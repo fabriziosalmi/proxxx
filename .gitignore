@@ -1,0 +1,13 @@
+/target
+.claude/
+# Live cluster harness — credentials and run artifacts are local-only.
+tests/live/test_env.md
+tests/live/*.log
+tests/live/*_summary.md
+# Mission 2 — local E2E env (do NOT commit secrets); only the
+# .example template is tracked.
+tests/e2e.env
+.env
+# Pre-publication history backup (text + restorable bundle).
+git_history_backup.md
+proxxx-pre-reset.bundle

@@ -1,0 +1,137 @@
+# Vector 19 (macro audit) — CI gate covering the full quality bar:
+# build / test / clippy-deny / fmt / supply-chain audit.
+#
+# `cargo audit` runs against `Cargo.lock` and fails if any direct or
+# transitive dependency has a CVE in the RustSec advisory database.
+# That gives us a formal supply-chain check at every push and PR;
+# `Cargo.lock` is committed so the audit is reproducible.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Daily 04:17 UTC sweep — catches CVEs disclosed AFTER the last
+    # commit. The commit-triggered runs above only see CVEs known at
+    # commit time.
+    - cron: "17 4 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: Build · test · clippy · fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny tier)
+        # The `[lints.clippy]` block in Cargo.toml already declares
+        # `unwrap_used`, `expect_used`, `panic`, `todo` as deny. We
+        # also surface pedantic/nursery as warnings (informational).
+        # `--all-targets` covers tests + examples + benches.
+        run: cargo clippy --all-targets
+
+      - name: Build (debug)
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Build (release, stripped)
+        run: cargo build --release
+
+  audit:
+    name: Supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Don't share with build-test cache — we only need the
+          # registry, not target/.
+          shared-key: audit
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Audit Cargo.lock for CVEs
+        # The `--deny warnings` flag escalates yanked-crate notices
+        # into hard failures alongside actual CVEs. Adjust if it
+        # becomes too noisy for legitimate reasons (then keep just
+        # `cargo audit`).
+        run: cargo audit --deny warnings
+
+  musl-static:
+    name: Static binary (musl)
+    runs-on: ubuntu-latest
+    # Vector 23 (macro audit) — `x86_64-unknown-linux-musl` produces
+    # a TRULY portable Linux binary that links libc statically. The
+    # default `x86_64-unknown-linux-gnu` glibc binary built on Ubuntu
+    # 24.04 (`GLIBC_2.39`) crashes on Debian 11 (`GLIBC_2.31`) /
+    # Alpine (musl) with `symbol lookup error`. The musl artefact
+    # runs on every Linux distro from RHEL 6 to Alpine 3.20.
+    #
+    # We don't run tests on musl — the library code is identical, the
+    # only delta is the link target.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: musl
+
+      - name: Build static release
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Verify the binary is statically linked
+        # `ldd` on a static binary prints "not a dynamic executable"
+        # OR "statically linked" depending on libc; either is the
+        # correct outcome — we fail only if it lists shared deps.
+        run: |
+          set -e
+          BIN=target/x86_64-unknown-linux-musl/release/proxxx
+          file "$BIN"
+          if ldd "$BIN" 2>&1 | grep -q "=>"; then
+            echo "ERROR: musl binary still has dynamic deps"
+            ldd "$BIN"
+            exit 1
+          fi
+          echo "OK: $BIN is statically linked"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxxx-x86_64-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/proxxx
+          retention-days: 14

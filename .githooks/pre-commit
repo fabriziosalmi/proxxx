@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# proxxx pre-commit hook — calls the unified gate.
+exec "$(git rev-parse --show-toplevel)/scripts/gate.sh"

@@ -1,0 +1,167 @@
+[package]
+name = "proxxx"
+version = "0.1.0"
+edition = "2021"
+description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
+license = "MIT"
+repository = "https://github.com/fabriziosalmi/proxxx"
+keywords = ["proxmox", "tui", "cli", "virtualization", "infrastructure"]
+categories = ["command-line-utilities", "visualization"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+toml = "0.8"
+directories = "6"
+
+# Error handling.
+# - `thiserror` for typed domain errors (V26.4 audit) — `proxxx::api::ApiError`
+#   exposes actionable variants (Unauthorized / NotFound / RateLimited /
+#   PayloadTooLarge / Transport / Parse) the UI can `match` on.
+# - `anyhow` for the application boundary (main, CLI dispatch) where we
+#   collapse everything into one report-friendly error chain.
+anyhow = "1"
+thiserror = "2"
+
+# Logging (async, file-based — TUI owns stdout)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Rate limiting
+governor = "0.8"
+
+# Fuzzy search
+nucleo = "0.5"
+
+# OS keychain
+keyring = { version = "3", optional = true }
+
+# Async trait
+async-trait = "0.1"
+nucleo-matcher = "0.3.1"
+dirs = "6.0.0"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+
+# SSH (Pillar 0)
+russh = "0.46"
+russh-keys = "0.46"
+hex = "0.4"
+sha2 = "0.10"
+
+# PTY screen state for SSH guest sessions (feature 1a).
+# Using vt100-ctt (up-to-date fork of vt100) because vt100 0.16 pins
+# unicode-width >= 0.2.1, conflicting with ratatui 0.29's exact pin to 0.2.0.
+vt100 = { package = "vt100-ctt", version = "0.17" }
+
+# WebSocket client for Proxmox termproxy serial console (feature 1b).
+# Uses rustls (matching reqwest's existing rustls-tls feature) so we don't
+# pull in native-tls / openssl-sys as a new system dep.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Custom rustls verifier for `verify_tls = false` profiles (homelab self-
+# signed). Pulled in directly so we can build a ClientConfig that mirrors
+# the reqwest `danger_accept_invalid_certs` flag.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Atomic, TOCTOU-safe temp-file creation for the SPICE .vv handoff path
+# (Vector 2 audit). Provides O_EXCL + crypto-random suffix + permissions
+# applied at creation time, so a malicious local process can't pre-place
+# a symlink at the expected path and steal the SPICE password.
+tempfile = "3"
+
+# Vector 16 (macro audit) — secret zeroing.
+# `Zeroizing<String>` overwrites the heap bytes with zeros in `Drop`,
+# so a core dump or swap-out after the secret has been released cannot
+# leak the Proxmox / PBS / Telegram credentials. The wrapper has no
+# performance cost on the hot path; only the Drop call does the memset.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[features]
+default = ["keychain"]
+keychain = ["dep:keyring"]
+
+[dev-dependencies]
+wiremock = "0.6"
+insta = { version = "1", features = ["json"] }
+tokio-test = "0.4"
+# Benchmark suite (Mission 1, Bench protocol).
+# `criterion` is the standard Rust benchmarking harness — it supplies
+# `black_box` to defeat LLVM dead-code elimination, statistical
+# sample collection (default 100 samples, t-test outlier filtering),
+# and `cargo bench` integration. We use it through the `harness =
+# false` per-bench flag so each bench file is its own binary.
+criterion = { version = "0.5", features = ["html_reports"] }
+# E2E test suite (Mission 2 will use this — declared here so adding
+# `#[serial]` tests later doesn't require a Cargo.toml churn).
+serial_test = "3"
+
+# ── Benchmark binaries ──────────────────────────────────
+# Each `[[bench]]` produces an isolated binary so failures or
+# allocation pollution in one don't bleed into others.
+[[bench]]
+name = "serde_parse"
+harness = false
+
+[[bench]]
+name = "snaptree_assemble"
+harness = false
+
+[[bench]]
+name = "fuzzy_search"
+harness = false
+
+# V26.2 (audit) — release profile choices, with intent.
+#
+# - `lto = true` is the same as `lto = "fat"` per Cargo docs (cross-crate
+#   inlining across the whole dep graph). Fat LTO is ON.
+# - `codegen-units = 1` forces single-translation-unit codegen, the
+#   slowest-but-most-optimal mode.
+# - `strip = true` removes symbol info from the final binary
+#   (~15→6 MiB on this codebase).
+# - `opt-level = "z"` is INTENTIONALLY size-optimised, not speed-
+#   optimised. proxxx is shipped as a single binary distributed via
+#   homebrew / direct download; size matters more than the marginal
+#   ~5% runtime gain of `opt-level = 3`. The CPU-bound paths
+#   (`benches/serde_parse.rs` etc.) measure within budget at "z".
+# - `panic = "unwind"` (the default) is INTENTIONALLY kept. The
+#   BLOCKER 3 panic hook (`util::panic_hook`) and the V26.8
+#   `TerminalGuard::Drop` BOTH depend on Rust's unwind machinery to
+#   restore the terminal on panic. Switching to `panic = "abort"`
+#   would shave another ~200 KiB off the binary at the cost of
+#   leaving the user's terminal in a broken raw-mode state on any
+#   unwrap / assert / index OOB. Not worth it.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"    # size > speed (see comment above; benches stay in budget)
+# panic = "unwind" — DO NOT change to "abort". TerminalGuard + panic_hook
+# need unwind for terminal restoration. Reviewed V26.2.
+
+# ── PARANOID CLIPPY ──────────────────────────────────────
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+clone_on_ref_ptr = "warn"
+todo = "deny"
+panic = "deny"
+indexing_slicing = "warn"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

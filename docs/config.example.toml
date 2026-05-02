@@ -1,0 +1,132 @@
+# proxxx configuration — drop into ~/.config/proxxx/config.toml
+#
+# This file is consumed by `crate::config::ProfileConfig` (one profile
+# per file in the MVP — multi-profile is a future config layout).
+#
+# Secret resolution order (the same for all `*_secret` fields):
+#   1. CLI flag (e.g. --token-secret, --pbs-token-secret)
+#   2. Environment variable (e.g. PROXXX_TOKEN_SECRET, PROXXX_PBS_TOKEN_SECRET)
+#   3. `*_secret_file` path (must be 0600 on Unix or proxxx refuses)
+#   4. OS keychain (entry "proxxx" / "token_secret" or "pbs_token_secret")
+#
+# Plain-text secrets in this file are accepted but discouraged.
+
+# ── Required: Proxmox VE REST connection ────────────────
+url = "https://pve1.lan:8006"
+user = "root@pam"
+auth = "token"                   # "token" | "password"
+
+# Token auth (recommended over password for headless tools).
+# Build it with: pveum user token add root@pam proxxx --privsep=1
+token_id = "proxxx"
+# token_secret = "00000000-0000-0000-0000-000000000000"
+# token_secret_file = "/etc/proxxx/pve.secret"   # 0600 perms required
+
+# Or password auth — proxxx logs in via /access/ticket and refreshes
+# the cookie automatically. Useful for ad-hoc sessions, not pipelines.
+# auth = "password"
+# password = "..."
+
+verify_tls = false               # Homelab self-signed: false; production: true
+rate_limit = 10                  # API calls per second (default 10)
+
+# ── Optional: HITL approval gate via Telegram ──────────
+# When `--secure` is set OR a [[policies]] entry matches a destructive
+# action, proxxx sends an approval request to Telegram and blocks the
+# operation until Approve/Deny is clicked.
+[telegram]
+bot_token = "0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+chat_id = "-1001234567890"
+
+# Per-action policies. `action` matches the dispatch identifier used
+# internally (start, stop, restart, delete, migrate, exec, move_disk,
+# resize_disk). `target` is "*" or "tag:<name>" or a vmid as string.
+[[policies]]
+action = "delete"
+target = "tag:prod"
+channel = "telegram"
+require = 1                      # Number of approvals needed
+
+[[policies]]
+action = "stop"
+target = "tag:prod"
+channel = "telegram"
+require = 1
+
+# ── Optional: SSH layer (Pillar 0) ─────────────────────
+# Enables features that can't go through the Proxmox REST API:
+#   - feature 9 (patch apply via apt-get on the node)
+#   - feature 10 (proxxx perms — pveum shell-out)
+#   - feature 1a (per-guest SSH session)
+#
+# Auth is publickey-only. Generate a dedicated keypair:
+#   ssh-keygen -t ed25519 -f ~/.ssh/proxxx_homelab -N ""
+#   ssh-copy-id -i ~/.ssh/proxxx_homelab.pub root@pve1
+[ssh]
+user = "root"                    # SSH user on the Proxmox node
+key_path = "~/.ssh/proxxx_homelab"
+strict_host_key_checking = "tofu"  # "tofu" | "strict" | "off"
+max_concurrent = 8                 # Hard cap on parallel SSH ops
+idle_timeout_secs = 300
+exec_timeout_secs = 60
+
+# Optional per-node hostname overrides (default: use node name as host).
+# Useful when nodes are reachable via different DNS names than their
+# Proxmox node identifier.
+# [ssh.hosts]
+# pve1 = "pve1.lan:22"
+# pve2 = "10.0.0.122:22"
+
+# Per-guest SSH targets for feature 1a (`:ssh <vmid>`). The VMID is the
+# table key as a string (TOML doesn't allow integer keys).
+# [ssh.guests."100"]
+# host = "10.0.0.5"
+# user = "ubuntu"
+# port = 22
+# key_path = "~/.ssh/id_ed25519"     # Optional override
+
+# ── Optional: Proxmox Backup Server (feature 3) ────────
+# Browse REST works on every platform; restore shells out to
+# `proxmox-backup-client` (Linux only — see features.md).
+[pbs]
+url = "https://pbs.lan:8007"
+user = "proxxx@pbs"
+token_id = "reader"
+# token_secret = "..."
+# token_secret_file = "/etc/proxxx/pbs.secret"
+verify_tls = false
+rate_limit = 10
+
+# ── Optional: Alert rules (feature 8) ──────────────────
+# Closed enum of `when` predicates: "node_offline" | "storage_above" |
+# "replication_failing". Add ALL the rules you want; engine evaluates
+# each tick.
+#
+# Routes: "telegram" | "ntfy:<topic>" | "webhook:<https-url>"
+
+[[alerts]]
+name = "node_down"
+when = "node_offline"
+for_secs = 120
+severity = "critical"
+route = ["telegram", "ntfy:proxxx-prod"]
+dedup_secs = 600
+
+[[alerts]]
+name = "storage_full_warn"
+when = "storage_above"
+threshold_percent = 85
+# storage = "ceph-rbd"           # Optional: filter to one storage
+severity = "warning"
+route = ["telegram"]
+dedup_secs = 1800
+
+[[alerts]]
+name = "replica_broken"
+when = "replication_failing"
+severity = "critical"
+route = ["telegram", "ntfy:proxxx-prod"]
+dedup_secs = 600
+
+# Run with:
+#   proxxx alerts watch --interval 30
