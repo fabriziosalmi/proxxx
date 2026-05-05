@@ -143,7 +143,7 @@ jobs:
           echo "sha256=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact for the release job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
