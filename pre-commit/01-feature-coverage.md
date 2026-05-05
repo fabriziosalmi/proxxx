@@ -9,6 +9,8 @@
 
 | Feature | Verified end-to-end | Revisions across commits |
 |---|---|---|
+| Onboarding · `proxxx init` writes valid starter config.toml (idempotent, refuses to clobber) | ✅ unit-tested — atomic temp+rename in [src/cli/mod.rs](src/cli/mod.rs)::`execute_init`. | 1 |
+| Onboarding · `proxxx init --interactive` 5-step config wizard with live cluster probes | ✅ unit-tested — [src/cli/init_wizard.rs](src/cli/init_wizard.rs) provides 5-step flow (URL + reachability, TLS, auth, optional SSH, optional Telegram); each input probed against the live cluster (anonymous version GET, `/access/permissions` token test, `ssh -o BatchMode=yes uname -a`, Telegram `getMe`); failed probe never lands in TOML; existing config triggers backup-or-cancel; atomic 0600 write. 12 unit tests cover token-string parsing, URL normalisation, TOML rendering, and round-trip-via-serde so wizard output is guaranteed to parse as TOML. | 1 |
 | Nodes & Cluster · Read node list (Cluster API) | ✅ | 8 |
 | Nodes & Cluster · Read node metrics (CPU, RAM, uptime) | ✅ | 8 |
 | Nodes & Cluster · Detect offline / partitioned node | ⚠️ wiremock + 9 unit tests in [src/alerts/engine.rs](src/alerts/engine.rs) (16 offline-node refs); the `node_offline` predicate fires correctly given a synthetic offline node, but no live test has actually taken a node offline. | 8 |

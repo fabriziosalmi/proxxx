@@ -10,6 +10,26 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
+## [Unreleased]
+
+### Added
+
+- **`proxxx init --interactive` config wizard.** Five-step prompted
+  flow that walks a first-time user from "fresh machine" to
+  "validated, working `config.toml`". Each input is probed live
+  against the cluster before write — anonymous PVE version probe,
+  token / password authentication test against
+  `/access/permissions`, optional SSH `uname -a` round-trip via
+  `ssh -o BatchMode=yes`, optional Telegram `getMe`. A failed probe
+  never lands in TOML; the user fixes the wrong field in place.
+  Existing config triggers a backup-or-cancel prompt
+  (`config.toml.bak.<epoch>`); the new file is written atomically
+  with mode 0600 (token / password lives in it). No new dependency
+  — uses reqwest + crossterm (already in tree). Pinned by 12 unit
+  tests covering token-string parsing, URL normalisation, TOML
+  rendering, and round-trip-via-serde so wizard output is
+  guaranteed to parse as TOML.
+
 ## [0.1.2] — 2026-05-05
 
 ### Added

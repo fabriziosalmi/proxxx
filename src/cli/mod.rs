@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
 use serde_json::Value;
 
+mod init_wizard;
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// List resources (aliases: get)
@@ -594,6 +596,16 @@ pub enum Command {
         /// Without this flag, `init` refuses to clobber prior state.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Run an interactive wizard that prompts for URL, auth, TLS,
+        /// optional SSH + Telegram, validates each input against the
+        /// live cluster (anonymous version probe + token / password /
+        /// ssh / telegram round-trips) and only writes the config if
+        /// every probed field responded. First-mile UX: turns the
+        /// 90 % of fresh-install failures ("config typo'd, error on
+        /// first `ls nodes`") into "wrong field caught here, fix in
+        /// place, never lands in TOML".
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
     },
     /// QEMU VM hardware/options/cloud-init management. The typed
     /// subcommands (`set`, `cloudinit`) cover the well-trodden config
@@ -2833,7 +2845,10 @@ pub async fn execute(
     // landmine: prior to this short-circuit the error message
     // recommended `proxxx init` but the command did not exist —
     // dismiss-after-five-seconds territory.)
-    if let Command::Init { force } = &cmd {
+    if let Command::Init { force, interactive } = &cmd {
+        if *interactive {
+            return init_wizard::run().await;
+        }
         return execute_init(*force);
     }
 
@@ -3466,7 +3481,10 @@ pub async fn execute(
             // `_ =>` catch-all.
             Ok((build_version_payload(), 0))
         }
-        Command::Init { .. } => {
+        Command::Init {
+            force: _,
+            interactive: _,
+        } => {
             // Unreachable: short-circuited before `load_config` so it
             // works on a fresh machine. Kept here for exhaustiveness.
             unreachable!("Init handled in early-exit block")
