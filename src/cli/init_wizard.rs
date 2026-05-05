@@ -532,6 +532,12 @@ async fn probe_password(url: &str, user: &str, password: &str, verify_tls: bool)
 struct SshBlock {
     user: String,
     key_path: String,
+    /// Optional per-guest overrides: (vmid_string, host). Auto-discovery
+    /// via QGA covers most cases now (see `cli::qga_resolve_guest`),
+    /// so this list is genuinely only for guests where QGA is off,
+    /// returns only loopback/link-local, or where the operator wants
+    /// a stable DNS name instead of a churning DHCP IP.
+    guests: Vec<(String, String)>,
 }
 
 fn prompt_ssh(api_url: &str) -> Result<Option<SshBlock>> {
@@ -555,7 +561,87 @@ fn prompt_ssh(api_url: &str) -> Result<Option<SshBlock>> {
             }
         }
     }
-    Ok(Some(SshBlock { user, key_path }))
+
+    let guests = prompt_ssh_guest_overrides()?;
+
+    Ok(Some(SshBlock {
+        user,
+        key_path,
+        guests,
+    }))
+}
+
+/// Optional sub-step: pin per-guest SSH targets in config.toml.
+///
+/// Most operators don't need this — `proxxx ssh <vmid>` falls back
+/// to QGA (QEMU) / `/lxc/N/interfaces` (LXC) auto-discovery when the
+/// guest isn't pinned. The wizard surfaces this step explicitly only
+/// because there are three legitimate reasons to override:
+///
+///   1. Guest has no qemu-guest-agent (or the agent is off, or the
+///      VM is suspended): auto-discovery returns empty, ssh hangs.
+///   2. Auto-discovery returns only 127.0.0.1 / 169.254.x: a guest
+///      whose only NIC is on a private bridge with no usable
+///      address from the operator's perspective.
+///   3. Operator prefers a stable DNS name (`web1.lab.example`)
+///      over the rotating DHCP IP QGA would surface.
+///
+/// Empty-VMID terminates the loop — no separate "are you done"
+/// prompt to read past.
+fn prompt_ssh_guest_overrides() -> Result<Vec<(String, String)>> {
+    println!();
+    info("  Per-guest SSH overrides (optional):");
+    info("    `proxxx ssh <vmid>` auto-discovers via QGA / lxc-interfaces by");
+    info("    default. Pin a host below ONLY when the guest has no agent,");
+    info("    QGA reports only loopback/link-local, OR you want a stable");
+    info("    DNS name. You can also add these later with a text editor.");
+    if !prompt_yn("  Pin per-guest SSH targets now?", false)? {
+        return Ok(Vec::new());
+    }
+
+    let mut guests: Vec<(String, String)> = Vec::new();
+    loop {
+        let vmid_raw = prompt_string("    VMID (empty = done)")?;
+        if vmid_raw.is_empty() {
+            break;
+        }
+        // VMID is a u32 in PVE — refuse anything else loudly so the
+        // generated TOML is parse-clean by the loader (which will
+        // reject non-numeric keys at runtime).
+        if vmid_raw.parse::<u32>().is_err() {
+            warn("VMID must be a non-negative integer (PVE uses u32)");
+            continue;
+        }
+        // Detect duplicate entries — TOML allows them syntactically
+        // but the second wins, silently. Surface here so the operator
+        // doesn't lose work to a typo.
+        if guests.iter().any(|(v, _)| v == &vmid_raw) {
+            warn(&format!(
+                "vmid {vmid_raw} already pinned in this session — overwrite by re-entering, or skip with empty VMID"
+            ));
+        }
+        let host = prompt_string("    host (IP or DNS name)")?;
+        if host.is_empty() {
+            warn("host cannot be empty — re-enter the vmid to retry");
+            continue;
+        }
+        // Replace existing entry rather than append duplicate.
+        if let Some(pos) = guests.iter().position(|(v, _)| v == &vmid_raw) {
+            guests[pos] = (vmid_raw, host);
+        } else {
+            guests.push((vmid_raw, host));
+        }
+    }
+
+    if guests.is_empty() {
+        info("  no per-guest overrides entered — auto-discovery will resolve at `proxxx ssh` time");
+    } else {
+        ok(&format!(
+            "{} per-guest SSH override(s) staged for write",
+            guests.len()
+        ));
+    }
+    Ok(guests)
 }
 
 /// Discover SSH private keys in `~/.ssh/` and let the operator pick.
@@ -829,6 +915,14 @@ fn render_toml(
         out.push_str("\n[ssh]\n");
         out.push_str(&format!("user = {}\n", toml_escape(&s.user)));
         out.push_str(&format!("key_path = {}\n", toml_escape(&s.key_path)));
+        for (vmid, host) in &s.guests {
+            // VMID keys must be quoted strings in TOML even when
+            // they look numeric — `[ssh.guests.100]` parses as
+            // integer-keyed table which proxxx's loader rejects.
+            // Quote unconditionally for a parse-clean output.
+            out.push_str(&format!("\n[ssh.guests.\"{vmid}\"]\n"));
+            out.push_str(&format!("host = {}\n", toml_escape(host)));
+        }
     }
 
     if let Some(t) = telegram {
@@ -1118,6 +1212,7 @@ mod tests {
         let ssh = SshBlock {
             user: "root".into(),
             key_path: "~/.ssh/proxxx_e2e_ed25519".into(),
+            guests: Vec::new(),
         };
         let out = render_toml("https://10.0.0.1:8006", false, &auth, Some(&ssh), None);
         assert!(out.contains(r#"auth = "password""#));
@@ -1125,6 +1220,8 @@ mod tests {
         assert!(out.contains("verify_tls = false"));
         assert!(out.contains("[ssh]"));
         assert!(out.contains(r#"key_path = "~/.ssh/proxxx_e2e_ed25519""#));
+        // No guest overrides — must NOT emit any [ssh.guests.*] block.
+        assert!(!out.contains("[ssh.guests"));
     }
 
     #[test]
@@ -1304,6 +1401,52 @@ mod tests {
         assert!(keys[0].ends_with("id_real"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_toml_emits_per_guest_ssh_blocks_when_present() {
+        let auth = AuthBlock {
+            user: "root@pam".into(),
+            auth: "token",
+            token_id: Some("proxxx".into()),
+            token_secret: Some("secret".into()),
+            password: None,
+        };
+        let ssh = SshBlock {
+            user: "root".into(),
+            key_path: "~/.ssh/id_ed25519".into(),
+            guests: vec![
+                ("100".into(), "10.0.0.42".into()),
+                ("9999".into(), "lxc-9999.lab.example".into()),
+            ],
+        };
+        let out = render_toml("https://10.0.0.1:8006", true, &auth, Some(&ssh), None);
+
+        // Per-guest blocks land with quoted vmid (TOML loader needs
+        // string keys, not integers).
+        assert!(out.contains(r#"[ssh.guests."100"]"#));
+        assert!(out.contains(r#"host = "10.0.0.42""#));
+        assert!(out.contains(r#"[ssh.guests."9999"]"#));
+        assert!(out.contains(r#"host = "lxc-9999.lab.example""#));
+
+        // Round-trip through proxxx's own loader: the wizard's output
+        // must parse back without error AND surface the per-guest
+        // entries as a populated `guests` map.
+        let parsed: toml::Value = toml::from_str(&out).expect("wizard output must parse as TOML");
+        let guests = parsed
+            .get("ssh")
+            .and_then(|s| s.get("guests"))
+            .and_then(|g| g.as_table())
+            .expect("ssh.guests table missing from wizard output");
+        assert!(guests.contains_key("100"), "vmid 100 missing");
+        assert!(guests.contains_key("9999"), "vmid 9999 missing");
+        assert_eq!(
+            guests
+                .get("100")
+                .and_then(|v| v.get("host"))
+                .and_then(|h| h.as_str()),
+            Some("10.0.0.42")
+        );
     }
 
     #[test]

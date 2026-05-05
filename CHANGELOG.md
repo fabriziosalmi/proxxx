@@ -12,6 +12,21 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Added
+
+- **Wizard step 4 now optionally pins per-guest SSH overrides.**
+  After the standard `[ssh]` block, the wizard asks "Pin per-guest
+  SSH targets now?" and (on yes) loops VMID → host until empty
+  VMID. Each pair lands as `[ssh.guests."<vmid>"]` in config.toml.
+  Default is no — auto-discovery via QGA covers most cases now;
+  the explicit-pin path stays surfaced for the legitimate
+  exceptions: agent-less guests, QGA reporting only loopback /
+  link-local, or operator preference for a stable DNS name over a
+  rotating DHCP IP. Duplicate VMIDs in one session overwrite (with
+  a warning) so a typo doesn't get re-typed; non-numeric VMIDs are
+  rejected loudly. Round-trip-via-serde test pins that wizard
+  output parses back as `ssh.guests` table with the right VMIDs.
+
 ### Changed
 
 - **`proxxx ssh <vmid>` now auto-discovers guest IPs via QGA / LXC
