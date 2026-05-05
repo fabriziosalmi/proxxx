@@ -3433,7 +3433,7 @@ pub async fn execute(
         Command::StorageDefs { action } => execute_storage_defs(&client, action).await,
         Command::Acme { action } => execute_acme(&client, action).await,
         Command::ClusterBootstrap { action } => execute_cluster_bootstrap(&client, action).await,
-        Command::Alerts { action } => execute_alerts(&client, &config, action).await,
+        Command::Alerts { action } => execute_alerts(&client, &config, profile, action).await,
         Command::Access { action } => execute_access(&client, action).await,
         Command::Token { action } => execute_token(&client, action).await,
         Command::Perms { userid, path, node } => {
@@ -4428,6 +4428,7 @@ mod shell_quote_tests {
 async fn execute_alerts(
     client: &std::sync::Arc<crate::api::PxClient>,
     config: &crate::config::ProfileConfig,
+    profile: Option<&str>,
     action: AlertsCommand,
 ) -> Result<(Value, i32)> {
     use crate::alerts::engine::{evaluate, ClusterSnapshot, EngineState};
@@ -4513,7 +4514,26 @@ async fn execute_alerts(
                     .collect();
 
             let mut state = EngineState::default();
-            let mut dedup = DedupCache::default();
+            // Cache schema v2 — persist the dedup window across daemon
+            // restarts so a routine restart (config reload, kernel
+            // update, accidental SIGHUP) does NOT re-fire every active
+            // alert. Best-effort: a missing/corrupt cache yields an
+            // empty DedupCache rather than failing the daemon.
+            let mut dedup = match crate::app::cache::load_alert_dedup(profile) {
+                Ok(rows) => {
+                    if !rows.is_empty() {
+                        tracing::info!(
+                            "alert daemon: restored {} dedup entries from cache",
+                            rows.len()
+                        );
+                    }
+                    DedupCache::from_entries(rows)
+                }
+                Err(e) => {
+                    tracing::warn!("alert daemon: dedup cache load failed: {e:#} — starting empty");
+                    DedupCache::default()
+                }
+            };
             tracing::info!(
                 "alert daemon starting: {} rules, interval {}s",
                 rules.len(),
@@ -4529,6 +4549,16 @@ async fn execute_alerts(
                     biased; // signals are higher priority than the next tick
                     () = crate::util::shutdown::wait_for_shutdown_signal() => {
                         tracing::info!("alert daemon: shutdown signal received, exiting cleanly");
+                        // Final flush so the dedup window survives the
+                        // shutdown — operator restarts the daemon, the
+                        // cache is current. Best-effort by design.
+                        if let Err(e) =
+                            crate::app::cache::save_alert_dedup(profile, &dedup.entries())
+                        {
+                            tracing::warn!(
+                                "alert daemon: dedup cache flush at shutdown failed: {e:#}"
+                            );
+                        }
                         return Ok((
                             serde_json::json!({ "status": "shutdown" }),
                             0,
@@ -4569,6 +4599,15 @@ async fn execute_alerts(
                         }
 
                         dedup.evict_older_than(86_400, now);
+                        // Persist after each tick so a crash within
+                        // `sleep` window costs at most one tick of
+                        // dedup state. Best-effort — a transient I/O
+                        // error must not kill the daemon.
+                        if let Err(e) =
+                            crate::app::cache::save_alert_dedup(profile, &dedup.entries())
+                        {
+                            tracing::warn!("alert daemon: dedup cache save failed: {e:#}");
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
                     }
                 }

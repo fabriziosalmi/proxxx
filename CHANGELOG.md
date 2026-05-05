@@ -14,6 +14,17 @@ SemVer contract:
 
 ### Added
 
+- **Alert daemon dedup persistence (cache schema 1 → 2).** `alerts
+  watch` now persists the `(rule, target) → last_fired` window to
+  the SQLite cache after each tick (and at graceful shutdown), and
+  reloads it on startup. Without this, a routine daemon restart
+  (config reload, kernel update, accidental SIGHUP) re-fired every
+  active alert immediately — a single restart could flood Telegram
+  with 50 duplicate notices for problems the operator had already
+  seen and acknowledged. Best-effort: a missing/corrupt cache
+  yields an empty state rather than failing the daemon. Schema
+  bump pinned by a 1 → 2 migration regression test plus an
+  end-to-end round-trip test.
 - **MCP per-tool execution timeout (DoS guard).** Each `ToolDef`
   carries a `timeout_secs` budget; the JSON-RPC `tools/call`
   dispatch wraps `handle_tool_call` in `tokio::time::timeout`. On

@@ -41,7 +41,7 @@ use crate::api::types::{Guest, Node, StoragePool};
 ///    `PersistedQueueEntry` is independently backward-compatible
 ///    because every nullable field carries `#[serde(default)]` —
 ///    old JSON loads cleanly into a new struct shape.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 fn open_db(path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -134,6 +134,24 @@ fn migrate_schema(conn: &Connection) -> anyhow::Result<()> {
             // `init_db` / `init_queue_table` are idempotent and
             // already cover this; nothing to do here.
             0 => {}
+            // 1 → 2: persist the alert daemon dedup window across
+            // restarts. Without this, a routine daemon restart
+            // (config reload, kernel update, accidental SIGHUP)
+            // re-fires every active alert immediately — a single
+            // restart could flood Telegram with 50 duplicate notices
+            // for problems the operator already saw and acknowledged.
+            // Idempotent — safe to re-run.
+            1 => {
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS alert_dedup (
+                        rule TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        last_fired INTEGER NOT NULL,
+                        PRIMARY KEY (rule, target)
+                    )",
+                    [],
+                )?;
+            }
             // Future migration arms go here, one per version step.
             _ => anyhow::bail!("no migration path from schema version {step}"),
         }
@@ -397,6 +415,70 @@ pub fn load_queue(profile_name: Option<&str>) -> anyhow::Result<Vec<PersistedQue
     Ok(out)
 }
 
+/// Idempotent — `CREATE TABLE IF NOT EXISTS`. The migration ladder
+/// already covers fresh installs (schema v2 creates this table), but
+/// older proxxx installs that wrote v1 data still need the table on
+/// first save. Cheap enough to call on every save/load.
+fn init_alert_dedup_table(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS alert_dedup (
+            rule TEXT NOT NULL,
+            target TEXT NOT NULL,
+            last_fired INTEGER NOT NULL,
+            PRIMARY KEY (rule, target)
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Replace the persisted alert-dedup window with the given entries
+/// (full overwrite — matches `save_queue` semantics). Wrapped in a
+/// transaction so a crash mid-save can't leave partial state. Called
+/// after each daemon tick; cheap with WAL on a few-hundred-row table.
+pub fn save_alert_dedup(
+    profile_name: Option<&str>,
+    entries: &[(String, String, u64)],
+) -> anyhow::Result<()> {
+    let path = get_db_path(profile_name);
+    let mut conn = open_db(&path)?;
+    init_alert_dedup_table(&conn)?;
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM alert_dedup", [])?;
+    for (rule, target, last_fired) in entries {
+        tx.execute(
+            "INSERT INTO alert_dedup (rule, target, last_fired) VALUES (?1, ?2, ?3)",
+            params![rule, target, *last_fired as i64],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Load persisted alert-dedup entries. Returns an empty Vec if the
+/// table is empty or missing — callers treat that as "fresh state",
+/// matching `DedupCache::default()` semantics.
+pub fn load_alert_dedup(profile_name: Option<&str>) -> anyhow::Result<Vec<(String, String, u64)>> {
+    let path = get_db_path(profile_name);
+    let conn = open_db(&path)?;
+    init_alert_dedup_table(&conn)?;
+
+    let mut stmt =
+        conn.prepare("SELECT rule, target, last_fired FROM alert_dedup ORDER BY rule, target")?;
+    let rows = stmt.query_map([], |row| {
+        let rule: String = row.get(0)?;
+        let target: String = row.get(1)?;
+        let last_fired: i64 = row.get(2)?;
+        Ok((rule, target, last_fired as u64))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn get_all_snapshots(profile_name: Option<&str>) -> anyhow::Result<Vec<u64>> {
     let path = get_db_path(profile_name);
     let conn = open_db(&path)?;
@@ -590,5 +672,96 @@ mod concurrency_tests {
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Schema v1 → v2 migration regression. Stamp a fresh DB at
+    /// `user_version = 1`, re-open it, and assert the migration ran
+    /// (`user_version = 2`, `alert_dedup` table exists). Pre-fix (no
+    /// 1 → 2 arm) this test fails because the migration ladder bails
+    /// with "no migration path from schema version 1".
+    #[test]
+    fn migrates_v1_db_to_v2_and_creates_alert_dedup_table() {
+        let dir =
+            std::env::temp_dir().join(format!("proxxx-cache-test-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("cache.db");
+
+        // Bring up at v2, then forcibly downgrade the user_version
+        // marker to v1 to simulate a DB written by an older proxxx
+        // that pre-dates the alert_dedup table. Drop the table too so
+        // the migration arm has actual work to do.
+        {
+            let conn = open_db(&path).expect("open at current");
+            conn.execute("DROP TABLE IF EXISTS alert_dedup", [])
+                .expect("drop dedup table");
+            conn.pragma_update(None, "user_version", 1_u32)
+                .expect("downgrade marker");
+        }
+
+        // Re-open: migration should run 1 → 2 idempotently.
+        let conn = open_db(&path).expect("re-open should migrate");
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("pragma read");
+        assert_eq!(v, super::SCHEMA_VERSION, "should be at current schema");
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='alert_dedup'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("table count");
+        assert_eq!(
+            table_count, 1,
+            "alert_dedup table must exist after migration"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// End-to-end alert dedup persistence: write a snapshot via
+    /// `save_alert_dedup`, read it back via `load_alert_dedup`,
+    /// assert keys + timestamps round-trip. Uses a profile name
+    /// scoped to the test PID so it doesn't trample real cache.
+    #[test]
+    fn alert_dedup_persistence_round_trip() {
+        let profile = format!("alertdedup-test-{}", std::process::id());
+        // Start clean — `save_alert_dedup` does a full overwrite, so
+        // any leftovers from a previous run are wiped on first save.
+
+        let entries = vec![
+            ("storage_low".to_string(), "node:pve1".to_string(), 1000_u64),
+            (
+                "replication_failed".to_string(),
+                "100-0".to_string(),
+                1500_u64,
+            ),
+            (
+                "guest_offline".to_string(),
+                "vmid:9999".to_string(),
+                2000_u64,
+            ),
+        ];
+        save_alert_dedup(Some(&profile), &entries).expect("save");
+
+        let loaded = load_alert_dedup(Some(&profile)).expect("load");
+        assert_eq!(loaded.len(), 3);
+        // Output is ordered by (rule, target) ASC — pin that for
+        // determinism. Reorder the input to match.
+        let mut expected = entries.clone();
+        expected.sort();
+        let mut got = loaded;
+        got.sort();
+        assert_eq!(got, expected);
+
+        // Cleanup — `get_db_path` derives the file from profile name.
+        let path = get_db_path(Some(&profile));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }
