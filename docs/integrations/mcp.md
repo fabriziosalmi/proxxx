@@ -17,18 +17,18 @@ HITL gate as human callers.
 
 Closed enum, compile-time fixed:
 
-| Tool | Destructive | Description |
-| :--- | :---: | :--- |
-| `list_nodes` | no | Cluster nodes with status, CPU, RAM, uptime |
-| `list_guests` | no | All VMs and LXCs across the cluster |
-| `get_guest_status` | no | Detailed status for one guest |
-| `start_guest` | no | Start a stopped guest |
-| `stop_guest` | **yes** | Graceful or hard stop |
-| `restart_guest` | **yes** | Restart |
-| `delete_guest` | **yes** | Permanent delete (cannot be undone) |
-| `create_snapshot` | no | Create snapshot |
-| `delete_snapshot` | **yes** | Delete snapshot |
-| `get_storage_pools` | no | Per-node storage list with usage |
+| Tool | Destructive | Budget | Description |
+| :--- | :---: | :---: | :--- |
+| `list_nodes` | no | 30 s | Cluster nodes with status, CPU, RAM, uptime |
+| `list_guests` | no | 30 s | All VMs and LXCs across the cluster |
+| `get_guest_status` | no | 30 s | Detailed status for one guest |
+| `start_guest` | no | 60 s | Start a stopped guest |
+| `stop_guest` | **yes** | 60 s | Graceful or hard stop |
+| `restart_guest` | **yes** | 60 s | Restart |
+| `delete_guest` | **yes** | 180 s | Permanent delete (cannot be undone) |
+| `create_snapshot` | no | 120 s | Create snapshot |
+| `delete_snapshot` | **yes** | 120 s | Delete snapshot |
+| `get_storage_pools` | no | 30 s | Per-node storage list with usage |
 
 The full schema is exposed by `proxxx mcp tools --json`. Example
 entry:
@@ -38,6 +38,7 @@ entry:
     "name": "stop_guest",
     "description": "Stop a VM or LXC container",
     "destructive": true,
+    "timeout_secs": 60,
     "parameters": [
         { "name": "guest_id", "type": "int",  "required": true,  "description": "Guest VMID (100-999999)" },
         { "name": "force",    "type": "bool", "required": false, "description": "Force stop without graceful shutdown" }
@@ -96,6 +97,42 @@ $ proxxx mcp tools --checksum
 
 Pin this in your CI / supply-chain tracker. If the hash changes
 between builds, the tool surface changed — review the diff.
+
+## Per-tool execution budget
+
+JSON-RPC over stdio serializes requests — one slow tool blocks every
+subsequent call. A misbehaving cluster (storage hung on a lock,
+upstream PVE wedged, network stall) or a hostile prompt-injection
+that nudges the agent into a long-running call would otherwise stall
+the MCP loop indefinitely.
+
+Each `ToolDef` carries a `timeout_secs` budget (see the table above).
+The dispatch wraps `handle_tool_call` in `tokio::time::timeout`. On
+expiry the request returns JSON-RPC error code **`-32001`** with the
+budget in the message; the request loop continues and the next call
+is unaffected.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32001,
+    "message": "tool 'create_snapshot' exceeded 120s execution budget"
+  }
+}
+```
+
+`-32001` is in the JSON-RPC server-defined range (`-32000` ..=
+`-32099`). Clients should treat it as "ephemeral, retry-safe at the
+caller's discretion" — the tool may have partially executed, so for
+destructive ops the caller MUST verify state before retrying.
+
+`delete_guest` carries an extended 180 s budget because the HITL
+gate alone consumes up to 120 s waiting for Telegram approval, and
+the actual delete + task-log poll runs after that. A test
+(`test_hitl_gated_delete_guest_has_post_hitl_budget`) pins this
+invariant so the budget cannot drift below 120 s by accident.
 
 ## HITL on MCP destructive calls
 

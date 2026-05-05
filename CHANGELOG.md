@@ -10,6 +10,22 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
+## [Unreleased]
+
+### Added
+
+- **MCP per-tool execution timeout (DoS guard).** Each `ToolDef`
+  carries a `timeout_secs` budget; the JSON-RPC `tools/call`
+  dispatch wraps `handle_tool_call` in `tokio::time::timeout`. On
+  expiry the request returns server-defined error code `-32001` with
+  the budget in the message; the request loop continues. Without
+  this, a single hung call (storage lock, network stall, upstream
+  PVE wedged) would block every subsequent JSON-RPC line — stdio is
+  serialized. Read-only tools get 30 s; lifecycle ops 60 s; snapshot
+  ops 120 s; `delete_guest` 180 s to accommodate the 120 s HITL
+  Telegram round-trip plus the actual delete. Budget is also
+  serialized into `proxxx mcp tools --json` for external audit.
+
 ## [0.1.1]
 
 Documentation patch release. No functional changes; no API surface

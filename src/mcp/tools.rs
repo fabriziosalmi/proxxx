@@ -37,7 +37,29 @@ pub struct ToolDef {
     pub params: &'static [ParamDef],
     pub action: ToolAction,
     pub destructive: bool,
+    /// Per-tool execution-budget in seconds. Wrapped around
+    /// `handle_tool_call` in the server's request loop via
+    /// `tokio::time::timeout`. On expiry the tool returns a JSON-RPC
+    /// error code `-32001` (server-defined) with the budget in the
+    /// message — the request loop continues, no server crash.
+    ///
+    /// Bounds the DoS surface for misbehaving / hostile LLM agents:
+    /// without this, a single tool call that hangs (network stall,
+    /// upstream PVE wedged on a lock, etc.) would block the next
+    /// JSON-RPC request indefinitely. JSON-RPC over stdio serializes
+    /// requests, so one slow tool blocks ALL subsequent traffic.
+    ///
+    /// `DEFAULT_TIMEOUT_SECS` (30) is comfortably above any
+    /// PVE-API-side return time on a healthy cluster — the typed
+    /// `ApiError::StorageHang` already surfaces 595s much earlier
+    /// for the read paths. Tools that legitimately do longer work
+    /// (snapshot, delete) get explicit higher budgets below.
+    pub timeout_secs: u64,
 }
+
+/// Default per-tool budget. Read-only tools sit comfortably under
+/// this. Per-tool overrides go in the registry below.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug)]
 pub struct ParamDef {
@@ -67,6 +89,7 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::ListNodes,
         destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
     },
     ToolDef {
         name: "list_guests",
@@ -87,6 +110,7 @@ pub const TOOLS: &[ToolDef] = &[
         ],
         action: ToolAction::ListGuests,
         destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
     },
     ToolDef {
         name: "get_guest_status",
@@ -99,6 +123,7 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::GetGuestStatus,
         destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
     },
     ToolDef {
         name: "start_guest",
@@ -111,6 +136,7 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::StartGuest,
         destructive: false,
+        timeout_secs: 60,
     },
     ToolDef {
         name: "stop_guest",
@@ -131,6 +157,7 @@ pub const TOOLS: &[ToolDef] = &[
         ],
         action: ToolAction::StopGuest,
         destructive: true,
+        timeout_secs: 60,
     },
     ToolDef {
         name: "restart_guest",
@@ -143,6 +170,7 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::RestartGuest,
         destructive: true,
+        timeout_secs: 60,
     },
     ToolDef {
         name: "delete_guest",
@@ -155,6 +183,10 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::DeleteGuest,
         destructive: true, // ALWAYS triggers HITL gate
+        // 120s HITL response window + headroom for the actual delete +
+        // task-log poll. Tighter than this risks a Telegram-approved
+        // delete still timing out at the MCP layer.
+        timeout_secs: 180,
     },
     ToolDef {
         name: "create_snapshot",
@@ -175,6 +207,7 @@ pub const TOOLS: &[ToolDef] = &[
         ],
         action: ToolAction::CreateSnapshot,
         destructive: false,
+        timeout_secs: 120,
     },
     ToolDef {
         name: "delete_snapshot",
@@ -195,6 +228,7 @@ pub const TOOLS: &[ToolDef] = &[
         ],
         action: ToolAction::DeleteSnapshot,
         destructive: true,
+        timeout_secs: 120,
     },
     ToolDef {
         name: "get_storage_pools",
@@ -207,6 +241,7 @@ pub const TOOLS: &[ToolDef] = &[
         }],
         action: ToolAction::GetStoragePools,
         destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
     },
 ];
 
@@ -234,6 +269,7 @@ pub fn registry_json() -> serde_json::Value {
                 "description": t.description,
                 "parameters": params,
                 "destructive": t.destructive,
+                "timeout_secs": t.timeout_secs,
             })
         })
         .collect();

@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// (Gemini audit) — hard cap on a single JSON-RPC line.
@@ -19,7 +20,7 @@ const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::api::PxClient;
 use crate::config::ProfileConfig;
-use crate::mcp::tools::{ToolAction, TOOLS};
+use crate::mcp::tools::{ToolAction, DEFAULT_TIMEOUT_SECS, TOOLS};
 
 #[derive(Deserialize, Debug)]
 struct RpcRequest {
@@ -152,9 +153,39 @@ pub async fn run_server(client: Arc<PxClient>, config: Arc<ProfileConfig>) -> Re
                     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                    match handle_tool_call(&client, &config, name, &args).await {
-                        Ok(res) => send_result(&mut stdout, id, res).await?,
-                        Err(e) => send_error(&mut stdout, id, -32603, &e.to_string()).await?,
+                    // Per-tool execution budget — see ToolDef::timeout_secs for the
+                    // DoS rationale. Unknown tool names get DEFAULT_TIMEOUT_SECS:
+                    // handle_tool_call will reject with "Tool not found" well
+                    // before that, but the budget still bounds the failure path.
+                    let budget_secs = TOOLS
+                        .iter()
+                        .find(|t| t.name == name)
+                        .map_or(DEFAULT_TIMEOUT_SECS, |t| t.timeout_secs);
+                    let budget = Duration::from_secs(budget_secs);
+
+                    match tokio::time::timeout(
+                        budget,
+                        handle_tool_call(&client, &config, name, &args),
+                    )
+                    .await
+                    {
+                        Ok(Ok(res)) => send_result(&mut stdout, id, res).await?,
+                        Ok(Err(e)) => {
+                            send_error(&mut stdout, id, -32603, &e.to_string()).await?;
+                        }
+                        Err(_elapsed) => {
+                            // Server-defined JSON-RPC error code (-32000..=-32099 reserved).
+                            // -32001 = tool execution exceeded its budget. Caller can
+                            // retry with a fresh request — the next JSON-RPC line is
+                            // unaffected because the timeout drops the future cleanly.
+                            send_error(
+                                &mut stdout,
+                                id,
+                                -32001,
+                                &format!("tool '{name}' exceeded {budget_secs}s execution budget"),
+                            )
+                            .await?;
+                        }
                     }
                 } else {
                     send_error(&mut stdout, id, -32602, "Invalid params").await?;

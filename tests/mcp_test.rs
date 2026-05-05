@@ -125,4 +125,50 @@ mod tests {
         actions.dedup();
         assert_eq!(actions.len(), len_before, "Duplicate ToolActions found!");
     }
+
+    #[test]
+    fn test_every_tool_has_nonzero_timeout() {
+        // Sanity: a 0s budget would always fire before the call dispatches,
+        // bricking the tool. Catch that at compile-test time, not at runtime.
+        for t in TOOLS {
+            assert!(
+                t.timeout_secs > 0,
+                "Tool {} has zero timeout_secs — would always trip the gate",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_hitl_gated_delete_guest_has_post_hitl_budget() {
+        // delete_guest goes through the 120s Telegram round-trip BEFORE the
+        // actual delete + task-log poll. The budget MUST exceed 120s, else a
+        // legitimately approved delete still trips -32001 at the MCP layer.
+        let dg = TOOLS
+            .iter()
+            .find(|t| t.name == "delete_guest")
+            .expect("delete_guest in registry");
+        assert!(
+            dg.timeout_secs >= 120,
+            "delete_guest budget {}s must accommodate HITL window",
+            dg.timeout_secs
+        );
+    }
+
+    #[test]
+    fn test_registry_json_exposes_timeout_secs() {
+        // Every tool entry in the externally-serialized registry must carry
+        // timeout_secs so consumers (e.g. `proxxx mcp tools --json`) can audit
+        // the per-tool budget without re-parsing the binary.
+        let json = registry_json();
+        let tools = json["tools"].as_array().expect("tools array");
+        for entry in tools {
+            let name = entry["name"].as_str().unwrap_or("?");
+            let budget = entry["timeout_secs"].as_u64();
+            assert!(
+                budget.is_some_and(|b| b > 0),
+                "Tool {name} missing/zero timeout_secs in registry JSON"
+            );
+        }
+    }
 }
