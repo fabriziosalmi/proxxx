@@ -53,7 +53,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # Rate limiting
-governor = "0.8"
+governor = "0.10"
 
 # Fuzzy search
 nucleo = "0.5"
