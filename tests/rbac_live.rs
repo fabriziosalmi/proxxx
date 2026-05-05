@@ -509,3 +509,132 @@ async fn hitl_does_not_escalate_auditor_to_admin() {
         "auditor's restart MUST 403 — HITL approval does not confer extra PVE privilege"
     );
 }
+
+// ── HITL callback replay-attack live coverage ───────────────────────
+//
+// The replay gate (`PendingApprovals::consume`) is unit-tested at the
+// pure-logic layer in `src/hitl/pending.rs` and exercised via mocks
+// in `tests/hitl_e2e.rs`. The remaining angle this DOES NOT cover:
+// does the gate actually hold when wired to a real `ProxmoxGateway`
+// implementation (PxClient against a live PVE cluster) under the
+// realistic timing of two callbacks arriving back-to-back?
+//
+// Threat model the live test pins:
+//   - Telegram redelivers `approve:restart:9999` due to a network
+//     hiccup before the daemon advances `offset`.
+//   - Daemon receives it twice within the same session.
+//   - First callback hits `client.get_nodes()` / `client.get_guests()`
+//     against real PVE (using the operator's privsep token).
+//   - Second callback MUST short-circuit at the dedup gate before
+//     reaching PVE again — proven by `CallbackOutcome::Replay` and by
+//     `pending.consumed_count()` staying at 1.
+//
+// Side-effect minimisation: we deliberately use `BLIND_VMID` (which
+// the env contract documents as "often nonexistent on the cluster")
+// so the first callback hits `NodeNotFound` rather than restarting a
+// real VM. This still exercises the full PVE round-trip (every
+// `get_guests` call goes over the wire) AND keeps the test idempotent
+// — no VM is restarted, no UPID is created.
+
+/// Closes the "HITL replay attack" row in
+/// [pre-commit/01-feature-coverage.md] under "RBAC & multi-persona".
+/// Pre-fix (no `PendingApprovals::consume` in `handle_callback_update`)
+/// the second call would also produce `NodeNotFound` and
+/// `consumed_count == 0` — but the contract is that the daemon
+/// REJECTS at the gate and exposes that as `Replay`. This test fails
+/// loudly if anyone removes / weakens the gate.
+#[tokio::test]
+#[ignore = "live cluster: requires PROXXX_E2E_RBAC_ENABLE=1 + persona tokens"]
+#[serial_test::serial]
+async fn hitl_callback_replay_rejected_under_live_pve() {
+    use proxxx::hitl::daemon::{handle_callback_update, CallbackOutcome};
+    use proxxx::hitl::pending::PendingApprovals;
+    use proxxx::hitl::telegram::{TelegramGateway, Update};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = env_or_skip!();
+
+    // Wiremock stand-in for api.telegram.org so the daemon's
+    // `answer_callback` / `edit_message_text` calls succeed (they're
+    // wrapped in `let _ = ...await`, but a real connection failure
+    // would hold the test for the reqwest connect timeout — using a
+    // mock keeps the test fast and independent of network shape).
+    let server = MockServer::start().await;
+    for endpoint in [
+        "/botfaketoken/answerCallbackQuery",
+        "/botfaketoken/editMessageText",
+        "/botfaketoken/sendMessage",
+    ] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1 },
+            })))
+            .mount(&server)
+            .await;
+    }
+    let tg = TelegramGateway::with_base_url(
+        "faketoken".to_string(),
+        "1".to_string(),
+        format!("{}/bot", server.uri()),
+    );
+
+    // Real operator client against the live PVE cluster.
+    let client = env.operator().await.expect("operator client");
+
+    // Build the synthetic callback. Round-trip through serde_json
+    // because `CallbackQuery` only derives `Deserialize`. The data
+    // string `approve:restart:{blind_vmid}` is what Telegram would
+    // actually deliver — and the gate stores the FULL data string as
+    // the txn_id, so two identical Updates collide on it.
+    let callback_data = format!("approve:restart:{}", env.blind_vmid);
+    let update_json = serde_json::json!({
+        "update_id": 1_i64,
+        "callback_query": {
+            "id": "live-replay-1",
+            "from": { "first_name": "live-replay-tester" },
+            "data": callback_data,
+            "message": { "message_id": 1_i64 },
+        }
+    });
+    let update: Update = serde_json::from_value(update_json).expect("Update deserializes");
+
+    let pending = PendingApprovals::new();
+
+    // First call — passes the gate, hits real PVE for node/guest
+    // discovery, ends in NodeNotFound (blind_vmid does not exist on
+    // the cluster). Side effect on PVE: only read-only API calls.
+    let first = handle_callback_update(&update, &pending, client.as_ref(), &tg)
+        .await
+        .expect("handle_callback_update first");
+    assert!(
+        matches!(first, CallbackOutcome::NodeNotFound { .. }),
+        "first call should land at NodeNotFound (blind_vmid is sentinel-nonexistent), got {first:?}"
+    );
+    assert_eq!(
+        pending.consumed_count(),
+        1,
+        "after first call, exactly one txn must be marked consumed"
+    );
+
+    // Second call — IDENTICAL update. MUST short-circuit at the
+    // dedup gate before any PVE call. The contract is loud: any
+    // outcome other than Replay means the gate is broken.
+    let second = handle_callback_update(&update, &pending, client.as_ref(), &tg)
+        .await
+        .expect("handle_callback_update second");
+    let CallbackOutcome::Replay { txn_id } = second else {
+        panic!("second call MUST be Replay, got {second:?} — replay gate is broken");
+    };
+    assert_eq!(
+        txn_id, callback_data,
+        "Replay outcome must surface the colliding callback data as txn_id"
+    );
+    assert_eq!(
+        pending.consumed_count(),
+        1,
+        "consumed_count must NOT increment on replay (HashSet dedup invariant)"
+    );
+}

@@ -14,6 +14,17 @@ SemVer contract:
 
 ### Added
 
+- **HITL callback replay-attack live test
+  (`hitl_callback_replay_rejected_under_live_pve`).** Drives
+  `handle_callback_update` twice with an identical `Update` against
+  a real `PxClient` (operator persona) + a wiremock Telegram
+  stand-in; pins `CallbackOutcome::Replay` on the second call and
+  `pending.consumed_count() == 1`. Pure-logic dedup is already
+  unit-tested; this test pins the contract under realistic
+  live-PVE wiring. Side-effect-free — uses the sentinel
+  `BLIND_VMID` so the first call lands at `NodeNotFound` rather
+  than restarting a real VM. `#[ignore]`-gated; opt in with
+  `PROXXX_E2E_RBAC_ENABLE=1` and persona tokens.
 - **Alert daemon dedup persistence (cache schema 1 → 2).** `alerts
   watch` now persists the `(rule, target) → last_fired` window to
   the SQLite cache after each tick (and at graceful shutdown), and
