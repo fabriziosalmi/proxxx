@@ -12,6 +12,21 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Changed
+
+- **Wizard SSH step now auto-discovers `~/.ssh/` private keys.**
+  Previously hardcoded `~/.ssh/id_ed25519` as the default path —
+  operators with named keys (`id_ed25519_root`,
+  `proxxx_e2e_ed25519`, `id_rsa`) accepted the default, the SSH
+  probe failed, the config got written pointing at a path that
+  didn't exist. Now the wizard scans `~/.ssh/`, content-checks each
+  candidate against `-----BEGIN ... PRIVATE KEY-----` (so `.pub`
+  siblings, `known_hosts`, `config`, `authorized_keys`, and random
+  files don't pollute the list), and presents a numbered choice
+  (OpenSSH-format keys first, then RSA PEM, alphabetical within).
+  Falls back to free-form prompt only when no keys are found OR
+  HOME is unset. 3 unit tests pin the filter rules + sort order.
+
 ### Added
 
 - **`proxxx ssh <vmid>` CLI subcommand.** Opens an interactive SSH

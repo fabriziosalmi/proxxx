@@ -482,8 +482,7 @@ struct SshBlock {
 
 fn prompt_ssh(api_url: &str) -> Result<Option<SshBlock>> {
     let user = prompt_string_default("  SSH user", "root")?;
-    let default_key = default_ssh_key_path();
-    let key_path = prompt_string_default("  Private key path", &default_key)?;
+    let key_path = prompt_ssh_key_path()?;
     let expanded = expand_tilde_str(&key_path);
     if !std::path::Path::new(&expanded).exists() {
         warn(&format!(
@@ -505,12 +504,127 @@ fn prompt_ssh(api_url: &str) -> Result<Option<SshBlock>> {
     Ok(Some(SshBlock { user, key_path }))
 }
 
-fn default_ssh_key_path() -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        format!("{home}/.ssh/id_ed25519")
-    } else {
-        "~/.ssh/id_ed25519".to_string()
+/// Discover SSH private keys in `~/.ssh/` and let the operator pick.
+/// Pre-fix the wizard hardcoded `~/.ssh/id_ed25519` as the default —
+/// when that file didn't exist (operators with `id_rsa`, named keys,
+/// or per-host keys like `proxxx_e2e_ed25519`) the SSH probe failed
+/// + the config was written with a path pointing to nothing.
+///
+/// The discovery scans `~/.ssh/`, opens each candidate, and matches
+/// the OpenSSH / RSA private-key header — so files that LOOK like
+/// keys (no `.pub`, not `known_hosts`, not `config`) but actually
+/// aren't get filtered out. Falls back to the legacy free-form
+/// prompt when no keys are found OR `HOME` is unset.
+fn prompt_ssh_key_path() -> Result<String> {
+    let candidates = discover_ssh_keys();
+    if candidates.is_empty() {
+        // Fallback: no keys found, prompt for custom path with the
+        // conventional default — guides the operator toward a
+        // `ssh-keygen -t ed25519` if they really have nothing.
+        return prompt_string_default("  Private key path", "~/.ssh/id_ed25519");
     }
+
+    info(&format!(
+        "  found {} SSH private key(s) in ~/.ssh/",
+        candidates.len()
+    ));
+    let mut display: Vec<String> = candidates
+        .iter()
+        .map(|p| {
+            let name = std::path::Path::new(p)
+                .file_name()
+                .map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned());
+            // Show name + truncated path for clarity; the basename
+            // tells operators "is this the one I authorised on the
+            // cluster?" at a glance.
+            format!("{name}")
+        })
+        .collect();
+    display.push("Other (type a custom path)".to_string());
+    let opts: Vec<&str> = display.iter().map(String::as_str).collect();
+    let i = prompt_choice("  Private key", &opts, 0)?;
+    if i == candidates.len() {
+        // "Other" branch — free-form prompt (still tilde-expanded
+        // downstream by expand_tilde_str).
+        let custom = prompt_string("  Custom key path")?;
+        Ok(custom)
+    } else {
+        Ok(candidates[i].clone())
+    }
+}
+
+/// Walk `~/.ssh/` and return paths to files whose first bytes match
+/// an OpenSSH or RSA private-key header. Returns an empty Vec when
+/// HOME is unset.
+fn discover_ssh_keys() -> Vec<String> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    discover_ssh_keys_in(&format!("{home}/.ssh"))
+}
+
+/// Inner discovery — takes the directory path explicitly so tests can
+/// drive it with a fixture tempdir instead of touching `~/.ssh/`.
+///
+/// Sort order: OpenSSH-format keys first (modern, ed25519/ecdsa
+/// usually live here), then PEM-format RSA, alphabetical within
+/// each group. The first entry becomes the default in the choice
+/// prompt — so an operator with both `id_ed25519_root` and
+/// `id_rsa` gets ed25519 pre-selected.
+fn discover_ssh_keys_in(dir: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    // (priority_bucket, name, full_path). Sort tuples lexically:
+    // bucket then name. 0 = OpenSSH format, 1 = RSA PEM, 2 = unknown
+    // but matched a BEGIN header.
+    let mut keys: Vec<(u8, String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip well-known non-keys. The `ends_with(".pub")` filter is
+        // critical: public keys also start with the openssh header.
+        if name.ends_with(".pub")
+            || name == "known_hosts"
+            || name == "known_hosts.old"
+            || name == "config"
+            || name == "authorized_keys"
+            || name.starts_with('.')
+        {
+            continue;
+        }
+        // Files only — `agent/` etc. are subdirectories.
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        // Cap the read at 200 bytes — enough for the header.
+        let Ok(content) = std::fs::read(&path) else {
+            continue;
+        };
+        let preview =
+            String::from_utf8_lossy(&content.iter().take(200).copied().collect::<Vec<u8>>())
+                .into_owned();
+        let bucket = if preview.contains("-----BEGIN OPENSSH PRIVATE KEY-----") {
+            0
+        } else if preview.contains("-----BEGIN RSA PRIVATE KEY-----") {
+            1
+        } else if preview.contains("-----BEGIN ") && preview.contains("PRIVATE KEY-----") {
+            2
+        } else {
+            continue;
+        };
+        keys.push((
+            bucket,
+            name.to_string(),
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    keys.sort();
+    keys.into_iter().map(|(_, _, p)| p).collect()
 }
 
 fn expand_tilde_str(p: &str) -> String {
@@ -965,6 +1079,106 @@ mod tests {
         assert_eq!(toml_escape("with \"quote\""), r#""with \"quote\"""#);
         assert_eq!(toml_escape("back\\slash"), r#""back\\slash""#);
         assert_eq!(toml_escape("new\nline"), r#""new\nline""#);
+    }
+
+    #[test]
+    fn discover_ssh_keys_filters_pub_keys_and_known_hosts() {
+        // Reproduces the operator's `~/.ssh/` from the wizard run that
+        // surfaced this gap: id_ed25519_root + id_rsa (private +
+        // public siblings), plus known_hosts / config / authorized_keys
+        // noise. Discovery must return EXACTLY the two private keys,
+        // OpenSSH first (id_ed25519_root), RSA second (id_rsa).
+        let dir = std::env::temp_dir().join(format!(
+            "proxxx-ssh-discover-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+
+        let openssh = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\n-----END OPENSSH PRIVATE KEY-----\n";
+        let rsa =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n";
+        let pub_key = "ssh-ed25519 AAAA tester@host\n";
+
+        std::fs::write(dir.join("id_ed25519_root"), openssh).unwrap();
+        std::fs::write(dir.join("id_ed25519_root.pub"), pub_key).unwrap();
+        std::fs::write(dir.join("id_rsa"), rsa).unwrap();
+        std::fs::write(dir.join("id_rsa.pub"), pub_key).unwrap();
+        std::fs::write(dir.join("known_hosts"), "host ssh-ed25519 AAAA\n").unwrap();
+        std::fs::write(dir.join("config"), "Host *\n  User root\n").unwrap();
+        std::fs::write(dir.join("authorized_keys"), pub_key).unwrap();
+        std::fs::write(dir.join("random.txt"), "not a key\n").unwrap();
+        // A dotfile that should be skipped by the leading-dot rule:
+        std::fs::write(dir.join(".DS_Store"), b"\x00\x01").unwrap();
+
+        let keys = discover_ssh_keys_in(dir.to_str().unwrap());
+        assert_eq!(
+            keys.len(),
+            2,
+            "must filter pub keys + non-keys, got {keys:?}"
+        );
+        // OpenSSH first per sort priority.
+        assert!(
+            keys[0].ends_with("id_ed25519_root"),
+            "OpenSSH key should sort first, got {keys:?}"
+        );
+        assert!(
+            keys[1].ends_with("id_rsa"),
+            "RSA key should sort second, got {keys:?}"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_ssh_keys_returns_empty_for_missing_dir() {
+        let nonexistent = std::env::temp_dir().join(format!(
+            "proxxx-ssh-nope-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let keys = discover_ssh_keys_in(nonexistent.to_str().unwrap());
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn discover_ssh_keys_skips_files_without_private_key_header() {
+        // A file with a plausible name but no `-----BEGIN` header
+        // (e.g. an old-format key, garbage from a half-rotated
+        // backup, a base64 blob without armouring) must not be
+        // surfaced as a candidate — the operator would pick it,
+        // ssh would fail with a confusing error, the wizard's "I
+        // tested this for you" promise would be broken.
+        let dir = std::env::temp_dir().join(format!(
+            "proxxx-ssh-noheader-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+
+        std::fs::write(
+            dir.join("looks_like_a_key"),
+            "MIIEpAIBAAKCAQEA-without-the-armour-line\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("id_real"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n",
+        )
+        .unwrap();
+
+        let keys = discover_ssh_keys_in(dir.to_str().unwrap());
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].ends_with("id_real"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
