@@ -1,0 +1,227 @@
+# Release workflow — fires on `v*` tag push, builds three target
+# matrices, and attaches stripped binaries to the GitHub release.
+#
+# Why three targets:
+#   - aarch64-apple-darwin       : macOS Apple Silicon (default for
+#                                  M-series Macs; Intel macs run via
+#                                  Rosetta 2 acceptably).
+#   - x86_64-unknown-linux-musl  : Static Linux x86_64. Runs on every
+#                                  distro from RHEL 6 to Alpine 3.x
+#                                  without GLIBC drama.
+#   - aarch64-unknown-linux-musl : Static Linux ARM64. Pi 4/5,
+#                                  Ampere, Graviton, Oracle Free Tier.
+#
+# We don't ship a Windows binary — proxxx claims macOS + Linux only
+# (per README's "Honest non-goals"). PowerShell users can use WSL2.
+#
+# This workflow does NOT replace `ci.yml`. ci.yml runs on every push
+# and PR (build/test/clippy/fmt + audit + musl); release.yml runs on
+# tag push only and assumes the tagged commit already passed ci.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# `contents: write` is the permission that lets the GitHub-Action-
+# bot create the release + upload assets. Default GITHUB_TOKEN has
+# `contents: read` — we override to write FOR THIS WORKFLOW only.
+permissions:
+  contents: write
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Build matrix — one job per target triple, parallel.
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive_ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive_ext: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl + cross tooling (Linux targets)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install aarch64 cross-linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        # The Rust toolchain installs the std for aarch64-musl, but the
+        # linker has to come from the host's package set. `gcc-aarch64-
+        # linux-gnu` is the cross gcc; we point cargo at the matching
+        # musl-aware linker via env.
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify Linux binary is statically linked
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          set -e
+          BIN=target/${{ matrix.target }}/release/proxxx
+          file "$BIN"
+          # `ldd` on a static binary prints "not a dynamic executable"
+          # OR "statically linked" — both are correct. We fail only if
+          # it lists actual shared deps (`=>`).
+          if ldd "$BIN" 2>&1 | grep -q "=>"; then
+            echo "ERROR: $BIN still has dynamic deps" >&2
+            ldd "$BIN"
+            exit 1
+          fi
+          echo "OK: $BIN is statically linked"
+
+      - name: Strip binary
+        # Release profile already strips on macOS via the cargo
+        # `[profile.release] strip = true` block (if present), but
+        # an explicit pass is harmless and consistent across targets.
+        # On the aarch64 cross we use the cross strip from binutils.
+        run: |
+          set -e
+          BIN=target/${{ matrix.target }}/release/proxxx
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            aarch64-linux-gnu-strip "$BIN" || true
+          else
+            strip "$BIN" || true
+          fi
+          ls -lh "$BIN"
+
+      - name: Package
+        # Tarball naming: proxxx-<version>-<target>.tar.gz . The version
+        # comes from the tag (drop the leading `v`). Tarball contains
+        # the binary + LICENSE + README + SECURITY policy so anyone
+        # downloading the tarball alone gets the legal + security
+        # context without round-tripping to the repo.
+        id: pack
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="proxxx-${VERSION}-${{ matrix.target }}"
+          mkdir -p dist/"$NAME"
+          cp target/${{ matrix.target }}/release/proxxx dist/"$NAME"/
+          cp LICENSE README.md SECURITY.md dist/"$NAME"/
+          tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
+          # SHA256 alongside the tarball so users can pin the artefact
+          # without GitHub-API round-trips.
+          ( cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+          ls -lh dist/
+          echo "archive=dist/${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sha256=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact for the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.pack.outputs.archive }}
+            ${{ steps.pack.outputs.sha256 }}
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────
+  # Release job — collect artifacts and attach to the GH release.
+  # ──────────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifact tree
+        # actions/download-artifact@v4 puts each artifact into its own
+        # subdirectory keyed on the artifact name. Flatten so the
+        # release-asset uploader sees a single dist/ directory.
+        run: |
+          set -e
+          mkdir -p dist
+          find artifacts -name 'proxxx-*.tar.gz' -exec cp {} dist/ \;
+          find artifacts -name 'proxxx-*.tar.gz.sha256' -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Compose release notes
+        # Pull the `[Unreleased]` section from CHANGELOG.md if present;
+        # otherwise emit a minimal blurb. We deliberately do NOT use
+        # `gh release create --generate-notes` — the curated CHANGELOG
+        # entries beat the auto-generated commit-list every time.
+        id: notes
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES_FILE="$(mktemp)"
+          {
+            echo "## proxxx ${GITHUB_REF_NAME}"
+            echo
+            # Try to extract the [Unreleased] section, stop at the
+            # next `## [` marker.
+            if awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/unreleased.md && [ -s /tmp/unreleased.md ]; then
+              cat /tmp/unreleased.md
+            else
+              echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) for details."
+            fi
+            echo
+            echo "### Verifying downloads"
+            echo
+            echo "Each tarball ships with a sibling \`.sha256\` file. Verify:"
+            echo
+            echo '```bash'
+            echo 'shasum -a 256 -c proxxx-*-<target>.tar.gz.sha256'
+            echo '```'
+          } > "$NOTES_FILE"
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release + upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          # Trigger fired on `v*` tag, so `github.ref_name` is `vX.Y.Z`.
+          tag_name: ${{ github.ref_name }}
+          name: proxxx ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.notes_file }}
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          # `draft: false` publishes immediately; flip to true if you
+          # want to review before announcing.
+          draft: false
+          # `prerelease: true` for `v0.x.y` and `vX.Y.Z-rc*` style.
+          # Strict-semver test: anything non-final-stable goes pre.
+          prerelease: ${{ contains(github.ref_name, '-') || startsWith(github.ref_name, 'v0.') }}
+          fail_on_unmatched_files: true

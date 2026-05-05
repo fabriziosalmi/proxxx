@@ -2,11 +2,19 @@
 name = "proxxx"
 version = "0.1.0"
 edition = "2021"
+authors = ["Fabrizio Salmi <fabrizio.salmi@gmail.com>"]
 description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
 license = "MIT"
 repository = "https://github.com/fabriziosalmi/proxxx"
+homepage = "https://fabriziosalmi.github.io/proxxx/"
+documentation = "https://fabriziosalmi.github.io/proxxx/"
+readme = "README.md"
 keywords = ["proxmox", "tui", "cli", "virtualization", "infrastructure"]
 categories = ["command-line-utilities", "visualization"]
+# Match rust-toolchain.toml so consumers (and `cargo publish` if it
+# ever happens) get a clear "you need at least this" floor instead of
+# a cryptic syntax error from a feature we silently rely on.
+rust-version = "1.95"
 
 [dependencies]
 # Async runtime
