@@ -3476,7 +3476,7 @@ pub async fn execute(
         Command::Serial { vmid, node, kind } => {
             execute_serial(&client, &config, vmid, &node, kind).await
         }
-        Command::Ssh { vmid, cmd } => execute_ssh(&config, vmid, cmd.as_deref()),
+        Command::Ssh { vmid, cmd } => execute_ssh(&client, &config, vmid, cmd.as_deref()).await,
         Command::Spice {
             vmid,
             node,
@@ -4071,13 +4071,13 @@ async fn execute_serial(
 /// because it embeds the session in a TUI widget; here the operator
 /// owns the terminal entirely and `ssh` is the right shape.
 ///
-/// Per-guest connection details come from `[ssh.guests."<vmid>"]`
-/// in the active profile's config.toml. No QGA-based auto-discovery
-/// today — that would need a separate code path that talks to PVE,
-/// queries the agent, and falls back to manual config when missing.
-/// Tracked as a follow-up; the explicit-config path is shipped first
-/// because it's the predictable contract.
-fn execute_ssh(
+/// Resolution order:
+///   1. `[ssh.guests."<vmid>"]` in config.toml — explicit override
+///   2. Auto-discovery via QGA (QEMU) or `/lxc/N/interfaces` (LXC)
+///      — uses [ssh].user / [ssh].key_path as defaults.
+///   3. Friendly error with paste-able TOML if both fail.
+async fn execute_ssh(
+    client: &std::sync::Arc<crate::api::PxClient>,
     config: &crate::config::ProfileConfig,
     vmid: u32,
     cmd: Option<&str>,
@@ -4094,23 +4094,50 @@ fn execute_ssh(
              then add a per-guest target as below."
         )
     })?;
-    let target = ssh_cfg.resolve_guest(vmid).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no [ssh.guests.\"{vmid}\"] entry in config.toml.\n\
-             \n\
-             proxxx does not auto-discover guest IPs (a future enhancement\n\
-             will use qemu-guest-agent for QEMU). Add the target block:\n\
-             \n\
-             [ssh.guests.\"{vmid}\"]\n\
-             host = \"<guest-ip-or-hostname>\"   # e.g. 192.168.1.42\n\
-             # user = \"root\"                    # optional, falls back to [ssh].user\n\
-             # port = 22                          # optional, default 22\n\
-             # key_path = \"~/.ssh/...\"           # optional, falls back to [ssh].key_path\n\
-             \n\
-             You can confirm the guest's IP from PVE with:\n\
-             proxxx --format json ls guests | jq '.[] | select(.vmid == {vmid})'"
+    // 1. Explicit config wins. The operator may have set host:
+    // "internal-name.lab" via DNS or pinned a non-default user/port —
+    // auto-discovery must not override that.
+    let (target, source) = if let Some(t) = ssh_cfg.resolve_guest(vmid) {
+        (t, "config.toml")
+    } else {
+        // 2. Try auto-discovery. The error path collects WHY discovery
+        // failed (no agent, link-local only, etc.) so the fallback
+        // message is actionable rather than just "not found".
+        match qga_resolve_guest(client, ssh_cfg, vmid).await {
+            Ok(t) => (t, "QGA / lxc-interfaces auto-discovery"),
+            Err(discovery_err) => {
+                // 3. Both paths failed — surface paste-able TOML +
+                // the discovery diagnostic so the operator knows
+                // whether the agent is missing, the IP is link-local
+                // only, or PVE rejected the lookup.
+                anyhow::bail!(
+                    "no [ssh.guests.\"{vmid}\"] entry in config.toml AND auto-\n\
+                     discovery failed: {discovery_err}\n\
+                     \n\
+                     Add an explicit target:\n\
+                     \n\
+                     [ssh.guests.\"{vmid}\"]\n\
+                     host = \"<guest-ip-or-hostname>\"   # e.g. 192.168.1.42\n\
+                     # user = \"root\"                    # optional, falls back to [ssh].user\n\
+                     # port = 22                          # optional, default 22\n\
+                     # key_path = \"~/.ssh/...\"           # optional, falls back to [ssh].key_path\n\
+                     \n\
+                     You can confirm the guest's IP from PVE with:\n\
+                     proxxx --format json ls guests | jq '.[] | select(.vmid == {vmid})'\n\
+                     \n\
+                     For QEMU guests with the agent installed but not running:\n\
+                     proxxx qga {vmid} net   # exercises the same path"
+                )
+            }
+        }
+    };
+    eprintln!(
+        "\x1b[2m{}\x1b[0m",
+        format!(
+            "[ssh] resolved {}@{}:{} (source: {source})",
+            target.user, target.host, target.port
         )
-    })?;
+    );
 
     // Spawn the system `ssh`. Sharing stdin/stdout/stderr with the
     // parent gives a true terminal handoff — no extra PTY layer, no
@@ -4146,6 +4173,248 @@ fn execute_ssh(
         }),
         exit_code,
     ))
+}
+
+/// Resolve a guest's SSH target via auto-discovery — QGA for QEMU,
+/// `/lxc/{vmid}/interfaces` for LXC. Used as a fallback by
+/// `execute_ssh` when no explicit `[ssh.guests."<vmid>"]` block is
+/// present in config.toml.
+///
+/// Selection: first IPv4 address that is NOT loopback (127.0.0.0/8)
+/// AND NOT link-local (169.254.0.0/16). Picks IPv6 only if no IPv4
+/// candidate exists — most operators want the v4 by default.
+///
+/// Diagnostic-rich error: tells the operator WHY discovery failed
+/// (no node, agent off, only loopback) so the fallback message in
+/// `execute_ssh` doesn't leave them guessing whether the agent
+/// needs to be started or the IP just looks weird.
+async fn qga_resolve_guest(
+    client: &std::sync::Arc<crate::api::PxClient>,
+    ssh_cfg: &crate::config::SshConfig,
+    vmid: u32,
+) -> Result<crate::config::ResolvedGuestSsh> {
+    use crate::api::types::GuestType;
+    use crate::api::ProxmoxGateway;
+
+    let (node, gtype) = find_guest(client, vmid).await?;
+
+    let host = match gtype {
+        GuestType::Qemu => {
+            let interfaces = client
+                .qemu_agent_network_get_interfaces(&node, vmid)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "QEMU guest-agent query failed (agent off or not installed?): {e:#}"
+                    )
+                })?;
+            pick_first_routable_ipv4_qemu(&interfaces).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QGA returned no routable IPv4 for vmid {vmid} \
+                     (only loopback / link-local / IPv6 found — guest may be on \
+                     a private bridge with no usable address)"
+                )
+            })?
+        }
+        GuestType::Lxc => {
+            let interfaces = client
+                .list_lxc_interfaces(&node, vmid)
+                .await
+                .map_err(|e| anyhow::anyhow!("LXC interface query failed: {e:#}"))?;
+            pick_first_routable_ipv4_lxc(&interfaces).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LXC vmid {vmid} has no routable IPv4 \
+                     (interfaces query returned only empty / loopback / link-local entries)"
+                )
+            })?
+        }
+    };
+
+    // Use [ssh] defaults — operator already accepted these in the
+    // wizard / their config. This is the same fallback the explicit-
+    // config path uses for missing per-guest user/key_path.
+    let key_path = ssh_cfg.key_path_resolved().ok_or_else(|| {
+        anyhow::anyhow!(
+            "[ssh].key_path is not set in config.toml — auto-discovery found \
+             host {host} for vmid {vmid} but cannot pick a private key"
+        )
+    })?;
+    Ok(crate::config::ResolvedGuestSsh {
+        host,
+        port: 22,
+        user: ssh_cfg.user.clone(),
+        key_path,
+    })
+}
+
+/// Pick the first routable IPv4 from a QGA interface list. Skips
+/// loopback (127.0.0.0/8) and link-local (169.254.0.0/16); pure
+/// function so we can pin invariants in unit tests without needing
+/// a live cluster.
+#[must_use]
+pub fn pick_first_routable_ipv4_qemu(
+    interfaces: &[crate::api::types::GuestAgentNetworkInterface],
+) -> Option<String> {
+    for iface in interfaces {
+        for ip in &iface.ip_addresses {
+            if ip.ip_address_type != "ipv4" {
+                continue;
+            }
+            if is_routable_ipv4(&ip.ip_address) {
+                return Some(ip.ip_address.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Same as `pick_first_routable_ipv4_qemu` but for the LXC `inet`
+/// shape (e.g. `"10.0.0.42/24"`) — strip the CIDR before predicate.
+#[must_use]
+pub fn pick_first_routable_ipv4_lxc(
+    interfaces: &[crate::api::types::LxcInterface],
+) -> Option<String> {
+    for iface in interfaces {
+        if iface.inet.is_empty() {
+            continue;
+        }
+        let ip = iface
+            .inet
+            .split_once('/')
+            .map_or(iface.inet.as_str(), |(addr, _cidr)| addr);
+        if is_routable_ipv4(ip) {
+            return Some(ip.to_string());
+        }
+    }
+    None
+}
+
+/// True for IPv4 strings that aren't loopback or link-local. Pure;
+/// rejects malformed input by returning false (caller filters with
+/// the predicate, not asserts).
+fn is_routable_ipv4(s: &str) -> bool {
+    let octets: Vec<u8> = s.split('.').filter_map(|p| p.parse::<u8>().ok()).collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    if octets[0] == 127 {
+        return false; // loopback 127/8
+    }
+    if octets[0] == 169 && octets[1] == 254 {
+        return false; // link-local 169.254/16
+    }
+    if octets[0] == 0 {
+        return false; // 0.0.0.0/8 — never a destination
+    }
+    true
+}
+
+#[cfg(test)]
+mod ssh_discovery_tests {
+    use super::*;
+    use crate::api::types::{GuestAgentIpAddress, GuestAgentNetworkInterface, LxcInterface};
+
+    fn ipv4(addr: &str) -> GuestAgentIpAddress {
+        GuestAgentIpAddress {
+            ip_address_type: "ipv4".into(),
+            ip_address: addr.into(),
+            prefix: 24,
+        }
+    }
+    fn ipv6(addr: &str) -> GuestAgentIpAddress {
+        GuestAgentIpAddress {
+            ip_address_type: "ipv6".into(),
+            ip_address: addr.into(),
+            prefix: 64,
+        }
+    }
+    fn iface(name: &str, ips: Vec<GuestAgentIpAddress>) -> GuestAgentNetworkInterface {
+        GuestAgentNetworkInterface {
+            name: name.into(),
+            hardware_address: "00:00:00:00:00:00".into(),
+            ip_addresses: ips,
+        }
+    }
+
+    #[test]
+    fn qga_picks_first_routable_ipv4_skipping_loopback() {
+        let ifaces = vec![
+            iface("lo", vec![ipv4("127.0.0.1"), ipv6("::1")]),
+            iface(
+                "eth0",
+                vec![ipv4("169.254.99.1"), ipv4("192.168.1.42"), ipv6("fe80::1")],
+            ),
+        ];
+        assert_eq!(
+            pick_first_routable_ipv4_qemu(&ifaces),
+            Some("192.168.1.42".to_string())
+        );
+    }
+
+    #[test]
+    fn qga_returns_none_when_only_loopback_and_link_local() {
+        // Pre-fix the wizard would have happily picked 127.0.0.1 and
+        // tried to ssh into it — auto-discovery must reject and fall
+        // back to the explicit-config error message.
+        let ifaces = vec![iface("lo", vec![ipv4("127.0.0.1"), ipv4("169.254.99.1")])];
+        assert!(pick_first_routable_ipv4_qemu(&ifaces).is_none());
+    }
+
+    #[test]
+    fn qga_skips_ipv6_only_entries() {
+        let ifaces = vec![iface("eth0", vec![ipv6("2001:db8::1")])];
+        assert!(pick_first_routable_ipv4_qemu(&ifaces).is_none());
+    }
+
+    #[test]
+    fn lxc_strips_cidr_and_picks_first_routable() {
+        let ifaces = vec![
+            LxcInterface {
+                name: "lo".into(),
+                hwaddr: String::new(),
+                inet: "127.0.0.1/8".into(),
+                inet6: "::1/128".into(),
+            },
+            LxcInterface {
+                name: "eth0".into(),
+                hwaddr: "00:01".into(),
+                inet: "10.0.0.42/24".into(),
+                inet6: String::new(),
+            },
+        ];
+        assert_eq!(
+            pick_first_routable_ipv4_lxc(&ifaces),
+            Some("10.0.0.42".to_string())
+        );
+    }
+
+    #[test]
+    fn lxc_skips_empty_inet() {
+        // PVE returns "" when the interface has no v4 — must be
+        // skipped, not surfaced as a candidate, otherwise the SSH
+        // command would be `ssh root@` and fail confusingly.
+        let ifaces = vec![LxcInterface {
+            name: "eth0".into(),
+            hwaddr: "00:01".into(),
+            inet: String::new(),
+            inet6: "fe80::1/64".into(),
+        }];
+        assert!(pick_first_routable_ipv4_lxc(&ifaces).is_none());
+    }
+
+    #[test]
+    fn is_routable_rejects_malformed_strings() {
+        assert!(!is_routable_ipv4("not-an-ip"));
+        assert!(!is_routable_ipv4("192.168.1"));
+        assert!(!is_routable_ipv4(""));
+        assert!(!is_routable_ipv4("999.999.999.999"));
+        assert!(!is_routable_ipv4("0.0.0.0"));
+        assert!(!is_routable_ipv4("127.0.0.1"));
+        assert!(!is_routable_ipv4("169.254.0.1"));
+        assert!(is_routable_ipv4("10.0.0.1"));
+        assert!(is_routable_ipv4("192.168.1.42"));
+        assert!(is_routable_ipv4("8.8.8.8"));
+    }
 }
 
 /// Inner loop: keystrokes → WS, WS frames → stdout. Returns exit code.

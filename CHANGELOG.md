@@ -14,6 +14,21 @@ SemVer contract:
 
 ### Changed
 
+- **`proxxx ssh <vmid>` now auto-discovers guest IPs via QGA / LXC
+  interfaces.** Previously required an explicit
+  `[ssh.guests."<vmid>"]` block in config.toml; now falls back to
+  asking PVE for the live IPs (QGA `network-get-interfaces` for
+  QEMU, `/lxc/{vmid}/interfaces` for LXC) and picks the first
+  routable IPv4 (skipping loopback 127.0.0.0/8 and link-local
+  169.254.0.0/16). Uses `[ssh].user` / `[ssh].key_path` as
+  defaults. Explicit config still wins; the source ("config.toml"
+  or "QGA / lxc-interfaces auto-discovery") is echoed before the
+  ssh exec so the operator knows which path resolved. Diagnostic-
+  rich error chain when both fail (agent off vs. only-loopback
+  vs. no [ssh].key_path) so the message tells you what to fix
+  rather than just "guest not found". 6 unit tests pin the IP
+  selection invariants (loopback skipped, link-local skipped,
+  IPv6-only returns None, malformed input rejected).
 - **Wizard SSH step now auto-discovers `~/.ssh/` private keys.**
   Previously hardcoded `~/.ssh/id_ed25519` as the default path —
   operators with named keys (`id_ed25519_root`,
