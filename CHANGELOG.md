@@ -14,6 +14,18 @@ SemVer contract:
 
 ### Added
 
+- **`proxxx ssh <vmid>` CLI subcommand.** Opens an interactive SSH
+  session into a guest by spawning the system `ssh` (so the
+  operator's existing keys, agent, known_hosts, and `~/.ssh/config`
+  apply transparently — re-implementing those in russh would be
+  incomplete and invisible to muscle memory). Per-guest connection
+  details come from `[ssh.guests."<vmid>"]` in config.toml. When
+  the block is missing, proxxx prints the exact TOML to paste in
+  plus a `proxxx --format json ls guests | jq` recipe to discover
+  the guest's IP. `--cmd "<remote-command>"` runs a one-shot
+  instead of an interactive shell. Closes a long-standing gap
+  where `proxxx ssh 100` was advertised in the docs but unreachable
+  at the CLI (existed only inside the TUI's `c` keypress flow).
 - **TUI always-visible status footer with contextual keybindings.**
   Bottom row of every view now surfaces 3-9 view-specific bindings
   (`j/k:nav  ↵:detail  s:start  S:stop  r:restart  c:console

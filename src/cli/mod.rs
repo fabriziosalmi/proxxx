@@ -548,6 +548,25 @@ pub enum Command {
         #[arg(long, value_enum)]
         kind: Option<SerialKind>,
     },
+    /// Open an interactive SSH session into a guest (NOT into the PVE
+    /// node — for that, just `ssh root@<node>` directly). Per-guest
+    /// connection details (host/IP, optional user/port/key override)
+    /// are read from `[ssh.guests."<vmid>"]` in your config.toml.
+    /// Spawns the system `ssh` so the operator's existing keys, agent,
+    /// and known_hosts apply transparently. Press Ctrl+D or type `exit`
+    /// to leave the session — return value is the remote shell's exit
+    /// code (or `ssh`'s, if connection failed).
+    Ssh {
+        /// Guest VMID. Must have a `[ssh.guests."<vmid>"]` block in
+        /// the config; without it, proxxx prints the exact TOML to
+        /// paste in.
+        vmid: u32,
+        /// Optional remote command to run instead of an interactive
+        /// shell (e.g. `--cmd "uptime"`). When present, ssh runs it
+        /// non-interactively and exits.
+        #[arg(long)]
+        cmd: Option<String>,
+    },
     /// Effective permissions for a user — shells out to `pveum user
     /// permissions` on a Proxmox node via SSH layer (SSH). Per the
     /// architectural review, we don't reimplement the algorithm; the
@@ -3457,6 +3476,7 @@ pub async fn execute(
         Command::Serial { vmid, node, kind } => {
             execute_serial(&client, &config, vmid, &node, kind).await
         }
+        Command::Ssh { vmid, cmd } => execute_ssh(&config, vmid, cmd.as_deref()),
         Command::Spice {
             vmid,
             node,
@@ -4035,6 +4055,93 @@ async fn execute_serial(
             "node": node,
             "type": format!("{guest_type:?}").to_lowercase(),
             "user": ticket.user,
+            "exit_code": exit_code,
+        }),
+        exit_code,
+    ))
+}
+
+/// `proxxx ssh <vmid>` — interactive SSH session into a guest VM/CT.
+///
+/// Why exec the system `ssh` rather than russh: the operator's
+/// existing keys, known_hosts, ssh-agent, and SSH config (Host
+/// stanzas, ProxyJump, ControlMaster) all apply transparently.
+/// Re-implementing those features in russh would be incomplete and
+/// invisible to muscle memory. The TUI's per-pane PTY uses russh
+/// because it embeds the session in a TUI widget; here the operator
+/// owns the terminal entirely and `ssh` is the right shape.
+///
+/// Per-guest connection details come from `[ssh.guests."<vmid>"]`
+/// in the active profile's config.toml. No QGA-based auto-discovery
+/// today — that would need a separate code path that talks to PVE,
+/// queries the agent, and falls back to manual config when missing.
+/// Tracked as a follow-up; the explicit-config path is shipped first
+/// because it's the predictable contract.
+fn execute_ssh(
+    config: &crate::config::ProfileConfig,
+    vmid: u32,
+    cmd: Option<&str>,
+) -> Result<(Value, i32)> {
+    let ssh_cfg = config.ssh.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no [ssh] block in config.toml — run `proxxx init --interactive`\n\
+             and answer 'y' at the SSH layer step, OR add a minimal block:\n\
+             \n\
+             [ssh]\n\
+             user = \"root\"\n\
+             key_path = \"~/.ssh/id_ed25519\"\n\
+             \n\
+             then add a per-guest target as below."
+        )
+    })?;
+    let target = ssh_cfg.resolve_guest(vmid).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no [ssh.guests.\"{vmid}\"] entry in config.toml.\n\
+             \n\
+             proxxx does not auto-discover guest IPs (a future enhancement\n\
+             will use qemu-guest-agent for QEMU). Add the target block:\n\
+             \n\
+             [ssh.guests.\"{vmid}\"]\n\
+             host = \"<guest-ip-or-hostname>\"   # e.g. 192.168.1.42\n\
+             # user = \"root\"                    # optional, falls back to [ssh].user\n\
+             # port = 22                          # optional, default 22\n\
+             # key_path = \"~/.ssh/...\"           # optional, falls back to [ssh].key_path\n\
+             \n\
+             You can confirm the guest's IP from PVE with:\n\
+             proxxx --format json ls guests | jq '.[] | select(.vmid == {vmid})'"
+        )
+    })?;
+
+    // Spawn the system `ssh`. Sharing stdin/stdout/stderr with the
+    // parent gives a true terminal handoff — no extra PTY layer, no
+    // double key forwarding. The child inherits TERM, LANG, etc.
+    let mut cmd_builder = std::process::Command::new("ssh");
+    cmd_builder
+        .arg("-i")
+        .arg(&target.key_path)
+        .arg("-p")
+        .arg(target.port.to_string())
+        .arg(format!("{}@{}", target.user, target.host));
+    if let Some(c) = cmd {
+        cmd_builder.arg(c);
+    }
+    // stdio inherits by default for std::process::Command. Status
+    // returns when the child exits — its exit code is what the
+    // operator sees from `proxxx ssh ...`.
+    let status = cmd_builder.status().map_err(|e| {
+        anyhow::anyhow!(
+            "spawning ssh failed: {e}\n\
+             Verify `ssh` is on PATH (it usually is on macOS / Linux)."
+        )
+    })?;
+    let exit_code = status.code().unwrap_or(1);
+
+    Ok((
+        serde_json::json!({
+            "vmid": vmid,
+            "host": target.host,
+            "user": target.user,
+            "port": target.port,
             "exit_code": exit_code,
         }),
         exit_code,

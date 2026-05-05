@@ -125,7 +125,7 @@ proxxx disk move 100 --disk scsi0 --storage ceph-rbd --yes
 proxxx patch apply --reboot=auto --dry-run
 
 # Hand off to a graphical client
-proxxx ssh    100                       # russh PTY
+proxxx ssh    100                       # interactive SSH into the guest (system ssh)
 proxxx serial 100 --node pve1           # raw termproxy WebSocket
 proxxx spice  100 --node pve1           # writes .vv (0600), launches remote-viewer
 proxxx novnc  100 --node pve1           # opens browser to web UI's noVNC
