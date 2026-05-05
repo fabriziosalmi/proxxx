@@ -162,12 +162,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Flatten artifact tree
-        # actions/download-artifact@v4 puts each artifact into its own
+        # actions/download-artifact@v8 puts each artifact into its own
         # subdirectory keyed on the artifact name. Flatten so the
         # release-asset uploader sees a single dist/ directory.
         run: |
