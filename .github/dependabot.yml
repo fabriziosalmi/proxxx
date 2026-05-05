@@ -1,0 +1,61 @@
+# Dependabot — keep cargo and GitHub Actions deps fresh.
+#
+# Why weekly + grouped: a daily firehose of single-dep PRs is cognitive
+# noise that pushes maintainers to merge without reviewing. Grouping
+# patch + minor bumps into one PR per ecosystem per week keeps the
+# review surface manageable while still catching CVEs within ~7 days
+# of disclosure (cargo audit nightly catches the urgent ones earlier).
+#
+# Major bumps come as separate PRs by design — those need attention.
+
+version: 2
+
+updates:
+  # Rust crate deps
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "cargo"
+    commit-message:
+      prefix: "deps(cargo)"
+      include: "scope"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+        # Reqwest + tokio + ratatui are large enough surfaces that we
+        # want to look at them individually even on patch bumps.
+        exclude-patterns:
+          - "reqwest"
+          - "tokio*"
+          - "ratatui"
+          - "russh*"
+
+  # GitHub Actions deps (workflow YAML uses external actions)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "ci"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
+    groups:
+      actions-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"

@@ -1,0 +1,311 @@
+[package]
+name = "proxxx"
+version = "0.1.1"
+edition = "2021"
+authors = ["Fabrizio Salmi <fabrizio.salmi@gmail.com>"]
+description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
+license = "MIT"
+repository = "https://github.com/fabriziosalmi/proxxx"
+homepage = "https://fabriziosalmi.github.io/proxxx/"
+documentation = "https://fabriziosalmi.github.io/proxxx/"
+readme = "README.md"
+keywords = ["proxmox", "tui", "cli", "virtualization", "infrastructure"]
+categories = ["command-line-utilities", "visualization"]
+# Match rust-toolchain.toml so consumers (and `cargo publish` if it
+# ever happens) get a clear "you need at least this" floor instead of
+# a cryptic syntax error from a feature we silently rely on.
+rust-version = "1.95"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "stream", "multipart"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+toml = "0.8"
+directories = "6"
+
+# Error handling.
+# - `thiserror` for typed domain errors (audit) — `proxxx::api::ApiError`
+#   exposes actionable variants (Unauthorized / NotFound / RateLimited /
+#   PayloadTooLarge / Transport / Parse) the UI can `match` on.
+# - `anyhow` for the application boundary (main, CLI dispatch) where we
+#   collapse everything into one report-friendly error chain.
+anyhow = "1"
+thiserror = "2"
+
+# Logging (async, file-based — TUI owns stdout)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Rate limiting
+governor = "0.8"
+
+# Fuzzy search
+nucleo = "0.5"
+
+# OS keychain
+keyring = { version = "3", optional = true }
+
+# Async trait
+async-trait = "0.1"
+nucleo-matcher = "0.3.1"
+dirs = "6.0.0"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+
+# SSH layer
+russh = "0.60"
+# `russh-keys` was folded back into `russh` proper in 0.60 — the
+# functionality lives at `russh::keys::*` now. Removing the separate
+# crate also drops the transitive `rsa 0.9.10` (Marvin Attack,
+# RUSTSEC-2023-0071) which the old russh-keys 0.46 → ssh-key 0.6
+# chain was pulling.
+hex = "0.4"
+sha2 = "0.10"
+
+# PTY screen state for SSH guest sessions (feature 1a).
+# Using vt100-ctt (up-to-date fork of vt100) because vt100 0.16 pins
+# unicode-width >= 0.2.1, conflicting with ratatui 0.29's exact pin to 0.2.0.
+# `default-features = false` drops the `tui-term` feature (which pulls
+# ratatui 0.29 transitively + its `paste`/`lru` advisories). We only
+# use `vt100::Parser` directly; the tui-term widget is not in our
+# render path. Snapshots from the parser feed our own ratatui-0.30
+# rendering layer in `tui/widgets/pty.rs`.
+vt100 = { package = "vt100-ctt", version = "0.17", default-features = false }
+
+# WebSocket client for Proxmox termproxy serial console (feature 1b).
+# Uses rustls (matching reqwest's existing rustls-tls feature) so we don't
+# pull in native-tls / openssl-sys as a new system dep.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# `tokio-util io` adapts an async `File` into a Stream so multipart
+# uploads can be POSTed without buffering multi-GB files in RAM.
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+# Custom rustls verifier for `verify_tls = false` profiles (homelab self-
+# signed). Pulled in directly so we can build a ClientConfig that mirrors
+# the reqwest `danger_accept_invalid_certs` flag.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Atomic, TOCTOU-safe temp-file creation for the SPICE .vv handoff path
+# (audit). Provides O_EXCL + crypto-random suffix + permissions
+# applied at creation time, so a malicious local process can't pre-place
+# a symlink at the expected path and steal the SPICE password.
+tempfile = "3"
+
+# Macro audit: secret zeroing.
+# `Zeroizing<String>` overwrites the heap bytes with zeros in `Drop`,
+# so a core dump or swap-out after the secret has been released cannot
+# leak the Proxmox / PBS / Telegram credentials. The wrapper has no
+# performance cost on the hot path; only the Drop call does the memset.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[features]
+default = ["keychain"]
+keychain = ["dep:keyring"]
+
+[dev-dependencies]
+wiremock = "0.6"
+insta = { version = "1", features = ["json"] }
+tokio-test = "0.4"
+# Benchmark suite (Mission 1, Bench protocol).
+# `criterion` is the standard Rust benchmarking harness — it supplies
+# `black_box` to defeat LLVM dead-code elimination, statistical
+# sample collection (default 100 samples, t-test outlier filtering),
+# and `cargo bench` integration. We use it through the `harness =
+# false` per-bench flag so each bench file is its own binary.
+criterion = { version = "0.5", features = ["html_reports"] }
+# E2E test suite (Mission 2 will use this — declared here so adding
+# `#[serial]` tests later doesn't require a Cargo.toml churn).
+serial_test = "3"
+
+# ── Benchmark binaries ──────────────────────────────────
+# Each `[[bench]]` produces an isolated binary so failures or
+# allocation pollution in one don't bleed into others.
+[[bench]]
+name = "serde_parse"
+harness = false
+
+[[bench]]
+name = "snaptree_assemble"
+harness = false
+
+[[bench]]
+name = "fuzzy_search"
+harness = false
+
+# Audit: release profile choices, with intent.
+#
+# - `lto = true` is the same as `lto = "fat"` per Cargo docs (cross-crate
+#   inlining across the whole dep graph). Fat LTO is ON.
+# - `codegen-units = 1` forces single-translation-unit codegen, the
+#   slowest-but-most-optimal mode.
+# - `strip = true` removes symbol info from the final binary
+#   (~15→6 MiB on this codebase).
+# - `opt-level = "z"` is INTENTIONALLY size-optimised, not speed-
+#   optimised. proxxx is shipped as a single binary distributed via
+#   homebrew / direct download; size matters more than the marginal
+#   ~5% runtime gain of `opt-level = 3`. The CPU-bound paths
+#   (`benches/serde_parse.rs` etc.) measure within budget at "z".
+# - `panic = "unwind"` (the default) is INTENTIONALLY kept. The
+#   flight-recorder panic hook (`util::panic_hook`) and the 
+#   `TerminalGuard::Drop` BOTH depend on Rust's unwind machinery to
+#   restore the terminal on panic. Switching to `panic = "abort"`
+#   would shave another ~200 KiB off the binary at the cost of
+#   leaving the user's terminal in a broken raw-mode state on any
+#   unwrap / assert / index OOB. Not worth it.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"    # size > speed (see comment above; benches stay in budget)
+# panic = "unwind" — DO NOT change to "abort". TerminalGuard + panic_hook
+# need unwind for terminal restoration. Reviewed 
+
+# ── PARANOID CLIPPY ──────────────────────────────────────
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+clone_on_ref_ptr = "warn"
+todo = "deny"
+panic = "deny"
+
+# Phase polish baseline — `indexing_slicing` was at "warn", flagging
+# 140 already-bounds-checked sites in TUI renderers + snapshot
+# walkers. None are real OOB risks — every site is already gated by
+# `if i < v.len()` or the iterator was just collected from a sized
+# source. The `panic = "deny"` lint above catches the real failure
+# mode (an actual index-out-of-bounds at runtime is a panic), so
+# `indexing_slicing` adds noise without signal. Demoted to "allow"
+# with this reasoning so future drift on `panic` is what matters.
+indexing_slicing = "allow"
+
+# Audit #3 — codebase is clean today, but without an automated guard a
+# regression that holds a sync lock across an .await would deadlock the
+# Tokio scheduler under load and not get caught until production.
+await_holding_lock = "deny"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# ── Justified pedantic/nursery suppressions ──────────────────────────
+#
+# These categories produce dozens of false positives for proxxx's
+# domain. Each entry below is a deliberate scope decision, not laziness.
+# Removing one means scanning every site individually for the rare real
+# bug — which we'll do when we have a reason. Documented here so a
+# future maintainer can re-evaluate.
+#
+# Numeric casts: proxxx renders cluster metrics — bytes, CPU times,
+# memory — as percentages and human-friendly sizes. The natural shape
+# is `(used as f64 / total as f64) * 100.0`, which trips
+# `cast_precision_loss`/`cast_possible_truncation`/`cast_sign_loss` on
+# every divisor. Precision loss in a 0..100 % display is irrelevant;
+# the alternative of `TryFrom + unwrap` would just add noise.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+
+# Function shape: TUI render functions and CLI handlers handle many
+# branches by domain (one match arm per command, one case per cluster
+# event). Splitting them reduces locality without improving clarity.
+# `too_many_arguments` flags clap dispatchers and the `ProxmoxGateway`
+# trait — both have wide signatures because the underlying PVE API
+# does. Re-evaluate per-fn if a real legibility issue surfaces.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+
+# Layout: a const or struct decl colocated with its first use is
+# clearer than hoisting to the top of the function. Hoisted constants
+# get their own clippy lint anyway (`unnecessary_wraps` etc.) — pick
+# your poison.
+items_after_statements = "allow"
+
+# Style: we're not picking sides on these. Both forms compile to
+# equivalent code; clippy preferring one is taste, not safety.
+option_if_let_else = "allow"
+match_wildcard_for_single_variants = "allow"
+format_push_string = "allow"
+significant_drop_tightening = "allow"
+
+# More taste-level lints. Each one I evaluated and decided the lint
+# isn't load-bearing for proxxx's domain.
+#
+# `match_same_arms`: collapsing `Err(NotFound) => …, Err(Forbidden) =>
+# …` into one arm hides the categorical distinction we WANT to be
+# explicit about; same for PVE error families.
+#
+# `many_single_char_names`: PBS uses single-letter API field names
+# (`{T, ct, sz}`) that we deserialize 1:1; renaming defeats the
+# round-trip.
+#
+# `too_long_first_doc_paragraph`: many of our doc comments open with
+# a multi-clause sentence describing the WHY of the function. Splitting
+# at the first `.` hides intent.
+#
+# `literal_string_with_formatting_args`: false-fires on shell command
+# strings (`"qm config {VMID}"`-style templates) where the `{}` is
+# meant for the SHELL or for downstream substitution, not Rust format!.
+#
+# `unreadable_literal`: most hits are timestamps/UPIDs in test
+# fixtures; readability isn't improved by adding underscores to a
+# random-looking string.
+#
+# `manual_let_else`, `map_unwrap_or`, `or_fun_call`,
+# `field_reassign_with_default`, `assigning_clones`,
+# `useless_let_if_seq`, `if_not_else`: all stylistic transforms that
+# are equivalent in performance and clarity. Choosing for the project
+# is more legibility-cost than the lint saves.
+#
+# `implicit_hasher`: forces generic over `S: BuildHasher` everywhere
+# we accept a `HashMap`. Adds one trait bound for every signature with
+# zero practical benefit on the proxxx call surface.
+#
+# `clone_on_ref_ptr`: the deny config above already enforces
+# `Arc::clone(&x)` for our own code; warn-level here picks up
+# transitive false positives from macros.
+#
+# `doc_lazy_continuation`: rustdoc renders both forms identically.
+match_same_arms = "allow"
+many_single_char_names = "allow"
+too_long_first_doc_paragraph = "allow"
+literal_string_with_formatting_args = "allow"
+unreadable_literal = "allow"
+manual_let_else = "allow"
+map_unwrap_or = "allow"
+or_fun_call = "allow"
+field_reassign_with_default = "allow"
+assigning_clones = "allow"
+useless_let_if_seq = "allow"
+if_not_else = "allow"
+implicit_hasher = "allow"
+doc_lazy_continuation = "allow"
+
+# `# Errors` doc sections on every fn returning `Result` is documentation
+# theatre for an internal-API codebase. Errors flow through `anyhow` /
+# `ApiError` and are categorised at the boundary (cli, mcp, tui). The
+# domain types tell the operator far more than "may fail" prose.
+missing_errors_doc = "allow"
+# Same for `# Panics`: panics are explicitly forbidden via the `panic`
+# = "deny" rule above; if a function CAN panic it's a deny-level issue,
+# not a doc-paragraph issue.
+missing_panics_doc = "allow"
+
+# `format!("Hello, {x}")` vs `format!("Hello, {}", x)` is a stylistic
+# preference that flips between Rust toolchain versions. We've already
+# auto-applied where possible; the remainder appear inside macros
+# clippy can't reach. Allowing avoids periodic noise.
+uninlined_format_args = "allow"

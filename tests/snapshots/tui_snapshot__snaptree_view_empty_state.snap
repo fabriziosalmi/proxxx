@@ -1,0 +1,9 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 331
+expression: dump
+---
+ snapshot tree: 100
+
+ — ─────────────────────────────────────────────────────────────────────────────────────────────────
+                                          No snapshot data

@@ -1,0 +1,17 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 422
+expression: dump
+---
+┌ ssh: vmid 100 (root@10.0.0.5) ───────────────────────────────────────────────┐
+│alpine:~# uname -a                                                            │
+│Linux alpine 6.12.0-pve #1 SMP                                                │
+│alpine:~#                                                                     │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└ Ctrl+] to exit ──────────────────────────────────────────────────────────────┘
