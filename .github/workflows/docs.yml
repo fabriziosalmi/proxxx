@@ -71,7 +71,7 @@ jobs:
         # No-op step that just configures the action env. Required
         # before upload-pages-artifact.
         if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
         if: github.event_name != 'pull_request'
