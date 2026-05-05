@@ -75,7 +75,7 @@ russh = "0.60"
 # RUSTSEC-2023-0071) which the old russh-keys 0.46 → ssh-key 0.6
 # chain was pulling.
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # PTY screen state for SSH guest sessions (feature 1a).
 # Using vt100-ctt (up-to-date fork of vt100) because vt100 0.16 pins
