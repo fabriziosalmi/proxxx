@@ -10,7 +10,7 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
-## [Unreleased]
+## [0.1.3] — 2026-05-06
 
 ### Added
 
