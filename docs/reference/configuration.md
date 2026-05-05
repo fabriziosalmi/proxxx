@@ -46,19 +46,35 @@ user = "root"                              # optional, default "root"
 known_hosts = "~/.config/proxxx/known_hosts"  # optional, default to XDG path
 ```
 
-## `[ssh.guests.<vmid>]`
+## `[ssh.guests.<vmid>]` (optional override)
 
-Per-guest SSH targets for `proxxx ssh <vmid>`:
+`proxxx ssh <vmid>` resolves a guest's connection details in two
+steps: it consults this section first, and on miss auto-discovers
+via QGA (`network-get-interfaces` for QEMU) or
+`/lxc/{vmid}/interfaces` (for LXC). Most operators don't need to
+populate this block at all.
+
+Pin a per-guest entry only when:
+
+- the guest has no qemu-guest-agent installed (or the agent is
+  off / not running),
+- QGA returns only loopback (`127.0.0.0/8`) or link-local
+  (`169.254.0.0/16`) IPs — i.e. the guest is on a private bridge
+  with no usable address from your machine's perspective,
+- you want a stable DNS name (`web1.lab.example`) instead of the
+  rotating DHCP IP QGA would surface.
 
 ```toml
 [ssh.guests."100"]
 host = "10.10.10.100"
 port = 22
 user = "fab"
-key  = "/home/fab/.ssh/k8s_master"        # optional, falls back to top-level [ssh].key
+key_path = "~/.ssh/k8s_master"   # optional, falls back to [ssh].key_path
 ```
 
-VMIDs must be quoted (TOML key restriction).
+VMIDs must be quoted (TOML key restriction). The wizard's
+`proxxx init --interactive` step 4 sub-prompt builds this section
+interactively; you can also hand-edit it later.
 
 ## `[telegram]`
 

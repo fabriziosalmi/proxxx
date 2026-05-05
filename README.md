@@ -27,7 +27,7 @@
 - **Pipeline writes** — start, stop, migrate, snapshot, clone, backup, patch, disk-move, with `--format json` for jq.
 - **Pre-flight risk gate** — 11 risk variants (`Locked`, `Running`, `LongUptime`, `TaggedProd`, `ActiveNetTraffic`, `HaManaged`, …) refuse destructive ops on running guests without `--allow-risk`.
 - **HITL** — Telegram-mediated human approval gate, deny-on-timeout (120 s), policy-driven by tag / vmid / wildcard.
-- **Console handoff** — SSH (russh), serial (termproxy WebSocket), SPICE (`.vv` 0600), noVNC (system browser) — all from `proxxx <verb> <vmid>`.
+- **Console handoff** — SSH (system `ssh` + QGA / lxc-interfaces auto-discovery), serial (termproxy WebSocket), SPICE (`.vv` 0600), noVNC (system browser) — all from `proxxx <verb> <vmid>`.
 - **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision.
 - **MCP server** — stdio JSON-RPC for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned.
 
@@ -58,12 +58,17 @@ The Linux musl artifact is statically linked — runs on every distro from RHEL 
 ## Quick start
 
 ```bash
-proxxx init                             # writes a starter config.toml to the OS-default
-                                        # config dir; refuses to overwrite — pass --force
-                                        # if you mean it. Edit url / user / token_id /
-                                        # token_secret and you're ready.
+proxxx init --interactive               # 5-step wizard: prompts for URL, auth, TLS, optional
+                                        # SSH + Telegram, validates each input against the
+                                        # live cluster before write. Recommended for first
+                                        # run — wrong field caught here, never lands in TOML.
+proxxx init                             # non-interactive variant: writes a commented
+                                        # starter config.toml; refuses to overwrite — pass
+                                        # --force if you mean it. Edit url / user /
+                                        # token_id / token_secret manually after.
 proxxx ls nodes                         # validates the connection.
-proxxx                                  # TUI (no args). Press ? for the keymap.
+proxxx                                  # TUI (no args). Press ? for the keymap; the
+                                        # bottom-row footer shows contextual binds always.
 proxxx --help                           # full subcommand list.
 proxxx version --json                   # build + capability metadata.
 ```
@@ -105,7 +110,9 @@ proxxx patch apply --reboot=auto --dry-run
 
 ```bash
 # Console handoff
-proxxx ssh    100                               # russh PTY (per-guest config)
+proxxx ssh    100                               # interactive ssh into guest (system ssh +
+                                                # QGA / lxc-interfaces auto-discovery; falls
+                                                # back to [ssh.guests."100"] when explicit)
 proxxx serial 100 --node pve1                   # raw termproxy WebSocket
 proxxx spice  100 --node pve1                   # writes 0600 .vv, launches remote-viewer
 proxxx novnc  100 --node pve1                   # opens browser to web UI's noVNC
@@ -136,7 +143,7 @@ Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → `token_secr
 | :--- | :--- |
 | `[telegram]`     | HITL approvals + alert routing |
 | `[ssh]`          | Patching orchestrator, `proxxx perms`, guest SSH |
-| `[ssh.guests.X]` | Per-guest SSH session targets |
+| `[ssh.guests.X]` | Per-guest SSH overrides (optional — `proxxx ssh <vmid>` auto-discovers via QGA / lxc-interfaces by default; pin only when the agent's off, only loopback/link-local IPs are returned, or you want a stable DNS name) |
 | `[pbs]`          | PBS browse + restore |
 | `[[alerts]]`     | Alerting daemon — `node_offline`, `storage_above`, `replication_failing` |
 | `[[policies]]`   | HITL gating rules — match by tag / vmid / wildcard |

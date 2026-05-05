@@ -99,11 +99,27 @@ Every destructive operation pops a centered modal. Press `y` or
 `Enter` to confirm, `n` or `Esc` to cancel. The modal is rendered
 in `Theme::DANGER` colour and clears the background underneath.
 
+## Status footer
+
+Always visible at the bottom row of every view: a contextual list
+of 3–9 keybindings relevant to the current view + mode. Convention
+follows htop / lazygit / k9s — `?:help  q:back` are universal,
+view-specific keys appear inline (e.g. GuestList shows `s:start
+S:stop r:restart c:console`). Per-view binding tables are pure
+functions pinned by 7 unit tests; an accidental future refactor
+that drops `q:back` from any view fails the gate loudly.
+
+The footer hides when an overlay covers the bottom row — the
+input bar (Command / InputTag / InputBroadcast modes), the help
+modal, the confirm modal. No explicit gating: the existing overlay
+z-order does the right thing.
+
 ## Help overlay
 
 Press `?` anywhere. The overlay is rendered from a single static
 keymap table reviewed alongside `event::map_key`. Press any key to
-dismiss.
+dismiss. While the help is up, the status footer collapses to
+"any key dismiss help".
 
 ## Theming
 

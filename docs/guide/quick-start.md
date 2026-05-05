@@ -9,7 +9,22 @@ Create an API token in the Proxmox web UI under
 unless you know which roles you need. Copy the secret — Proxmox shows
 it only once.
 
-Drop it in your config:
+### Easy path: the wizard
+
+```sh
+proxxx init --interactive
+```
+
+5-step prompted flow that walks you through URL, TLS, auth (token
+or password), optional SSH layer + per-guest overrides, optional
+Telegram for HITL. Each input is validated against the live
+cluster before write — a wrong token is caught at the prompt, never
+lands in the TOML. Existing config triggers a backup-or-cancel
+prompt; new file written with mode 0600.
+
+### Manual path
+
+If you'd rather edit the file by hand:
 
 ```toml
 # ~/.config/proxxx/config.toml  (Linux)
@@ -81,7 +96,7 @@ See [Pre-flight risk gate](/architecture/security#pre-flight-risk-gate).
 ## 5. Hand off a graphical console
 
 ```sh
-proxxx ssh    100                       # russh PTY directly to the guest
+proxxx ssh    100                       # interactive ssh (system ssh + QGA auto-discovery)
 proxxx serial 100 --node pve1           # raw termproxy WebSocket
 proxxx spice  100 --node pve1           # writes a 0600 .vv, launches remote-viewer
 proxxx novnc  100 --node pve1           # opens browser to the web UI's noVNC

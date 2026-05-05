@@ -42,7 +42,31 @@ proxxx reads its configuration from an OS-conventional path:
 | macOS   | `~/Library/Application Support/dev.proxxx.proxxx/config.toml` |
 | Windows | `%APPDATA%\dev\proxxx\proxxx\config.toml` |
 
-A minimal config:
+### Easy: interactive wizard
+
+```sh
+proxxx init --interactive
+```
+
+A 5-step prompted flow asks for URL, TLS posture, auth method
+(API token or username + password), optional SSH layer with key
+auto-discovery from `~/.ssh/`, optional per-guest SSH overrides,
+and optional Telegram for HITL. Every input is probed against
+the live cluster before write — a wrong token is caught at the
+prompt, never lands in the TOML. Existing config triggers a
+backup-or-cancel choice; the new file is written atomically
+with mode 0600.
+
+### Manual: edit the TOML
+
+If you prefer to edit by hand, `proxxx init` (no flag) writes a
+commented starter template you can fill in:
+
+```sh
+proxxx init                # writes the template; --force to overwrite
+```
+
+Or paste the minimum directly:
 
 ```toml
 url = "https://pve.example.org:8006/"

@@ -164,7 +164,7 @@ within a major version.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx ssh <vmid>`              | russh PTY directly to the guest (uses `[ssh.guests.<vmid>]`) |
+| `proxxx ssh <vmid> [--cmd "<remote-cmd>"]` | Spawn the system `ssh` against the guest. Resolves via `[ssh.guests."<vmid>"]` first, then auto-discovers via QGA (QEMU) or `/lxc/N/interfaces` (LXC). Picks first routable IPv4 (skips loopback / link-local). `--cmd` runs a one-shot non-interactively |
 | `proxxx serial <vmid> --node N`  | Raw termproxy WebSocket. Ctrl+] then `q` to exit |
 | `proxxx spice <vmid> --node N`   | Write 0600 `.vv`, launch `remote-viewer` / `virt-viewer` |
 | `proxxx novnc <vmid> --node N`   | Open the system browser at the web UI's noVNC console |
@@ -214,6 +214,14 @@ within a major version.
 | :--- | :--- |
 | `proxxx dev-panic [--message X]` | Flight-recorder smoke — trigger a controlled panic to test the flight-recorder hook |
 | `proxxx version --json`          | Test count, vector framework hash, audit ignores, build metadata |
+
+## Configuration bootstrap
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx init`                | Write a commented starter `config.toml` to the OS-default config dir; refuses to overwrite without `--force` |
+| `proxxx init --interactive`  | 5-step prompted wizard: URL + reachability probe, TLS choice, auth (token or password) live-validated, optional SSH layer with `~/.ssh/` key auto-discovery + per-guest overrides, optional Telegram for HITL. A wrong field is caught at the prompt, never lands in TOML |
+| `proxxx init --force`        | Overwrite an existing config without backup (template-only path) |
 
 ## See also
 
