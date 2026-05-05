@@ -1,0 +1,94 @@
+# VitePress docs build + deploy to GitHub Pages.
+#
+# Mirrors the Rust ci.yml structure: triggers on push to main, on PR
+# (build-only — no deploy from PRs), and `workflow_dispatch` for
+# manual re-runs.
+#
+# Uses the modern Pages workflow (actions/upload-pages-artifact +
+# actions/deploy-pages), not the legacy gh-pages branch dance. The
+# `pages: write` permission is what wires the artifact into the live
+# site — without it the deploy step would 403.
+#
+# Concurrency: only one deploy in flight at a time. Cancel-in-progress
+# is OFF for the deploy itself (cancelling mid-deploy can leave Pages
+# pointing at a half-uploaded artifact); we cancel queued PRs instead.
+
+name: Docs
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Required for actions/deploy-pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't queue concurrent deploys — Pages can only host one artifact at
+# a time; a queued duplicate just delays the next push for no gain.
+concurrency:
+  group: 'docs-pages'
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build VitePress
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # `lastUpdated: true` in config.ts reads from `git log` —
+          # without full history every page would show "now".
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install dependencies
+        working-directory: docs
+        run: npm ci
+
+      - name: Build
+        working-directory: docs
+        run: npx vitepress build
+
+      - name: Setup Pages
+        # No-op step that just configures the action env. Required
+        # before upload-pages-artifact.
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Push to main only — PRs build but don't deploy.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

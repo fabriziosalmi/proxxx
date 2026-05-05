@@ -1,0 +1,579 @@
+/* proxxx docs — premium minimal: tight typography, sober palette,
+   monospace for technical accents, hairline borders, true elevation
+   in dark mode. Functional art, no decoration. */
+
+:root {
+  --vp-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, Helvetica, Arial, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo,
+    Consolas, 'Liberation Mono', monospace;
+
+  /* Brand: a single sober blue, used sparingly. */
+  --vp-c-brand-1: #2563eb;
+  --vp-c-brand-2: #1d4ed8;
+  --vp-c-brand-3: #1e40af;
+  --vp-c-brand-soft: rgba(37, 99, 235, 0.10);
+
+  /* Layout — wider for code blocks. */
+  --vp-layout-max-width: 1440px;
+}
+
+.dark {
+  /* True dark — slightly deeper than VitePress default for proper card
+     elevation contrast. */
+  --vp-c-bg: #0c0c0d;
+  --vp-c-bg-alt: #0a0a0b;
+  --vp-c-bg-soft: #141416;
+  --vp-c-bg-elv: #1a1a1d;
+  --vp-c-divider: rgba(255, 255, 255, 0.08);
+  --vp-c-divider-light: rgba(255, 255, 255, 0.06);
+  --vp-c-gutter: rgba(255, 255, 255, 0.04);
+
+  --vp-c-brand-1: #5b8df6;
+  --vp-c-brand-2: #3b82f6;
+  --vp-c-brand-3: #2563eb;
+  --vp-c-brand-soft: rgba(91, 141, 246, 0.14);
+}
+
+/* Tabular numerics everywhere data shows — feature cards, tables,
+   code-adjacent. The little things that read as "designed by an
+   engineer". */
+.VPHome,
+.vp-doc table {
+  font-feature-settings: 'tnum' 1, 'cv11' 1;
+}
+
+/* ── Hero ────────────────────────────────────────────────────────
+   Brand name is a small mono pill (identifier, not focal point).
+   The headline is the focal point — it tells what proxxx IS. */
+
+.VPHero .container {
+  padding-top: 32px;
+}
+.VPHero .heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.VPHero .name {
+  display: inline-block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0;
+  color: var(--vp-c-text-2);
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin: 0 0 28px 0;
+}
+.VPHero .name::before {
+  content: '◆ ';
+  color: var(--vp-c-brand-1);
+  margin-right: 2px;
+}
+
+.VPHero .text {
+  font-size: 64px;
+  line-height: 1.04;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  margin: 0;
+  max-width: 580px;
+}
+
+.VPHero .tagline {
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--vp-c-text-2);
+  max-width: 540px;
+  margin-top: 24px;
+  font-weight: 400;
+  letter-spacing: -0.005em;
+}
+
+@media (max-width: 960px) {
+  .VPHero .text { font-size: 48px; }
+}
+@media (max-width: 640px) {
+  .VPHero .text { font-size: 36px; }
+  .VPHero .tagline { font-size: 16px; }
+}
+
+/* Hero image — right-aligned on desktop, hairline + adaptive shadow.
+   5 px radius matches the buttons + name pill + code blocks.
+   Nudged 30 px right and 30 px down on desktop so the screenshot's
+   top edge aligns visually with the headline. */
+.VPHero .image-container {
+  max-width: 540px;
+  position: relative;
+}
+@media (min-width: 960px) {
+  .VPHero .image {
+    transform: translate(30px, 30px);
+  }
+}
+.VPHero .image-bg {
+  display: none; /* drop the radial blob — the screenshot is the visual */
+}
+
+.VPHero .image-src,
+.VPHero img.VPImage {
+  border-radius: 5px;
+  border: 1px solid var(--vp-c-divider);
+  max-width: 100%;
+  height: auto;
+  /* Multi-layer ambient shadow + brand-tinted ring (light tone). */
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 8px 24px rgba(15, 23, 42, 0.06),
+    0 24px 64px rgba(15, 23, 42, 0.05),
+    0 0 0 1px rgba(37, 99, 235, 0.04);
+  /* Subtle saturation lift so the screenshot's terminal greens pop
+     just enough — never enough to look filtered. */
+  filter: saturate(1.02);
+  transition: box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.VPHero .image-src:hover,
+.VPHero img.VPImage:hover {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 12px 32px rgba(15, 23, 42, 0.08),
+    0 32px 80px rgba(15, 23, 42, 0.06),
+    0 0 0 1px rgba(37, 99, 235, 0.08);
+}
+
+.dark .VPHero .image-src,
+.dark .VPHero img.VPImage {
+  border-color: rgba(255, 255, 255, 0.10);
+  /* Dark mode: deeper drop + a soft brand-blue ambient halo around the
+     frame. The glow is large, low-alpha — visible only in peripheral,
+     never directly. */
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.55),
+    0 8px 32px rgba(0, 0, 0, 0.65),
+    0 32px 96px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(91, 141, 246, 0.10),
+    0 0 80px rgba(91, 141, 246, 0.06),
+    0 0 160px rgba(91, 141, 246, 0.04);
+  filter: saturate(1.04);
+}
+.dark .VPHero .image-src:hover,
+.dark .VPHero img.VPImage:hover {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.55),
+    0 12px 40px rgba(0, 0, 0, 0.7),
+    0 40px 120px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(91, 141, 246, 0.18),
+    0 0 100px rgba(91, 141, 246, 0.10),
+    0 0 200px rgba(91, 141, 246, 0.06);
+}
+
+/* Frame overlay — sits ON TOP of the screenshot inside the same 5 px
+   radius. Two ultra-thin highlights (top white-ish, bottom dark-ish)
+   give the "edge of glass" cue without tinting the content. */
+.VPHero .image-container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  pointer-events: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.06);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.025) 0%,
+    transparent 14%,
+    transparent 86%,
+    rgba(0, 0, 0, 0.04) 100%
+  );
+  mix-blend-mode: overlay;
+}
+.dark .VPHero .image-container::after {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.20);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    transparent 18%,
+    transparent 82%,
+    rgba(0, 0, 0, 0.10) 100%
+  );
+}
+
+/* CTA buttons — 5 px (matches screenshot + name pill), denser, mono-
+   weight. Brand button uses the accent; alts are quiet outlines. */
+.VPButton {
+  border-radius: 5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  padding: 0 18px;
+  height: 38px;
+  line-height: 38px;
+  font-size: 14px;
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+              color 0.15s ease;
+}
+.VPButton.brand {
+  background-color: var(--vp-c-brand-1);
+  border-color: var(--vp-c-brand-1);
+  color: #fff;
+}
+.VPButton.brand:hover {
+  background-color: var(--vp-c-brand-2);
+  border-color: var(--vp-c-brand-2);
+  color: #fff;
+}
+.VPButton.alt {
+  background: transparent;
+  border-color: var(--vp-c-divider);
+  color: var(--vp-c-text-1);
+}
+.VPButton.alt:hover {
+  border-color: var(--vp-c-text-2);
+  color: var(--vp-c-text-1);
+  background: transparent;
+}
+
+/* ── Features grid ───────────────────────────────────────────────
+   Visible elevation in both modes. The "01 — " prefix in titles uses
+   tabular nums via font-feature-settings on the parent. */
+
+.VPFeatures {
+  padding-top: 72px !important;
+}
+.VPFeatures .container {
+  max-width: 1280px;
+}
+.VPFeatures .item {
+  padding: 8px;
+}
+.VPFeature {
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  border-radius: 8px;
+  padding: 28px;
+  height: 100%;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.VPFeature:hover {
+  border-color: var(--vp-c-text-3);
+  background: var(--vp-c-bg-elv);
+}
+.dark .VPFeature:hover {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg-elv);
+}
+.VPFeature .icon { display: none; }
+.VPFeature .title {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  font-size: 17px;
+  margin: 0 0 10px;
+  color: var(--vp-c-text-1);
+  font-feature-settings: 'tnum' 1;
+}
+.VPFeature .details {
+  color: var(--vp-c-text-2);
+  font-size: 14.5px;
+  line-height: 1.6;
+  letter-spacing: -0.005em;
+}
+
+/* ── Code blocks ─────────────────────────────────────────────────
+   Sharper edges (5 px), monospace metrics tightened, padding tweaked
+   so multi-line samples don't feel cramped. */
+
+.vp-doc div[class*='language-'] {
+  border-radius: 5px;
+  margin: 18px 0;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+}
+.dark .vp-doc div[class*='language-'] {
+  background: var(--vp-c-bg-soft);
+}
+.vp-doc div[class*='language-'] pre {
+  padding: 18px 0;
+}
+.vp-doc div[class*='language-'] code {
+  font-size: 13px;
+  line-height: 1.7;
+  font-feature-settings: 'liga' 0; /* no Fira-style ligatures in CLI samples */
+}
+
+.vp-doc :not(pre) > code {
+  font-size: 0.92em;
+  font-weight: 500;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* ── Tables ──────────────────────────────────────────────────────
+   Hairline borders, uppercase headers, tabular nums. */
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+  font-size: 14px;
+  border-collapse: collapse;
+  margin: 24px 0;
+}
+.vp-doc tr:nth-child(2n) { background: transparent; }
+.vp-doc th {
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--vp-c-text-3);
+  border-bottom: 1px solid var(--vp-c-divider);
+  padding: 12px 18px;
+  text-align: left;
+}
+.vp-doc td {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-1);
+  vertical-align: top;
+}
+.vp-doc table tr:last-child td { border-bottom: none; }
+
+/* ── Nav / sidebar ──────────────────────────────────────────────── */
+
+.VPNavBar.has-sidebar .content {
+  padding-right: 32px;
+}
+.VPNavBar .title {
+  letter-spacing: -0.01em;
+  font-weight: 600;
+}
+.VPNavBarTitle .title { font-size: 15px; }
+
+.VPSidebarItem.level-0 .text {
+  letter-spacing: -0.005em;
+  font-weight: 600;
+}
+.VPSidebarItem .link { font-size: 14px; }
+.VPSidebarItem .link.is-active {
+  color: var(--vp-c-brand-1);
+  font-weight: 500;
+}
+
+/* ── Search bar — mono key hint, sharper edges. */
+.DocSearch.DocSearch-Button {
+  border-radius: 5px;
+  border: 1px solid var(--vp-c-divider) !important;
+  background: var(--vp-c-bg-soft) !important;
+}
+.DocSearch-Button-Keys kbd,
+.DocSearch-Button-Key {
+  font-family: var(--vp-font-family-mono);
+  font-weight: 500;
+  border-radius: 3px;
+}
+
+/* ── Doc body ────────────────────────────────────────────────────
+   Readable measure, tighter heading rhythm with hairline dividers. */
+
+.vp-doc {
+  font-size: 16px;
+  line-height: 1.7;
+}
+.vp-doc h1 {
+  font-size: 38px;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  font-weight: 600;
+}
+.vp-doc h2 {
+  font-size: 24px;
+  letter-spacing: -0.015em;
+  font-weight: 600;
+  margin-top: 56px;
+  padding-top: 32px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+.vp-doc h3 {
+  font-size: 18px;
+  letter-spacing: -0.005em;
+  font-weight: 600;
+  margin-top: 32px;
+}
+.vp-doc h2:first-of-type {
+  margin-top: 32px;
+  padding-top: 0;
+  border-top: none;
+}
+.vp-doc p,
+.vp-doc li {
+  letter-spacing: -0.003em;
+}
+
+/* Custom blocks — quieter borders, no chrome. */
+.vp-doc .custom-block {
+  border-radius: 5px;
+  border-width: 1px;
+  border-style: solid;
+}
+.vp-doc .custom-block.tip {
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+}
+
+/* Footer — minimal. */
+.VPFooter {
+  border-top: 1px solid var(--vp-c-divider);
+  padding: 32px 24px;
+  background: transparent;
+}
+
+/* Sidebar scrollbar — invisible until hover. */
+.VPSidebar::-webkit-scrollbar { width: 6px; }
+.VPSidebar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+.VPSidebar:hover::-webkit-scrollbar-thumb {
+  background: var(--vp-c-divider);
+}
+
+/* ── Home postscript — terminal-frame for the code sample, mono-
+   aligned for the data table, hairline dividers between sections. */
+
+.home-postscript {
+  font-feature-settings: 'tnum' 1;
+}
+.home-postscript table {
+  font-feature-settings: 'tnum' 1;
+}
+.home-postscript table td:nth-child(2) {
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+/* Home-page code block: subtle "terminal" hint via top border accent. */
+.home-postscript div[class*='language-bash']::before,
+.home-postscript div[class*='language-sh']::before {
+  content: '';
+  display: block;
+  height: 28px;
+  background: var(--vp-c-bg-elv);
+  border-bottom: 1px solid var(--vp-c-divider);
+  border-radius: 4px 4px 0 0;
+  background-image:
+    radial-gradient(circle at 14px 14px, #ff5f57 4px, transparent 4.5px),
+    radial-gradient(circle at 32px 14px, #febc2e 4px, transparent 4.5px),
+    radial-gradient(circle at 50px 14px, #28c840 4px, transparent 4.5px);
+}
+.home-postscript div[class*='language-bash'] pre,
+.home-postscript div[class*='language-sh'] pre {
+  padding-top: 10px;
+}
+
+/* ── Status row: compose + metallic sweep ─────────────────────────
+   Compose phase: each char fades in left-to-right (≈12 ms stagger
+   driven by JS that splits text into char-spans on mount). Total
+   compose ≈ 1.6 s for ~110 chars.
+   Sweep phase: a single soft band passes across the row, easing,
+   adapts colour to light/dark. Starts after compose.
+   Reduced-motion: both phases collapse to instant visible state. */
+
+.home-postscript .status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+  color: var(--vp-c-text-3);
+  margin: 0 0 32px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--vp-c-divider);
+  letter-spacing: 0;
+  position: relative;
+  /* Hide until JS has split the chars; prevents a flash of un-animated
+     text before hydration. The .ready class lifts opacity. JS adds it. */
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+.home-postscript .status-row.ready {
+  opacity: 1;
+}
+.home-postscript .status-row strong {
+  color: var(--vp-c-text-2);
+  font-weight: 500;
+}
+.home-postscript .status-row .ok {
+  color: #16a34a;
+}
+.dark .home-postscript .status-row .ok {
+  color: #4ade80;
+}
+
+/* Per-character span injected by the mount script. Each carries an
+   inline `--i` (its global character index) which drives BOTH the
+   compose stagger and the shine sweep. The shine is intentionally
+   NOT a pseudo-element overlay — that would render a rectangular
+   blend-mode block ignoring glyph outlines. Instead each glyph
+   animates its own colour at a staggered offset; the visual wave
+   is the cumulative effect, perfectly clipped to the text by
+   construction. */
+
+.home-postscript .status-row {
+  --char-shine-color: var(--vp-c-text-1);
+  --char-shine-glow:  0 0 0 transparent;
+}
+.dark .home-postscript .status-row {
+  --char-shine-color: #ffffff;
+  --char-shine-glow:  0 0 6px rgba(255, 255, 255, 0.32);
+}
+
+.home-postscript .status-row .char {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(2px);
+  filter: blur(2px);
+  animation:
+    status-char-compose 0.42s cubic-bezier(0.16, 1, 0.3, 1)
+      calc(var(--i, 0) * 12ms) forwards,
+    status-char-shine   0.6s  ease-in-out
+      calc(1850ms + var(--i, 0) * 8ms) forwards;
+}
+
+@keyframes status-char-compose {
+  0%   { opacity: 0; transform: translateY(2px); filter: blur(2px); }
+  60%  { filter: blur(0); }
+  100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+@keyframes status-char-shine {
+  0%, 100% {
+    color: inherit;
+    text-shadow: 0 0 0 transparent;
+  }
+  50% {
+    color: var(--char-shine-color);
+    text-shadow: var(--char-shine-glow);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-postscript .status-row {
+    opacity: 1;
+  }
+  .home-postscript .status-row .char {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}

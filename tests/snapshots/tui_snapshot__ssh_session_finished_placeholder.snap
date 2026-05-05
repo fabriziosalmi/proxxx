@@ -1,0 +1,17 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 397
+expression: dump
+---
+┌ ssh: vmid 100 ───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                Session closed.                               │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└ session ended — press Esc or Ctrl+] to return ───────────────────────────────┘

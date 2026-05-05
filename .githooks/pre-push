@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# proxxx pre-push hook — defense-in-depth re-run of the unified gate.
+# Catches anything that snuck past pre-commit (e.g. --no-verify) so the
+# remote never sees an unverified commit.
+exec "$(git rev-parse --show-toplevel)/scripts/gate.sh"

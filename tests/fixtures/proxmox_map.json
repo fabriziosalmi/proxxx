@@ -1,0 +1,300 @@
+{
+  "proxmox_api_surface_absolute": {
+    "version": { "method": "GET", "path": "/version", "desc": "API/PVE version and release info" },
+    "cluster": {
+      "core": {
+        "status": { "method": "GET", "path": "/cluster/status" },
+        "resources": { "method": "GET", "path": "/cluster/resources" },
+        "tasks": { "method": "GET", "path": "/cluster/tasks" },
+        "options": { "method": "GET|PUT", "path": "/cluster/options" },
+        "log": { "method": "GET", "path": "/cluster/log", "desc": "Cluster-wide action log" },
+        "nextid": { "method": "GET", "path": "/cluster/nextid", "desc": "Fetch next free VMID" }
+      },
+      "config": {
+        "nodes": { "method": "GET|POST|DELETE", "path": "/cluster/config/nodes", "desc": "Corosync node management" },
+        "join": { "method": "GET|POST", "path": "/cluster/config/join", "desc": "Get join info or join cluster" },
+        "qdevice": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/config/qdevice", "desc": "Corosync Quorum Device" },
+        "totem": { "method": "GET", "path": "/cluster/config/totem", "desc": "Corosync totem protocol config" }
+      },
+      "ha": {
+        "resources": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/ha/resources" },
+        "groups": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/ha/groups" },
+        "rules": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/ha/rules", "desc": "PVE 9 — replaces ha/groups in newer clusters; proxxx prefers rules and falls back to groups" },
+        "status": { "method": "GET", "path": "/cluster/ha/status/current" },
+        "manager_status": { "method": "GET", "path": "/cluster/ha/status/manager_status" }
+      },
+      "replication": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/replication" },
+      "backup_jobs": {
+        "management": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/backup" },
+        "info": { "method": "GET", "path": "/cluster/backup-info", "desc": "Backup volume and state info" }
+      },
+      "notifications": {
+        "endpoints": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/notifications/endpoints", "desc": "Webhook/Gotify/Sendmail (PVE 8+)" },
+        "endpoints_per_type": { "method": "PUT|DELETE", "path": "/cluster/notifications/endpoints/{type}/{name}", "desc": "Per-type endpoint singleton (PVE 8+)" },
+        "matchers": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/notifications/matchers", "desc": "Notification routing rules (PVE 8+)" },
+        "targets": { "method": "GET", "path": "/cluster/notifications/targets", "desc": "List all valid notification targets (PVE 8+)" }
+      },
+      "firewall": {
+        "rules": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/firewall/rules" },
+        "aliases": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/firewall/aliases" },
+        "groups": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/firewall/groups" },
+        "ipset": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/firewall/ipset" },
+        "ipset_cidrs": { "method": "GET|PUT|DELETE", "path": "/cluster/firewall/ipset/{name}/{cidr}", "desc": "Per-CIDR sub-resource within an ipset" },
+        "options": { "method": "GET|PUT", "path": "/cluster/firewall/options" }
+      },
+      "acme": {
+        "accounts": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/acme/account" },
+        "plugins": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/acme/plugins" },
+        "tos": { "method": "GET", "path": "/cluster/acme/tos", "desc": "Terms of Service" },
+        "directories": { "method": "GET", "path": "/cluster/acme/directories" },
+        "challenge_schema": { "method": "GET", "path": "/cluster/acme/challenge-schema" }
+      },
+      "metrics": {
+        "server": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/metrics/server", "desc": "InfluxDB / Graphite config" }
+      },
+      "mapping": {
+        "pci": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/mapping/pci", "desc": "Hardware resource mapping" },
+        "usb": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/mapping/usb" }
+      },
+      "sdn": {
+        "zones": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/zones" },
+        "vnets": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/vnets" },
+        "subnets": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/vnets/{vnet}/subnets" },
+        "controllers": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/controllers" },
+        "ipams": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/ipams" },
+        "dns": { "method": "GET|POST|PUT|DELETE", "path": "/cluster/sdn/dns" },
+        "macs": { "method": "GET", "path": "/cluster/sdn/macs", "desc": "SDN MAC address state" },
+        "apply": { "method": "PUT", "path": "/cluster/sdn" }
+      },
+      "ceph": {
+        "metadata": { "method": "GET", "path": "/cluster/ceph/metadata" },
+        "status": { "method": "GET", "path": "/cluster/ceph/status" },
+        "flags": { "method": "GET|PUT", "path": "/cluster/ceph/flags" }
+      }
+    },
+    "pools": {
+      "management": { "method": "GET|POST|PUT|DELETE", "path": "/pools" },
+      "resources": { "method": "PUT", "path": "/pools/{poolid}", "desc": "Add/Remove VMs and Storage from Pool" }
+    },
+    "storage": {
+      "definitions": { "method": "GET|POST|PUT|DELETE", "path": "/storage", "desc": "Cluster-wide storage config (pvesm)" }
+    },
+    "nodes": {
+      "list": { "method": "GET", "path": "/nodes", "desc": "Cluster-wide node enumeration" },
+      "system": {
+        "status": { "method": "GET|POST", "path": "/nodes/{node}/status", "desc": "Metrics / Trigger Reboot|Shutdown" },
+        "syslog": { "method": "GET", "path": "/nodes/{node}/syslog" },
+        "journal": { "method": "GET", "path": "/nodes/{node}/journal" },
+        "rrddata": { "method": "GET", "path": "/nodes/{node}/rrddata", "desc": "Node historical metrics" },
+        "report": { "method": "GET", "path": "/nodes/{node}/report", "desc": "pvereport generation" },
+        "time": { "method": "GET|PUT", "path": "/nodes/{node}/time", "desc": "NTP & Timezone" },
+        "dns": { "method": "GET|PUT", "path": "/nodes/{node}/dns" },
+        "hosts": { "method": "GET|PUT", "path": "/nodes/{node}/hosts" },
+        "wakeonlan": { "method": "POST", "path": "/nodes/{node}/wakeonlan" },
+        "subscription": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/subscription" },
+        "certificates": {
+          "info": { "method": "GET", "path": "/nodes/{node}/certificates/info" },
+          "custom": { "method": "POST|DELETE", "path": "/nodes/{node}/certificates/custom" },
+          "acme": { "method": "POST|PUT", "path": "/nodes/{node}/certificates/acme/certificate", "desc": "ACME order/renew" }
+        }
+      },
+      "shell": {
+        "termproxy": { "method": "POST", "path": "/nodes/{node}/termproxy", "desc": "Host terminal proxy" },
+        "vncshell": { "method": "POST", "path": "/nodes/{node}/vncshell", "desc": "Host VNC shell" },
+        "spiceshell": { "method": "POST", "path": "/nodes/{node}/spiceshell", "desc": "Host SPICE shell" }
+      },
+      "power_bulk": {
+        "startall": { "method": "POST", "path": "/nodes/{node}/startall" },
+        "stopall": { "method": "POST", "path": "/nodes/{node}/stopall" },
+        "suspendall": { "method": "POST", "path": "/nodes/{node}/suspendall", "desc": "Bulk suspend (PVE 8+)" }
+      },
+      "hardware": {
+        "pci": { "method": "GET", "path": "/nodes/{node}/hardware/pci" },
+        "usb": { "method": "GET", "path": "/nodes/{node}/hardware/usb" }
+      },
+      "network": {
+        "interfaces": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/network" },
+        "firewall": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/firewall/rules" }
+      },
+      "storage_local": {
+        "pools": { "method": "GET", "path": "/nodes/{node}/storage" },
+        "content": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/storage/{storage}/content" },
+        "upload": { "method": "POST", "path": "/nodes/{node}/storage/{storage}/upload" },
+        "download_url": { "method": "POST", "path": "/nodes/{node}/storage/{storage}/download-url" },
+        "rrddata": { "method": "GET", "path": "/nodes/{node}/storage/{storage}/rrddata" }
+      },
+      "tasks": {
+        "list": { "method": "GET", "path": "/nodes/{node}/tasks" },
+        "log": { "method": "GET", "path": "/nodes/{node}/tasks/{upid}/log" },
+        "status": { "method": "GET", "path": "/nodes/{node}/tasks/{upid}/status" },
+        "stop": { "method": "DELETE", "path": "/nodes/{node}/tasks/{upid}" }
+      },
+      "replication": { "method": "GET", "path": "/nodes/{node}/replication", "desc": "Per-node replication job status (cluster-level config lives at /cluster/replication)" },
+      "updates": {
+        "apt": { "method": "GET|POST", "path": "/nodes/{node}/apt/update" },
+        "changelog": { "method": "GET", "path": "/nodes/{node}/apt/changelog" },
+        "repositories": { "method": "GET|PUT", "path": "/nodes/{node}/apt/repositories" },
+        "versions": { "method": "GET", "path": "/nodes/{node}/apt/versions", "desc": "List installed package versions" }
+      },
+      "vzdump": {
+        "execute": { "method": "POST", "path": "/nodes/{node}/vzdump" },
+        "extractconfig": { "method": "GET", "path": "/nodes/{node}/vzdump/extractconfig" }
+      },
+      "ceph": {
+        "init": { "method": "POST", "path": "/nodes/{node}/ceph/init" },
+        "mon": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/mon" },
+        "osd": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/osd" },
+        "pool": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/pools" },
+        "fs": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/fs" },
+        "mds": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/mds" },
+        "mgr": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/ceph/mgr" },
+        "log": { "method": "GET", "path": "/nodes/{node}/ceph/log" },
+        "rules": { "method": "GET", "path": "/nodes/{node}/ceph/rules", "desc": "CRUSH rules" }
+      },
+      "disks": {
+        "list": { "method": "GET", "path": "/nodes/{node}/disks/list" },
+        "smart": { "method": "GET", "path": "/nodes/{node}/disks/smart" },
+        "init_gpt": { "method": "POST", "path": "/nodes/{node}/disks/initgpt" },
+        "lvm": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/disks/lvm" },
+        "lvmthin": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/disks/lvmthin" },
+        "zfs": { "method": "GET|POST|DELETE", "path": "/nodes/{node}/disks/zfs" }
+      },
+      "utils": {
+        "aplinfo": { "method": "GET|POST", "path": "/nodes/{node}/aplinfo", "desc": "LXC template catalog" },
+        "query_url_metadata": { "method": "GET", "path": "/nodes/{node}/query-url-metadata", "desc": "Fetch filesize/name for URL" }
+      }
+    },
+    "qemu": {
+      "lifecycle": {
+        "create": { "method": "POST", "path": "/nodes/{node}/qemu" },
+        "delete": { "method": "DELETE", "path": "/nodes/{node}/qemu/{vmid}" },
+        "clone": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/clone" },
+        "template": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/template" }
+      },
+      "power": {
+        "start": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/start" },
+        "stop": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/stop" },
+        "shutdown": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/shutdown" },
+        "reboot": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/reboot" },
+        "suspend": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/suspend" },
+        "resume": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/status/resume" },
+        "current": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/status/current" }
+      },
+      "config": {
+        "get": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/config" },
+        "set": { "method": "PUT", "path": "/nodes/{node}/qemu/{vmid}/config" },
+        "pending": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/pending" }
+      },
+      "cloudinit": {
+        "dump": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/cloudinit/dump" },
+        "generate": { "method": "PUT", "path": "/nodes/{node}/qemu/{vmid}/cloudinit" }
+      },
+      "snapshots": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/qemu/{vmid}/snapshot" },
+      "operations": {
+        "migrate": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/migrate" },
+        "move_disk": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/move_disk" },
+        "resize_disk": { "method": "PUT", "path": "/nodes/{node}/qemu/{vmid}/resize" },
+        "unlink_disk": { "method": "PUT", "path": "/nodes/{node}/qemu/{vmid}/unlink" },
+        "sendkey": { "method": "PUT", "path": "/nodes/{node}/qemu/{vmid}/sendkey", "desc": "Send NMI/sysrq" }
+      },
+      "metrics": {
+        "rrddata": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/rrddata" },
+        "rrd": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/rrd", "desc": "PNG graph generation" }
+      },
+      "console": {
+        "spiceproxy": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/spiceproxy" },
+        "vncwebsocket": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/vncwebsocket" },
+        "termproxy": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/termproxy" },
+        "vncproxy": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/vncproxy" }
+      },
+      "agent": {
+        "exec": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/agent/exec" },
+        "exec_status": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/agent/exec-status" },
+        "file_read": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/agent/file-read" },
+        "file_write": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/agent/file-write" },
+        "network_get_interfaces": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces" }
+      },
+      "firewall": {
+        "rules": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/qemu/{vmid}/firewall/rules" },
+        "aliases": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/qemu/{vmid}/firewall/aliases" },
+        "options": { "method": "GET|PUT", "path": "/nodes/{node}/qemu/{vmid}/firewall/options" }
+      },
+      "diagnostics": {
+        "feature": { "method": "GET", "path": "/nodes/{node}/qemu/{vmid}/feature", "desc": "Check capability (e.g. snapshot)" },
+        "monitor": { "method": "POST", "path": "/nodes/{node}/qemu/{vmid}/monitor", "desc": "Send raw QMP commands" }
+      }
+    },
+    "lxc": {
+      "lifecycle": {
+        "create": { "method": "POST", "path": "/nodes/{node}/lxc" },
+        "delete": { "method": "DELETE", "path": "/nodes/{node}/lxc/{vmid}" },
+        "clone": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/clone" },
+        "template": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/template" }
+      },
+      "power": {
+        "start": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/start" },
+        "stop": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/stop" },
+        "shutdown": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/shutdown" },
+        "reboot": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/reboot" },
+        "suspend": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/suspend" },
+        "resume": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/status/resume" },
+        "current": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/status/current" }
+      },
+      "config": {
+        "get": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/config" },
+        "set": { "method": "PUT", "path": "/nodes/{node}/lxc/{vmid}/config" },
+        "pending": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/pending" }
+      },
+      "snapshots": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/lxc/{vmid}/snapshot" },
+      "operations": {
+        "migrate": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/migrate" },
+        "move_volume": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/move_volume" },
+        "resize_volume": { "method": "PUT", "path": "/nodes/{node}/lxc/{vmid}/resize" }
+      },
+      "metrics": {
+        "rrddata": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/rrddata" },
+        "rrd": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/rrd" }
+      },
+      "console": {
+        "vncwebsocket": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/vncwebsocket" },
+        "termproxy": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/termproxy" },
+        "vncproxy": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/vncproxy" },
+        "spiceproxy": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/spiceproxy" },
+        "exec": { "method": "POST", "path": "/nodes/{node}/lxc/{vmid}/exec" }
+      },
+      "firewall": {
+        "rules": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/lxc/{vmid}/firewall/rules" },
+        "aliases": { "method": "GET|POST|PUT|DELETE", "path": "/nodes/{node}/lxc/{vmid}/firewall/aliases" },
+        "options": { "method": "GET|PUT", "path": "/nodes/{node}/lxc/{vmid}/firewall/options" }
+      },
+      "diagnostics": {
+        "feature": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/feature" },
+        "interfaces": { "method": "GET", "path": "/nodes/{node}/lxc/{vmid}/interfaces" }
+      }
+    },
+    "access_control": {
+      "auth": {
+        "create_ticket": { "method": "POST", "path": "/access/ticket" },
+        "password": { "method": "PUT", "path": "/access/password" }
+      },
+      "users": { "method": "GET|POST|PUT|DELETE", "path": "/access/users" },
+      "tokens": { "method": "GET|POST|PUT|DELETE", "path": "/access/users/{userid}/token/{tokenid}" },
+      "groups": { "method": "GET|POST|PUT|DELETE", "path": "/access/groups" },
+      "roles": { "method": "GET|POST|PUT|DELETE", "path": "/access/roles" },
+      "acl": { "method": "GET|PUT", "path": "/access/acl" },
+      "permissions": { "method": "GET", "path": "/access/permissions", "desc": "Effective user permissions" },
+      "domains": {
+        "management": { "method": "GET|POST|PUT|DELETE", "path": "/access/domains" },
+        "sync": { "method": "POST", "path": "/access/domains/{realm}/sync" }
+      },
+      "tfa": {
+        "management": { "method": "GET|POST|PUT|DELETE", "path": "/access/tfa", "desc": "Legacy MFA endpoint (Pre-PVE 8)" },
+        "u2f": { "method": "GET|POST|PUT|DELETE", "path": "/access/tfa/u2f", "desc": "FIDO/U2F management" }
+      },
+      "openid": {
+        "login": { "method": "GET", "path": "/access/openid/login" },
+        "auth_url": { "method": "POST", "path": "/access/openid/auth-url" }
+      }
+    }
+  }
+}

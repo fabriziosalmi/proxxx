@@ -1,0 +1,32 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 159
+expression: dump
+---
+
+
+
+            ┌ Help — keymap reference ─────────────────────────────┐
+            │                                                      │
+            │Navigation                                            │
+            │  j / Down  move selection down                       │
+            │  k / Up    move selection up                         │
+            │  Enter / l select / drill in                         │
+            │  h / Esc   back / parent view                        │
+            │  q         quit                                      │
+            │  R         force refresh                             │
+            │  Ctrl+L    redraw (recover from SIGCONT)             │
+            │                                                      │
+            │Views                                                 │
+            │  1         Dashboard                                 │
+            │  2         Nodes                                     │
+            │  3         Guests                                    │
+            │  4         Storage                                   │
+            │  H         Heatmap                                   │
+            │  B         Backup board                              │
+            │  G         Config grep                               │
+            │  Q         Operation queue                           │
+            │  T         Audit timeline                            │
+            │                                                      │
+            │Selection (Guest list)                                │
+            └──────────────────────────────────────────────────────┘

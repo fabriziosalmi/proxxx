@@ -1,0 +1,29 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 173
+expression: dump
+---
+ ⚡  proxxx │ 0 nodes │ 0/0 guests
+
+────────────────────────────────────────────────────────────────────────────────
+ ⏳  Loading cluster data...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ NORMAL  │ j/k nav Enter select / search : cmd q quit
