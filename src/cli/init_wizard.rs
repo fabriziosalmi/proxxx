@@ -289,29 +289,83 @@ async fn probe_pve_anon(url: &str, verify_tls: bool) -> Result<String> {
         .danger_accept_invalid_certs(!verify_tls)
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
-    // /api2/json/version is the anonymous endpoint — no auth required.
     let res = client
         .get(format!("{url}/api2/json/version"))
         .send()
         .await
         .context("HTTP request failed (cluster unreachable, wrong URL, or TLS rejection)")?;
     let status = res.status();
-    let body: serde_json::Value = res.json().await.context("response was not JSON")?;
-    if !status.is_success() {
-        anyhow::bail!("HTTP {status}: {body}");
+    // Read once into bytes so we can inspect both as JSON (success path)
+    // and as a raw preview (diagnostic on failure). reqwest's `.json()`
+    // would consume the body and hide the bytes from us.
+    let body_bytes = res.bytes().await.unwrap_or_default();
+    interpret_anon_probe(status, &body_bytes)
+}
+
+/// Pure (status, body) → friendly summary. Extracted so it's
+/// testable without spinning up a wiremock — PVE's anonymous-probe
+/// behaviour drifts between minor versions (PVE 7 returned a real
+/// JSON body, PVE 8+ returns 401 with an empty body) and we want
+/// invariants on both shapes pinned by a unit test.
+fn interpret_anon_probe(status: reqwest::StatusCode, body: &[u8]) -> Result<String> {
+    // PVE 8+ requires auth for /version too. A 401/403 here is NOT
+    // a probe failure — the cluster IS reachable, the TLS handshake
+    // worked, the HTTP server responded. We just can't read the
+    // version banner without credentials, which the next wizard
+    // step provides anyway.
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(format!(
+            "alive (HTTP {} — auth needed for version detail)",
+            status.as_u16()
+        ));
     }
-    let release = body
+
+    if !status.is_success() {
+        anyhow::bail!("HTTP {}: {}", status, body_preview(body, 200));
+    }
+
+    // 2xx success — try to extract version + release. On non-JSON
+    // (reverse-proxy stripped, captive portal, anything weird),
+    // surface a body preview so the operator can see what the
+    // endpoint actually returned.
+    let parsed: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        anyhow::anyhow!(
+            "HTTP {} but body is not JSON ({}): {}",
+            status,
+            e,
+            body_preview(body, 200)
+        )
+    })?;
+    let release = parsed
         .get("data")
         .and_then(|d| d.get("release"))
         .and_then(|r| r.as_str())
-        .unwrap_or("?")
-        .to_string();
-    let version = body
+        .unwrap_or("?");
+    let version = parsed
         .get("data")
         .and_then(|d| d.get("version"))
         .and_then(|r| r.as_str())
         .unwrap_or("?");
     Ok(format!("PVE {version} ({release})"))
+}
+
+/// First N chars (NOT bytes — UTF-8 boundary safe) of a body, with
+/// trailing whitespace trimmed. Empty bodies become `<empty>` so
+/// the diagnostic doesn't render a stray colon followed by nothing.
+fn body_preview(bytes: &[u8], max_chars: usize) -> String {
+    if bytes.is_empty() {
+        return "<empty>".to_string();
+    }
+    let s: String = String::from_utf8_lossy(bytes)
+        .chars()
+        .take(max_chars)
+        .collect();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        "<whitespace-only>".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ── Step 3a: Token auth ──────────────────────────────────────
@@ -1079,6 +1133,77 @@ mod tests {
         assert_eq!(toml_escape("with \"quote\""), r#""with \"quote\"""#);
         assert_eq!(toml_escape("back\\slash"), r#""back\\slash""#);
         assert_eq!(toml_escape("new\nline"), r#""new\nline""#);
+    }
+
+    #[test]
+    fn anon_probe_401_treated_as_alive_not_failure() {
+        // PVE 8+ requires auth for /version. The wizard's anonymous
+        // probe should treat this as a successful liveness signal,
+        // not surface "response was not JSON" — the cluster IS up,
+        // the TLS handshake worked, the HTTP daemon is responding.
+        let r = interpret_anon_probe(reqwest::StatusCode::UNAUTHORIZED, b"");
+        let s = r.expect("401 must be treated as alive");
+        assert!(s.contains("alive"), "expected 'alive' in {s:?}");
+        assert!(s.contains("401"), "expected '401' in {s:?}");
+    }
+
+    #[test]
+    fn anon_probe_403_also_treated_as_alive() {
+        let r = interpret_anon_probe(reqwest::StatusCode::FORBIDDEN, b"");
+        let s = r.expect("403 must be treated as alive");
+        assert!(s.contains("alive"));
+    }
+
+    #[test]
+    fn anon_probe_200_with_pve7_body_extracts_version() {
+        // PVE 7-style response: full version banner anonymously.
+        let body = br#"{"data":{"version":"7.4-1","release":"7.4","repoid":"abc"}}"#;
+        let r = interpret_anon_probe(reqwest::StatusCode::OK, body);
+        let s = r.expect("valid PVE 7 body must parse");
+        assert!(s.contains("7.4"), "expected version in {s:?}");
+    }
+
+    #[test]
+    fn anon_probe_200_with_html_body_surfaces_preview() {
+        // Reverse-proxy intercepting /api2/json/version and returning
+        // a login HTML page is the realistic non-JSON scenario. The
+        // error must include the body preview so the operator can
+        // see "oh this is HTML" rather than an opaque "not JSON".
+        let body = b"<html><body>Login required</body></html>";
+        let r = interpret_anon_probe(reqwest::StatusCode::OK, body);
+        let err = r.expect_err("non-JSON body must surface as error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Login required"), "preview missing: {msg}");
+    }
+
+    #[test]
+    fn anon_probe_500_surfaces_status_and_body_preview() {
+        let body = b"Internal server error: backend unreachable";
+        let r = interpret_anon_probe(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body);
+        let err = r.expect_err("5xx must surface as error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("500"), "status missing: {msg}");
+        assert!(
+            msg.contains("backend unreachable"),
+            "preview missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn body_preview_handles_empty_and_whitespace() {
+        assert_eq!(body_preview(b"", 200), "<empty>");
+        assert_eq!(body_preview(b"   \n\t  ", 200), "<whitespace-only>");
+        assert_eq!(body_preview(b"  hello  \n", 200), "hello");
+    }
+
+    #[test]
+    fn body_preview_caps_at_max_chars() {
+        // The cap is in CHARS, not bytes — multi-byte UTF-8 characters
+        // mustn't get sliced mid-codepoint (the operator's PVE error
+        // message could include emoji or non-ASCII).
+        let long: String = "abc".repeat(200);
+        let p = body_preview(long.as_bytes(), 100);
+        assert_eq!(p.chars().count(), 100);
     }
 
     #[test]
