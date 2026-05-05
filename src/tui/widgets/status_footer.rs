@@ -28,7 +28,22 @@ use ratatui::{
 
 pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
     let bindings = bindings_for(&state.current_view(), &state.mode);
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(bindings.len() * 4);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(bindings.len() * 4 + 3);
+
+    // Mode indicator pill — promoted from the per-view status bars
+    // (dashboard.rs / nodes.rs each had their own copy) into the
+    // single global footer. Same look as the legacy dashboard pill
+    // (accent bg, bg fg, bold) so the visual continuity is preserved.
+    let mode_label = mode_label_for(&state.mode);
+    spans.push(Span::styled(
+        format!(" {mode_label} "),
+        Style::default()
+            .fg(Theme::BG)
+            .bg(Theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" │ ", Style::default().fg(Theme::TEXT_MUTED)));
+
     for (i, (key, label)) in bindings.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(Theme::TEXT_MUTED)));
@@ -50,6 +65,25 @@ pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(p, area);
 }
 
+/// Pure mapping of `AppMode` → label rendered in the footer's mode
+/// pill. Pre-fix this lived in `dashboard.rs::draw_status_bar` only
+/// — `nodes.rs` re-rendered the dashboard chrome (a copy-paste bug
+/// from when it was forked) and other views had no mode indicator
+/// at all. Centralised here so every view shows the same.
+const fn mode_label_for(mode: &AppMode) -> &'static str {
+    match mode {
+        AppMode::Normal => "NORMAL",
+        AppMode::Search => "SEARCH",
+        AppMode::Command => "COMMAND",
+        AppMode::InputTag => "INPUT TAG",
+        AppMode::InputBroadcast => "BROADCAST",
+        AppMode::ConfigGrep => "CONFIG GREP",
+        AppMode::Confirm { .. } => "CONFIRM",
+        AppMode::SshSession { .. } => "SSH",
+        AppMode::Help => "HELP",
+    }
+}
+
 /// Returns the `(key, label)` pairs to surface for the current
 /// (view, mode). Pure — testable without rendering.
 fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)> {
@@ -69,6 +103,14 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         return vec![("Esc", "cancel"), ("↵", "submit")];
     }
 
+    // Truth-in-binds: `q` is hardcoded to Action::Quit (always exits the
+    // app). `Esc` / `h` / `←` are the back-out chord (Action::Back —
+    // pops the nav stack, falls through to Quit only when the stack is
+    // empty / Dashboard is the root). Pre-fix the footer claimed
+    // "q back" on internal views, which lied: an operator who typed
+    // `q` from GuestList expecting to return to Dashboard got dumped
+    // back to the shell instead. Now the footer surfaces both chords
+    // separately so the legend matches the keymap.
     match view {
         View::Dashboard => vec![
             ("↵", "open"),
@@ -83,8 +125,9 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
             ("j/k", "nav"),
             ("↵", "detail"),
             ("/", "search"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
         View::GuestList => vec![
             ("j/k", "nav"),
@@ -94,45 +137,80 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
             ("r", "restart"),
             ("c", "console"),
             ("/", "search"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
         View::GuestDetail { .. } => vec![
             ("s", "start"),
             ("S", "stop"),
             ("r", "restart"),
             ("c", "console"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
         View::StorageList => vec![
             ("j/k", "nav"),
             ("↵", "detail"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
-        View::TaskLog { .. } => vec![("j/k", "scroll"), ("?", "help"), ("q", "back")],
+        View::TaskLog { .. } => vec![
+            ("j/k", "scroll"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         View::ApprovalQueue => vec![
             ("a", "approve"),
             ("d", "deny"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
-        View::OperationQueue => vec![("j/k", "nav"), ("?", "help"), ("q", "back")],
-        View::Heatmap => vec![("?", "help"), ("q", "back")],
-        View::BackupBoard => vec![("j/k", "nav"), ("?", "help"), ("q", "back")],
-        View::AuditTimeline => vec![("j/k", "scroll"), ("?", "help"), ("q", "back")],
-        View::ConfigGrep => vec![("/", "search"), ("?", "help"), ("q", "back")],
-        View::SnapshotTree { .. } => vec![("j/k", "nav"), ("?", "help"), ("q", "back")],
+        View::OperationQueue => vec![
+            ("j/k", "nav"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        View::Heatmap => vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
+        View::BackupBoard => vec![
+            ("j/k", "nav"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        View::AuditTimeline => vec![
+            ("j/k", "scroll"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        View::ConfigGrep => vec![
+            ("/", "search"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        View::SnapshotTree { .. } => vec![
+            ("j/k", "nav"),
+            ("Esc", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         View::IsoLibrary => vec![
             ("j/k", "nav"),
             ("↵", "download"),
+            ("Esc", "back"),
             ("?", "help"),
-            ("q", "back"),
+            ("q", "quit"),
         ],
-        View::HaConsole => vec![("?", "help"), ("q", "back")],
-        View::Hardware { .. } => vec![("?", "help"), ("q", "back")],
-        View::GuestCompare { .. } => vec![("?", "help"), ("q", "back")],
+        View::HaConsole => vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
+        View::Hardware { .. } => vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
+        View::GuestCompare { .. } => vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
         View::GuestSshSession { .. } => vec![("Ctrl+]", "exit SSH")],
     }
 }
@@ -195,11 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn every_view_has_a_quit_or_back_binding() {
-        // Every view in Normal mode must surface either `q` (back/quit)
-        // or a custom exit chord (SshSession's Ctrl+]). Pre-fix, hitting
-        // an unknown key pattern in a deep view left users wondering
-        // how to leave.
+    fn every_view_has_a_quit_chord() {
+        // Every view in Normal mode must surface SOME way to leave —
+        // `q:quit` (every regular view), `Ctrl+]` (SSH session, where
+        // every key forwards to the remote shell). Pre-fix the
+        // assertion was conflated with "back" — the guarantee here is
+        // narrower: there's always an exit-the-app path visible.
         let views: Vec<View> = vec![
             View::Dashboard,
             View::NodeList,
@@ -227,8 +306,73 @@ mod tests {
         for v in &views {
             let b = bindings_for(v, &AppMode::Normal);
             let has_exit = b.iter().any(|(k, _)| *k == "q" || *k == "Ctrl+]");
-            assert!(has_exit, "{v:?} surfaces no quit/back binding");
+            assert!(has_exit, "{v:?} surfaces no quit binding");
         }
+    }
+
+    #[test]
+    fn footer_truth_q_quits_esc_goes_back_on_internal_views() {
+        // Pre-fix the footer claimed "q back" on internal views — a
+        // lie: event::map_key wires `q` to Action::Quit unconditionally,
+        // while Action::Back is bound to Esc / h / ←. An operator who
+        // typed `q` from GuestList expecting to return to Dashboard
+        // got dumped back to the shell. This test pins the truth: every
+        // internal view must surface BOTH chords as separate bindings,
+        // with the correct labels.
+        let internal_views: Vec<View> = vec![
+            View::NodeList,
+            View::GuestList,
+            View::GuestDetail { vmid: 100 },
+            View::StorageList,
+            View::TaskLog {
+                upid: String::new(),
+            },
+            View::ApprovalQueue,
+            View::OperationQueue,
+            View::Heatmap,
+            View::BackupBoard,
+            View::AuditTimeline,
+            View::ConfigGrep,
+            View::SnapshotTree { vmid: 100 },
+            View::IsoLibrary,
+            View::HaConsole,
+            View::Hardware {
+                node: String::new(),
+            },
+            View::GuestCompare { guests: vec![] },
+        ];
+        for v in &internal_views {
+            let b = bindings_for(v, &AppMode::Normal);
+            let q_label = b.iter().find(|(k, _)| *k == "q").map(|(_, l)| *l);
+            let esc_label = b.iter().find(|(k, _)| *k == "Esc").map(|(_, l)| *l);
+            assert_eq!(
+                q_label,
+                Some("quit"),
+                "{v:?}: q must say 'quit' (it triggers Action::Quit unconditionally)"
+            );
+            assert_eq!(
+                esc_label,
+                Some("back"),
+                "{v:?}: Esc must say 'back' (it triggers Action::Back which pops the stack)"
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_omits_back_chord_at_root() {
+        // Dashboard is the bottom of the nav stack — Action::Back from
+        // here also exits (pop_view returns false → SideEffect::Quit),
+        // so showing "Esc back" would be misleading. Pin: dashboard
+        // surfaces `q quit` and nothing labelled "back".
+        let b = bindings_for(&View::Dashboard, &AppMode::Normal);
+        assert_eq!(
+            b.iter().find(|(k, _)| *k == "q").map(|(_, l)| *l),
+            Some("quit")
+        );
+        assert!(
+            !b.iter().any(|(_, l)| *l == "back"),
+            "Dashboard should not surface 'back' (it's the nav root)"
+        );
     }
 
     #[test]

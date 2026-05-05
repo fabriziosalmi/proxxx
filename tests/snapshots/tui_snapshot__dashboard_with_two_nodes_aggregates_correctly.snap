@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 196
 expression: dump
 ---
  ⚡  proxxx │ 2 nodes │ 1/2 guests
@@ -31,5 +30,5 @@ expression: dump
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- NORMAL  │ j/k nav Enter select / search : cmd q quit

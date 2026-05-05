@@ -12,7 +12,10 @@ use ratatui::{
 use crate::app::AppState;
 use crate::tui::theme::Theme;
 
-/// Render the main dashboard
+/// Render the main dashboard. The bottom status bar (mode pill +
+/// keybind hints) is rendered globally by `status_footer`, not here
+/// — pre-fix the dashboard had its own copy and we ended up with two
+/// stacked rows on screen. Removed.
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -20,14 +23,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
             Constraint::Length(3), // header bar
             Constraint::Length(5), // aggregate stats
             Constraint::Min(10),   // node cards
-            Constraint::Length(1), // status bar
         ])
         .split(area);
 
     draw_header(f, chunks[0], state);
     draw_aggregate_stats(f, chunks[1], state);
     draw_node_cards(f, chunks[2], state);
-    draw_status_bar(f, chunks[3], state);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
@@ -263,73 +264,10 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(table, area);
 }
 
-fn draw_status_bar(f: &mut Frame, area: Rect, state: &AppState) {
-    let mode_text = match &state.mode {
-        crate::app::AppMode::Normal => "NORMAL",
-        crate::app::AppMode::Search => "SEARCH",
-        crate::app::AppMode::Command => "COMMAND",
-        crate::app::AppMode::InputTag => "INPUT TAG",
-        crate::app::AppMode::InputBroadcast => "BROADCAST",
-        crate::app::AppMode::ConfigGrep => "CONFIG GREP",
-        crate::app::AppMode::Confirm { .. } => "CONFIRM",
-        crate::app::AppMode::SshSession { .. } => "SSH",
-        crate::app::AppMode::Help => "HELP",
-    };
-
-    let bar = Line::from(vec![
-        Span::styled(
-            format!(" {mode_text} "),
-            Style::default()
-                .fg(Theme::BG)
-                .bg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(Theme::BORDER)),
-        Span::styled(
-            "j/k",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" nav ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "Enter",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" select ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "/",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" search ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            ":",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" cmd ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "q",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" quit", Style::default().fg(Theme::TEXT_DIM)),
-        if let Some(ref err) = state.error {
-            Span::styled(format!(" │ ⚠ {err}"), Style::default().fg(Theme::DANGER))
-        } else {
-            Span::raw("")
-        },
-    ]);
-
-    let paragraph = Paragraph::new(bar).style(Style::default().bg(Theme::BG_ELEVATED));
-    f.render_widget(paragraph, area);
-}
+// `draw_status_bar` removed: status pill + keybind hints + error
+// banner now live in the global `widgets::status_footer`. Pre-fix
+// the dashboard rendered its own copy below the global footer,
+// resulting in two stacked rows on screen.
 
 // ── Helpers ─────────────────────────────────────────────
 

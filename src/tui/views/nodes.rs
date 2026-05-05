@@ -13,14 +13,20 @@ use crate::api::types::{GuestStatus, NodeStatus};
 use crate::app::AppState;
 use crate::tui::theme::Theme;
 
-/// Render the node list view
+/// Render the node list view. The bottom status row (mode pill +
+/// keybind hints) is rendered by the global `widgets::status_footer`
+/// — pre-fix this view called `super::dashboard::draw` to render its
+/// own copy, which was a forgotten copy-paste from when nodes.rs was
+/// forked from dashboard.rs (the call rendered the WHOLE dashboard
+/// pipeline into a 1-row chunk, with everything but the trailing
+/// status row clipped). Removed; the row is now reclaimed by the
+/// node table.
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // title
             Constraint::Min(8),    // node table
-            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -39,9 +45,6 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
     // Node table with more detail
     draw_node_table(f, chunks[1], state);
-
-    // Status bar
-    super::dashboard::draw(f, chunks[2], state);
 }
 
 fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
