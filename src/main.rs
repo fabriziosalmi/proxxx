@@ -127,7 +127,13 @@ fn main() -> Result<()> {
                             ),
                         }
                     } else {
-                        eprintln!("Fatal Error: {e}");
+                        // `{:#}` renders the anyhow Error chain — outermost
+                        // context first, then `: <next>` for each wrapped
+                        // cause. Without this, every "Failed to parse
+                        // response from /X" message hid the actual serde
+                        // / TLS / IO error one level down, leaving the
+                        // operator with nothing to act on.
+                        eprintln!("Fatal Error: {e:#}");
                     }
                     std::process::exit(1);
                 }

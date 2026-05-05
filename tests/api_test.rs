@@ -6011,3 +6011,12 @@ mod tests {
         assert!(cfg.contains("cores: 2"));
     }
 }
+
+#[test]
+fn empty_backup_jobs_array_parses_cleanly() {
+    use proxxx::api::types::{ApiResponse, BackupJob};
+    let raw = br#"{"data":[]}"#;
+    let parsed: ApiResponse<Vec<BackupJob>> =
+        serde_json::from_slice(raw).expect("empty BackupJob array must parse");
+    assert!(parsed.data.is_empty());
+}

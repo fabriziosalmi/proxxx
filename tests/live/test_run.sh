@@ -144,14 +144,7 @@ probe "cluster-log --max 5"            cluster-log --max 5
 probe "storage-defs list"              storage-defs list
 
 # Backup-jobs scheduler (recurring vzdump; read side)
-# Cluster-level backup-jobs read. Currently has a known parse-side
-# regression on clusters returning `{"data":[]}` — proxxx surfaces
-# "Failed to parse response from /cluster/backup" instead of an
-# empty list. Gated on PROXXX_E2E_BACKUP_JOBS_ENABLE=1 until the
-# deserializer is hardened; tracked separately.
-if [ "${PROXXX_E2E_BACKUP_JOBS_ENABLE:-0}" = "1" ]; then
-    probe "backup-jobs list"               backup-jobs list
-fi
+probe "backup-jobs list"               backup-jobs list
 
 # Notifications (PVE 8+ native)
 probe "notifications targets"          notifications targets
