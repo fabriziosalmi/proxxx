@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 220
 expression: dump
 ---
  ⚡  Guests  4 total │ 🟢  3 🔴  1 │ VM:3 LXC:1
@@ -21,5 +20,5 @@ expression: dump
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- start Stop restart delete console / search

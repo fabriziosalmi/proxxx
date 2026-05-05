@@ -10,6 +10,37 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
+## [0.1.4] — 2026-05-06
+
+### Fixed
+
+- **TUI single source of truth for the bottom status row.** Two
+  related fixes after operator feedback on v0.1.3:
+  - Footer truth-in-binds: the global status footer claimed
+    `q back` on every internal view (NodeList / GuestList / etc.)
+    — a lie. `event::map_key` wires `q` unconditionally to
+    `Action::Quit`; `Action::Back` is bound to `Esc / h / ←`.
+    An operator on GuestList who hit `q` expecting to return to
+    Dashboard got dumped to the shell instead. Now internal views
+    surface BOTH chords with their real labels (`Esc back · q
+    quit`); Dashboard shows only `q quit` (it's the nav root,
+    where `Action::Back` would also exit). 2 new tests pin the
+    contract.
+  - Two-stacked-bars across views: `dashboard.rs::draw_status_bar`
+    rendered its own mode pill + binds row, BELOW which the new
+    global footer rendered another row — two visually identical
+    lines. `nodes.rs::draw` was even worse: it called
+    `super::dashboard::draw` (a forgotten copy-paste from when
+    nodes.rs was forked) which fired the WHOLE dashboard pipeline
+    into a 1-row chunk with everything but the trailing line
+    clipped. `guests.rs` and `storage.rs` had their own
+    `draw_action_bar` hint rows on top of the table, also
+    duplicated by the new footer. All four per-view status / hint
+    bars removed; the mode pill is promoted into the global
+    footer. Each view reclaims its bottom row for content. Single
+    source of truth: `widgets::status_footer` is THE bottom row
+    for every view.
+
 ## [0.1.3] — 2026-05-06
 
 ### Added

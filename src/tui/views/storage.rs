@@ -3,7 +3,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table},
     Frame,
@@ -14,12 +14,14 @@ use crate::tui::theme::Theme;
 
 /// Render the storage list
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
+    // Bottom action-hint row removed in favour of the global
+    // widgets::status_footer (avoids two-stacked-bars on screen);
+    // table reclaims the row.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // title
             Constraint::Min(8),    // storage table
-            Constraint::Length(1), // action hints
         ])
         .split(area);
 
@@ -36,7 +38,6 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(title, chunks[0]);
 
     draw_storage_table(f, chunks[1], state);
-    draw_action_bar(f, chunks[2]);
 }
 
 fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
@@ -180,22 +181,8 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(table, area);
 }
 
-fn draw_action_bar(f: &mut Frame, area: Rect) {
-    let bar = Line::from(vec![
-        Span::styled(
-            " /",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" search", Style::default().fg(Theme::TEXT_DIM)),
-    ]);
-
-    f.render_widget(
-        Paragraph::new(bar).style(Style::default().bg(Theme::BG_ELEVATED)),
-        area,
-    );
-}
+// `draw_action_bar` removed: hints now live in the global
+// `widgets::status_footer`.
 
 fn make_bar(percent: f64, width: usize) -> String {
     let blocks = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];

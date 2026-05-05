@@ -14,7 +14,12 @@ use crate::app::AppState;
 use crate::tui::theme::Theme;
 use crate::util::sanitize::sanitize_display;
 
-/// Render the guest list or guest detail
+/// Render the guest list or guest detail. The bottom action-hint
+/// row (s start · S stop · r restart · d delete · c console · /
+/// search) is rendered globally by `widgets::status_footer`; pre-fix
+/// this view rendered its own copy in `draw_action_bar`, which the
+/// new global footer then duplicated below — two stacked rows of
+/// hints. Removed; bottom row reclaimed by the guest table.
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     if let crate::app::View::GuestDetail { vmid } = state.current_view() {
         draw_guest_detail(f, area, state, *vmid);
@@ -25,13 +30,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .constraints([
             Constraint::Length(3), // title + counts
             Constraint::Min(8),    // guest table
-            Constraint::Length(1), // action hints
         ])
         .split(area);
 
     draw_title(f, chunks[0], state);
     draw_guest_table(f, chunks[1], state);
-    draw_action_bar(f, chunks[2]);
 }
 
 fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
@@ -241,57 +244,10 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(table, area);
 }
 
-fn draw_action_bar(f: &mut Frame, area: Rect) {
-    let bar = Line::from(vec![
-        Span::styled(
-            " s",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("tart ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "S",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("top ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "r",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("estart ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "d",
-            Style::default()
-                .fg(Theme::DANGER)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("elete ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "c",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("onsole ", Style::default().fg(Theme::TEXT_DIM)),
-        Span::styled(
-            "/",
-            Style::default()
-                .fg(Theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" search", Style::default().fg(Theme::TEXT_DIM)),
-    ]);
-
-    f.render_widget(
-        Paragraph::new(bar).style(Style::default().bg(Theme::BG_ELEVATED)),
-        area,
-    );
-}
+// `draw_action_bar` removed: action-key hints (s start · S stop ·
+// r restart · d delete · c console · / search) now live in the
+// global `widgets::status_footer`. Pre-fix this view rendered its
+// own copy on top of the global footer — two stacked rows.
 
 fn format_bytes(bytes: u64) -> String {
     const GB: u64 = 1_073_741_824;
@@ -321,7 +277,6 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Min(10),   // Main content
-            Constraint::Length(1), // Actions
         ])
         .split(area);
 
@@ -459,9 +414,7 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
         ),
         main_chunks[1],
     );
-
-    // Action bar
-    draw_action_bar(f, chunks[2]);
+    // Action bar moved to global widgets::status_footer.
 }
 
 fn format_uptime(secs: u64) -> String {
