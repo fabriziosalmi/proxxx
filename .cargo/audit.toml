@@ -1,0 +1,38 @@
+# cargo-audit configuration — repo-level advisory policy.
+#
+# Picked up automatically by `cargo audit` when run from the repo root.
+# Both the local gate (`scripts/gate.sh` stage 3) and CI
+# (`.github/workflows/ci.yml`) read this file.
+#
+# Every entry below MUST include:
+#   1. The crate + version it pertains to
+#   2. The dependency path that pulls it in
+#   3. The reason we accept it (no upstream fix / out of our code path / …)
+#   4. The planned remediation
+#
+# An ignore that lacks a documented remediation is debt, not policy.
+
+[advisories]
+ignore = [
+    # rsa 0.10.0-rc.16 — Marvin Attack timing sidechannel (CVSS 5.9 medium).
+    # Path (post russh 0.60 bump): russh 0.60 → internal-russh-forked-
+    # ssh-key 0.6.18 → rsa 0.10. The fork is upstream-tracked and
+    # pulls a release-candidate of `rsa` that STILL contains the
+    # advisory — the upstream `rsa` crate has had no fix since
+    # 2023-11. So russh 0.60 (despite the deduplication of -keys)
+    # did NOT close this advisory; we expected it to but it didn't.
+    # Why accepted: the Marvin Attack requires a network attacker
+    # who can issue many adaptive RSA decryption queries against a
+    # long-lived key under timing observation — not the proxxx
+    # threat model (we use SSH for one-shot console handoff against
+    # trusted Proxmox nodes, not as a network crypto service).
+    # Remediation path: blocked on the upstream `rsa` crate landing
+    # a constant-time decryption path. Track:
+    # https://github.com/RustCrypto/RSA/issues/19
+    "RUSTSEC-2023-0071",
+]
+# Phase 5.13: paste (RUSTSEC-2024-0436) and lru (RUSTSEC-2026-0002)
+# entries removed. Bumped ratatui 0.29 → 0.30 + dropped vt100-ctt's
+# `tui-term` default feature (which was the transitive pin to 0.29).
+# Both advisories no longer fire — Cargo.lock contains only ratatui
+# 0.30, which uses maintained paste alternative + patched lru.

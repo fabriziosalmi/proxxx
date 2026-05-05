@@ -1,0 +1,27 @@
+# Pin the Rust toolchain so local dev sees the EXACT same lints as CI.
+#
+# Background: CI uses `dtolnay/rust-toolchain@stable`, which respects
+# this file when present. Without the pin, CI would float on whatever
+# `stable` is at run time — and a contributor's `rustup default
+# stable` could be on an older 1.x where new pedantic lints don't
+# exist yet. That drift caused a CI break (clippy 1.95 added
+# `duration_suboptimal_units` + `collapsible_if`) that wasn't visible
+# locally on clippy 1.92.
+#
+# Bump strategy: when a new stable lands and we want to adopt it, edit
+# the channel here, run `cargo clippy` locally, fix or suppress every
+# new lint, and commit the result. CI will then pick up the same
+# version on the next run. Never let CI silently float — the gate's
+# value depends on local + CI seeing identical results.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+# `x86_64-unknown-linux-musl` for the `musl-static` CI job — without
+# this declaration, dtolnay/rust-toolchain installs 1.95.0 per channel
+# but the workflow's `targets:` input gets attached to a different
+# alias (the "stable" name), and rustc can't find the musl `core`
+# crate at build time. Declaring the target here means EVERY toolchain
+# install (CI or local) provisions it, costing ~30 MB on dev machines
+# that won't use it but eliminating the cross-toolchain target drift.
+targets = ["x86_64-unknown-linux-musl"]
+profile = "minimal"

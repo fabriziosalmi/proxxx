@@ -1,0 +1,29 @@
+/target
+.claude/
+# Live cluster harness — credentials and run artifacts are local-only.
+# `env.local` carries the PVE token used by `test_mutation.sh`; an
+# earlier revision had the token inline in the script and leaked it
+# to public history. Never re-introduce a tracked secret here — copy
+# `env.local.example` to `env.local` per the live README.
+tests/live/test_env.md
+tests/live/env.local
+tests/live/*.log
+tests/live/*_summary.md
+# Mission 2 — local E2E env (do NOT commit secrets); only the
+# .example template is tracked.
+tests/e2e.env
+.env
+# Pre-publication history backup (text + restorable bundle).
+git_history_backup.md
+proxxx-pre-reset.bundle
+# Working notes and pre-publication scratch — not the public docs site.
+development/
+# VitePress build artefacts.
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+features.md
+bootstrap.md
+# Personal cluster walkthrough — references the maintainer's lab IPs/hostnames.
+guide.md

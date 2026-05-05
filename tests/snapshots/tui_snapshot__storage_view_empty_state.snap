@@ -1,0 +1,25 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 340
+expression: dump
+---
+ 💾  Storage Pools  (0 total)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⏳  Loading storage...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ / search
