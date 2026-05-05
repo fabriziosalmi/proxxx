@@ -35,7 +35,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
 
 # Config
-toml = "0.8"
+toml = "1.1"
 directories = "6"
 
 # Error handling.
