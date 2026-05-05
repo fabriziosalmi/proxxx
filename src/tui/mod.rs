@@ -1781,25 +1781,33 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
         return;
     }
 
+    // Reserve the bottom row for the contextual keybindings footer.
+    // The input-bar overlay (Command / InputTag / InputBroadcast) and
+    // the help/confirm modals render on TOP of this layout, so they
+    // naturally hide the footer when active without explicit gating.
+    use ratatui::layout::{Constraint, Layout};
+    let [view_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
     match state.current_view() {
-        View::Dashboard => views::dashboard::draw(f, area, state),
-        View::NodeList => views::nodes::draw(f, area, state),
-        View::GuestList | View::GuestDetail { .. } => views::guests::draw(f, area, state),
-        View::StorageList => views::storage::draw(f, area, state),
-        View::TaskLog { upid } => views::tasks::draw(f, area, state, upid),
-        View::ApprovalQueue => views::approval::draw(f, area, state),
-        View::OperationQueue => views::queue::draw(f, area, state),
-        View::GuestCompare { guests } => views::compare::draw(f, area, state, guests),
-        View::Heatmap => views::heatmap::draw(f, area, state),
-        View::BackupBoard => views::backup::draw(f, area, state),
-        View::AuditTimeline => views::timeline::draw(f, area, state),
-        View::ConfigGrep => views::grep::draw(f, area, state),
+        View::Dashboard => views::dashboard::draw(f, view_area, state),
+        View::NodeList => views::nodes::draw(f, view_area, state),
+        View::GuestList | View::GuestDetail { .. } => views::guests::draw(f, view_area, state),
+        View::StorageList => views::storage::draw(f, view_area, state),
+        View::TaskLog { upid } => views::tasks::draw(f, view_area, state, upid),
+        View::ApprovalQueue => views::approval::draw(f, view_area, state),
+        View::OperationQueue => views::queue::draw(f, view_area, state),
+        View::GuestCompare { guests } => views::compare::draw(f, view_area, state, guests),
+        View::Heatmap => views::heatmap::draw(f, view_area, state),
+        View::BackupBoard => views::backup::draw(f, view_area, state),
+        View::AuditTimeline => views::timeline::draw(f, view_area, state),
+        View::ConfigGrep => views::grep::draw(f, view_area, state),
         View::SnapshotTree { vmid } => {
-            views::snaptree::draw(f, area, state, *vmid);
+            views::snaptree::draw(f, view_area, state, *vmid);
         }
-        View::IsoLibrary => views::iso_library::draw(f, area, state),
-        View::HaConsole => views::ha_console::draw(f, area, state),
-        View::Hardware { node } => views::hardware::draw(f, area, state, node),
+        View::IsoLibrary => views::iso_library::draw(f, view_area, state),
+        View::HaConsole => views::ha_console::draw(f, view_area, state),
+        View::Hardware { node } => views::hardware::draw(f, view_area, state, node),
         View::GuestSshSession { vmid } => {
             let parser = ssh.parser();
             let host = ssh.active_host();
@@ -1807,7 +1815,7 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
             let finished = ssh.is_finished();
             views::ssh_session::draw(
                 f,
-                area,
+                view_area,
                 &views::ssh_session::SessionFrameInput {
                     vmid: *vmid,
                     host: host.as_deref(),
@@ -1818,6 +1826,10 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
             );
         }
     }
+
+    // Footer last, so it draws under any modal overlays the block
+    // below adds for Confirm / Help / Search / InputBar.
+    widgets::status_footer::draw_status_footer(f, footer_area, state);
 
     if let app::AppMode::Confirm { description, .. } = &state.mode {
         widgets::modal::draw_confirm_modal(f, area, description);

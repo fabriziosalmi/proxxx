@@ -14,6 +14,18 @@ SemVer contract:
 
 ### Added
 
+- **TUI always-visible status footer with contextual keybindings.**
+  Bottom row of every view now surfaces 3-9 view-specific bindings
+  (`j/k:nav  ↵:detail  s:start  S:stop  r:restart  c:console
+  /:search  ?:help  q:back` for the guest list) plus universal
+  `?:help  q:back` so a new user always sees how to leave the
+  current view. Follows the htop / lazygit / k9s convention; the
+  `?` modal stays for the full keymap reference. Input bar
+  (Command / InputTag / InputBroadcast) and modal overlays cover
+  the footer naturally when active. 7 unit tests pin invariants:
+  every top-level view has `?:help`, every view has a quit/back
+  binding, GuestList surfaces all four lifecycle keys (s/S/r/c),
+  Help mode collapses to "any key dismisses".
 - **`proxxx init --interactive` config wizard.** Five-step prompted
   flow that walks a first-time user from "fresh machine" to
   "validated, working `config.toml`". Each input is probed live
