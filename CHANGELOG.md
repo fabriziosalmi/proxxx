@@ -14,6 +14,21 @@ SemVer contract:
 
 ### Added
 
+- **SSH layer live tests (`tests/ssh_live.rs`).** Two `#[ignore]`-
+  gated tests exercise the SSH layer end-to-end against a real PVE
+  node: `ssh_pool_exec_uname_round_trip` (boring smoke — `uname -a`
+  pins the russh handshake + channel exec) and
+  `ssh_pool_exec_pveum_user_permissions_round_trip` (mirrors the
+  `proxxx perms` shell-out path; pins the parse contract by
+  asserting `root@pam` is in stdout). The harness builds an
+  `SshConfig` from env vars (NOT from the user's `config.toml`) and
+  uses a per-process tmp `known_hosts` so the operator's real host
+  key store is never touched. Opt in with `PROXXX_E2E_SSH_ENABLE=1`.
+- **`setup_demo.sh --with-ssh`.** New flag that adds an SSH
+  preflight phase (key file mode 600/400, round-trip `uname -a`
+  over `ssh -o BatchMode=yes`, `pveum` reachable on remote PATH)
+  before declaring the cluster ready. Read-only by design — never
+  deploys keys, never edits the operator's `~/.ssh`.
 - **HITL callback replay-attack live test
   (`hitl_callback_replay_rejected_under_live_pve`).** Drives
   `handle_callback_update` twice with an identical `Update` against

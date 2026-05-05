@@ -16,6 +16,12 @@
 #   tests/live/setup_demo.sh                  # default: set up + verify (idempotent)
 #   tests/live/setup_demo.sh --teardown       # remove LXC 9999, leave 8888 alone
 #   tests/live/setup_demo.sh --check          # read-only verification, no mutations
+#   tests/live/setup_demo.sh --with-ssh       # check + verify SSH preflight for the
+#                                             # ssh_live test suite + the demo's
+#                                             # `proxxx perms` step (Act 6).
+#                                             # Read-only: never deploys keys or
+#                                             # mutates ~/.ssh — the operator owns
+#                                             # SSH provisioning to their cluster.
 #
 # Exit codes:
 #   0 — cluster is ready (setup mode) or all preconditions met (check mode)
@@ -49,17 +55,19 @@ title() { printf '\n%s%s%s\n' "$BOLD" "$*" "$RESET"; }
 
 # ── Argument parsing ───────────────────────────────────────
 MODE=setup
+WITH_SSH=0
 case "${1:-}" in
     ""|setup) MODE=setup ;;
     --teardown|teardown) MODE=teardown ;;
     --check|check) MODE=check ;;
+    --with-ssh|with-ssh) MODE=check; WITH_SSH=1 ;;
     -h|--help)
         sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
     *)
         fail "unknown argument: $1"
-        echo "usage: $0 [--teardown|--check]" >&2
+        echo "usage: $0 [--teardown|--check|--with-ssh]" >&2
         exit 2
         ;;
 esac
@@ -225,6 +233,94 @@ except Exception:
     ok "QEMU $QEMU_VMID primary disk on $disk_storage (good — Act 5 will move it)"
 }
 
+# ── SSH preflight (--with-ssh / ssh_live opt-in) ───────────
+#
+# Verifies the operator's machine can SSH into the PVE node BEFORE
+# the ssh_live test suite tries — failures here surface as a clear
+# "set this env var" / "fix this permission" message instead of a
+# russh handshake error mid-test.
+#
+# Reads:
+#   PROXXX_E2E_SSH_HOST     PVE node hostname/IP for the SSH layer
+#   PROXXX_E2E_SSH_USER     defaults to "root"
+#   PROXXX_E2E_SSH_KEY_PATH path to the private key (absolute or ~)
+#
+# This function is read-only: it never deploys keys, never edits
+# ~/.ssh, never modifies the operator's known_hosts. Provisioning
+# SSH access to a cluster is the operator's responsibility — same
+# stance as the RBAC fixture's "you provision pveum, the script
+# verifies".
+check_ssh_preflight() {
+    : "${PROXXX_E2E_SSH_HOST:?env PROXXX_E2E_SSH_HOST not set (e.g. \"10.0.0.1\")}"
+    : "${PROXXX_E2E_SSH_KEY_PATH:?env PROXXX_E2E_SSH_KEY_PATH not set (e.g. \"\$HOME/.ssh/proxxx_e2e_ed25519\")}"
+    local ssh_user="${PROXXX_E2E_SSH_USER:-root}"
+    # Tilde-expand the key path so the operator can write
+    # ~/.ssh/proxxx_e2e_ed25519 without having to manually expand.
+    local key_path="${PROXXX_E2E_SSH_KEY_PATH/#~\//$HOME/}"
+
+    # 1. Key file present + 0600. SSH refuses to use a world-readable
+    # key — better to surface that here than as a russh "permissions
+    # too open" error.
+    if [[ ! -f "$key_path" ]]; then
+        fail "SSH key not found at $key_path"
+        info "  set PROXXX_E2E_SSH_KEY_PATH to your provisioned ed25519 key"
+        return 1
+    fi
+    local mode
+    # `stat` differs between BSD (macOS) and GNU; try both.
+    mode=$(stat -f '%A' "$key_path" 2>/dev/null || stat -c '%a' "$key_path" 2>/dev/null || echo "?")
+    if [[ "$mode" != "600" && "$mode" != "400" ]]; then
+        fail "SSH key $key_path has mode $mode — must be 600 or 400"
+        info "  fix: chmod 600 $key_path"
+        return 1
+    fi
+    ok "SSH key at $key_path (mode $mode)"
+
+    # 2. Round-trip a trivial command. We DON'T hit ~/.ssh/known_hosts
+    # — `-o UserKnownHostsFile=/dev/null` keeps the operator's host
+    # key store untouched, mirroring what ssh_live.rs does with its
+    # per-test temp known_hosts.
+    local out
+    if ! out=$(ssh -o BatchMode=yes \
+                   -o ConnectTimeout=5 \
+                   -o StrictHostKeyChecking=accept-new \
+                   -o UserKnownHostsFile=/dev/null \
+                   -o LogLevel=ERROR \
+                   -i "$key_path" \
+                   "${ssh_user}@${PROXXX_E2E_SSH_HOST}" \
+                   'uname -a' 2>&1); then
+        fail "ssh ${ssh_user}@${PROXXX_E2E_SSH_HOST} failed:"
+        echo "$out" | sed 's/^/    /' >&2
+        info "  verify: the public key is in ${ssh_user}@${PROXXX_E2E_SSH_HOST}:~/.ssh/authorized_keys"
+        info "  verify: the host is reachable on TCP port 22"
+        return 1
+    fi
+    if [[ "$out" != Linux* ]]; then
+        fail "uname -a returned unexpected output (PVE node should be Linux):"
+        echo "$out" | sed 's/^/    /' >&2
+        return 1
+    fi
+    ok "SSH round-trip works (${ssh_user}@${PROXXX_E2E_SSH_HOST}: $(echo "$out" | awk '{print $1, $3}'))"
+
+    # 3. Confirm pveum is on PATH for the user — the live test runs
+    # `pveum user permissions root@pam`, so this preflights the same
+    # call. ENOENT here means the SSH user lacks the PVE-server PATH
+    # (rare — almost always root@pam on a real PVE node).
+    if ! ssh -o BatchMode=yes \
+             -o ConnectTimeout=5 \
+             -o StrictHostKeyChecking=accept-new \
+             -o UserKnownHostsFile=/dev/null \
+             -o LogLevel=ERROR \
+             -i "$key_path" \
+             "${ssh_user}@${PROXXX_E2E_SSH_HOST}" \
+             'command -v pveum' >/dev/null 2>&1; then
+        fail "pveum not on PATH for ${ssh_user}@${PROXXX_E2E_SSH_HOST}"
+        info "  the ssh_live test runs 'pveum user permissions root@pam' — needs PVE-server PATH"
+        return 1
+    fi
+    ok "pveum reachable on the remote shell"
+}
+
 check_lxc_state() {
     local resp
     resp=$("$BIN" --format json ls guests 2>/dev/null | python3 -c "
@@ -335,7 +431,7 @@ for g in json.load(sys.stdin):
 
 case "$MODE" in
     setup|check)
-        title "proxxx demo setup ($MODE mode)"
+        title "proxxx demo setup ($MODE mode$([[ "$WITH_SSH" == "1" ]] && echo " + ssh"))"
         info "Cluster: $URL  ·  Node: $NODE  ·  QEMU VMID: $QEMU_VMID  ·  LXC VMID: $LXC_VMID"
 
         title "Preconditions"
@@ -346,6 +442,11 @@ case "$MODE" in
         check_qemu_vm_state || exit 1
         check_qemu_disk_on_local_lvm || true   # warn-only
         check_lxc_state || exit 1
+
+        if [[ "$WITH_SSH" == "1" ]]; then
+            title "SSH preflight (--with-ssh)"
+            check_ssh_preflight || exit 1
+        fi
 
         if [[ "$MODE" == "check" ]]; then
             title "Check complete"
