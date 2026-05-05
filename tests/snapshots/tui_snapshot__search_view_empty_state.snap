@@ -1,0 +1,21 @@
+---
+source: tests/tui_snapshot.rs
+assertion_line: 322
+expression: dump
+---
+
+
+
+
+                    ┌ Instant Search (/ to filter, Enter to select) ───────────┐
+                    │>                                                         │
+                    └──────────────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────────────────────┐
+                    │🚀   View: Dashboard                   action              │
+                    │🚀   View: Nodes                       action              │
+                    │🚀   View: Guests                      action              │
+                    │🚀   View: Storage                     action              │
+                    │🚀   View: Hotspot Heatmap             action              │
+                    │🚀   View: Backup Health Board         action              │
+                    │🚀   View: Audit Timeline              action              │
+                    └──────────────────────────────────────────────────────────┘
