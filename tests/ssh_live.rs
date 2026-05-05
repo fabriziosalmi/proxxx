@@ -175,9 +175,9 @@ async fn ssh_pool_exec_uname_round_trip() {
 /// A second probe targeting the contract-relevant `pveum` shell-out
 /// path — the same code path `proxxx perms` uses. `pveum user
 /// permissions root@pam` is read-only and exists on every PVE node.
-/// The output shape is what `parse_user_permissions` (in src/access/)
-/// consumes, so we additionally assert it contains the user line so a
-/// silent `pveum` regression doesn't slip past as "exit 0 + empty".
+/// The output is a Unicode-bordered table with `ACL path` /
+/// `Permissions` columns. We pin the header so a silent `pveum`
+/// regression (exit 0 + empty / column rename) can't slip past.
 #[tokio::test]
 #[ignore = "live SSH: requires PROXXX_E2E_SSH_ENABLE=1 + reachable PVE node"]
 async fn ssh_pool_exec_pveum_user_permissions_round_trip() {
@@ -201,12 +201,19 @@ async fn ssh_pool_exec_pveum_user_permissions_round_trip() {
         res.exit_code,
         res.stderr.trim()
     );
-    // The `pveum` table renderer always echoes the userid header. If
-    // PVE ever rewrites the formatter, a wider grep on `root@pam` is
-    // the right canary.
+    // pveum renders a Unicode-bordered table with `ACL path` and
+    // `Permissions` columns. Root@pam always has perms on `/`, so a
+    // valid output contains BOTH the header AND a `/` row line. This
+    // catches: (a) silent format change, (b) empty-table 0-exit, (c)
+    // raw stdout being JSON or YAML rather than the rendered table.
     assert!(
-        res.stdout.contains("root@pam"),
-        "pveum stdout must contain root@pam; got: {:?}",
+        res.stdout.contains("ACL path") && res.stdout.contains("Permissions"),
+        "pveum stdout must include the table header (ACL path / Permissions); got: {:?}",
+        res.stdout.chars().take(500).collect::<String>()
+    );
+    assert!(
+        res.stdout.lines().any(|l| l.contains("│ /")),
+        "pveum output must include at least one ACL row for root@pam (root path); got: {:?}",
         res.stdout.chars().take(500).collect::<String>()
     );
 }
