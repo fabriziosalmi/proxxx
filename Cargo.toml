@@ -127,7 +127,7 @@ tokio-test = "0.4"
 # sample collection (default 100 samples, t-test outlier filtering),
 # and `cargo bench` integration. We use it through the `harness =
 # false` per-bench flag so each bench file is its own binary.
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # E2E test suite (Mission 2 will use this — declared here so adding
 # `#[serial]` tests later doesn't require a Cargo.toml churn).
 serial_test = "3"
