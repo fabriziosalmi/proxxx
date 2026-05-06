@@ -225,13 +225,17 @@ jobs:
         # binary, which would miss dev-cfg conditionally-compiled
         # crates and could miss-attribute via stripped strings).
         # The `--locked` install pins the cargo-cyclonedx version
-        # itself; --frozen gates against accidental Cargo.lock churn
-        # in CI.
+        # itself. `cargo-cyclonedx` reads Cargo.lock by default; it
+        # does NOT accept --frozen / --offline / --locked at the
+        # subcommand level (different CLI surface from `cargo build`)
+        # — see the upstream issue tracker. The lockfile is on disk
+        # from the checkout step, so reproducibility is enforced
+        # there, not via a flag here.
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
           cargo install --locked cargo-cyclonedx
-          cargo cyclonedx --format json --frozen
+          cargo cyclonedx --format json
           # cargo-cyclonedx emits `bom.json` next to Cargo.toml. Move
           # to dist/ with the proxxx-versioned name so it sits
           # alongside the tarballs in the release.
