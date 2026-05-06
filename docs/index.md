@@ -5,6 +5,14 @@ hero:
   name: proxxx
   text: Terminal cockpit for Proxmox VE & PBS.
   tagline: A Rust TUI and CLI that talks to real Proxmox clusters. REST against PVE and PBS, SSH for the rest. No agent on the cluster.
+  # Mirrors the README hero infographic (assets/proxxx-overview.jpg).
+  # vitepress's home layout slots `image.src` to the right of the
+  # headline + tagline + actions; `base: /proxxx/` from .vitepress/
+  # config.ts auto-prefixes the URL at build time, so we write the
+  # path as if served from the site root.
+  image:
+    src: /proxxx-overview.jpg
+    alt: proxxx overview — six panels covering installation, authentication wizard, cluster navigation, pre-flight risk gate, HITL approval workflow, and the contributor quality gate
   actions:
     - theme: brand
       text: Get started
