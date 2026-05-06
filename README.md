@@ -49,20 +49,44 @@ Pick the row that matches you and jump straight to the right page.
 - **Console handoff** — SSH (system `ssh` + QGA / lxc-interfaces auto-discovery), serial (termproxy WebSocket), SPICE (`.vv` 0600), noVNC (system browser) — all from `proxxx <verb> <vmid>`.
 - **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision.
 - **MCP server** — stdio JSON-RPC for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned.
+- **Verifiable releases** — every tarball ships with three layers: SHA-256 sidecar, sigstore keyless cosign signature pinned to this exact workflow path (offline-verifiable; transparency-log inclusion proof embedded), and a CycloneDX SBOM generated from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`.
 
 ## Install
 
-Pre-built binaries for macOS Apple Silicon, Linux x86_64-musl, and Linux aarch64-musl are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases) along with a sibling `.sha256`:
+Pre-built binaries for **macOS Apple Silicon** and **Linux x86_64-musl** are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases). ARM64 Linux builds from source (cross-link toolchain bug; tracked).
+
+Download + verify the full supply-chain trio:
 
 ```bash
-TARGET=x86_64-unknown-linux-musl   # or aarch64-apple-darwin, aarch64-unknown-linux-musl
-gh release download --repo fabriziosalmi/proxxx \
+TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin
+VERSION=0.1.7                        # latest at time of writing
+
+gh release download v${VERSION} --repo fabriziosalmi/proxxx \
   --pattern "*-${TARGET}.tar.gz" \
-  --pattern "*-${TARGET}.tar.gz.sha256"
-shasum -a 256 -c proxxx-*-${TARGET}.tar.gz.sha256
-tar xzf proxxx-*-${TARGET}.tar.gz
-./proxxx-*/proxxx --version
+  --pattern "*-${TARGET}.tar.gz.sha256" \
+  --pattern "*-${TARGET}.tar.gz.cosign.bundle"
+
+# 1. Checksum
+shasum -a 256 -c proxxx-${VERSION}-${TARGET}.tar.gz.sha256
+
+# 2. Sigstore keyless signature (offline; cert pinned to release.yml)
+cosign verify-blob \
+  --bundle proxxx-${VERSION}-${TARGET}.tar.gz.cosign.bundle \
+  --certificate-identity-regexp 'https://github.com/fabriziosalmi/proxxx/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  proxxx-${VERSION}-${TARGET}.tar.gz
+
+# 3. (optional) Audit the CycloneDX SBOM
+gh release download v${VERSION} --repo fabriziosalmi/proxxx \
+  --pattern "*.cdx.json" --pattern "*.cdx.json.sha256"
+shasum -a 256 -c proxxx-${VERSION}.cdx.json.sha256
+grype sbom:proxxx-${VERSION}.cdx.json   # or trivy / cyclonedx-cli
+
+tar xzf proxxx-${VERSION}-${TARGET}.tar.gz
+./proxxx-${VERSION}-${TARGET}/proxxx --version
 ```
+
+If you only want the binary fast (no verification), skip steps 2–3 and run just `shasum -a 256 -c …` from the snippet above. Production deployments should run all three — see the [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist).
 
 Or build from source (needs Rust 1.95+):
 

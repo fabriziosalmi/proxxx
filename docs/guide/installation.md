@@ -4,6 +4,62 @@ proxxx is a single Rust binary. There are no runtime dependencies beyond
 a working Proxmox VE cluster (and optionally a PBS host) reachable over
 HTTPS.
 
+## Pre-built binaries (recommended)
+
+Each [tagged release](https://github.com/fabriziosalmi/proxxx/releases)
+ships **three layers of artifact verification** for every tarball:
+
+1. **SHA-256 sidecar** — pin the bytes.
+2. **Sigstore keyless cosign signature** (`.cosign.bundle`) — the
+   signing certificate is pinned to this exact GitHub-Actions
+   workflow path; the transparency-log inclusion proof is embedded
+   so verification is offline.
+3. **CycloneDX SBOM** (`proxxx-VERSION.cdx.json`) — every dep with
+   name + version + checksum + license, generated authoritatively
+   from `Cargo.lock`.
+
+```sh
+TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin
+VERSION=0.1.7
+
+gh release download v${VERSION} --repo fabriziosalmi/proxxx \
+  --pattern "*-${TARGET}.tar.gz" \
+  --pattern "*-${TARGET}.tar.gz.sha256" \
+  --pattern "*-${TARGET}.tar.gz.cosign.bundle"
+
+# Layer 1
+shasum -a 256 -c proxxx-${VERSION}-${TARGET}.tar.gz.sha256
+
+# Layer 2 — needs sigstore/cosign installed locally
+cosign verify-blob \
+  --bundle proxxx-${VERSION}-${TARGET}.tar.gz.cosign.bundle \
+  --certificate-identity-regexp 'https://github.com/fabriziosalmi/proxxx/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  proxxx-${VERSION}-${TARGET}.tar.gz
+
+# Layer 3 (optional) — audit the dependency tree
+gh release download v${VERSION} --repo fabriziosalmi/proxxx \
+  --pattern "*.cdx.json" --pattern "*.cdx.json.sha256"
+shasum -a 256 -c proxxx-${VERSION}.cdx.json.sha256
+grype sbom:proxxx-${VERSION}.cdx.json   # or trivy, cyclonedx-cli
+
+tar xzf proxxx-${VERSION}-${TARGET}.tar.gz
+sudo mv proxxx-${VERSION}-${TARGET}/proxxx /usr/local/bin/
+proxxx --version
+```
+
+Targets shipped today:
+
+| Target                      | Platform              |
+| :-------------------------- | :-------------------- |
+| `aarch64-apple-darwin`      | macOS Apple Silicon   |
+| `x86_64-unknown-linux-musl` | Linux x86_64 (static) |
+
+ARM64 Linux is **build from source** for now — the cross-link
+toolchain has a transitive C-dep bug (`rusqlite` / `russh` / `sha2`)
+that the matrix hasn't bridged cleanly yet. `cargo build --release`
+on the target host works fine.
+
 ## From source
 
 Requires a stable Rust toolchain (1.75 or newer) and `cargo`.
