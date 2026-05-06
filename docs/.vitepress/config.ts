@@ -75,6 +75,7 @@ export default defineConfig({
           items: [
             { text: 'Pre-commit gate', link: '/guide/pre-commit-gate' },
             { text: 'Bypass policy', link: '/guide/bypass-policy' },
+            { text: 'Troubleshooting', link: '/guide/troubleshooting' },
           ],
         },
       ],
