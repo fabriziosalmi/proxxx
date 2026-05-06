@@ -30,11 +30,11 @@ Pick the row that matches you and jump straight to the right page.
 
 | If you are… | …you'll care about | Start here |
 | :--- | :--- | :--- |
-| **Homelab solo** running 1-3 nodes | wizard, fast TUI, single binary, no daemons | [Quick start](https://fabriziosalmi.github.io/proxxx/guide/quick-start) |
-| **Platform / SRE** on 10-50 nodes with on-call | HITL Telegram gate, alert daemon, `--format json` for CI, `--profile` for multi-cluster | [HITL](https://fabriziosalmi.github.io/proxxx/integrations/hitl) · [Alerts](https://fabriziosalmi.github.io/proxxx/integrations/alerts) |
+| **Homelab solo** running 1-3 nodes | wizard, fast TUI, single binary, no daemons | [5-min homelab quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-homelab) |
+| **Platform / SRE** on 10-50 nodes with on-call | HITL Telegram gate, alert daemon, `--format json` for CI, `--profile` for multi-cluster | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [HITL](https://fabriziosalmi.github.io/proxxx/integrations/hitl) |
 | **DevOps** scripting Proxmox in pipelines | typed exit codes, deterministic JSON, pre-flight risk gate, batch ops with `--yes` | [CLI reference](https://fabriziosalmi.github.io/proxxx/reference/cli) · [Exit codes](https://fabriziosalmi.github.io/proxxx/reference/exit-codes) |
-| **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP stdio server, compile-time-fixed 10-tool registry, SHA-256 pinned for supply-chain audit | [MCP server](https://fabriziosalmi.github.io/proxxx/integrations/mcp) |
-| **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [Security model](https://fabriziosalmi.github.io/proxxx/architecture/security) · [`SECURITY.md`](SECURITY.md) |
+| **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP stdio server, compile-time-fixed 10-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
+| **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [`SECURITY.md`](SECURITY.md) |
 | **Contributor** sending a PR | 7-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
 
 ---

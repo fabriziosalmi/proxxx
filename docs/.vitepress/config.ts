@@ -71,6 +71,13 @@ export default defineConfig({
           ],
         },
         {
+          text: 'Quickstarts by persona',
+          items: [
+            { text: 'Homelab in 5 min', link: '/guide/quickstart-homelab' },
+            { text: 'LLM / MCP server', link: '/guide/quickstart-llm-mcp' },
+          ],
+        },
+        {
           text: 'Operating',
           items: [
             { text: 'Production checklist', link: '/guide/production-checklist' },
