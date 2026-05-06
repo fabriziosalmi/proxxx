@@ -172,6 +172,9 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         ],
         View::OperationQueue => vec![
             ("j/k", "nav"),
+            ("d", "remove"),
+            ("C", "commit"),
+            ("R", "refresh"),
             ("Esc", "back"),
             ("?", "help"),
             ("q", "quit"),

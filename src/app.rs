@@ -1720,6 +1720,7 @@ fn item_count(state: &AppState) -> usize {
         View::GuestList => state.visible_guests().len(),
         View::StorageList => state.storage.len(),
         View::ApprovalQueue => state.pending_approvals.len(),
+        View::OperationQueue => state.op_queue.len(),
         View::ConfigGrep => state.grep_results.len(),
         View::IsoLibrary => crate::app::iso_library::LIBRARY.len(),
         _ => 0,

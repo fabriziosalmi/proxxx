@@ -200,6 +200,7 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
                 None
             }
             KeyCode::Char('d') => {
+                // GuestList: enqueue delete for selected/highlighted.
                 if *state.current_view() == View::GuestList {
                     let mut actions = Vec::new();
                     if !state.selected_guests.is_empty() {
@@ -212,6 +213,14 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
                     if !actions.is_empty() {
                         return Some(Action::EnqueueBatchOperation(actions));
                     }
+                }
+                // OperationQueue: remove the highlighted entry from the
+                // queue. Pre-fix the view's instruction line advertised
+                // "[D] Remove Selected" but no key was wired — Action::
+                // DequeueOperation was reachable only from the reducer
+                // side. Now `d` on the queue does what the legend says.
+                if *state.current_view() == View::OperationQueue && !state.op_queue.is_empty() {
+                    return Some(Action::DequeueOperation(state.selected_index));
                 }
                 None
             }

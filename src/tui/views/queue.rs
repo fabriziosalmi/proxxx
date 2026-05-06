@@ -24,8 +24,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         ])
         .split(main_chunks[0]);
 
+    // Truth-in-binds: pre-fix this said "[Q] Back" but Q opens the
+    // queue (no-op when already here) and `q` triggers Quit. Esc /
+    // h / ← are the actual back chord. "[D] Remove Selected" was
+    // advertised but no key was wired — fixed by binding lowercase
+    // `d` on this view to Action::DequeueOperation.
     let instruction_text =
-        " [Q] Back | [D] Remove Selected | [C] Commit & Execute Queue | [R] Refresh ";
+        " [j/k] Nav · [d] Remove · [C] Commit & Execute · [R] Refresh · [Esc] Back ";
     let instruction_block = Paragraph::new(instruction_text)
         .style(Style::default().fg(Theme::TEXT_MUTED))
         .block(

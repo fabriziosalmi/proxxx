@@ -1,10 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 313
 expression: dump
 ---
 ┌ Operation Queue ─────────────────────────────────────────┐┌ Replay-as-Script ────────────────────┐
-│ [Q] Back | [D] Remove Selected | [C] Commit & Execute Que││                                      │
+│ [j/k] Nav · [d] Remove · [C] Commit & Execute · [R] Refre││                                      │
 └──────────────────────────────────────────────────────────┘│                                      │
 ┌──────────────────────────────────────────────────────────┐│                                      │
 │Queue is empty. Press 's', 'S', 'r', 'd' in Guest List to ││                                      │
