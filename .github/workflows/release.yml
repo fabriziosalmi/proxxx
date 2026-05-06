@@ -25,11 +25,18 @@ on:
     tags:
       - 'v*'
 
-# `contents: write` is the permission that lets the GitHub-Action-
-# bot create the release + upload assets. Default GITHUB_TOKEN has
-# `contents: read` — we override to write FOR THIS WORKFLOW only.
+# Permissions used by this workflow:
+#   - contents: write   — create release + upload assets (default
+#                         GITHUB_TOKEN is read-only; override here only).
+#   - id-token: write   — required for sigstore keyless cosign signing
+#                         via OIDC. The action exchanges this token for
+#                         a short-lived signing certificate; the cert
+#                         pins the issuer + workflow path so a leaked
+#                         cert from another repo can't validate against
+#                         our bundles.
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   # ──────────────────────────────────────────────────────────
@@ -145,6 +152,26 @@ jobs:
           ls -lh dist/
           echo "archive=dist/${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "sha256=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "bundle=dist/${NAME}.tar.gz.cosign.bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign (sigstore)
+        # Pinned action; sigstore-managed. ~5 MiB download, runs in <2s.
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign tarball with cosign (keyless via OIDC)
+        # `--bundle` packs the signature, signing certificate, and
+        # transparency-log inclusion proof into a single self-verifiable
+        # file. Keyless mode = no long-lived signing key on the runner
+        # or anywhere else: the signing cert is short-lived, scoped to
+        # this exact workflow path, and rooted in sigstore's public
+        # transparency log (rekor.sigstore.dev). Anyone can verify
+        # against the OIDC issuer + cert subject without a PGP keyring.
+        run: |
+          set -e
+          cosign sign-blob --yes \
+            --bundle "${{ steps.pack.outputs.bundle }}" \
+            "${{ steps.pack.outputs.archive }}"
+          ls -lh "${{ steps.pack.outputs.bundle }}"
 
       - name: Upload artifact for the release job
         uses: actions/upload-artifact@v4
@@ -153,6 +180,7 @@ jobs:
           path: |
             ${{ steps.pack.outputs.archive }}
             ${{ steps.pack.outputs.sha256 }}
+            ${{ steps.pack.outputs.bundle }}
           retention-days: 7
 
   # ──────────────────────────────────────────────────────────
@@ -164,6 +192,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (for cargo-cyclonedx)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-sbom
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -179,7 +215,36 @@ jobs:
           mkdir -p dist
           find artifacts -name 'proxxx-*.tar.gz' -exec cp {} dist/ \;
           find artifacts -name 'proxxx-*.tar.gz.sha256' -exec cp {} dist/ \;
+          find artifacts -name 'proxxx-*.tar.gz.cosign.bundle' -exec cp {} dist/ \;
           ls -lh dist/
+
+      - name: Generate CycloneDX SBOM
+        # `cargo-cyclonedx` reads Cargo.lock and emits a structured
+        # dependency manifest in CycloneDX format — authoritative for
+        # the source-side dep graph (more precise than scanning the
+        # binary, which would miss dev-cfg conditionally-compiled
+        # crates and could miss-attribute via stripped strings).
+        # The `--locked` install pins the cargo-cyclonedx version
+        # itself; --frozen gates against accidental Cargo.lock churn
+        # in CI.
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo install --locked cargo-cyclonedx
+          cargo cyclonedx --format json --frozen
+          # cargo-cyclonedx emits `bom.json` next to Cargo.toml. Move
+          # to dist/ with the proxxx-versioned name so it sits
+          # alongside the tarballs in the release.
+          if [ -f bom.json ]; then
+            mv bom.json "dist/proxxx-${VERSION}.cdx.json"
+          else
+            # Some versions write `<crate>.cdx.json` instead.
+            mv proxxx.cdx.json "dist/proxxx-${VERSION}.cdx.json" 2>/dev/null || true
+          fi
+          ls -lh dist/proxxx-${VERSION}.cdx.json
+          # Sha256 the SBOM too — same as the tarballs, no GitHub-API
+          # round-trip needed to pin.
+          ( cd dist && shasum -a 256 "proxxx-${VERSION}.cdx.json" > "proxxx-${VERSION}.cdx.json.sha256" )
 
       - name: Compose release notes
         # Pull the `[Unreleased]` section from CHANGELOG.md if present;
@@ -204,10 +269,36 @@ jobs:
             echo
             echo "### Verifying downloads"
             echo
-            echo "Each tarball ships with a sibling \`.sha256\` file. Verify:"
+            echo "Three layers of verification ship with every release tarball:"
+            echo
+            echo "**1. Checksum** — sibling \`.sha256\` file:"
             echo
             echo '```bash'
             echo 'shasum -a 256 -c proxxx-*-<target>.tar.gz.sha256'
+            echo '```'
+            echo
+            echo "**2. Sigstore keyless signature** — sibling \`.cosign.bundle\`:"
+            echo
+            echo '```bash'
+            echo "cosign verify-blob \\"
+            echo "  --bundle proxxx-${VERSION}-<target>.tar.gz.cosign.bundle \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@.*' \\"
+            echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\"
+            echo "  proxxx-${VERSION}-<target>.tar.gz"
+            echo '```'
+            echo
+            echo "The certificate identity pins to this exact workflow path —"
+            echo "a leaked sigstore cert from any other repo cannot validate"
+            echo "against these bundles. The transparency-log inclusion proof"
+            echo "is embedded in the bundle; no online lookup at verify time."
+            echo
+            echo "**3. CycloneDX SBOM** — \`proxxx-${VERSION}.cdx.json\` lists"
+            echo "every dependency from \`Cargo.lock\` with name + version +"
+            echo "checksum + license. Audit with \`cyclonedx-cli\`,"
+            echo "\`grype\`, \`trivy\`, or any SBOM-aware scanner:"
+            echo
+            echo '```bash'
+            echo "grype sbom:proxxx-${VERSION}.cdx.json"
             echo '```'
           } > "$NOTES_FILE"
           echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
@@ -222,6 +313,9 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.cosign.bundle
+            dist/*.cdx.json
+            dist/*.cdx.json.sha256
           # `draft: false` publishes immediately; flip to true if you
           # want to review before announcing.
           draft: false
