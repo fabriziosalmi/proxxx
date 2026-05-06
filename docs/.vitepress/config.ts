@@ -73,6 +73,7 @@ export default defineConfig({
         {
           text: 'Operating',
           items: [
+            { text: 'Production checklist', link: '/guide/production-checklist' },
             { text: 'Pre-commit gate', link: '/guide/pre-commit-gate' },
             { text: 'Bypass policy', link: '/guide/bypass-policy' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
