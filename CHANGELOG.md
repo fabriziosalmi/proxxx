@@ -12,6 +12,54 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-06
+
+### Added — supply chain
+
+- **Sigstore keyless cosign signatures on every release tarball.**
+  Each per-target tarball now ships with a `.cosign.bundle`
+  (signature + signing certificate + transparency-log inclusion
+  proof — all in one self-verifiable file). Verification:
+  ```bash
+  cosign verify-blob \
+    --bundle proxxx-0.1.7-<target>.tar.gz.cosign.bundle \
+    --certificate-identity-regexp 'https://github.com/fabriziosalmi/proxxx/.github/workflows/release.yml@.*' \
+    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+    proxxx-0.1.7-<target>.tar.gz
+  ```
+  The cert-identity regexp pins to the exact workflow path —
+  a leaked sigstore cert from any other repo or workflow can
+  not validate against these bundles. Offline verification (the
+  transparency-log inclusion proof is embedded in the bundle).
+- **CycloneDX SBOM (`proxxx-0.1.7.cdx.json`).** Generated in
+  the release job from `Cargo.lock` via `cargo-cyclonedx
+  --frozen` — authoritative source-side dep graph (more precise
+  than scanning the binary). Ships with its own `.sha256`
+  sidecar. Audit with `grype sbom:proxxx-0.1.7.cdx.json` or
+  any CycloneDX-aware scanner.
+
+### Added — docs
+
+- **README "Who is this for?" personas table** above "What you
+  get". Six rows mapping persona → concerns → deep link, so a
+  first-time visitor evaluating in 30 seconds gets a
+  jump-to-the-right-page table instead of a feature list.
+- **`/guide/troubleshooting`** — 16 common errors covering
+  connection, TLS, auth, secrets, SSH, config, backup, HITL,
+  MCP, and pre-commit-gate failure modes. Every entry quotes
+  the exact `Fatal Error: ...` string proxxx emits, then the
+  cause + a copy-pasteable fix.
+- **`/guide/production-checklist`** — 7-section, 26-item
+  walkthrough for operators deploying to prod: verify the
+  binary (sha + cosign + SBOM), configure access (token /
+  TLS / secret storage), HITL setup with systemd, alerting,
+  SSH layer, host hardening, operational runbook (inventory
+  pin, release notifications, recovery test).
+- **Persona quickstarts**: `/guide/quickstart-homelab`
+  (5-min single-node walkthrough) and `/guide/quickstart-llm-mcp`
+  (5-min Claude Desktop / Cursor wiring with HITL on destructive
+  tools). Sidebar new "Quickstarts by persona" section.
+
 ## [0.1.6] — 2026-05-06
 
 ### Added
