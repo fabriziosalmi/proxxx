@@ -12,6 +12,22 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-06
+
+### Added
+
+- **Click-to-zoom on the docs landing page hero image.** The
+  6-panel overview infographic embedded in the home hero slot
+  is now zoomable via `medium-zoom` (~3 KB JS, the canonical
+  vitepress recipe). Click anywhere on the image → smooth
+  zoom-to-viewport with the page-bg as backdrop; click again
+  or Esc → zoom back. Wired generically to `.VPHero img` and
+  `.vp-doc img`, so any future screenshot in `/guide/` or
+  `/reference/` benefits automatically. The navbar logo
+  (`.VPNavBar img`) is intentionally excluded — clicking the
+  brand mark in the corner shouldn't zoom it. SSR-safe (init
+  gated in `onMounted`); re-binds across SPA navigation.
+
 ### Removed
 
 - **Dead `repl_jobs` pipeline pruned from the TUI path.** Pre-cleanup
