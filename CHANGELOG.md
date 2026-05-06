@@ -10,6 +10,30 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
+## [0.1.5] — 2026-05-06
+
+### Fixed
+
+- **Operation Queue: navigation + remove key wired, instruction
+  text honest.** Pre-fix the queue's instruction strip advertised
+  `[Q] Back · [D] Remove Selected · [C] Commit · [R] Refresh` and
+  three of those four were lies:
+  - `[Q]` switches TO the queue (no-op when already there); `q`
+    actually quits the app.
+  - `[D]` only deletes guests in GuestList; on the queue, it did
+    nothing.
+  - `j/k` navigation was broken because `item_count()` didn't
+    include `OperationQueue` — the selected-index was frozen at
+    0 even with multiple entries.
+  - Only `[C]` and `[R]` worked.
+  Result: the queue was a viewer with one usable button. Now `j/k`
+  walks the entries, lowercase `d` removes the highlighted one
+  (`Action::DequeueOperation` was reachable from the reducer side
+  but never wired to a key — fixed), and the legend reflects the
+  truth: `[j/k] Nav · [d] Remove · [C] Commit & Execute · [R]
+  Refresh · [Esc] Back`. The global status footer's
+  `OperationQueue` bindings updated to match.
+
 ## [0.1.4] — 2026-05-06
 
 ### Fixed
