@@ -18,6 +18,10 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
 </p>
 
+<p align="center">
+  <img src="assets/proxxx-overview.jpg" alt="proxxx overview — six panels covering installation, authentication wizard, cluster navigation, pre-flight risk gate, HITL approval workflow, and the contributor quality gate" width="900">
+</p>
+
 ---
 
 ## What you get
