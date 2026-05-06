@@ -97,7 +97,6 @@ enum DataMsg {
         resources: Vec<crate::api::types::HaResource>,
         manager: crate::api::types::HaManagerStatus,
         cluster: Vec<crate::api::types::ClusterStatusEntry>,
-        repl_jobs: Vec<crate::api::types::ReplicationJob>,
         repl_status: Vec<crate::api::types::ReplicationStatus>,
     },
 }
@@ -608,7 +607,6 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                             resources,
                             manager,
                             cluster,
-                            repl_jobs,
                             repl_status,
                         } => {
                             app::update(
@@ -618,7 +616,6 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                                     resources,
                                     manager,
                                     cluster,
-                                    repl_jobs,
                                     repl_status,
                                 },
                             );
@@ -1573,8 +1570,11 @@ async fn dispatch_side_effect(
                     tokio::time::timeout(FETCH_TIMEOUT, client_cloned.ha_manager_status());
                 let cluster_fut =
                     tokio::time::timeout(FETCH_TIMEOUT, client_cloned.cluster_status());
-                let jobs_fut =
-                    tokio::time::timeout(FETCH_TIMEOUT, client_cloned.list_replication_jobs());
+                // (replication-jobs fetch removed — pre-cleanup we
+                // pulled `list_replication_jobs` here too, but no
+                // view rendered it. The CLI `proxxx replication
+                // jobs` reads it directly via the gateway, bypassing
+                // AppState — that path is unaffected.)
                 // Per-node replication status: fan out across online nodes
                 // and concatenate. Each per-node call gets the same
                 // budget; one fenced node cannot stall the whole sweep.
@@ -1585,13 +1585,8 @@ async fn dispatch_side_effect(
                         tokio::time::timeout(FETCH_TIMEOUT, c.list_replication_status(&n)).await
                     });
                 }
-                let (g, r, m, cl, j) = tokio::join!(
-                    groups_fut,
-                    resources_fut,
-                    manager_fut,
-                    cluster_fut,
-                    jobs_fut
-                );
+                let (g, r, m, cl) =
+                    tokio::join!(groups_fut, resources_fut, manager_fut, cluster_fut);
                 // `timeout` returns Result<inner, Elapsed>. The inner is
                 // itself anyhow::Result<T>. Coalesce timeout + transport
                 // failure into "empty list" so a single fenced node
@@ -1622,7 +1617,6 @@ async fn dispatch_side_effect(
                     resources: flatten_or_default!(r, "ha_resources"),
                     manager: flatten_or_default!(m, "ha_manager"),
                     cluster: flatten_or_default!(cl, "cluster_status"),
-                    repl_jobs: flatten_or_default!(j, "repl_jobs"),
                     repl_status: all_status,
                 };
                 let _ = tx_cloned.send(payload).await;

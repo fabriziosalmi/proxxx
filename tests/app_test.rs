@@ -785,7 +785,6 @@ mod tests {
                     node_status: std::collections::HashMap::new(),
                 },
                 cluster: vec![],
-                repl_jobs: vec![],
                 repl_status: vec![],
             },
         );

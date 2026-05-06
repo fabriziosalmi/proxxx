@@ -101,7 +101,6 @@ pub struct AppState {
     pub ha_resources: Vec<crate::api::types::HaResource>,
     pub ha_manager: Option<crate::api::types::HaManagerStatus>,
     pub cluster_entries: Vec<crate::api::types::ClusterStatusEntry>,
-    pub repl_jobs: Vec<crate::api::types::ReplicationJob>,
     pub repl_status: Vec<crate::api::types::ReplicationStatus>,
     pub ha_loading: bool,
 
@@ -280,7 +279,10 @@ pub enum Action {
     // HA + replication console (feature #5)
     /// Open the HA console (read-only inspector). Triggers a refresh
     /// of `ha_groups`, `ha_resources`, `ha_status`, `cluster_status`,
-    /// `replication_jobs`, and per-node `replication_status`.
+    /// and per-node `replication_status`. (replication_jobs was
+    /// fetched here too pre-cleanup but no view rendered it — the
+    /// CLI `proxxx replication jobs` reads it directly from the
+    /// gateway and bypasses AppState.)
     OpenHaConsole,
     /// Bulk data delivered by the controller after the multi-fetch.
     HaDataLoaded {
@@ -288,7 +290,6 @@ pub enum Action {
         resources: Vec<crate::api::types::HaResource>,
         manager: crate::api::types::HaManagerStatus,
         cluster: Vec<crate::api::types::ClusterStatusEntry>,
-        repl_jobs: Vec<crate::api::types::ReplicationJob>,
         repl_status: Vec<crate::api::types::ReplicationStatus>,
     },
 
@@ -499,7 +500,6 @@ impl Default for AppState {
             ha_resources: Vec::new(),
             ha_manager: None,
             cluster_entries: Vec::new(),
-            repl_jobs: Vec::new(),
             repl_status: Vec::new(),
             ha_loading: false,
             hw_node: String::new(),
@@ -566,7 +566,6 @@ impl AppState {
                         self.ha_resources.clear();
                         self.ha_manager = None;
                         self.cluster_entries.clear();
-                        self.repl_jobs.clear();
                         self.repl_status.clear();
                         self.ha_loading = false;
                     }
@@ -1192,14 +1191,12 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             resources,
             manager,
             cluster,
-            repl_jobs,
             repl_status,
         } => {
             state.ha_groups = groups;
             state.ha_resources = resources;
             state.ha_manager = Some(manager);
             state.cluster_entries = cluster;
-            state.repl_jobs = repl_jobs;
             state.repl_status = repl_status;
             state.ha_loading = false;
         }

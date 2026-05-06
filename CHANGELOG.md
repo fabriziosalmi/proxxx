@@ -10,6 +10,34 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
+## [Unreleased]
+
+### Removed
+
+- **Dead `repl_jobs` pipeline pruned from the TUI path.** Pre-cleanup
+  the TUI fetched `client.list_replication_jobs()` on every HA-console
+  open, routed it through `DataMsg::HaData → Action::HaDataLoaded →
+  state.repl_jobs`, and… nothing read it. Six call sites surgically
+  removed: `AppState.repl_jobs` field + initializer, `Action::
+  HaDataLoaded.repl_jobs` variant field, `DataMsg::HaData.repl_jobs`,
+  the `client.list_replication_jobs()` future in the HA fetch
+  fan-out + its `tokio::join!` arm, the `repl_status.clear()`-
+  alongside `repl_jobs.clear()` line in the view-pop GC, and a
+  test fixture. The trait method `ProxmoxGateway::list_replication_
+  jobs()` and the CLI `proxxx replication jobs` command stay —
+  the CLI reads the gateway directly, bypassing AppState. Net:
+  one less network round-trip per HA console open, ~30 lines
+  removed, no behaviour change visible to operators. Surfaced by
+  the from-zero project audit; verified with `grep -rn repl_jobs
+  src/ tests/` returning nothing in the live tree.
+
+### Docs
+
+- **CHANGELOG `[Unreleased]` section restored.** Post-v0.1.5
+  release the section was missing — future commits had nowhere
+  to land until the next bump. Added at the top so the next
+  feature/fix lands in the right slot without a manual restore.
+
 ## [0.1.5] — 2026-05-06
 
 ### Fixed
