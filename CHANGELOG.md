@@ -12,6 +12,44 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-05-07
+
+### Fixed — security hardening
+
+- **SSH argv injection (CWE-88).** The CLI's `proxxx ssh <vmid>` and the
+  init-wizard's connectivity probe both shell out to system `ssh(1)`
+  with `format!("{user}@{host}")` as the destination positional. Without
+  a `--` separator before the destination, a `host` value beginning with
+  `-` (e.g. via a tampered TOML or a hostile QGA reply) would be parsed
+  as a flag — `-oProxyCommand=…` is the canonical exploit. Both call
+  sites now (1) refuse the operation up-front via the new
+  `config::validate_ssh_destination(user, host)` helper and (2) emit a
+  POSIX `--` before the destination as defense-in-depth. The validator
+  rejects empty strings, leading `-`, embedded `@` in `user`,
+  whitespace, and NUL bytes; covered by six unit tests.
+
+### Fixed — test reliability
+
+- **Process-global `env::set_var` race in test fixtures.** Five mock
+  client builders (`src/app/preflight.rs`, `tests/api_test.rs`,
+  `tests/common/mod.rs`, `tests/rbac_e2e.rs`, `tests/rbac_live.rs`)
+  injected the auth secret via `std::env::set_var("PROXXX_TOKEN_SECRET",
+  …)`. Cargo runs unit and integration tests in parallel and env state
+  is process-global, so any concurrent test reading the variable could
+  observe the wrong value or race a sibling's `remove_var`. Replaced
+  with the `cli_secret` resolver-priority-#1 parameter — same effect,
+  zero shared mutable state, no `serial_test` annotation needed for the
+  wiremock-only suites.
+
+### Internal — code clarity
+
+- `Orchestrator::wait_for_reboot` reads as if it swallows API errors
+  in its node-liveness poll loop. The `unwrap_or_default()` is in fact
+  load-bearing — the loop is designed to outlast a reboot, so transient
+  TCP/TLS failures during cluster reconvergence MUST keep polling
+  rather than abort the upgrade orchestration. Comment added; behaviour
+  unchanged.
+
 ## [0.1.8] — 2026-05-07
 
 ### Added — supply chain
