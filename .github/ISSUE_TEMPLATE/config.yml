@@ -1,0 +1,13 @@
+# Disabling the catch-all blank issue forces reporters into one of the
+# templates below. The security entry redirects out of the public
+# tracker per SECURITY.md (private vulnerability reports only).
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/fabriziosalmi/proxxx/security/advisories/new
+    about: |
+      Please do NOT open a public issue for security problems. Use the
+      private vulnerability advisory flow described in SECURITY.md.
+  - name: 💬 Question or discussion
+    url: https://github.com/fabriziosalmi/proxxx/discussions
+    about: For open-ended questions, ideas, or "is this the right tool for me?"

@@ -18,13 +18,14 @@ git_history_backup.md
 proxxx-pre-reset.bundle
 # Working notes and pre-publication scratch — not the public docs site.
 development/
+# Catch-all for ad-hoc maintainer notes (features.md, bootstrap.md,
+# personal cluster walkthroughs with lab IPs/hostnames, etc.). Drop
+# anything here you don't want tracked rather than littering the repo
+# root with one-off ignores.
+scratch/
 # VitePress build artefacts.
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 
-features.md
-bootstrap.md
-# Personal cluster walkthrough — references the maintainer's lab IPs/hostnames.
-guide.md
 .DS_Store

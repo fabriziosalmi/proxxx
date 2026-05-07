@@ -15,6 +15,9 @@
 
 <p align="center">
   <a href="https://github.com/fabriziosalmi/proxxx/actions/workflows/ci.yml"><img src="https://github.com/fabriziosalmi/proxxx/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/fabriziosalmi/proxxx/actions/workflows/scorecard.yml"><img src="https://api.securityscorecards.dev/projects/github.com/fabriziosalmi/proxxx/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/fabriziosalmi/proxxx/releases/latest"><img src="https://img.shields.io/github/v/release/fabriziosalmi/proxxx?sort=semver&display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/fabriziosalmi/proxxx/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/MSRV-1.95-orange?logo=rust" alt="MSRV 1.95"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
 </p>
 

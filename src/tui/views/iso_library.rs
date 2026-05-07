@@ -152,7 +152,7 @@ fn draw_detail(f: &mut Frame, area: Rect, entry: &IsoEntry, state: &AppState) {
         }
         None => (
             "checksum:".into(),
-            "NOT PINNED — download refused (release-time TODO)".to_string(),
+            "NOT PINNED — download refused".to_string(),
             Style::default()
                 .fg(Theme::WARNING)
                 .add_modifier(Modifier::BOLD),

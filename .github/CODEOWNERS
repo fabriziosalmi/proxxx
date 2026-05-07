@@ -1,0 +1,45 @@
+# CODEOWNERS — auto-request review on touched paths.
+#
+# Single-maintainer project today, so every path falls back to the
+# repo owner. The point of listing security-sensitive paths
+# explicitly anyway is twofold:
+#
+#   1. If branch protection ever gets `require code-owner review`
+#      enabled, sensitive paths can't be merged without a reviewer
+#      from this list — even if other reviewers approve.
+#   2. When co-maintainers join later, swap the owner per-path
+#      without losing the routing intent (e.g. crypto / supply-chain
+#      changes go to the security owner; API changes to the API owner).
+#
+# Format: <pattern> <user-or-team> [...]
+# Last matching pattern wins.
+
+# Default fallback — every file the catch-all matches goes here.
+*                       @fabriziosalmi
+
+# Build / supply-chain surface — release artefacts, signing, SBOM,
+# dependency lockfile.
+/Cargo.toml             @fabriziosalmi
+/Cargo.lock             @fabriziosalmi
+/.cargo/                @fabriziosalmi
+/rust-toolchain.toml    @fabriziosalmi
+
+# CI / release pipelines — anything that runs on the GITHUB_TOKEN
+# or signs release artefacts.
+/.github/               @fabriziosalmi
+/.githooks/             @fabriziosalmi
+/scripts/               @fabriziosalmi
+
+# Security-impacting source paths — secret handling, HITL approval
+# gate, RBAC, SSH credential layer.
+/src/config/            @fabriziosalmi
+/src/hitl/              @fabriziosalmi
+/src/access/            @fabriziosalmi
+/src/ssh/               @fabriziosalmi
+/src/api/auth.rs        @fabriziosalmi
+
+# Docs surface that ships externally — the user-visible policy
+# documents reviewers should see when they change.
+/SECURITY.md            @fabriziosalmi
+/CODE_OF_CONDUCT.md     @fabriziosalmi
+/LICENSE                @fabriziosalmi

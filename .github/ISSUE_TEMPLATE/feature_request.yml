@@ -1,0 +1,55 @@
+name: ✨ Feature request
+description: Propose a new capability or change to existing behaviour.
+title: "[feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check `README.md` → "Honest non-goals" and the
+        feature-coverage matrix in
+        [pre-commit/01-feature-coverage.md](../blob/main/pre-commit/01-feature-coverage.md).
+        proxxx is opinionated — some adjacent features are intentionally
+        out of scope (the README states which).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Operator-facing scenario. Don't lead with the proposed solution.
+      placeholder: |
+        When I'm migrating a guest off a node, I have to open the web
+        UI to confirm which storages are shared. proxxx tells me VM
+        config but not whether the disks will follow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed surface
+      description: |
+        CLI flag / TUI affordance / new subcommand. Sketch the contract,
+        not the implementation. If it touches the API client or
+        mutation lifecycle, say so — those changes need a live-cluster
+        verification matrix update (CONTRIBUTING.md).
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds do you use today? Why are they insufficient?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I read the "Honest non-goals" section and this isn't on it.
+          required: true
+        - label: I checked the feature-coverage matrix and this isn't already partially shipped.
+          required: true

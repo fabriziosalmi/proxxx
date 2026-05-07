@@ -1,0 +1,93 @@
+name: 🐛 Bug report
+description: Something proxxx did doesn't match what you expected. Wrong output, crash, broken UI, regression.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. proxxx is a
+        cluster-management tool, so a vague repro is hard to act on.
+        Please fill in every section — the more concrete the steps,
+        the faster this lands.
+
+        **For security issues**, stop here and use the private
+        advisory flow in [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Concrete observation. Include the exact command and the unexpected output.
+      placeholder: |
+        Ran `proxxx ls guests --format json` and got an empty array,
+        even though `qm list` on the node shows 14 VMs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        Step-by-step. Include redacted config (no tokens / no IPs you
+        don't want public) and the exact CLI args. If the bug is in
+        the TUI, describe the keystroke sequence.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: proxxx version
+      description: Output of `proxxx version --json` (the JSON form includes audit_ignores + build metadata).
+      placeholder: "0.1.7"
+    validations:
+      required: true
+
+  - type: input
+    id: pve-version
+    attributes:
+      label: PVE / PBS version (if relevant)
+      description: Output of `pveversion` on a node, or `proxmox-backup-manager versions` for PBS.
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / arch
+      placeholder: "macOS 15.2 arm64 / Debian 12 amd64 / Alpine 3.20 musl"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        proxxx writes structured logs under `~/.local/state/proxxx/`
+        (Linux) or `~/Library/Logs/proxxx/` (macOS). Tail the most
+        recent file and paste the lines around the failure. Strip any
+        tokens / hostnames you don't want public.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
