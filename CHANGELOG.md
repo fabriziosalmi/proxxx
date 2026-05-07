@@ -12,6 +12,81 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-07
+
+### Added — supply chain
+
+- **Every GitHub Actions `uses:` is now pinned to a 40-char commit
+  SHA**, with a trailing `# vX.Y.Z` comment recording what version
+  the SHA mapped to at pin time. Closes the floating-tag attack
+  surface (the tj-actions/changed-files class of supply-chain
+  compromise where a re-tagged `@v4` silently picks up malicious
+  code with the runner's `GITHUB_TOKEN`). Dependabot is configured
+  to update both the SHA and the trailing comment together so pins
+  do not drift past published releases.
+- **OpenSSF Scorecard workflow** (`.github/workflows/scorecard.yml`)
+  running weekly + on push-to-main + on branch-protection-rule
+  changes. Results land in GitHub Code-Scanning (per-finding
+  remediation, visible under Security → Code scanning) and the
+  public Scorecard API at api.securityscorecards.dev — feeds the
+  badge added to README.md.
+
+### Changed — operator-facing
+
+- `proxxx init` SSH-key discovery now compares the `.pub` extension
+  case-insensitively. On a case-preserving filesystem (HFS+ default,
+  exFAT, NTFS via fuse) a public key named `id_rsa.PUB` previously
+  slipped past the filter and was offered as a private-key candidate
+  in the wizard menu.
+- iso library detail panel: the "NOT PINNED — download refused"
+  status string no longer carries a parenthetical maintainer note.
+  The refusal behaviour is unchanged.
+
+### Fixed — contributor experience
+
+- `scripts/gate.sh` now resolves its working tree from the hook's
+  cwd when invoked under `GIT_DIR` (i.e. as a pre-commit hook).
+  Previously, in nested-worktree layouts (e.g. Claude Code's
+  `.claude/worktrees/<name>` under the main checkout) the gate
+  resolved `ROOT` to `scripts/` itself and stage 3 (`cargo audit`)
+  died with "Couldn't load Cargo.lock". Single-worktree commits are
+  unaffected.
+- The OpenSSF Scorecard workflow's pins for `ossf/scorecard-action`
+  and `github/codeql-action/upload-sarif` now point at the underlying
+  commit SHAs, not the annotated-tag object SHAs the GitHub git-refs
+  API initially returned. The Scorecard webapp's workflow-verification
+  step rejects annotated-tag SHAs as "imposter commits", so the very
+  first weekly run failed at the publish step with a 400. Other pinned
+  actions in `ci.yml` / `release.yml` / `docs.yml` use lightweight
+  tags (no dereferencing required) and were unaffected.
+
+### Added — community / repo surface
+
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) — closes the
+  broken link `CONTRIBUTING.md` already pointed at.
+- `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml`
+  with required-field validations and a security redirect to the
+  private advisory flow.
+- `.github/PULL_REQUEST_TEMPLATE.md` matching the gate.sh + live-
+  cluster + CHANGELOG verification policy.
+- `.github/CODEOWNERS` routing for build-system, CI, and the
+  security-impacting source paths.
+- README badge sweep: latest release, MSRV (linked to
+  `rust-toolchain.toml`), and OpenSSF Scorecard alongside the
+  existing CI + license badges.
+
+### Internal — code health
+
+- `cargo clippy --all-targets` now emits zero warnings on Rust
+  1.95.0 — including the pedantic / nursery groups already wired
+  as `warn`. Five pedantic-level production fixes (case-insensitive
+  `.pub`, `Option<&T>` over `&Option<T>`, `format!` collapse,
+  struct-bools allow on the genuinely-flat `GuestFirewallOptions`,
+  blank-line-after-outer-attr) plus a sweep of the test stubs
+  (justified file-level `default_trait_access` allow on the
+  fake-gateway fixtures, `float_cmp` allow on the exact-min/max
+  sparkline asserts, digit-grouping + missing-backtick fixes).
+
 ## [0.1.7] — 2026-05-06
 
 ### Added — supply chain
