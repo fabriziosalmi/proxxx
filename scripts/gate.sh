@@ -30,7 +30,26 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+
+# Resolve the working tree the gate should test against:
+#   - When invoked as a pre-commit hook (git sets GIT_DIR), the hook's
+#     cwd already IS the working tree git is committing FROM. Use it
+#     directly. This handles nested worktree layouts where SCRIPT_DIR
+#     lives in the main checkout but the commit is happening in a
+#     sibling worktree — naively asking `git -C "$SCRIPT_DIR" rev-parse
+#     --show-toplevel` under hook env returns SCRIPT_DIR itself, and
+#     `cd $ROOT` lands in scripts/ where there is no Cargo.lock; stage 3
+#     `cargo audit` then fails with "Couldn't load Cargo.lock".
+#   - Otherwise (manual `bash scripts/gate.sh`), derive from script
+#     location.
+# Either way, drop GIT_DIR / GIT_WORK_TREE so the cargo subcommands
+# below see a clean env (each one re-derives its own context).
+if [ -n "${GIT_DIR:-}" ]; then
+    ROOT="$(pwd)"
+else
+    ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+fi
+unset GIT_DIR GIT_WORK_TREE
 cd "$ROOT"
 
 T0=$(date +%s)
