@@ -4141,6 +4141,21 @@ async fn execute_ssh(
             }
         }
     };
+    // Last-line-of-defense validation BEFORE we spawn ssh. The config
+    // and QGA paths above can each yield a target, but a tampered TOML
+    // or a hostile QGA reply could still smuggle a leading `-` or an
+    // embedded `@`. Refuse here with a paste-ready diagnostic instead
+    // of relying solely on the `--` separator below (CWE-88).
+    if let Err(why) = crate::config::validate_ssh_destination(&target.user, &target.host) {
+        anyhow::bail!(
+            "refusing to ssh: {why}\n\
+             source: {source}\n\
+             target: user={:?} host={:?}\n\
+             Edit [ssh] / [ssh.guests.\"{vmid}\"] in config.toml to fix.",
+            target.user,
+            target.host,
+        );
+    }
     eprintln!(
         "\x1b[2m[ssh] resolved {}@{}:{} (source: {source})\x1b[0m",
         target.user, target.host, target.port
@@ -4149,12 +4164,18 @@ async fn execute_ssh(
     // Spawn the system `ssh`. Sharing stdin/stdout/stderr with the
     // parent gives a true terminal handoff — no extra PTY layer, no
     // double key forwarding. The child inherits TERM, LANG, etc.
+    //
+    // The `--` separator before `user@host` is defense-in-depth against
+    // argv injection: a misconfigured/poisoned `host` starting with `-`
+    // (e.g. `-oProxyCommand=…`) would otherwise be parsed by ssh as a
+    // flag. POSIX `--` ends option processing.
     let mut cmd_builder = std::process::Command::new("ssh");
     cmd_builder
         .arg("-i")
         .arg(&target.key_path)
         .arg("-p")
         .arg(target.port.to_string())
+        .arg("--")
         .arg(format!("{}@{}", target.user, target.host));
     if let Some(c) = cmd {
         cmd_builder.arg(c);

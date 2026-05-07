@@ -84,9 +84,12 @@ impl RbacEnv {
     }
 
     async fn client_for(&self, user: &str, secret: &str) -> Result<Arc<PxClient>> {
-        // Per-test secret injection via env var. Each test runs serial,
-        // so the env doesn't race; PxClient reads it once at build.
-        std::env::set_var("PROXXX_TOKEN_SECRET", secret);
+        // Pass the secret as cli_secret (resolver priority #1). The
+        // serial annotation already removes intra-suite race risk, but
+        // avoiding set_var also keeps env state clean for tests in
+        // OTHER suites that share the same cargo-test process — and
+        // means a hot-loop test no longer hands the secret to siblings
+        // through process-global state.
         let cfg = ProfileConfig {
             url: self.api_url.clone(),
             user: user.into(),
@@ -103,7 +106,7 @@ impl RbacEnv {
             pbs: None,
             alerts: None,
         };
-        Ok(Arc::new(PxClient::new(cfg, None).await?))
+        Ok(Arc::new(PxClient::new(cfg, Some(secret)).await?))
     }
 
     async fn operator(&self) -> Result<Arc<PxClient>> {

@@ -111,9 +111,14 @@ impl E2eEnv {
     /// fallback in E2E to keep the test deterministic).
     pub async fn build_client(&self) -> Result<Arc<PxClient>> {
         // We construct a `ProfileConfig` directly rather than going
-        // through the TOML loader — the env IS the source of truth
-        // for E2E and we don't want to touch ~/.config/proxxx.
-        std::env::set_var("PROXXX_TOKEN_SECRET", &self.token_secret);
+        // through the TOML loader — the E2E env IS the source of truth
+        // and we don't want to touch ~/.config/proxxx.
+        //
+        // The token secret is passed via cli_secret (resolver priority
+        // #1) instead of being injected through PROXXX_TOKEN_SECRET. The
+        // env-var path is process-global; with concurrent test binaries
+        // sharing a parent shell environment, a stale set_var can leak
+        // into a sibling suite that legitimately wants the env empty.
         let cfg = proxxx::config::ProfileConfig {
             url: self.api_url.clone(),
             user: self.user.clone(),
@@ -130,7 +135,7 @@ impl E2eEnv {
             pbs: None,
             alerts: None,
         };
-        let client = PxClient::new(cfg, None)
+        let client = PxClient::new(cfg, Some(&self.token_secret))
             .await
             .context("PxClient::new from E2E env")?;
         Ok(Arc::new(client))
