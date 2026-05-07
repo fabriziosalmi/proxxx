@@ -874,7 +874,10 @@ tcp   0      0      :::443                  :::*                    LISTEN
     //   4. an empty backup list yields Ok(None)
 
     async fn mock_pxclient(server: &wiremock::MockServer) -> crate::api::PxClient {
-        std::env::set_var("PROXXX_TOKEN_SECRET", "fake-secret");
+        // Pass the secret via the cli_secret parameter (resolver priority
+        // #1) rather than std::env::set_var. Env vars are process-global
+        // and cargo runs unit tests in parallel — set_var here would race
+        // with any concurrently-running test that reads PROXXX_TOKEN_SECRET.
         let cfg = crate::config::ProfileConfig {
             url: server.uri(),
             user: "root@pam".into(),
@@ -891,7 +894,9 @@ tcp   0      0      :::443                  :::*                    LISTEN
             pbs: None,
             alerts: None,
         };
-        crate::api::PxClient::new(cfg, None).await.expect("client")
+        crate::api::PxClient::new(cfg, Some("fake-secret"))
+            .await
+            .expect("client")
     }
 
     #[tokio::test]

@@ -60,7 +60,10 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 /// flows into the configured profile so the client picks the right auth
 /// header shape (token-auth uses the user as the principal).
 async fn persona_client(server: &MockServer, user: &str) -> PxClient {
-    std::env::set_var("PROXXX_TOKEN_SECRET", "fake-secret");
+    // Pass the secret as cli_secret (resolver priority #1) instead of
+    // mutating PROXXX_TOKEN_SECRET. Env state is process-global and
+    // cargo runs integration tests in parallel — set_var would race
+    // with any test that observes the env var.
     let cfg = ProfileConfig {
         url: server.uri(),
         user: user.into(),
@@ -77,7 +80,9 @@ async fn persona_client(server: &MockServer, user: &str) -> PxClient {
         pbs: None,
         alerts: None,
     };
-    PxClient::new(cfg, None).await.expect("client builds")
+    PxClient::new(cfg, Some("fake-secret"))
+        .await
+        .expect("client builds")
 }
 
 /// Stock 403 response in PVE's standard envelope.

@@ -390,6 +390,88 @@ pub struct ResolvedGuestSsh {
     pub key_path: std::path::PathBuf,
 }
 
+/// Reject SSH user/host strings that would be parsed by `ssh(1)` as
+/// flags or that would smuggle a different destination through the
+/// `user@host` positional. Defense-in-depth even with `--`: the
+/// `--`-separator stops flag parsing in the binary, but a leading `-`
+/// in `host` or `@` in `user` still indicates a config that's been
+/// tampered with or fat-fingered, and "ssh -- -oProxyCommand=…" is
+/// unsafe on shells that auto-complete around `--` (CWE-88).
+///
+/// Returns `Err(reason)` so callers can surface an actionable message.
+pub fn validate_ssh_destination(user: &str, host: &str) -> std::result::Result<(), String> {
+    if user.is_empty() {
+        return Err("ssh user is empty".into());
+    }
+    if host.is_empty() {
+        return Err("ssh host is empty".into());
+    }
+    // Leading `-` would be parsed as a flag if the destination ever
+    // ends up before `--` (e.g. via a future call site that forgets
+    // the separator). Refuse at the source.
+    if user.starts_with('-') {
+        return Err(format!("ssh user starts with '-': {user:?}"));
+    }
+    if host.starts_with('-') {
+        return Err(format!("ssh host starts with '-': {host:?}"));
+    }
+    // `@` in the user collapses `user@host` parsing — ssh keeps the
+    // last `@` as the separator, so `user="a@b", host="c"` becomes
+    // destination `b@c` and silently changes target.
+    if user.contains('@') {
+        return Err(format!("ssh user contains '@': {user:?}"));
+    }
+    // Whitespace and NUL would survive into argv but break shell
+    // composition for the few internal callers that quote into
+    // log/diagnostic strings.
+    let bad = |c: char| c.is_whitespace() || c == '\0';
+    if user.contains(bad) {
+        return Err(format!("ssh user contains whitespace/NUL: {user:?}"));
+    }
+    if host.contains(bad) {
+        return Err(format!("ssh host contains whitespace/NUL: {host:?}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ssh_validation_tests {
+    use super::validate_ssh_destination;
+
+    #[test]
+    fn accepts_normal_destination() {
+        assert!(validate_ssh_destination("root", "10.0.0.1").is_ok());
+        assert!(validate_ssh_destination("ops", "pve.lab").is_ok());
+    }
+
+    #[test]
+    fn rejects_leading_dash_host() {
+        assert!(validate_ssh_destination("root", "-oProxyCommand=evil").is_err());
+    }
+
+    #[test]
+    fn rejects_leading_dash_user() {
+        assert!(validate_ssh_destination("-l", "host").is_err());
+    }
+
+    #[test]
+    fn rejects_at_in_user() {
+        assert!(validate_ssh_destination("user@other", "host").is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_or_nul() {
+        assert!(validate_ssh_destination("ro ot", "h").is_err());
+        assert!(validate_ssh_destination("root", "h\0ost").is_err());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_ssh_destination("", "host").is_err());
+        assert!(validate_ssh_destination("user", "").is_err());
+    }
+}
+
 impl SshConfig {
     /// Look up a guest's connection target by VMID, applying parent fallbacks.
     /// Returns `None` if the guest isn't configured AND there's no auto-discovery

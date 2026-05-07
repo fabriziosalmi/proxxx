@@ -790,6 +790,16 @@ fn api_host_only(url: &str) -> Option<String> {
 
 fn probe_ssh(user: &str, host: &str, key_path: &str) -> Result<String> {
     use std::process::Command;
+    // Refuse hostile/typo'd destinations BEFORE shelling out, so the
+    // wizard fails fast with a clear message instead of OpenSSH's
+    // cryptic "command-line option not recognised" (CWE-88).
+    if let Err(why) = crate::config::validate_ssh_destination(user, host) {
+        anyhow::bail!("refusing to ssh: {why}");
+    }
+    // `--` ends option processing before `user@host`: defense-in-depth
+    // so a host string starting with `-` can't be parsed as a flag
+    // (CWE-88). The remote command must come AFTER the destination —
+    // openssh keeps it as a positional even past `--`.
     let out = Command::new("ssh")
         .args([
             "-o",
@@ -802,6 +812,7 @@ fn probe_ssh(user: &str, host: &str, key_path: &str) -> Result<String> {
             "LogLevel=ERROR",
             "-i",
             key_path,
+            "--",
             &format!("{user}@{host}"),
             "uname -a",
         ])

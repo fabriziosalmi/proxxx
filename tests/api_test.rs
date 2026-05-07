@@ -27,9 +27,13 @@ mod tests {
     }
 
     async fn mock_client(server: &MockServer) -> PxClient {
-        // Use a token-auth profile pointing at the mock server. Token
-        // secret comes from env so we don't read filesystem keychain.
-        std::env::set_var("PROXXX_TOKEN_SECRET", "fake-secret");
+        // Pass the secret via the cli_secret parameter (resolver priority
+        // #1) instead of `std::env::set_var`. Env vars are process-global
+        // and cargo runs integration tests in parallel — set_var would
+        // race with any other test reading PROXXX_TOKEN_SECRET. The token
+        // also stays out of the keychain code path because cli_secret
+        // short-circuits the resolver before it consults env / file /
+        // keychain.
         let cfg = ProfileConfig {
             url: server.uri(),
             user: "root@pam".into(),
@@ -46,7 +50,9 @@ mod tests {
             pbs: None,
             alerts: None,
         };
-        PxClient::new(cfg, None).await.expect("client builds")
+        PxClient::new(cfg, Some("fake-secret"))
+            .await
+            .expect("client builds")
     }
 
     // ── Bug #1: LXC routing ─────────────────────────────────

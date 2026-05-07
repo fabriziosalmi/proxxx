@@ -505,6 +505,15 @@ impl Orchestrator {
 
             // 1. Confirm the node went down at least once. The `/nodes`
             //    list reflects cluster-level liveness.
+            //
+            // We intentionally swallow API errors here: this loop is
+            // designed to outlast a reboot, so transient TCP/TLS
+            // failures while the cluster is reconverging are EXPECTED.
+            // An empty list ⇒ no `node_entry` ⇒ `online = false`,
+            // which is exactly the signal the rest of the loop reads
+            // ("treat unreachable as offline, keep polling"). A bubbled
+            // error here would abort the whole upgrade orchestration on
+            // the first dropped packet — bug, not safety.
             let nodes = self.api.get_nodes().await.unwrap_or_default();
             let node_entry = nodes.iter().find(|n| n.node == node);
             let online =
