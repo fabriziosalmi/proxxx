@@ -39,7 +39,14 @@ updates:
           - "ratatui"
           - "russh*"
 
-  # GitHub Actions deps (workflow YAML uses external actions)
+  # GitHub Actions deps (workflow YAML uses external actions).
+  #
+  # Every `uses:` in `.github/workflows/*.yml` is pinned to a 40-char
+  # commit SHA with a trailing `# vX.Y.Z` comment. Dependabot is
+  # configured to update both atomically — the SHA and the comment —
+  # rather than letting the pin drift past a published release. This
+  # closes the tj-actions/changed-files-style attack window where a
+  # compromised tag (e.g. `@v4`) could re-point at malicious code.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

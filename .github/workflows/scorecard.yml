@@ -1,0 +1,66 @@
+# OpenSSF Scorecard — automated supply-chain posture scoring.
+#
+# Scorecard runs ~20 checks against the repo (branch protection,
+# token permissions, signed releases, pinned dependencies, SAST,
+# fuzzing, vulnerability scanning, …) and produces a 0–10 score plus
+# per-check verdicts. Results land in two places:
+#
+#   1. GitHub Code-Scanning (SARIF upload via codeql-action) — visible
+#      under Security → Code scanning, with per-finding remediation.
+#   2. The public OpenSSF Scorecard API (publish_results: true) which
+#      feeds the badge in README.md and the api.securityscorecards.dev
+#      record other security tools consume.
+#
+# The token-permissions check requires `id-token: write` so the
+# workflow can sign its own results to OIDC; `security-events: write`
+# is what lets the SARIF land in Code-Scanning.
+#
+# Schedule: weekly + on default-branch push. Catches regressions
+# (e.g. a workflow added without SHA-pinning) within ~7 days.
+
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "31 4 * * 1"  # Mondays 04:31 UTC
+  push:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for codeql-action/upload-sarif.
+      security-events: write
+      # Needed by Scorecard for OIDC-based publish.
+      id-token: write
+      # Read-only access to repo metadata that Scorecard inspects.
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@99c09fe975337306107572b4fdf4db224cf8e2f2  # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # publish_results=true sends scores to the public Scorecard
+          # API so the badge in README.md can render. Toggle off if
+          # you want internal-only Code-Scanning visibility.
+          publish_results: true
+
+      # Upload to Code-Scanning so findings are actionable from the
+      # Security tab rather than hidden in the workflow log.
+      - name: Upload SARIF to code-scanning
+        uses: github/codeql-action/upload-sarif@14c9a0cbe6373488c2a41f7e75c8dd142bb2aba8  # v3.35.3
+        with:
+          sarif_file: results.sarif

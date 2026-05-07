@@ -5,6 +5,15 @@
 # transitive dependency has a CVE in the RustSec advisory database.
 # That gives us a formal supply-chain check at every push and PR;
 # `Cargo.lock` is committed so the audit is reproducible.
+#
+# All third-party actions are pinned to a 40-char commit SHA, not a
+# floating tag. `@v4` would let an attacker who compromises the action
+# repo (or the publisher's npm/PAT) silently re-tag a malicious commit
+# and reach our workflow's GITHUB_TOKEN — the tj-actions/changed-files
+# class of supply-chain attack. The `# vX.Y.Z` trailing comment records
+# what the SHA was when pinned so reviewers don't have to look it up;
+# Dependabot updates both the SHA and the comment together
+# (see `.github/dependabot.yml` — github-actions ecosystem).
 
 name: CI
 
@@ -28,15 +37,15 @@ jobs:
     name: Build · test · clippy · fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -61,13 +70,13 @@ jobs:
     name: Supply-chain audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
 
       - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           # Don't share with build-test cache — we only need the
           # registry, not target/.
@@ -96,10 +105,10 @@ jobs:
     # We don't run tests on musl — the library code is identical, the
     # only delta is the link target.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Install Rust toolchain + musl target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
         with:
           targets: x86_64-unknown-linux-musl
 
@@ -107,7 +116,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           shared-key: musl
 
@@ -130,7 +139,7 @@ jobs:
           echo "OK: $BIN is statically linked"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: proxxx-x86_64-linux-musl
           path: target/x86_64-unknown-linux-musl/release/proxxx
