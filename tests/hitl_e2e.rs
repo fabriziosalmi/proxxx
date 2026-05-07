@@ -7,6 +7,13 @@
     clippy::missing_errors_doc,
     clippy::too_many_arguments,
     clippy::unused_async,
+    // The 200+ trait-method stubs below return `Ok(Default::default())`
+    // for every endpoint not exercised by these HITL E2E tests. Replacing
+    // each with `Ok(<ConcreteType>::default())` would add 17 type names
+    // of pure noise to a fake gateway whose only contract is "do not
+    // execute and return cheap Ok"; the value of pedantic
+    // `default_trait_access` evaporates in this fixture.
+    clippy::default_trait_access,
     dead_code
 )]
 //! Phase 5.13 HITL E2E — wiremock-Telegram driven coverage of the 3

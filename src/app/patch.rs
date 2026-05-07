@@ -565,6 +565,13 @@ fn tail(s: &str, n: usize) -> &str {
 // ── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
+// The fake gateway below stubs 200+ trait methods so the patch logic
+// can be unit-tested without a live PVE; replacing every
+// `Ok(Default::default())` with `Ok(<ConcreteType>::default())` would
+// add 17+ type names of pure noise to a fixture whose only contract is
+// "do not execute and return cheap Ok". Pedantic
+// `default_trait_access` carries no signal here.
+#[allow(clippy::default_trait_access)]
 mod tests {
     use super::*;
     use crate::api::types::{Guest, NodeStatus, StoragePool, TaskInfo, TaskLog};

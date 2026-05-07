@@ -303,7 +303,7 @@ impl TelegramGateway {
     /// `text` is sent as plain text (no `parse_mode`) — same
     /// reasoning as `send_message`: lifecycle status strings contain
     /// `[REDACTED]`, action verbs, error fragments that would trip
-    /// MarkdownV2 parsing if any contained reserved chars.
+    /// `MarkdownV2` parsing if any contained reserved chars.
     pub async fn edit_message_text(&self, message_id: i64, text: &str) -> Result<()> {
         let url = format!("{}{}/editMessageText", self.base_url, self.bot_token);
         let payload = serde_json::json!({

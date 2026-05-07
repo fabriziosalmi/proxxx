@@ -2230,7 +2230,10 @@ mod tests {
             .await;
         let c = mock_client(&server).await;
         let res = c.lxc_exec_oneshot("pve1", 200, "ls").await.expect("exec");
-        assert_eq!(res.get("pid").and_then(|v| v.as_i64()), Some(12345));
+        assert_eq!(
+            res.get("pid").and_then(serde_json::Value::as_i64),
+            Some(12345)
+        );
     }
 
     // ── Hill 3a: rrddata (time-series metrics) ─────────────────
@@ -2250,7 +2253,7 @@ mod tests {
                         "time": 1_777_830_660_u64,
                         "cpu": 0.166750234930471,
                         "loadavg": 0.285,
-                        "memused": 2_168_258_901.33333,
+                        "memused": 2_168_258_901.333_33,
                         "memtotal": 4_107_104_256_u64,
                         "iowait": 0.000426781270092046,
                         "netin": 35_210.6666666667,

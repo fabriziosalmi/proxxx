@@ -45,15 +45,15 @@ use ratatui::Terminal;
 
 // ── Key builders ──────────────────────────────────────────
 
-fn key_char(c: char) -> KeyEvent {
+const fn key_char(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
 
-fn key_ctrl(c: char) -> KeyEvent {
+const fn key_ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
-fn key_code(code: KeyCode) -> KeyEvent {
+const fn key_code(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 

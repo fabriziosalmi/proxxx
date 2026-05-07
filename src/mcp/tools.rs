@@ -43,7 +43,7 @@ pub struct ToolDef {
     /// error code `-32001` (server-defined) with the budget in the
     /// message — the request loop continues, no server crash.
     ///
-    /// Bounds the DoS surface for misbehaving / hostile LLM agents:
+    /// Bounds the `DoS` surface for misbehaving / hostile LLM agents:
     /// without this, a single tool call that hangs (network stall,
     /// upstream PVE wedged on a lock, etc.) would block the next
     /// JSON-RPC request indefinitely. JSON-RPC over stdio serializes

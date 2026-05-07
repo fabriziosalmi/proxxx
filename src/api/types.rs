@@ -489,7 +489,7 @@ pub struct GuestAgentIpAddress {
 /// One network interface as reported by the QEMU Guest Agent. Used
 /// by operators to confirm a guest's actual IPs (not just what the
 /// `qm config` cloud-init line claims) — e.g. after a DHCP renewal,
-/// or to map a VMID to a reachable IP without SSHing in.
+/// or to map a VMID to a reachable IP without `SSHing` in.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuestAgentNetworkInterface {
@@ -710,7 +710,7 @@ pub struct ApiVersion {
 // log (login/lockout/task-start/quorum events) — diagnostic surface.
 
 /// `GET /cluster/options` — global cluster config. Many fields; the
-/// typed ones below are the operator-facing essentials (mac_prefix,
+/// typed ones below are the operator-facing essentials (`mac_prefix`,
 /// migration network, etc.). Less-common knobs (crs, fencing, u2f
 /// schema) are reachable via `--raw KEY=VAL` on the CLI.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,6 +903,12 @@ pub struct FirewallOptions {
 /// only meaningful at the guest NIC. Closes the operator-facing CRUD
 /// half of `qemu.firewall.options` + `lxc.firewall.options` — the
 /// rules-list endpoint was already covered.
+// PVE's per-guest firewall surface is genuinely 6 booleans
+// (enable / dhcp / ndp / macfilter / ipfilter / radv) plus 4 string
+// fields. Splitting into substructs would obscure the 1:1 mapping to
+// the underlying API and complicate (de)serialisation; the bools are
+// orthogonal and individually tested.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuestFirewallOptions {
@@ -1695,7 +1701,7 @@ pub struct BackupJob {
 /// `POST /nodes/{node}/vncshell` (node-level shell).
 ///
 /// Same shape as `TermproxyTicket` plus an optional `cert` field —
-/// VNC carries the TLS server certificate when verify_tls is on, so
+/// VNC carries the TLS server certificate when `verify_tls` is on, so
 /// downstream noVNC clients can pin against it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -2226,7 +2232,7 @@ pub struct RrdImage {
 }
 
 /// One row of `GET /cluster/metrics/server` — a configured external
-/// metrics exporter (InfluxDB / Graphite). Heterogeneous shape
+/// metrics exporter (`InfluxDB` / Graphite). Heterogeneous shape
 /// because `type` discriminates between protocol families with
 /// different config knobs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2286,7 +2292,7 @@ pub struct AplTemplate {
     /// `iso` | `vztmpl`.
     #[serde(rename = "type")]
     pub template_type: String,
-    /// Where the template comes from (PVE | TurnKey | etc).
+    /// Where the template comes from (PVE | `TurnKey` | etc).
     pub source: String,
     pub headline: String,
     pub description: String,
@@ -2335,7 +2341,7 @@ pub struct AcmeAccount {
 /// Full ACME account from `GET /cluster/acme/account/{name}`.
 /// Wraps the registration response from the ACME CA — `account` is
 /// the CA's RFC 8555 account object (status, contact, orders), `tos`
-/// is the agreed-to ToS URL captured at registration, `directory` is
+/// is the agreed-to `ToS` URL captured at registration, `directory` is
 /// the CA endpoint, `location` is the per-account URL the CA assigned.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -2384,7 +2390,7 @@ pub struct AcmeDirectory {
 /// One cluster-wide storage definition from `GET /storage`. PVE
 /// supports many storage types (dir, lvm, lvmthin, zfspool, nfs, cifs,
 /// iscsi, glusterfs, cephfs, rbd, pbs, btrfs, esxi, …) — the typed
-/// fields below cover the common subset; type-specific knobs (smb_version,
+/// fields below cover the common subset; type-specific knobs (`smb_version`,
 /// monhost, krbd, prune-backups, encryption-key, …) round-trip via the
 /// raw escape hatch on create/update — operators pass them via
 /// `--raw KEY=VAL`.
@@ -2406,7 +2412,7 @@ pub struct StorageDefinition {
     /// 1 = config kept but storage is inactive.
     #[serde(deserialize_with = "deserialize_bool_from_int", default)]
     pub disable: bool,
-    /// 1 = visible to every node (e.g. NFS, PBS, CephFS).
+    /// 1 = visible to every node (e.g. NFS, PBS, `CephFS`).
     #[serde(deserialize_with = "deserialize_bool_from_int", default)]
     pub shared: bool,
     pub digest: String,
@@ -2626,7 +2632,7 @@ impl StorageContent {
 /// `Eq` is intentionally NOT derived: `wearout` is `serde_json::Value`
 /// (PVE returns either u8 or u32 depending on version) which contains
 /// f64 internally; floats break Eq.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Disk {
     /// Block device path, e.g. `/dev/sda`, `/dev/nvme0n1`.
@@ -2706,7 +2712,7 @@ pub struct DiskSmart {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SmartAttribute {
-    /// SMART attribute id (e.g. `"5"` for Reallocated_Sector_Ct).
+    /// SMART attribute id (e.g. `"5"` for `Reallocated_Sector_Ct`).
     pub id: String,
     /// Human name (e.g. `"Reallocated_Sector_Ct"`).
     pub name: String,
@@ -2717,7 +2723,7 @@ pub struct SmartAttribute {
     /// Failure threshold — once `value <= threshold`, disk fails the
     /// SMART check. 0 means "no threshold defined for this attribute".
     pub threshold: String,
-    /// Raw value (vendor-specific encoding). For Reallocated_Sector_Ct
+    /// Raw value (vendor-specific encoding). For `Reallocated_Sector_Ct`
     /// this is the literal bad-sector count.
     #[serde(default)]
     pub raw: String,
@@ -2927,7 +2933,7 @@ impl RrdCf {
 /// Distinct from `AptUpgradable` (which is the *delta* — what would
 /// change on apt upgrade): this is the inventory of what's currently
 /// installed, including kernel/manager metadata. PVE serializes the
-/// fields in PascalCase (Debian apt convention); we map to snake_case.
+/// fields in `PascalCase` (Debian apt convention); we map to `snake_case`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AptInstalledPackage {

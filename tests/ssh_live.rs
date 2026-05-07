@@ -55,7 +55,7 @@ struct SshEnv {
     host: String,
     user: String,
     key_path: PathBuf,
-    /// Per-process tmp known_hosts. Cleaned up at test end (best-effort).
+    /// Per-process tmp `known_hosts`. Cleaned up at test end (best-effort).
     known_hosts: PathBuf,
 }
 
@@ -139,9 +139,9 @@ macro_rules! ssh_env_or_skip {
 /// `SshPool::new + exec` round-trips correctly against a real PVE
 /// node. Failure modes this catches that unit tests cannot:
 ///   - russh handshake regression (key exchange / auth)
-///   - known_hosts TOFU first-write does not corrupt the file
+///   - `known_hosts` TOFU first-write does not corrupt the file
 ///   - session pool initialises and tears down cleanly
-///   - exec result fields (stdout, exit_code) are populated by the
+///   - exec result fields (`stdout`, `exit_code`) are populated by the
 ///     channel event loop, not just defaulted
 #[tokio::test]
 #[ignore = "live SSH: requires PROXXX_E2E_SSH_ENABLE=1 + reachable PVE node"]

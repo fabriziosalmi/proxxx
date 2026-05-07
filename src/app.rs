@@ -279,10 +279,10 @@ pub enum Action {
     // HA + replication console (feature #5)
     /// Open the HA console (read-only inspector). Triggers a refresh
     /// of `ha_groups`, `ha_resources`, `ha_status`, `cluster_status`,
-    /// and per-node `replication_status`. (replication_jobs was
+    /// and per-node `replication_status`. (`replication_jobs` was
     /// fetched here too pre-cleanup but no view rendered it — the
     /// CLI `proxxx replication jobs` reads it directly from the
-    /// gateway and bypasses AppState.)
+    /// gateway and bypasses `AppState`.)
     OpenHaConsole,
     /// Bulk data delivered by the controller after the multi-fetch.
     HaDataLoaded {

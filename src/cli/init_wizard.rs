@@ -532,7 +532,7 @@ async fn probe_password(url: &str, user: &str, password: &str, verify_tls: bool)
 struct SshBlock {
     user: String,
     key_path: String,
-    /// Optional per-guest overrides: (vmid_string, host). Auto-discovery
+    /// Optional per-guest overrides: (`vmid_string`, host). Auto-discovery
     /// via QGA covers most cases now (see `cli::qga_resolve_guest`),
     /// so this list is genuinely only for guests where QGA is off,
     /// returns only loopback/link-local, or where the operator wants
@@ -677,7 +677,7 @@ fn prompt_ssh_key_path() -> Result<String> {
             // Show name + truncated path for clarity; the basename
             // tells operators "is this the one I authorised on the
             // cluster?" at a glance.
-            format!("{name}")
+            name
         })
         .collect();
     display.push("Other (type a custom path)".to_string());
@@ -725,9 +725,15 @@ fn discover_ssh_keys_in(dir: &str) -> Vec<String> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Skip well-known non-keys. The `ends_with(".pub")` filter is
-        // critical: public keys also start with the openssh header.
-        if name.ends_with(".pub")
+        // Skip well-known non-keys. The `.pub` filter is critical:
+        // public keys also start with the openssh header. Compare
+        // case-insensitively so `id_rsa.PUB` on a case-preserving
+        // filesystem (HFS+ default, exFAT, NTFS via fuse) doesn't slip
+        // past the filter and get treated as a private key.
+        let is_pub = std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"));
+        if is_pub
             || name == "known_hosts"
             || name == "known_hosts.old"
             || name == "config"
@@ -857,7 +863,7 @@ async fn probe_telegram(bot_token: &str) -> Result<String> {
         anyhow::bail!("HTTP {}", res.status());
     }
     let body: serde_json::Value = res.json().await?;
-    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+    if body.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         anyhow::bail!(
             "Telegram returned ok=false: {}",
             body.get("description")
@@ -1093,10 +1099,11 @@ fn prompt_password(label: &str) -> Result<String> {
 
     let mut buf = String::new();
     let result: Result<()> = (|| loop {
-        match event::read()? {
-            Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) => match code {
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event::read()?
+        {
+            match code {
                 KeyCode::Enter => break Ok(()),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     break Err(anyhow::anyhow!("cancelled"));
@@ -1109,8 +1116,7 @@ fn prompt_password(label: &str) -> Result<String> {
                 }
                 KeyCode::Esc => break Err(anyhow::anyhow!("cancelled")),
                 _ => {}
-            },
-            _ => {}
+            }
         }
     })();
     let _ = disable_raw_mode();

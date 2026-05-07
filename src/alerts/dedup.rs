@@ -2,7 +2,7 @@
 //!
 //! Suppresses re-firing the same `(rule_name, target)` pair within a
 //! configurable window. In-memory; the alert daemon (`alerts watch`)
-//! persists it to SQLite via `app::cache::{load,save}_alert_dedup`
+//! persists it to `SQLite` via `app::cache::{load,save}_alert_dedup`
 //! after each tick so a routine restart (config reload, kernel update,
 //! accidental SIGHUP) does not re-fire every active alert.
 
@@ -46,7 +46,7 @@ impl DedupCache {
     }
 
     /// Snapshot the cache as `(rule, target, last_fired)` tuples. Used
-    /// by the alert daemon to write the in-memory state to SQLite via
+    /// by the alert daemon to write the in-memory state to `SQLite` via
     /// `app::cache::save_alert_dedup` after each tick. Sorted output
     /// is not guaranteed — the SQL layer pins ordering on write.
     #[must_use]

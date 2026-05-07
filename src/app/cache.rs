@@ -752,7 +752,7 @@ mod concurrency_tests {
         assert_eq!(loaded.len(), 3);
         // Output is ordered by (rule, target) ASC — pin that for
         // determinism. Reorder the input to match.
-        let mut expected = entries.clone();
+        let mut expected = entries;
         expected.sort();
         let mut got = loaded;
         got.sort();

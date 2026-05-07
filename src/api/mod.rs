@@ -1026,7 +1026,7 @@ pub trait ProxmoxGateway: Send + Sync {
     async fn list_notification_targets(&self)
         -> Result<Vec<crate::api::types::NotificationTarget>>;
 
-    /// Top-tier 80/20 closure (4 endpoints).
+    // Top-tier 80/20 closure (4 endpoints).
 
     /// `GET /access/permissions[?userid=X&path=Y]` — effective
     /// permissions tree for a user on a path. Returns nested map
@@ -1209,7 +1209,7 @@ pub trait ProxmoxGateway: Send + Sync {
     async fn remove_cluster_qdevice(&self) -> Result<String>;
 
     /// `GET /cluster/config/totem` — corosync totem transport config
-    /// (cluster_name, version, transport, interfaces, secauth, ...).
+    /// (`cluster_name`, version, transport, interfaces, secauth, ...).
     /// Read-only — totem changes go through corosync.conf editing.
     async fn get_cluster_totem(&self) -> Result<serde_json::Value>;
 

@@ -179,7 +179,7 @@ pub enum Command {
         #[arg(long)]
         url: String,
     },
-    /// External metrics exporters (InfluxDB / Graphite). Cluster-wide
+    /// External metrics exporters (`InfluxDB` / Graphite). Cluster-wide
     /// CRUD on `/cluster/metrics/server`. Distinct from `proxxx metrics`
     /// which READS guest/node/storage RRD samples — this command
     /// configures the EXPORTERS that ship those samples elsewhere.
@@ -443,8 +443,8 @@ pub enum Command {
     /// (Distinct from `proxxx version` which reports proxxx's own
     /// binary version.)
     PveVersion,
-    /// Cluster-wide config: mac_prefix, default migration network,
-    /// console viewer, max_workers, registered tags, etc. `get` shows
+    /// Cluster-wide config: `mac_prefix`, default migration network,
+    /// console viewer, `max_workers`, registered tags, etc. `get` shows
     /// the full config; `set` updates one or more fields.
     ClusterConfig {
         #[command(subcommand)]
@@ -473,7 +473,7 @@ pub enum Command {
         action: StorageDefsCommand,
     },
     /// ACME (Let's Encrypt et al) cluster-wide config — accounts +
-    /// challenge plugins + read-only ToS / directories / schema.
+    /// challenge plugins + read-only `ToS` / directories / schema.
     /// Pairs with `proxxx node-system <node> cert acme-order` which
     /// triggers the actual cert order using these account/plugin configs.
     Acme {
@@ -553,7 +553,7 @@ pub enum Command {
     /// connection details (host/IP, optional user/port/key override)
     /// are read from `[ssh.guests."<vmid>"]` in your config.toml.
     /// Spawns the system `ssh` so the operator's existing keys, agent,
-    /// and known_hosts apply transparently. Press Ctrl+D or type `exit`
+    /// and `known_hosts` apply transparently. Press Ctrl+D or type `exit`
     /// to leave the session — return value is the remote shell's exit
     /// code (or `ssh`'s, if connection failed).
     Ssh {
@@ -1108,7 +1108,7 @@ pub enum AlertsCommand {
 
 /// Selectable metric for `proxxx metrics …`. Each variant maps to a
 /// `RrdPoint` field via the extractor in `execute_metrics`. Closed
-/// enum (clap ValueEnum) so users can't typo their way into a silent
+/// enum (clap `ValueEnum`) so users can't typo their way into a silent
 /// no-op.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum MetricField {
@@ -1259,7 +1259,7 @@ pub enum MetricServersCommand {
         /// Server hostname or IP.
         #[arg(long)]
         server: String,
-        /// Server port (e.g. 8086 for InfluxDB OSS, 2003 for Graphite).
+        /// Server port (e.g. 8086 for `InfluxDB` OSS, 2003 for Graphite).
         #[arg(long)]
         port: u16,
         #[arg(long)]
@@ -2129,7 +2129,7 @@ pub enum StorageDefsCommand {
         /// CSV node-restriction. Empty = all nodes (default).
         #[arg(long)]
         nodes: Option<String>,
-        /// 1 = visible to every node (NFS, PBS, CephFS, etc.).
+        /// 1 = visible to every node (NFS, PBS, `CephFS`, etc.).
         #[arg(long)]
         shared: Option<bool>,
         /// `dir` / `btrfs`: filesystem path.
@@ -2226,7 +2226,7 @@ pub enum AcmeAccountCommand {
         /// Contact email(s), CSV (`mailto:` prefix optional).
         #[arg(long)]
         contact: String,
-        /// ToS URL to confirm acceptance — get it via `proxxx acme tos`.
+        /// `ToS` URL to confirm acceptance — get it via `proxxx acme tos`.
         #[arg(long)]
         tos_url: Option<String>,
         /// ACME directory URL (defaults to LE prod).
@@ -4074,8 +4074,8 @@ async fn execute_serial(
 /// `proxxx ssh <vmid>` — interactive SSH session into a guest VM/CT.
 ///
 /// Why exec the system `ssh` rather than russh: the operator's
-/// existing keys, known_hosts, ssh-agent, and SSH config (Host
-/// stanzas, ProxyJump, ControlMaster) all apply transparently.
+/// existing keys, `known_hosts`, ssh-agent, and SSH config (Host
+/// stanzas, `ProxyJump`, `ControlMaster`) all apply transparently.
 /// Re-implementing those features in russh would be incomplete and
 /// invisible to muscle memory. The TUI's per-pane PTY uses russh
 /// because it embeds the session in a TUI widget; here the operator
@@ -4084,7 +4084,7 @@ async fn execute_serial(
 /// Resolution order:
 ///   1. `[ssh.guests."<vmid>"]` in config.toml — explicit override
 ///   2. Auto-discovery via QGA (QEMU) or `/lxc/N/interfaces` (LXC)
-///      — uses [ssh].user / [ssh].key_path as defaults.
+///      — uses [ssh].user / [ssh].`key_path` as defaults.
 ///   3. Friendly error with paste-able TOML if both fail.
 async fn execute_ssh(
     client: &std::sync::Arc<crate::api::PxClient>,
@@ -4142,11 +4142,8 @@ async fn execute_ssh(
         }
     };
     eprintln!(
-        "\x1b[2m{}\x1b[0m",
-        format!(
-            "[ssh] resolved {}@{}:{} (source: {source})",
-            target.user, target.host, target.port
-        )
+        "\x1b[2m[ssh] resolved {}@{}:{} (source: {source})\x1b[0m",
+        target.user, target.host, target.port
     );
 
     // Spawn the system `ssh`. Sharing stdin/stdout/stderr with the
@@ -4523,7 +4520,7 @@ where
 /// delete chunks. Inline comments document every secret-resolution
 /// path so an operator who doesn't want plain-text secrets can pick
 /// env / file / keychain at a glance.
-const INIT_CONFIG_TEMPLATE: &str = r##"# proxxx — generated by `proxxx init`
+const INIT_CONFIG_TEMPLATE: &str = r#"# proxxx — generated by `proxxx init`
 #
 # Prefer `proxxx init --interactive` for an end-to-end wizard that
 # probes the cluster live before write (URL reachability, auth, TLS,
@@ -4608,7 +4605,7 @@ token_id = "proxxx"
 # predicate = "node_offline"
 # severity = "critical"
 # route = "telegram:default"
-"##;
+"#;
 
 /// `proxxx init` — write a starter config.toml to the OS-default
 /// proxxx config directory. First-mile UX: the config-not-found
@@ -5551,7 +5548,7 @@ async fn execute_backup_jobs(
 /// Cluster firewall CRUD dispatch. Reuses the same `build_params`
 /// pattern as backup-jobs: typed flags merged with `--raw KEY=VAL`
 /// overrides, with `Box::leak` providing the static lifetime needed
-/// for the `&[(&str, &str)]` shape PxClient takes. Acceptable here
+/// for the `&[(&str, &str)]` shape `PxClient` takes. Acceptable here
 /// because the process exits immediately after dispatching one CLI
 /// invocation — the leak is bounded.
 #[allow(clippy::too_many_lines)]
@@ -6321,8 +6318,8 @@ async fn execute_pool(
     use crate::api::ProxmoxGateway;
 
     fn member_params<'a>(
-        vms: &'a Option<String>,
-        storage: &'a Option<String>,
+        vms: Option<&'a String>,
+        storage: Option<&'a String>,
     ) -> Vec<(&'a str, &'a str)> {
         let mut p = vec![];
         if let Some(v) = vms {
@@ -6356,7 +6353,7 @@ async fn execute_pool(
             vms,
             storage,
         } => {
-            let params = member_params(&vms, &storage);
+            let params = member_params(vms.as_ref(), storage.as_ref());
             if params.is_empty() {
                 anyhow::bail!("add-members needs at least one of --vms or --storage");
             }
@@ -6368,7 +6365,7 @@ async fn execute_pool(
             vms,
             storage,
         } => {
-            let mut params = member_params(&vms, &storage);
+            let mut params = member_params(vms.as_ref(), storage.as_ref());
             if params.is_empty() {
                 anyhow::bail!("remove-members needs at least one of --vms or --storage");
             }
@@ -7191,7 +7188,7 @@ async fn execute_aplinfo(
 }
 
 /// Hill 2a/2b — guest VNC handoff. Mints a one-shot vncproxy ticket
-/// and emits it as JSON. Auto-discovers the owning node + guest_type
+/// and emits it as JSON. Auto-discovers the owning node + `guest_type`
 /// when caller omits `--node`.
 async fn execute_vnc(
     client: &std::sync::Arc<crate::api::PxClient>,
@@ -7202,35 +7199,30 @@ async fn execute_vnc(
     use crate::api::types::GuestType;
     use crate::api::ProxmoxGateway;
 
-    let (node_name, gt) = match node {
-        Some(n) => {
-            // Caller knows the node — but we still need guest_type to
-            // route /qemu/ vs /lxc/. One get_guests call is the
-            // cheapest way to determine it (filtering one node).
-            let guests = client.get_guests(&n).await?;
-            let g = guests
-                .iter()
-                .find(|g| g.vmid == vmid)
-                .ok_or_else(|| anyhow::anyhow!("vmid {vmid} not on node {n}"))?;
-            (n, g.guest_type)
-        }
-        None => {
-            let nodes = client.get_nodes().await?;
-            let mut found: Option<(String, GuestType)> = None;
-            for n in &nodes {
-                if let Ok(guests) = client.get_guests(&n.node).await {
-                    if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                        found = Some((n.node.clone(), g.guest_type));
-                        break;
-                    }
+    let (node_name, gt) = if let Some(n) = node {
+        // Caller knows the node — but we still need guest_type to
+        // route /qemu/ vs /lxc/. One get_guests call is the
+        // cheapest way to determine it (filtering one node).
+        let guests = client.get_guests(&n).await?;
+        let g = guests
+            .iter()
+            .find(|g| g.vmid == vmid)
+            .ok_or_else(|| anyhow::anyhow!("vmid {vmid} not on node {n}"))?;
+        (n, g.guest_type)
+    } else {
+        let nodes = client.get_nodes().await?;
+        let mut found: Option<(String, GuestType)> = None;
+        for n in &nodes {
+            if let Ok(guests) = client.get_guests(&n.node).await {
+                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
+                    found = Some((n.node.clone(), g.guest_type));
+                    break;
                 }
             }
-            found.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vmid {vmid} not found on any node — pass --node X to skip discovery"
-                )
-            })?
         }
+        found.ok_or_else(|| {
+            anyhow::anyhow!("vmid {vmid} not found on any node — pass --node X to skip discovery")
+        })?
     };
 
     let ticket = client.get_guest_vncproxy(&node_name, vmid, gt).await?;

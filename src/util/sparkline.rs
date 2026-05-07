@@ -116,8 +116,15 @@ mod tests {
         let v = vec![Some(1.0), None, Some(f64::NAN), Some(3.0), Some(5.0)];
         let s = Summary::of(&v).expect("3 finite values");
         assert_eq!(s.count, 3);
-        assert_eq!(s.min, 1.0);
-        assert_eq!(s.max, 5.0);
+        // 1.0 / 5.0 are exactly representable in f64 and `Summary::of`
+        // does not transform inputs (it scans for min/max), so direct
+        // equality is well-defined here. Allow `float_cmp` locally rather
+        // than masking real equality bugs across the module.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(s.min, 1.0);
+            assert_eq!(s.max, 5.0);
+        }
         assert!((s.avg - 3.0).abs() < 1e-9);
     }
 

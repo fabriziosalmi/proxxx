@@ -7,13 +7,13 @@
 //! convention: cheap, non-blocking, gets out of the way the moment
 //! the operator types a command.
 //!
-//! Suppression: the input bar (Command / InputTag / InputBroadcast
+//! Suppression: the input bar (Command / `InputTag` / `InputBroadcast`
 //! modes) renders a 3-row overlay at the bottom — it covers the
 //! footer naturally without explicit gating. Confirm + Help modals
 //! cover the whole screen. Search renders its own overlay.
 //!
 //! Pure-function `bindings_for` returns the (key, label) list per
-//! (View, AppMode). Pinned by unit tests so a future refactor that
+//! (View, `AppMode`). Pinned by unit tests so a future refactor that
 //! drops the `q`-back invariant on a view fails loudly.
 
 use crate::app::{AppMode, AppState, View};
@@ -27,7 +27,7 @@ use ratatui::{
 };
 
 pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
-    let bindings = bindings_for(&state.current_view(), &state.mode);
+    let bindings = bindings_for(state.current_view(), &state.mode);
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(bindings.len() * 4 + 3);
 
     // Mode indicator pill — promoted from the per-view status bars
