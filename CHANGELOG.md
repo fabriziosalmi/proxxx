@@ -12,6 +12,43 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-05-11
+
+### Added — RBAC test coverage
+
+- **12 new wiremock-based RBAC tests** covering the read-path /
+  visibility-filter gaps the v0.1.10 audit flagged. The Phase 7 fixture
+  pinned the three matrix-level invariants (typed `ApiError::Forbidden`
+  on destructive 403; filtered-empty deserialization; `privsep` wire
+  format) but said nothing about what each non-root persona is allowed
+  to *see*. The new section pins per-persona contracts:
+  - **operator@pve** (PVEVMAdmin on `/vms`, no `/nodes`, no `/access`):
+    `/nodes` returns filtered-empty (not 403 — PVE prefers filtering
+    for collection endpoints); `get_guests` returns only owned VMIDs;
+    per-VM `status/current` on an unowned VMID returns typed Forbidden
+    on both QEMU and LXC fallback paths; `cluster/resources` returns
+    a partial union containing owned VMs but no `node`-type entries.
+  - **auditor@pve** (PVEAuditor global, read-only): `get_guests` sees
+    the full list (no filtering for `Sys.Audit` globally); `list_users`
+    succeeds (read path != User.Modify write path); `stop_guest` and
+    `create_snapshot` both surface typed Forbidden on the destructive
+    POSTs against `/qemu/{vmid}/status/stop` and `/qemu/{vmid}/snapshot`.
+  - **blind@pve** (PVEVMUser scoped to VMID 999): `get_guests` returns
+    a single-entry filtered list (not empty — the operator-test bonus
+    above only covered all-empty); `get_guest_status` on the scoped
+    VMID succeeds; `get_guest_status` on any other VMID returns typed
+    Forbidden on both QEMU+LXC paths; `cluster/resources` returns
+    only the scoped entry.
+
+  `tests/rbac_e2e.rs` is now 27 wiremock tests (15 Phase 7 + 12
+  Phase 8). The live-cluster suite (`tests/rbac_live.rs`, 10 tests,
+  `#[ignore]`) still depends on a re-provisioned PVE test cluster
+  for end-to-end `pveum` validation — unchanged.
+
+### Internal
+
+- No production-code changes; tests-only patch release.
+
 ## [0.1.10] — 2026-05-11
 
 ### Internal — refactor
