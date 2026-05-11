@@ -12,6 +12,60 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-05-11
+
+### Added — TLS certificate pinning (Trust On First Use)
+
+- **New `tls_pin_mode = "tofu"` profile option** for homelab clusters
+  with self-signed certificates. The v0.1.10 audit flagged that
+  `verify_tls = false` accepts ANY certificate, which is silent MITM
+  bait: a rogue cert on the same network can intercept the entire
+  REST/WebSocket session including serial-console tickets. TOFU sits
+  between "strict CA validation" and "accept anything":
+
+  - **First connect:** proxxx opens a TLS handshake with an
+    accept-any verifier, snapshots the leaf cert in DER form to
+    `<config_dir>/known_certs/<host>_<port>.der`, and logs the
+    SHA-256 fingerprint.
+  - **Subsequent connects:** reqwest is built with the pinned cert
+    as the ONLY trusted root (built-in roots disabled). If the
+    cluster rotates the cert — legit renewal or MITM swap — the
+    standard rustls verifier rejects the new cert with a clear
+    error and the operator can inspect the cert out-of-band and
+    delete the file to re-trust.
+
+  Pin storage is keyed by `host_port`, not by profile name — two
+  profiles targeting the same cluster (e.g. `--profile readonly` +
+  `--profile admin`) share the pinned cert because it's the same
+  cluster identity. Writes use temp-file + rename so a crash mid-
+  write can't leave a half-written cert.
+
+  New module: [`src/api/tls_pin.rs`](src/api/tls_pin.rs) with
+  `probe_leaf_cert`, `fingerprint_sha256`, `pinned_cert_path`,
+  `load_pinned_cert`, `save_pinned_cert`. Wired into
+  `PxClient::new` via the new `resolve_tofu_cert` helper in
+  [`src/api/client.rs`](src/api/client.rs).
+
+### Config
+
+- New optional field `tls_pin_mode: Option<String>` on
+  `ProfileConfig`. Defaults to `None` (current behaviour: trust
+  decided by `verify_tls` alone). Set to `"tofu"` (case-insensitive)
+  to opt in. Documented inline in the `proxxx init` template.
+
+### Internal
+
+- New direct dep: `tokio-rustls = "0.26"` (rustls 0.23 ABI) for the
+  bootstrap handshake. The `rustls` crate was already a direct dep
+  for the WebSocket custom verifier.
+- 6 new lib tests in `src/api/tls_pin.rs::tests`:
+  - `fingerprint_sha256_empty_input`
+  - `fingerprint_sha256_deterministic`
+  - `pinned_cert_save_load_round_trip`
+  - `load_pinned_cert_missing_file_returns_none`
+  - `pinned_cert_path_sanitises_special_chars`
+  - `pinned_cert_path_collapses_url_variants_to_same_path`
+
 ## [0.1.16] — 2026-05-11
 
 ### Fixed — async SQLite writers (TUI render-loop latency)

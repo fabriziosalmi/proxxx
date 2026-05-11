@@ -1,6 +1,6 @@
 [package]
 name = "proxxx"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2021"
 authors = ["Fabrizio Salmi <fabrizio.salmi@gmail.com>"]
 description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
@@ -99,6 +99,12 @@ tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 # signed). Pulled in directly so we can build a ClientConfig that mirrors
 # the reqwest `danger_accept_invalid_certs` flag.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Phase 13 audit fix: TLS pinning (TOFU) for self-signed PVE clusters.
+# `tls_pin_mode = "tofu"` in a profile fetches the leaf cert on first
+# connect via a tokio-rustls TLS handshake, pins it to disk, and
+# rebuilds the reqwest client with that cert as the ONLY trusted root.
+# Must match rustls 0.23 above.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
 # Atomic, TOCTOU-safe temp-file creation for the SPICE .vv handoff path
 # (audit). Provides O_EXCL + crypto-random suffix + permissions

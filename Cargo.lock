@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "proxxx"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3051,6 +3051,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-test",
  "tokio-tungstenite",
  "tokio-util",
