@@ -12,6 +12,49 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-05-11
+
+### Fixed — typed exit codes (closes documentation drift)
+
+- **`main.rs` now exits with the typed exit code documented in
+  [docs/reference/exit-codes.md].** The contract had been published
+  for several releases (`4` = auth/authz, `5` = not found, `7` =
+  cluster transient, `6` = pre-flight refused) but `main.rs` always
+  exited `1` for any `Err(_)` from the CLI dispatch. Shell scripts
+  branching on `$?` to distinguish "auth expired" from "guest gone"
+  silently got the wrong code.
+
+  Implementation:
+  - **`ApiError::exit_code() -> i32`** — closed match over every
+    variant. `Unauthorized` and `Forbidden` collapse to `4` (one
+    `case` arm in shell); `NotFound` → `5`; `RateLimited` and
+    `StorageHang` collapse to `7` (transient — same retry strategy).
+    `Parse` / `Transport` / `PayloadTooLarge` / `Other` → `1`
+    (no shell-actionable distinction; the hint and stderr carry
+    the detail).
+  - **`app::preflight::PreflightRefusal`** — new typed error with
+    `pub const EXIT_CODE: i32 = 6`. `enforce_preflight` previously
+    bailed with an untyped `anyhow::bail!("refusing destructive
+    op …")`; the message is unchanged but the chain now carries the
+    typed marker so `main.rs` can map it to `6` instead of `1`.
+  - **`main.rs` Err path** walks the anyhow chain via
+    `Error::chain().find_map(downcast_ref)` looking for `ApiError`
+    or `PreflightRefusal` and exits with the typed code. Non-typed
+    errors fall through to `1` as before.
+
+### Internal
+
+- 5 new lib tests in `src/api/error.rs` pinning the exit-code
+  contract per variant + a full-table assertion catching future
+  variants that forget to extend the `exit_code` match. The
+  existing `enforce_preflight_bails_on_severe_without_force` test
+  now also asserts the chain carries `PreflightRefusal` so a future
+  refactor reverting to `anyhow::bail!` breaks the test loudly.
+- `docs/reference/exit-codes.md`: fixed stale `ApiError::Schema` →
+  `ApiError::Parse`, added `Other`, marked configuration-load
+  errors as still exiting `1` pending a follow-up `ConfigError`
+  variant. Total lib tests: 309 → 314.
+
 ## [0.1.14] — 2026-05-11
 
 ### Added — actionable error hints
