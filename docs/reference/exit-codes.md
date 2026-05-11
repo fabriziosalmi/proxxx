@@ -69,10 +69,12 @@ variants not in the table) fall through to `1`.
 Pre-flight refusal is surfaced as a typed `app::preflight::PreflightRefusal`
 error carried via anyhow; the same chain walker maps it to `6`.
 
-Configuration-load errors are not yet typed — they exit `1` today.
-That's a documentation drift this release acknowledges; a follow-up
-will introduce `ConfigError` and wire it to `3` once the variant set
-stabilises.
+Configuration-load errors are typed via `config::ConfigError` with
+three variants — `NotFound` (no `config.toml`), `Io` (read failure
+once file exists), `Toml` (parse / missing-required-field). All
+three currently map to exit `3` per the `Configuration error` slot
+above. Splitting individual variants to distinct codes later is an
+additive (minor) bump as long as `3` stays in the set.
 
 ## Stability
 

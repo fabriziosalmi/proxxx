@@ -686,7 +686,63 @@ impl ProfileConfig {
     }
 }
 
-/// Load configuration from TOML file
+/// Phase 15 audit fix: typed errors for the config-load path.
+///
+/// `docs/reference/exit-codes.md` has documented exit code `3` for
+/// "Configuration error" since v0.1.10, but every config-load failure
+/// (file missing, IO error, malformed TOML, missing required field)
+/// was an opaque `anyhow::Error` that landed in main.rs's catch-all
+/// → exit `1`. Scripts written against the contract (`case $? in 3) ...`)
+/// silently never matched. Same wiring pattern as `ApiError::exit_code`
+/// (v0.1.15) and `PreflightRefusal::EXIT_CODE` (v0.1.13):
+///
+///   1. Construct typed `ConfigError` at the failure site.
+///   2. Carry through anyhow via `From<ConfigError> for anyhow::Error`
+///      (free — `thiserror::Error` blanket impls `std::error::Error`).
+///   3. main.rs chain-walker downcasts to `ConfigError` and maps to 3.
+///
+/// All three variants currently map to the same exit code, so a single
+/// associated constant keeps the chain walker trivial (no per-variant
+/// branch). Splitting later is a SemVer-compatible additive change as
+/// long as 3 remains in the set.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// `config.toml` does not exist at the expected path. First-run
+    /// case — the operator hasn't run `proxxx init` yet.
+    #[error("Config not found at {path}. Run `proxxx init` to create one.")]
+    NotFound { path: std::path::PathBuf },
+
+    /// The file exists but couldn't be read — permission denied, EIO,
+    /// disk gone. Distinct from `NotFound` because the fix is different
+    /// (chmod / unmount diagnostics, not `proxxx init`).
+    #[error("Failed to read config at {path}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The file was read but TOML parsing failed: syntax error, type
+    /// mismatch (`url = 8006` instead of `"…"`), or a required field
+    /// is missing (the toml crate surfaces both as the same error
+    /// type — `toml::de::Error` carries line/col info in `Display`).
+    #[error("Invalid TOML in {path}")]
+    Toml {
+        path: std::path::PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+impl ConfigError {
+    /// Process exit code for any `ConfigError` variant — matches the
+    /// `3` slot in [`docs/reference/exit-codes.md`](../../docs/reference/exit-codes.md).
+    pub const EXIT_CODE: i32 = 3;
+}
+
+/// Load configuration from TOML file. Errors carry a typed
+/// [`ConfigError`] through anyhow so main.rs can map them to exit
+/// code `3` ("Configuration error") instead of the generic `1`.
 pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
     let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
         .map(|d| d.config_dir().to_path_buf())
@@ -699,14 +755,17 @@ pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
     let config_path = config_dir.join("config.toml");
 
     if !config_path.exists() {
-        anyhow::bail!(
-            "Config not found at {}. Run `proxxx init` to create one.",
-            config_path.display()
-        );
+        return Err(ConfigError::NotFound { path: config_path }.into());
     }
 
-    let content = std::fs::read_to_string(&config_path)?;
-    let config: ProfileConfig = toml::from_str(&content)?;
+    let content = std::fs::read_to_string(&config_path).map_err(|source| ConfigError::Io {
+        path: config_path.clone(),
+        source,
+    })?;
+    let config: ProfileConfig = toml::from_str(&content).map_err(|source| ConfigError::Toml {
+        path: config_path,
+        source,
+    })?;
     Ok(config)
 }
 
@@ -715,4 +774,76 @@ fn dirs_fallback() -> std::path::PathBuf {
         |_| std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from,
     )
+}
+
+#[cfg(test)]
+mod config_error_tests {
+    use super::*;
+
+    /// All variants must be downcastable from an `anyhow::Error` chain.
+    /// This is what `main.rs::typed_exit` does on the boundary; if the
+    /// downcast breaks (e.g. someone wraps via `anyhow!("…: {e}")`
+    /// which is a string, not a source) main.rs falls back to exit 1
+    /// and the contract regresses silently.
+    #[test]
+    fn config_error_variants_carry_through_anyhow_chain() {
+        let path = std::path::PathBuf::from("/nonexistent/config.toml");
+
+        let not_found: anyhow::Error = ConfigError::NotFound { path: path.clone() }.into();
+        assert!(
+            not_found
+                .chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "NotFound should be downcast-recoverable from the anyhow chain"
+        );
+
+        let io: anyhow::Error = ConfigError::Io {
+            path: path.clone(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }
+        .into();
+        assert!(io.chain().any(|c| matches!(
+            c.downcast_ref::<ConfigError>(),
+            Some(ConfigError::Io { .. })
+        )));
+
+        // Build a real toml::de::Error so the Toml variant is exercised
+        // end-to-end — synthesising one by hand is unstable across
+        // toml crate versions, so go through the parser.
+        let toml_err = toml::from_str::<toml::Value>("url = 8006\nuser =").unwrap_err();
+        let toml: anyhow::Error = ConfigError::Toml {
+            path,
+            source: toml_err,
+        }
+        .into();
+        assert!(toml.chain().any(|c| matches!(
+            c.downcast_ref::<ConfigError>(),
+            Some(ConfigError::Toml { .. })
+        )));
+    }
+
+    /// The fixed exit code is documented in
+    /// `docs/reference/exit-codes.md` as part of the public CLI
+    /// contract. Lock it here so a typo in a future audit doesn't
+    /// silently change the value scripts depend on.
+    #[test]
+    fn config_error_exit_code_is_three() {
+        assert_eq!(ConfigError::EXIT_CODE, 3);
+    }
+
+    /// `load_config` of a path that doesn't exist must surface a
+    /// `NotFound` variant — main.rs's chain walker depends on this
+    /// shape. We can't easily override the resolved `config_dir` from
+    /// inside the test (it uses `directories::ProjectDirs`), so this
+    /// only exercises the variant-construction path, not the path
+    /// resolution. Path resolution belongs to a higher-level
+    /// integration test (`tests/cli_init_integration.rs` covers it).
+    #[test]
+    fn config_error_not_found_renders_actionable_message() {
+        let path = std::path::PathBuf::from("/var/empty/config.toml");
+        let e = ConfigError::NotFound { path };
+        let msg = format!("{e}");
+        assert!(msg.contains("Run `proxxx init`"), "got: {msg}");
+        assert!(msg.contains("/var/empty/config.toml"));
+    }
 }

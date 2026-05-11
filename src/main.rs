@@ -142,6 +142,17 @@ fn main() -> Result<()> {
                         {
                             return Some(proxxx::app::preflight::PreflightRefusal::EXIT_CODE);
                         }
+                        // Phase 15 — typed config-load errors. The doc
+                        // has promised exit 3 for "Configuration error"
+                        // since v0.1.10 but every config-load failure
+                        // fell through to 1 because the variants didn't
+                        // exist. Same downcast pattern as the two above.
+                        if cause
+                            .downcast_ref::<proxxx::config::ConfigError>()
+                            .is_some()
+                        {
+                            return Some(proxxx::config::ConfigError::EXIT_CODE);
+                        }
                         None
                     });
                     if matches!(cli.format, util::format::OutputFormat::Json) {
