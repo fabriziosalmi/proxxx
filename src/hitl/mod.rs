@@ -2,6 +2,7 @@
 // Zero new dependencies (reuses reqwest + tokio)
 
 pub mod daemon;
+pub mod hmac_key;
 pub mod pending;
 pub mod policy;
 pub mod telegram;

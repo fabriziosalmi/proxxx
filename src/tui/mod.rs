@@ -169,7 +169,44 @@ async fn run_hitl_poller(
                     offset = offset.max(u.update_id + 1);
                     let Some(cb) = u.callback_query else { continue };
                     let Some(data) = cb.data else { continue };
-                    let Some((decision, txn_id)) = data.split_once(':') else {
+
+                    // Phase 17: HMAC-verify before resolving. The
+                    // send-side (telegram.rs::request_approval) now
+                    // appends `:<16-hex-tag>` to every callback_data;
+                    // any inbound callback that doesn't match the
+                    // tag's shape OR fails the signature check is
+                    // silently dropped — defense-in-depth against
+                    // bot-token leak (an attacker who can forge bot
+                    // messages can't forge a valid tag without our
+                    // separately-stored HMAC key).
+                    //
+                    // Legacy unsigned format accepted for one release
+                    // (warn-only); v0.1.22 will refuse.
+                    let payload_for_resolve = {
+                        let tail = data.rsplitn(2, ':').collect::<Vec<&str>>();
+                        if tail.len() == 2
+                            && tail[0].len() == 16
+                            && tail[0].chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            let head = tail[1];
+                            if !crate::hitl::hmac_key::verify(tg.hmac_key(), head, tail[0]) {
+                                warn!("TUI HITL callback failed HMAC verify; dropping: {data}");
+                                let _ = tg
+                                    .answer_callback(&cb.id, "❌ Signature verification failed")
+                                    .await;
+                                continue;
+                            }
+                            head.to_string()
+                        } else {
+                            warn!(
+                                "TUI HITL callback without HMAC tag — accepting under \
+                                 v0.1.21 backward-compat shim; v0.1.22 will refuse: {data}"
+                            );
+                            data.clone()
+                        }
+                    };
+
+                    let Some((decision, txn_id)) = payload_for_resolve.split_once(':') else {
                         continue;
                     };
                     let approved = decision == "approve";

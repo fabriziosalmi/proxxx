@@ -1482,3 +1482,132 @@ async fn bot_token_file_with_lax_permissions_is_refused() {
 // reduced-test run.
 #[allow(dead_code)]
 fn _force_link(_u: User) {}
+
+// ── Phase 17: HMAC-signed callback_data ─────────────────────────────────
+
+/// Signed callback with a valid tag passes verification and executes
+/// exactly like a legacy unsigned one. This pins that the new path
+/// hasn't broken the happy path of `request_approval` → click
+/// → daemon dispatch.
+#[tokio::test]
+async fn signed_callback_with_valid_tag_executes() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let pending = PendingApprovals::new();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(7, "vm-signed-ok"));
+
+    // Use the SAME key the gateway holds (fake_gateway sets the
+    // all-zeros test key via `with_base_url`). Sign over the canonical
+    // prefix the daemon strips off.
+    let payload = "approve:stop:7";
+    let tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), payload);
+    let signed_data = format!("{payload}:{tag}");
+
+    let cb = callback_query("cb-sig-ok", &signed_data);
+    let upd = update(11, cb);
+
+    let outcome = handle_callback_update(&upd, &pending, &client, &tg)
+        .await
+        .expect("handle");
+    assert!(
+        matches!(outcome, CallbackOutcome::Executed { vmid: 7, .. }),
+        "valid HMAC must pass through to execute, got {outcome:?}"
+    );
+    assert_eq!(client.calls_for("shutdown_guest"), vec![7]);
+}
+
+/// Tampered tag fails verification — daemon refuses to execute and
+/// surfaces `InvalidFormat`. This is the defence-in-depth claim
+/// against bot-token leak: an attacker who can inject a forged
+/// callback CAN'T pass the HMAC step without also stealing the
+/// separately-stored HMAC key.
+#[tokio::test]
+async fn callback_with_tampered_tag_is_refused() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let pending = PendingApprovals::new();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(8, "vm-untrusted"));
+
+    let payload = "approve:stop:8";
+    let mut tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), payload);
+    // Flip one hex digit — the verifier compares constant-time so
+    // any single-bit difference rejects.
+    let last = tag.pop().expect("tag non-empty");
+    let flipped = if last == '0' { '1' } else { '0' };
+    tag.push(flipped);
+    let tampered = format!("{payload}:{tag}");
+
+    let cb = callback_query("cb-tampered", &tampered);
+    let upd = update(12, cb);
+
+    let outcome = handle_callback_update(&upd, &pending, &client, &tg)
+        .await
+        .expect("handle");
+    assert!(
+        matches!(outcome, CallbackOutcome::InvalidFormat { .. }),
+        "tampered tag must be refused, got {outcome:?}"
+    );
+    // Critical: no PVE-side call must have been made.
+    assert!(client.calls_for("shutdown_guest").is_empty());
+    assert!(client.calls_for("start_guest").is_empty());
+    assert_eq!(
+        pending.consumed_count(),
+        0,
+        "txn must not be marked consumed"
+    );
+}
+
+/// Tag signed with a different key fails — models the bot-token-leak
+/// scenario where the attacker can inject `callback_data` but doesn't
+/// have the HMAC key. The forged tag is mathematically valid hex but
+/// computed under the wrong secret.
+#[tokio::test]
+async fn callback_signed_with_wrong_key_is_refused() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let pending = PendingApprovals::new();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(9, "vm-target"));
+
+    // Attacker's key — different from the all-zeros key the test
+    // gateway holds. Both are 32 bytes so the signing succeeds; only
+    // the verifier catches the mismatch.
+    let attacker_key = vec![0x42u8; 32];
+    let payload = "approve:stop:9";
+    let attacker_tag = proxxx::hitl::hmac_key::sign(&attacker_key, payload);
+    let forged = format!("{payload}:{attacker_tag}");
+
+    let cb = callback_query("cb-wrong-key", &forged);
+    let upd = update(13, cb);
+
+    let outcome = handle_callback_update(&upd, &pending, &client, &tg)
+        .await
+        .expect("handle");
+    assert!(
+        matches!(outcome, CallbackOutcome::InvalidFormat { .. }),
+        "wrong-key forgery must be refused, got {outcome:?}"
+    );
+    assert!(client.calls_for("shutdown_guest").is_empty());
+}
+
+/// Legacy unsigned callbacks still flow through (one-release shim).
+/// v0.1.22 will flip this to refusal — the test name itself documents
+/// the transient contract so the v0.1.22 PR knows to invert.
+#[tokio::test]
+async fn legacy_unsigned_callback_still_accepted_in_v0_1_21() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let pending = PendingApprovals::new();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(10, "vm-legacy"));
+
+    // No `:hex16` tail — pre-Phase-17 shape.
+    let cb = callback_query("cb-legacy", "approve:stop:10");
+    let upd = update(14, cb);
+
+    let outcome = handle_callback_update(&upd, &pending, &client, &tg)
+        .await
+        .expect("handle");
+    assert!(
+        matches!(outcome, CallbackOutcome::Executed { vmid: 10, .. }),
+        "legacy unsigned callback must still execute under v0.1.21 shim, got {outcome:?}"
+    );
+}

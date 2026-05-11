@@ -87,7 +87,55 @@ pub async fn handle_callback_update(
     };
     info!("Received HITL callback: {}", data);
 
-    let parts: Vec<&str> = data.split(':').collect();
+    // Phase 17 audit fix: HMAC-verify the callback before any other
+    // parse step. Format introduced in Phase 17:
+    //     decision:action:vmid[-timestamp]:hmac_hex
+    // Legacy format (pre-Phase 17):
+    //     decision:action:vmid[-timestamp]
+    //
+    // We still accept the legacy format for one release so in-flight
+    // approvals at upgrade time resolve cleanly — but log a warning.
+    // Phase 18 will flip the legacy branch to refusal.
+    //
+    // The HMAC tag is exactly 16 hex chars (8 raw bytes). Anything
+    // else in tail position is treated as part of the txn_id (legacy
+    // format), not a tag — this keeps the parser deterministic
+    // without needing version-tagging on the wire.
+    let (payload_for_parse, signed) = {
+        let parts: Vec<&str> = data.rsplitn(2, ':').collect();
+        // rsplitn(2, ':') returns ["tail", "head"] for "head:tail" or
+        // a single-element vec when there's no colon. We check the
+        // tail for the canonical 16-hex tag shape.
+        if parts.len() == 2
+            && parts[0].len() == 16
+            && parts[0].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            let tail_tag = parts[0];
+            let head_payload = parts[1];
+            if !crate::hitl::hmac_key::verify(tg_gateway.hmac_key(), head_payload, tail_tag) {
+                warn!("HITL callback failed HMAC verify: {data}");
+                let _ = tg_gateway
+                    .answer_callback(&cb.id, "❌ Signature verification failed")
+                    .await;
+                return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
+            }
+            (head_payload.to_string(), true)
+        } else {
+            warn!(
+                "HITL callback without HMAC tag — accepting under v0.1.21 \
+                 backward-compat shim; v0.1.22 will refuse: {data}"
+            );
+            (data.clone(), false)
+        }
+    };
+    if !signed {
+        // Telemetry signal for operators upgrading from older proxxx —
+        // surfaced as a structured warning so an alert can fire on
+        // sustained unsigned traffic post-rollout.
+        tracing::warn!(target: "hitl.legacy_unsigned", "received unsigned callback");
+    }
+
+    let parts: Vec<&str> = payload_for_parse.split(':').collect();
     if parts.len() < 3 {
         let _ = tg_gateway
             .answer_callback(&cb.id, "❌ Invalid transaction ID format")

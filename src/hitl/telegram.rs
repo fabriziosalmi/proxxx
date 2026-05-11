@@ -129,34 +129,69 @@ pub struct TelegramGateway {
     /// MUST end without a trailing slash and without the token —
     /// the per-request URL is built as `{base}{token}/{method}`.
     base_url: String,
+    /// Phase 17 audit fix: HMAC key used to sign outbound
+    /// `callback_data`. Auto-bootstrapped on first `new()` /
+    /// `from_config()` call. Tests inject a deterministic key via
+    /// `with_base_url_and_key`.
+    hmac_key: Vec<u8>,
 }
 
 impl TelegramGateway {
     /// Production constructor — uses the public Telegram API endpoint.
     /// `bot_token` must be the resolved token (caller is responsible
     /// for going through `TelegramConfig::resolve_bot_token`).
-    #[must_use]
-    pub fn new(bot_token: String, chat_id: String) -> Self {
-        Self {
+    ///
+    /// Loads (or auto-generates) the HMAC key from disk on each call.
+    /// File I/O here is fine: HITL gateways are constructed once per
+    /// process, not per request.
+    pub fn new(bot_token: String, chat_id: String) -> Result<Self> {
+        let hmac_key = crate::hitl::hmac_key::load_or_generate_hmac_key()?;
+        Ok(Self {
             http: Client::new(),
             bot_token,
             chat_id,
             base_url: DEFAULT_TG_API.to_string(),
-        }
+            hmac_key,
+        })
     }
 
     /// Test constructor — point at a wiremock `MockServer::uri()` so the
     /// gateway hits the local fixture instead of api.telegram.org.
     /// The `base_url` should be the full URL up to (but not including)
     /// the bot token segment — typically `format!("{}/bot", server.uri())`.
+    ///
+    /// Uses a fixed all-zeros HMAC key so tests can pre-compute valid
+    /// callback signatures without coordinating on a random secret.
+    /// Production code must NEVER take this path.
     #[must_use]
     pub fn with_base_url(bot_token: String, chat_id: String, base_url: String) -> Self {
+        Self::with_base_url_and_key(bot_token, chat_id, base_url, vec![0u8; 32])
+    }
+
+    /// Test constructor that accepts an explicit HMAC key — used by the
+    /// HMAC-specific tests that need to verify cross-instance signing.
+    #[must_use]
+    pub fn with_base_url_and_key(
+        bot_token: String,
+        chat_id: String,
+        base_url: String,
+        hmac_key: Vec<u8>,
+    ) -> Self {
         Self {
             http: Client::new(),
             bot_token,
             chat_id,
             base_url,
+            hmac_key,
         }
+    }
+
+    /// Read-only handle to the HMAC key. The daemon-side verifier needs
+    /// this to validate inbound `callback_data` against the same key
+    /// that signed it.
+    #[must_use]
+    pub fn hmac_key(&self) -> &[u8] {
+        &self.hmac_key
     }
 
     /// High-level convenience: resolve the bot token via the configured
@@ -165,7 +200,7 @@ impl TelegramGateway {
     /// `with_base_url()` and pass an explicit fake token.
     pub async fn from_config(config: &crate::config::TelegramConfig) -> Result<Self> {
         let token = config.resolve_bot_token().await?;
-        Ok(Self::new(token.to_string(), config.chat_id.clone()))
+        Self::new(token.to_string(), config.chat_id.clone())
     }
 
     /// Sends a request for approval to the Telegram chat.
@@ -191,6 +226,16 @@ impl TelegramGateway {
             escape_markdown_v2(txn_id),
         );
 
+        // Phase 17: HMAC-sign each callback_data so the daemon-side
+        // verifier rejects forgeries from anyone who steals the bot
+        // token but not the HMAC key. Tag is appended as `:<hex>` to
+        // the existing `decision:txn_id` shape; the daemon parser
+        // peels it off and re-verifies before consuming the txn.
+        let approve_payload = format!("approve:{txn_id}");
+        let approve_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &approve_payload);
+        let deny_payload = format!("deny:{txn_id}");
+        let deny_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &deny_payload);
+
         let req = SendMessageReq {
             chat_id: self.chat_id.clone(),
             text,
@@ -199,11 +244,11 @@ impl TelegramGateway {
                 inline_keyboard: vec![vec![
                     InlineKeyboardButton {
                         text: "✅ Approve".to_string(),
-                        callback_data: format!("approve:{txn_id}"),
+                        callback_data: format!("{approve_payload}:{approve_tag}"),
                     },
                     InlineKeyboardButton {
                         text: "❌ Deny".to_string(),
-                        callback_data: format!("deny:{txn_id}"),
+                        callback_data: format!("{deny_payload}:{deny_tag}"),
                     },
                 ]],
             },
