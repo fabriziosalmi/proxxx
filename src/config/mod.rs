@@ -14,6 +14,15 @@ pub struct ProfileConfig {
     pub password: Option<String>,
     #[serde(default)]
     pub verify_tls: bool,
+    /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
+    /// insensitive) to snapshot the cluster's leaf cert on first connect
+    /// and refuse any subsequent cert that doesn't match. When unset
+    /// (the default), behaviour is unchanged — `verify_tls` alone
+    /// controls trust. The cert is persisted at
+    /// `<config_dir>/known_certs/<profile>.der`; delete the file to
+    /// re-trust on the next connect.
+    #[serde(default)]
+    pub tls_pin_mode: Option<String>,
     pub rate_limit: Option<u32>,
     pub policies: Option<Vec<crate::hitl::policy::Policy>>,
     pub telegram: Option<TelegramConfig>,

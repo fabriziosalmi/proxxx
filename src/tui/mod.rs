@@ -1776,6 +1776,7 @@ async fn run_demo() -> Result<()> {
         token_secret_file: None,
         password: None,
         verify_tls: false,
+        tls_pin_mode: None,
         rate_limit: None,
         policies: None,
         telegram: None,

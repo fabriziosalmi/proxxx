@@ -245,6 +245,59 @@ where
     deserializer.deserialize_any(Vis)
 }
 
+/// (audit) — TOFU (Trust On First Use) cert resolution.
+///
+/// Returns `Ok(None)` when TOFU is not enabled for the profile — the
+/// caller then falls back to `verify_tls`. Returns `Ok(Some(der))`
+/// when TOFU is active: either loaded from disk (subsequent connects)
+/// or freshly probed and saved (first connect).
+///
+/// Activation is opt-in via `tls_pin_mode = "tofu"` in the profile
+/// (case-insensitive). Any other value is treated as "off" and
+/// reported as a warning, on the theory that a typo here should not
+/// silently downgrade security.
+async fn resolve_tofu_cert(config: &ProfileConfig) -> Result<Option<Vec<u8>>> {
+    let mode = match config.tls_pin_mode.as_deref() {
+        Some(s) => s.to_ascii_lowercase(),
+        None => return Ok(None),
+    };
+    if mode != "tofu" {
+        warn!(
+            "tls_pin_mode = {:?} is not recognised (expected \"tofu\"); skipping pinning",
+            config.tls_pin_mode
+        );
+        return Ok(None);
+    }
+    if let Some(der) =
+        crate::api::tls_pin::load_pinned_cert(&config.url).context("loading pinned TLS cert")?
+    {
+        debug!(
+            "TOFU: using pinned cert for {} (fingerprint sha256={})",
+            config.url,
+            crate::api::tls_pin::fingerprint_sha256(&der)
+        );
+        return Ok(Some(der));
+    }
+    info!(
+        "TOFU: no pinned cert for {} — probing leaf cert",
+        config.url
+    );
+    let der = crate::api::tls_pin::probe_leaf_cert(&config.url)
+        .await
+        .with_context(|| format!("TOFU probe for {}", config.url))?;
+    crate::api::tls_pin::save_pinned_cert(&config.url, &der).context("saving pinned TLS cert")?;
+    let path = crate::api::tls_pin::pinned_cert_path(&config.url)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    info!(
+        "TOFU: pinned new cert for {} at {} (fingerprint sha256={})",
+        config.url,
+        path,
+        crate::api::tls_pin::fingerprint_sha256(&der)
+    );
+    Ok(Some(der))
+}
+
 /// Production Proxmox API client with rate limiting and auth refresh.
 pub struct PxClient {
     http: Client,
@@ -257,8 +310,16 @@ pub struct PxClient {
 impl PxClient {
     /// Create a new client for a given profile configuration
     pub async fn new(config: ProfileConfig, cli_secret: Option<&str>) -> Result<Self> {
-        let http = Client::builder()
-            .danger_accept_invalid_certs(!config.verify_tls)
+        // Phase 13 audit fix: TOFU (Trust On First Use) TLS pinning.
+        // When `tls_pin_mode = "tofu"` is set in the profile, fetch
+        // the leaf cert on first connect, persist it to disk, and
+        // build the reqwest client with that cert as the ONLY trusted
+        // root. Subsequent connects use the same cert; if the cluster
+        // rotates (legit renewal or MITM), reqwest's standard verifier
+        // rejects the new cert.
+        let pinned_cert = resolve_tofu_cert(&config).await?;
+
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             // (audit) — TCP keepalive on the reqwest pool.
             //
@@ -275,9 +336,21 @@ impl PxClient {
             // 60 s is a good compromise: shorter than typical NAT
             // idle timeouts (90–600 s), longer than the server's
             // own keepalive grace, low enough overhead.
-            .tcp_keepalive(Some(std::time::Duration::from_mins(1)))
-            .build()
-            .context("Failed to build HTTP client")?;
+            .tcp_keepalive(Some(std::time::Duration::from_mins(1)));
+        if let Some(cert_der) = pinned_cert {
+            // TOFU mode: trust ONLY the pinned cert. Disable built-in
+            // roots so a rogue CA-signed cert from the cluster also
+            // fails — the only valid cert is the one we pinned.
+            let cert = reqwest::Certificate::from_der(&cert_der)
+                .context("decoding pinned cert as reqwest Certificate")?;
+            builder = builder
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(cert);
+        } else {
+            // No TOFU pin — fall back to the legacy `verify_tls` boolean.
+            builder = builder.danger_accept_invalid_certs(!config.verify_tls);
+        }
+        let http = builder.build().context("Failed to build HTTP client")?;
 
         let auth = match config.auth_method() {
             crate::config::AuthType::Token => {

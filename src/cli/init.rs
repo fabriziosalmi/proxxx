@@ -38,6 +38,14 @@ verify_tls = true                # SET TO false ONLY for homelab clusters with s
                                  # full API + WebSocket traffic (incl. serial-console
                                  # tickets) to MITM. The flag is per-profile and also
                                  # propagates to the WebSocket termproxy client.
+# tls_pin_mode = "tofu"          # Optional: opt-in TLS certificate pinning (Trust On
+                                 # First Use). On first connect proxxx snapshots the
+                                 # cluster's leaf cert under <config_dir>/known_certs/
+                                 # and refuses subsequent connections that present a
+                                 # different cert. Recommended for self-signed homelabs:
+                                 # gives you MITM detection without a real CA chain.
+                                 # Delete the pinned file to re-trust (e.g. after a legit
+                                 # cert renewal).
 rate_limit = 10                  # API calls per second (default 10)
 
 # Token auth (recommended over password for headless tools).

@@ -73,6 +73,7 @@ async fn persona_client(server: &MockServer, user: &str) -> PxClient {
         token_secret_file: None,
         password: None,
         verify_tls: false,
+        tls_pin_mode: None,
         rate_limit: Some(100),
         policies: None,
         telegram: None,

@@ -128,6 +128,7 @@ impl E2eEnv {
             token_secret_file: None,
             password: None,
             verify_tls: false,
+            tls_pin_mode: None,
             rate_limit: Some(20),
             policies: None,
             telegram: None,
