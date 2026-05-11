@@ -12,6 +12,41 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-05-11
+
+### Fixed — TUI concurrency hardening
+
+- **Main `tokio::select!` is now `biased;` with a shutdown branch.**
+  The TUI run loop in `src/tui/mod.rs` previously had a 2-arm select
+  between UI events (`events.recv()`) and API worker messages
+  (`data_rx.recv()`). With tokio's default fair (random) selection,
+  a busy data channel could starve a `q` keypress for up to one API
+  tick (~5 s). The select is now `biased;` with three arms in priority
+  order: external shutdown signal → UI events → data messages. The
+  `q` keypath is unchanged but the shutdown signal is now first-class:
+  SIGINT/SIGTERM cleanly breaks the loop and runs the teardown
+  (queue cache flush, terminal restore, background task abort)
+  instead of dying on runtime drop. Pattern mirrors the HITL daemon
+  (`src/hitl/daemon.rs`) and the alerts daemon
+  (`src/cli/monitoring.rs`), which already used `biased;` for the
+  same reason.
+- **`JoinHandle` stored for the HITL poller and the API worker.**
+  Both long-lived spawns previously discarded their handle —
+  `tokio::spawn(async move { … })`. On quit the tokio runtime dropped
+  them silently. Symptoms: if the HITL poller died hours earlier
+  (Telegram token revoked, panic in the resolve path) the TUI
+  reported "TUI exited cleanly" with no indication. Now both handles
+  are captured. On quit we `abort()` + `await` each; the expected
+  outcome is `JoinError::is_cancelled() == true`, anything else is
+  logged via `tracing::warn!`. An operator restarting the TUI now
+  sees in the audit log whether a background task had been quietly
+  dead.
+
+### Internal
+
+- No public-API or CLI surface change. `proxxx --help` is identical;
+  exit codes and JSON output unchanged.
+
 ## [0.1.11] — 2026-05-11
 
 ### Added — RBAC test coverage
