@@ -12,6 +12,60 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-05-12
+
+### Fixed — snapshot tests now enforce content, not just layout
+
+- **TUI snapshot tests in `tests/tui_snapshot.rs` were layout-only.**
+  `insta::assert_snapshot!(dump)` catches "anything visible changed"
+  but the de-facto regression workflow is `cargo insta review` →
+  accept all → commit. A test named
+  `dashboard_with_two_nodes_aggregates_correctly` could silently
+  lock in a snapshot where one node had silently dropped out, as
+  long as the layout still rendered.
+
+- Added per-test `assert!(dump.contains(...))` semantic anchors on
+  top of every snapshot call. The two layers complement each other:
+  the snapshot still catches layout shifts; the explicit asserts
+  catch data-flow regressions that `cargo insta accept` would
+  otherwise hide.
+
+  Per-test contract:
+
+  - `help_overlay_renders_keymap` — title `"Help"`, `"Navigation"`
+    section header, `"quit"` binding documented.
+  - `dashboard_empty_cluster_does_not_panic_and_shows_idle_state`
+    — must show `"Loading"` hint (the "idle state" the test name
+    promises) and the `"0 nodes"` header.
+  - `dashboard_with_two_nodes_aggregates_correctly` — both node
+    names + the `"1/2 guests"` aggregate header.
+  - `guests_table_with_mixed_status` — both `"running"` +
+    `"stopped"` statuses, all four vmids (100/101/200/999), and
+    crucially **no raw `\u{1b}` ESC byte** (the Phase 5.13
+    ANSI-injection invariant — a snapshot can't safely enforce
+    "no ESC in dump" because a reviewer scanning a unicode diff
+    won't spot a U+001B).
+  - `compare_view_with_two_selected_guests` — both guest names +
+    `"(2 guests)"` panel header.
+  - `nodes_view_with_quorum_and_stale_stats_badges` — both node
+    names + `"(2 total)"` header.
+  - `ssh_session_with_pty_content` — pty content (`"alpine"`,
+    `"uname"`) renders through the parser.
+  - Empty-state hints pinned: `"No pending approvals"`,
+    `"No guests to monitor"` (backup + heatmap), `"Queue is empty"`,
+    `"No snapshot data"`, `"Loading storage"`, `"Waiting for logs"`,
+    `"No data for this snapshot"`.
+  - `tasks_view_empty_state` also pins the `"UPID:test"` prefix —
+    the UPID is the only forensic anchor between a log view and the
+    task that triggered it; a refactor that "cleans up" the header
+    by truncating it must break this test.
+
+### Internal
+
+- All 22 snapshot tests pass with the added asserts against the
+  existing accepted snapshots — no snapshot regeneration needed.
+- No production code changes.
+
 ## [0.1.19] — 2026-05-11
 
 ### Fixed — typed `ConfigError` wired to exit code 3
