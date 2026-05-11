@@ -12,6 +12,46 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-05-11
+
+### Fixed — typed `ConfigError` wired to exit code 3
+
+- **Config-load failures now exit `3` ("Configuration error") as
+  `docs/reference/exit-codes.md` has promised since v0.1.10.** Before
+  this release every config-load failure (file missing, IO error,
+  malformed TOML, missing required field) became an opaque
+  `anyhow::Error` that landed in main.rs's catch-all and exited `1`.
+  Scripts written against the documented contract (`case $? in 3) ...`)
+  silently never matched.
+
+- New `config::ConfigError` enum with three variants:
+  - `NotFound { path }` — `config.toml` doesn't exist at the
+    resolved path (first-run case; message points to `proxxx init`).
+  - `Io { path, source }` — file exists but couldn't be read
+    (permission denied, EIO, disk gone — fix is chmod / unmount
+    diagnostics, not `proxxx init`).
+  - `Toml { path, source }` — read succeeded but TOML parsing
+    failed: syntax error, type mismatch, or missing required field
+    (the `toml::de::Error` `Display` carries line/col).
+
+- All three map to `ConfigError::EXIT_CODE = 3`. Single constant
+  because the contract slot is one code; splitting variants to
+  distinct codes later is an additive (minor) bump per the doc.
+
+### Internal
+
+- New unit tests in `src/config/mod.rs::config_error_tests`:
+  - `config_error_variants_carry_through_anyhow_chain` — every
+    variant is downcast-recoverable from `anyhow::Error::chain()`,
+    pinning the contract main.rs's typed-exit walker relies on.
+  - `config_error_exit_code_is_three` — locks the documented value.
+  - `config_error_not_found_renders_actionable_message` — the
+    operator-facing message must keep pointing at `proxxx init`.
+
+- main.rs's typed-exit chain walker grew a third arm next to the
+  existing `ApiError` (v0.1.15) and `PreflightRefusal` (v0.1.13)
+  branches — same downcast pattern.
+
 ## [0.1.18] — 2026-05-11
 
 ### Fixed — panic visibility for fire-and-forget TUI dispatch spawns
