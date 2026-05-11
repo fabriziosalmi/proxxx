@@ -12,6 +12,29 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-05-11
+
+### Internal — refactor
+
+- **`src/cli/mod.rs` split into 12 domain submodules.** The CLI module
+  had grown to 9141 lines (208 `Command` enum variants + 27 nested
+  sub-enums + 45 async handlers + 7 shared helpers, all inline), making
+  compile times, merge conflicts, and onboarding all measurably worse.
+  Pulled out per-domain modules — `cli::{vm, ct, node, cluster, access,
+  storage, firewall, monitoring, console, patch, init}` plus
+  `cli::common` for shared helpers (`find_guest`, `enforce_preflight`,
+  `wait_and_classify`, `classify_pending`, `parse_kv_pairs`, `BatchOp`,
+  `NoSsh`, `execute_batch_op`). Sub-enums move with their handler (e.g.
+  `VmCommand` lives in `cli/vm.rs`, referenced from the top-level
+  `Command` as `vm::VmCommand`). `mod.rs` is now ~1670 lines — the
+  irreducible `Command` enum + dispatch + small daemons (`hitl_serve`,
+  `execute_search`, `execute_delete`, `build_version_payload`).
+  `ssh_discovery_tests` migrates to `console.rs` alongside the
+  predicates it pins; `parse_kv_pairs_tests` to `common.rs`;
+  `shell_quote_tests` to `access.rs`. **No user-facing surface change**
+  — clap parser tree, `--help`, `--format json` shapes, exit codes, and
+  the MCP tool registry are all bit-identical to 0.1.9.
+
 ## [0.1.9] — 2026-05-07
 
 ### Fixed — security hardening
