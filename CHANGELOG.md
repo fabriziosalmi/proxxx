@@ -12,6 +12,51 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-05-11
+
+### Fixed — panic visibility for fire-and-forget TUI dispatch spawns
+
+- **17 `tokio::spawn(async move { ... })` call sites in
+  `src/tui/mod.rs::dispatch_side_effect` + 1 in the SSH-session open
+  branch were dropping their `JoinHandle` on the floor.** Any panic
+  inside (e.g. `unreachable!` reached on malformed cluster data, an
+  `as` truncation hitting `panic = abort` in release, a serde
+  deserialise on garbage from a misbehaving PVE) was silently eaten
+  by the runtime: the task vanished, the user saw "operation did
+  nothing" and the log was blank.
+
+  New helper `util::spawn_traced::spawn_traced(name, future)`:
+  - Spawns `future` exactly like `tokio::spawn`.
+  - Spawns a tiny observer task that awaits the inner `JoinHandle`
+    and, on `JoinError::is_panic()`, recovers the payload and emits
+    `tracing::error!(task = name, "background task panicked: ...")`.
+  - Cancellation stays quiet (expected on runtime teardown).
+  - The observer self-completes when the inner task finishes — no
+    leak, no extra resource cost beyond ~200 ns per call.
+
+  Per-task labels: `start_guest`, `stop_guest`, `restart_guest`,
+  `create_snapshot`, `delete_guest`, `migrate_guest`,
+  `execute_guest_command`, `fetch_task_log`, `execute_queue`,
+  `download_iso`, `move_disk`, `resize_disk`, `fetch_hardware`,
+  `fetch_ha_console`, `fetch_snapshot_tree`, `config_grep`,
+  `hitl_approval`, `ssh_session_open`. `grep "task panicked"
+  proxxx.log` is now a usable triage command.
+
+  Long-lived tasks at [`src/tui/mod.rs:262`](src/tui/mod.rs#L262)
+  (HITL poller) and [`src/tui/mod.rs:347`](src/tui/mod.rs#L347)
+  (API worker) are unchanged — they already keep their
+  `JoinHandle` and are aborted + awaited at teardown
+  ([:679-692](src/tui/mod.rs#L679-L692)), so panic visibility was
+  already covered for those.
+
+### Internal
+
+- New module [`src/util/spawn_traced.rs`](src/util/spawn_traced.rs)
+  with 3 unit tests:
+  - `spawn_traced_runs_to_completion_for_normal_task`
+  - `spawn_traced_observer_completes_after_panic`
+  - `spawn_traced_observer_handles_string_panic`
+
 ## [0.1.17] — 2026-05-11
 
 ### Added — TLS certificate pinning (Trust On First Use)
