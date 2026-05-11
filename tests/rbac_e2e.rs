@@ -562,3 +562,395 @@ async fn create_token_form_encoding_includes_privsep_kv() {
         "must not double-set privsep: {body}"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 8 — read-path & scoped-visibility coverage per the v0.1.10 audit.
+//
+// The Phase 7 invariants above pinned three contracts (typed Forbidden
+// on destructive 403; filtered-empty deserialization; privsep wire
+// format). The audit identified a second class of gap: READ paths and
+// visibility filtering per persona. Symptom: an operator/auditor/blind
+// caller invoking `get_guests` / `get_guest_status` / `cluster_resources`
+// could regress silently because nothing pinned what they're allowed to
+// see. These 12 tests close that gap.
+//
+// PVE behaviour reference:
+// - `/access/users`         : 403 without User.Modify on /access
+// - `/access/acl`           : filtered 200 by visible path
+// - `/nodes`                : filtered 200 by Sys.Audit on /nodes/{node}
+// - `/nodes/{n}/qemu` (list): filtered 200 by VM.Audit on /vms/{vmid}
+// - `/nodes/{n}/qemu/{v}/status/current` (per-VM read): 403 if no VM.Audit
+// - `/cluster/resources`    : filtered 200 by union of visible paths
+// ════════════════════════════════════════════════════════════════════════
+
+// ── Operator persona (PVEVMAdmin on /vms, no /nodes, no /access) ──────
+
+/// `/nodes` returns 200 with an empty filtered list for an operator
+/// who has no Sys.Audit anywhere on `/nodes`. NOT a 403 — PVE prefers
+/// filtering for collection endpoints. The dashboard aggregation MUST
+/// survive zero-node input (also covered by the blind persona above,
+/// but pinned here per-persona so a regression to "always 403 for
+/// non-root" is caught).
+#[tokio::test]
+async fn operator_list_nodes_returns_filtered_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "operator@pve").await;
+    let nodes = c.get_nodes().await.expect("filtered-empty deserializes");
+    assert!(
+        nodes.is_empty(),
+        "operator without /nodes Sys.Audit sees []"
+    );
+}
+
+/// `/nodes/pve1/qemu` returns 200 with a partial list — only VMIDs the
+/// operator has VM.Audit on. Asserts proxxx doesn't filter further on
+/// top of PVE's filter (no client-side ACL evaluation) and that the
+/// shape deserializes with the operator's typical "I see 2 of 3"
+/// reality.
+#[tokio::test]
+async fn operator_get_guests_filtered_to_owned_vms_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"vmid": 200, "name": "vm-owned-200", "status": "running",
+                 "type": "qemu", "node": "pve1"},
+                {"vmid": 201, "name": "vm-owned-201", "status": "stopped",
+                 "type": "qemu", "node": "pve1"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // get_guests also queries /lxc on the same node. PVE may return
+    // empty filtered list there. Mock both to avoid 404 noise.
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "operator@pve").await;
+    let guests = c
+        .get_guests("pve1")
+        .await
+        .expect("partial list deserializes");
+    assert_eq!(guests.len(), 2, "operator sees exactly the VMs they own");
+    let vmids: Vec<u32> = guests.iter().map(|g| g.vmid).collect();
+    assert!(vmids.contains(&200) && vmids.contains(&201));
+    // Unowned VMID 100 (used in the destructive tests above) must NOT
+    // appear in the operator's filtered list.
+    assert!(
+        !vmids.contains(&100),
+        "filtered list must not leak unowned VMIDs"
+    );
+}
+
+/// Per-VM `status/current` is a path-scoped endpoint — for a VMID the
+/// operator does NOT own, PVE returns 403 (no VM.Audit on /vms/100).
+/// `get_guest_status` tries QEMU first then falls back to LXC, so both
+/// paths must 403 to surface the typed error cleanly.
+#[tokio::test]
+async fn operator_get_guest_status_on_unowned_returns_typed_forbidden() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc/100/status/current"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "operator@pve").await;
+    let err = c
+        .get_guest_status("pve1", 100)
+        .await
+        .expect_err("operator cannot read unowned VM status");
+    assert!(
+        matches!(typed(&err), ApiError::Forbidden(_)),
+        "expected Forbidden, got {:?}",
+        typed(&err)
+    );
+}
+
+/// `/cluster/resources` returns a partial union — only resources the
+/// operator can audit on at least one path. The shape must include
+/// owned VMs but NOT unowned ones, NOT nodes (no Sys.Audit on /nodes).
+#[tokio::test]
+async fn operator_cluster_resources_filtered_to_owned_vms() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/cluster/resources"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "qemu/200", "type": "qemu", "node": "pve1",
+                 "vmid": 200, "name": "vm-owned-200", "status": "running"},
+                {"id": "qemu/201", "type": "qemu", "node": "pve1",
+                 "vmid": 201, "name": "vm-owned-201", "status": "stopped"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "operator@pve").await;
+    let resources = c
+        .get_cluster_resources(None)
+        .await
+        .expect("partial cluster_resources deserializes");
+    assert_eq!(resources.len(), 2);
+    assert!(resources.iter().all(|r| r.resource_type == "qemu"));
+    // No node-type entries — operator lacks /nodes Sys.Audit.
+    assert!(!resources.iter().any(|r| r.resource_type == "node"));
+}
+
+// ── Auditor persona (PVEAuditor global → read everything, write nothing) ─
+
+/// Auditor with Sys.Audit on `/` reads the full guest list — no
+/// filtering. Pins that PVE's "filtered list" path is NOT
+/// short-circuiting on read for global-audit roles. Counterpart to
+/// `operator_get_guests_filtered_to_owned_vms_only`.
+#[tokio::test]
+async fn auditor_get_guests_sees_full_list_via_audit_role() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"vmid": 100, "name": "vm-prod-100",  "status": "running",
+                 "type": "qemu", "node": "pve1"},
+                {"vmid": 200, "name": "vm-owned-200", "status": "running",
+                 "type": "qemu", "node": "pve1"},
+                {"vmid": 999, "name": "vm-blind-999", "status": "stopped",
+                 "type": "qemu", "node": "pve1"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "auditor@pve").await;
+    let guests = c.get_guests("pve1").await.expect("full list deserializes");
+    assert_eq!(guests.len(), 3, "auditor sees every guest");
+}
+
+/// Auditor reads `/access/users` successfully — User.Modify is the
+/// write permission; Sys.Audit on `/access` allows the read. Pins that
+/// proxxx doesn't pre-gate on `User.Modify` for the read path.
+#[tokio::test]
+async fn auditor_list_users_returns_full_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/access/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"userid": "root@pam", "enable": 1, "email": "", "comment": "",
+                 "firstname": "", "lastname": "", "expire": 0},
+                {"userid": "operator@pve", "enable": 1, "email": "", "comment": "",
+                 "firstname": "", "lastname": "", "expire": 0},
+                {"userid": "auditor@pve", "enable": 1, "email": "", "comment": "",
+                 "firstname": "", "lastname": "", "expire": 0}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "auditor@pve").await;
+    let users = c.list_users().await.expect("auditor reads /access/users");
+    assert_eq!(users.len(), 3);
+    let userids: Vec<&str> = users.iter().map(|u| u.userid.as_str()).collect();
+    assert!(userids.contains(&"root@pam"));
+    assert!(userids.contains(&"auditor@pve"));
+}
+
+/// Destructive verb under auditor must 403. `PVEAuditor` grants only
+/// `*.Audit` privileges — no `VM.PowerMgmt`. Pins that the typed error
+/// flows back through the write path the same way the operator's does.
+#[tokio::test]
+async fn auditor_stop_guest_returns_typed_forbidden() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api2/json/nodes/pve1/qemu/100/status/stop"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.PowerMgmt)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "auditor@pve").await;
+    let err = c
+        .stop_guest("pve1", 100, proxxx::api::types::GuestType::Qemu, false)
+        .await
+        .expect_err("auditor cannot stop VMs");
+    assert!(matches!(typed(&err), ApiError::Forbidden(_)));
+}
+
+/// Snapshot creation requires VM.Snapshot — denied to auditor. The 403
+/// must round-trip as typed Forbidden through the snapshot path, which
+/// is a distinct PVE endpoint from `status/stop`. Without this, a regression
+/// in the snapshot wiring (e.g. swallowing 403 as a transient error)
+/// would not be caught by the existing operator-destructive tests.
+#[tokio::test]
+async fn auditor_create_snapshot_returns_typed_forbidden() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api2/json/nodes/pve1/qemu/100/snapshot"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.Snapshot)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "auditor@pve").await;
+    let err = c
+        .create_snapshot(
+            "pve1",
+            100,
+            proxxx::api::types::GuestType::Qemu,
+            "test-snap",
+        )
+        .await
+        .expect_err("auditor cannot snapshot");
+    assert!(matches!(typed(&err), ApiError::Forbidden(_)));
+}
+
+// ── Blind persona (PVEVMUser on /vms/999 only — sees ONE thing) ───────
+
+/// Blind persona scoped to VMID 999 sees a single-entry filtered list
+/// from `get_guests`, not an empty one (`blind_persona_empty_node_list_*`
+/// covers the all-empty case for `/nodes`). The list must round-trip
+/// through the Vec<Guest> deserializer; the renderer must handle "1 VM,
+/// 0 nodes" without zero-divide.
+#[tokio::test]
+async fn blind_get_guests_returns_only_scoped_vmid() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"vmid": 999, "name": "vm-blind-999", "status": "running",
+                 "type": "qemu", "node": "pve1"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "blind@pve").await;
+    let guests = c
+        .get_guests("pve1")
+        .await
+        .expect("single-entry deserializes");
+    assert_eq!(guests.len(), 1);
+    assert_eq!(guests[0].vmid, 999);
+    assert_eq!(guests[0].name, "vm-blind-999");
+}
+
+/// `get_guest_status` on the scoped VMID succeeds — blind has VM.Audit
+/// on `/vms/999`. Positive control alongside the next 403 test.
+#[tokio::test]
+async fn blind_get_guest_status_on_scoped_vmid_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu/999/status/current"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "vmid": 999, "name": "vm-blind-999", "status": "running",
+                "type": "qemu", "node": "pve1"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "blind@pve").await;
+    let guest = c
+        .get_guest_status("pve1", 999)
+        .await
+        .expect("blind sees scoped VMID");
+    assert_eq!(guest.vmid, 999);
+}
+
+/// `get_guest_status` on a non-scoped VMID is denied. Both QEMU and LXC
+/// paths must 403 because the fallback ladder would mask the error if
+/// only one was set. This is the canonical "blind cannot peek at
+/// neighbours" assertion.
+#[tokio::test]
+async fn blind_get_guest_status_on_other_vmid_returns_typed_forbidden() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc/100/status/current"))
+        .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "blind@pve").await;
+    let err = c
+        .get_guest_status("pve1", 100)
+        .await
+        .expect_err("blind cannot read neighbours");
+    assert!(matches!(typed(&err), ApiError::Forbidden(_)));
+}
+
+/// `/cluster/resources` returns a single-entry array containing only
+/// the scoped VMID. The aggregate-renderer invariants (e.g. dashboard's
+/// `if total_maxcpu > 0`) still hold because the lone entry might have
+/// nonzero maxcpu — this asserts the data layer; renderer-side guards
+/// are pinned in `tui_snapshot.rs::dashboard_*`.
+#[tokio::test]
+async fn blind_cluster_resources_returns_only_scoped_entry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/cluster/resources"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "qemu/999", "type": "qemu", "node": "pve1",
+                 "vmid": 999, "name": "vm-blind-999", "status": "running"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "blind@pve").await;
+    let resources = c
+        .get_cluster_resources(None)
+        .await
+        .expect("single-entry cluster_resources deserializes");
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].vmid, 999);
+    assert_eq!(resources[0].resource_type, "qemu");
+    // No node-type entries — blind has no /nodes perms.
+    assert!(!resources.iter().any(|r| r.resource_type == "node"));
+}
