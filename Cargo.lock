@@ -3023,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "proxxx"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3033,8 +3033,10 @@ dependencies = [
  "directories",
  "dirs",
  "futures-util",
+ "getrandom 0.2.17",
  "governor",
  "hex",
+ "hmac 0.12.1",
  "insta",
  "keyring",
  "nucleo",

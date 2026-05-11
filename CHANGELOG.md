@@ -12,6 +12,74 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-05-12
+
+### Added — HMAC-signed HITL callback_data (defence-in-depth against bot-token leak)
+
+- **Before this release, HITL callback authentication was a single layer:
+  the TLS channel to `api.telegram.org` plus the secrecy of the bot
+  token.** If the bot token leaked (env-var dump, log scrape,
+  supply-chain compromise of a deploy step), an attacker could:
+  1. Send arbitrary messages from the bot, including a freshly-forged
+     inline keyboard whose `callback_data` is `approve:delete:9001`.
+  2. Coerce or social-engineer any chat member into clicking it.
+  3. The proxxx HITL poller — TUI in-process or `proxxx hitl serve`
+     standalone — happily dispatches the PVE-side delete because the
+     callback parsed cleanly.
+
+  Real-CA TLS doesn't help: the attacker is sending messages **through**
+  the legitimate Telegram bot, not impersonating the server.
+
+- New module `hitl::hmac_key`:
+  - `load_or_generate_hmac_key()` auto-bootstraps a 32-byte random
+    key at `<config_dir>/telegram_hmac.key` (mode 0600 on Unix,
+    atomic temp+rename write). Same `directories::ProjectDirs`
+    layout as the TLS-pin file from v0.1.17.
+  - `sign(key, payload)` → 16-hex-char truncated HMAC-SHA256 tag
+    (8 raw bytes = 64-bit forgery resistance, fits comfortably in
+    Telegram's 64-byte `callback_data` cap).
+  - `verify(key, payload, tag)` → constant-time check via
+    `Hmac::verify_truncated_left`, fails-closed on bad hex / wrong
+    length / signing key mismatch.
+
+- Send side: `TelegramGateway::request_approval` now appends `:<tag>`
+  to both the Approve and Deny `callback_data`. The receive side in
+  BOTH `daemon::handle_callback_update` (used by `proxxx hitl serve`)
+  AND `tui::run_hitl_poller` (used in-process by the TUI) peels the
+  tag off and verifies before dispatching.
+
+### Backward compatibility
+
+- Callbacks issued by v0.1.20-or-earlier daemons have no tag. v0.1.21
+  accepts them with a structured `warn!(target: "hitl.legacy_unsigned", ...)`
+  log — so an operator running the rollout can grep for sustained
+  unsigned traffic before flipping the toggle. **v0.1.22 will refuse
+  unsigned callbacks** — the contract change is staged so in-flight
+  approvals at upgrade time still resolve cleanly.
+
+### Internal
+
+- New direct deps: `hmac = "0.12"` and `getrandom = "0.2"` (both were
+  already transitive via `rustls`/`tokio-rustls`; promoted to direct
+  so the call sites are grep-able).
+- 10 new unit tests in [`src/hitl/hmac_key.rs::tests`](src/hitl/hmac_key.rs):
+  - `sign_is_deterministic_for_same_payload`
+  - `sign_changes_with_payload`
+  - `sign_changes_with_key`
+  - `verify_accepts_own_signature`
+  - `verify_rejects_tampered_payload`
+  - `verify_rejects_tampered_tag`
+  - `verify_rejects_wrong_length_tag`
+  - `verify_rejects_non_hex_tag`
+  - `verify_rejects_with_wrong_key` — the bot-token-leak defence
+  - `telegram_callback_data_budget_holds` — locks the 64-byte cap
+- 4 new integration tests in [`tests/hitl_e2e.rs`](tests/hitl_e2e.rs):
+  - `signed_callback_with_valid_tag_executes`
+  - `callback_with_tampered_tag_is_refused`
+  - `callback_signed_with_wrong_key_is_refused`
+  - `legacy_unsigned_callback_still_accepted_in_v0_1_21`
+    (test name itself documents the v0.1.22 inversion point)
+
 ## [0.1.20] — 2026-05-12
 
 ### Fixed — snapshot tests now enforce content, not just layout
