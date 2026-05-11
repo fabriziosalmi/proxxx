@@ -250,13 +250,19 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                 }
             },
         };
-    if let Some(ref tg) = tg_gateway {
+    // Phase 8 audit fix: capture the JoinHandle so we can abort the
+    // poller cleanly on TUI quit AND log if it died on its own (e.g.
+    // Telegram credential revoked, panic) before quit fired. Without
+    // the handle the task was dropped silently when the runtime tore
+    // down — operators saw "TUI exited cleanly" even when HITL had
+    // died hours earlier.
+    let hitl_handle: Option<tokio::task::JoinHandle<()>> = tg_gateway.as_ref().map(|tg| {
         let coord_clone = Arc::clone(&hitl_coord);
         let tg_clone = Arc::clone(tg);
         tokio::spawn(async move {
             run_hitl_poller(tg_clone, coord_clone).await;
-        });
-    }
+        })
+    });
 
     // flight recorder: panic hook is now installed in main() via
     // util::panic_hook::install() — it runs for both TUI and CLI
@@ -331,10 +337,14 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
     let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(32);
 
     // ── Spawn API worker ────────────────────────────────
-    // Fetches data on startup and every 5 seconds
+    // Fetches data on startup and every 5 seconds.
+    //
+    // Phase 8 audit fix: capture the JoinHandle for the same reason as
+    // the HITL poller above — graceful abort + post-mortem logging
+    // instead of silently dropping the task on runtime teardown.
     let worker_client = Arc::clone(&client);
     let worker_tx = data_tx.clone();
-    tokio::spawn(async move {
+    let api_worker_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         loop {
             fetch_all(&worker_client, &worker_tx).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -343,6 +353,13 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
 
     // ── Event Loop (UI events) ──────────────────────────
     let mut events = event::spawn_event_loop(Duration::from_millis(200));
+
+    // Phase 8 audit fix: pin the shutdown future outside the loop so we
+    // can poll it across iterations via `&mut`. SIGINT/SIGTERM during
+    // the TUI cleanly triggers teardown (cache flush, terminal restore)
+    // instead of dying on runtime drop. The `q` keypath still works as
+    // before — both paths converge on `break` then teardown.
+    let mut shutdown_signal = Box::pin(crate::util::shutdown::wait_for_shutdown_signal());
 
     // (Gemini audit) — resize debounce. While the user
     // drags the terminal corner, the OS fires Resize events at
@@ -398,8 +415,21 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
             continue;
         }
 
-        // Multiplex: UI events + data messages
+        // Multiplex: shutdown signal + UI events + data messages.
+        //
+        // Phase 8 audit fix: `biased;` orders the arms by priority so
+        // SIGINT/SIGTERM and UI events (the user's `q`) cannot be
+        // starved by a busy data channel. Without it, tokio's fair
+        // (random) select policy could pick the data arm up to ~5 s
+        // longer than the user's keypress — visible as quit latency
+        // on a slow API tick. `biased` makes the policy deterministic.
         tokio::select! {
+            biased;
+            // External shutdown signal (SIGINT / SIGTERM) — top priority.
+            () = &mut shutdown_signal => {
+                info!("TUI: shutdown signal received, exiting cleanly");
+                break;
+            }
             // UI event (keyboard, tick, resize)
             evt = events.recv() => {
                 if let Some(evt) = evt {
@@ -623,6 +653,29 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                     }
                 }
             }
+        }
+    }
+
+    // ── Background task teardown ─────────────────────────
+    //
+    // Phase 8 audit fix: abort + await the long-lived spawns so we
+    // observe a final state instead of relying on runtime drop to GC
+    // them. `is_cancelled()` is the expected outcome here; anything
+    // else means the task ended on its own (panic, or — for HITL —
+    // poll_updates returned successfully which today is unreachable).
+    // Either way, log it so an operator who restarts the TUI knows.
+    api_worker_handle.abort();
+    match api_worker_handle.await {
+        Ok(()) => warn!("API worker task ended unexpectedly without panic"),
+        Err(e) if e.is_cancelled() => { /* expected */ }
+        Err(e) => warn!("API worker task ended unexpectedly: {e:#}"),
+    }
+    if let Some(h) = hitl_handle {
+        h.abort();
+        match h.await {
+            Ok(()) => warn!("HITL poller task ended unexpectedly without panic"),
+            Err(e) if e.is_cancelled() => { /* expected */ }
+            Err(e) => warn!("HITL poller task ended unexpectedly: {e:#}"),
         }
     }
 
