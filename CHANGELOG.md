@@ -12,6 +12,45 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-05-11
+
+### Added — actionable error hints
+
+- **`ApiError` now carries a per-variant `actionable_hint()` returning a
+  one-line "what should I do next?" string.** The v0.1.10 audit flagged
+  that proxxx's typed-error architecture existed but every error
+  collapsed to the same generic anyhow chain at the application
+  boundary — operators saw "Proxmox rejected our credentials" with no
+  follow-up. Each variant now points at a concrete next step:
+  - `Unauthorized` → "credentials rejected — re-run `proxxx init
+    --interactive` to rotate the token, or verify `$PROXXX_TOKEN_SECRET`
+    matches the live secret in PVE (`pveum user token list <user>`)"
+  - `Forbidden` → "token is valid but lacks the privilege for this op —
+    inspect the ACL with `proxxx access acl` and grant the needed role
+    on the affected path; `proxxx perms <user>` shows effective rights"
+  - `NotFound` → "the resource doesn't exist on the cluster — it may
+    have been deleted, renamed, or the vmid/storage/node name is wrong
+    (try `proxxx ls guests` / `proxxx ls nodes` to enumerate)"
+  - `RateLimited`, `StorageHang`, `Transport`, `Parse`, `PayloadTooLarge`,
+    `Other` — each gets its own targeted hint pointing at the right
+    diagnostic command or config knob.
+- **`api::error::extract_hint(&anyhow::Error) -> Option<&'static str>`**
+  walks an anyhow chain and surfaces the inner `ApiError`'s hint. Used
+  by `main.rs` for CLI error rendering:
+  - Text mode: appends `  hint: …` line under `Fatal Error: …`
+  - JSON mode: adds a `"hint"` field to the error object alongside
+    `"error"` and `"status"`. Non-API errors omit the field — proxxx
+    doesn't invent hints for config-parse or IO failures.
+
+### Internal
+
+- 7 new lib tests in `src/api/error.rs` covering: every variant has a
+  non-empty hint (≥20 chars), specific text checks for the four
+  highest-traffic variants, `extract_hint` finds typed errors through
+  `.context()` wrapping, and returns `None` for non-API errors.
+- Total lib tests: 302 → 309. No production-API change beyond the new
+  `actionable_hint()` / `extract_hint()` surface area.
+
 ## [0.1.13] — 2026-05-11
 
 ### Added — pre-flight risk gate coverage
