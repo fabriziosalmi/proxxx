@@ -208,6 +208,23 @@ pub fn load_state(profile_name: Option<&str>) -> anyhow::Result<ClusterStateCach
     }
 }
 
+/// Async wrapper around [`save_state`] — see [`save_queue_async`] for
+/// the rationale. The cluster-state Vecs are owned by the caller's
+/// `AppState` and live across iterations of the TUI run loop, so the
+/// caller clones into owned Vecs before handing them off here.
+pub async fn save_state_async(
+    profile_name: Option<String>,
+    nodes: Vec<Node>,
+    guests: Vec<Guest>,
+    storage: Vec<StoragePool>,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        save_state(profile_name.as_deref(), &nodes, &guests, &storage)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("save_state spawn_blocking join error: {e}"))?
+}
+
 pub fn save_state(
     profile_name: Option<&str>,
     nodes: &[Node],
@@ -363,6 +380,29 @@ fn init_queue_table(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Async wrapper around [`save_queue`] for tokio contexts.
+///
+/// Phase 12 audit fix: the TUI render loop and the alerts daemon both
+/// call cache writers on every tick. Each writer opens a `Connection`,
+/// runs a `transaction()`, and commits — under WAL-checkpoint contention
+/// the writer can block for up to the configured `busy_timeout` (5000 ms).
+/// Called synchronously from an async task, that pin the runtime worker
+/// thread for the full window — `q` keypresses lag, alerts skip ticks.
+/// Same pattern as [`config::keyring_get`](crate::config) which already
+/// uses `spawn_blocking` for the same reason on the keychain side.
+///
+/// Takes owned arguments because `spawn_blocking` requires `'static`;
+/// caller clones if they need the values afterwards (cheap — the cache
+/// types are small Vecs).
+pub async fn save_queue_async(
+    profile_name: Option<String>,
+    entries: Vec<PersistedQueueEntry>,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || save_queue(profile_name.as_deref(), &entries))
+        .await
+        .map_err(|e| anyhow::anyhow!("save_queue spawn_blocking join error: {e}"))?
+}
+
 /// Replace the persisted queue with the given entries (full overwrite).
 /// Cheap with WAL on a few-dozen-row table; called on every queue mutation.
 pub fn save_queue(
@@ -436,6 +476,20 @@ fn init_alert_dedup_table(conn: &Connection) -> anyhow::Result<()> {
 /// (full overwrite — matches `save_queue` semantics). Wrapped in a
 /// transaction so a crash mid-save can't leave partial state. Called
 /// after each daemon tick; cheap with WAL on a few-hundred-row table.
+/// Async wrapper around [`save_alert_dedup`] — see [`save_queue_async`]
+/// for the rationale. The alerts daemon calls this on every tick (every
+/// `interval` seconds, default 30) AND on graceful shutdown; either
+/// path is async, so wrapping moves the `SQLite` I/O off the runtime
+/// worker.
+pub async fn save_alert_dedup_async(
+    profile_name: Option<String>,
+    entries: Vec<(String, String, u64)>,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || save_alert_dedup(profile_name.as_deref(), &entries))
+        .await
+        .map_err(|e| anyhow::anyhow!("save_alert_dedup spawn_blocking join error: {e}"))?
+}
+
 pub fn save_alert_dedup(
     profile_name: Option<&str>,
     entries: &[(String, String, u64)],
@@ -763,5 +817,131 @@ mod concurrency_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    // ── Phase 12 — spawn_blocking async wrapper round-trips ───────
+    //
+    // Each test writes via the *_async wrapper (which routes through
+    // tokio::task::spawn_blocking) and reads back via the sync impl.
+    // Goal: pin that the wrapping doesn't break the data path, so a
+    // future contributor extending the wrappers can refactor with
+    // confidence. The performance claim ("doesn't block the runtime")
+    // is structural — `spawn_blocking` does what its docs say; we
+    // don't try to measure latency here.
+
+    fn cleanup_profile(profile: &str) {
+        let path = get_db_path(Some(profile));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn save_queue_async_round_trips_through_load_queue() {
+        let profile = format!("save-queue-async-{}", std::process::id());
+        let entries = vec![
+            PersistedQueueEntry {
+                id: "op-stop-100".into(),
+                description: "stop vmid 100".into(),
+                diff: String::new(),
+                status: PersistedOpStatus::Pending,
+                op: PersistedOp::StopGuest {
+                    vmid: 100,
+                    force: false,
+                },
+                created_at_secs: 1_700_000_000,
+            },
+            PersistedQueueEntry {
+                id: "op-restart-200".into(),
+                description: "restart vmid 200".into(),
+                diff: String::new(),
+                status: PersistedOpStatus::Running,
+                op: PersistedOp::RestartGuest { vmid: 200 },
+                created_at_secs: 1_700_000_500,
+            },
+        ];
+        super::save_queue_async(Some(profile.clone()), entries.clone())
+            .await
+            .expect("async save");
+
+        let loaded = load_queue(Some(&profile)).expect("sync load");
+        assert_eq!(loaded.len(), 2);
+        // Both rows share saved_at (we save in one transaction) so the
+        // tiebreaker is id ASC: "op-restart-200" < "op-stop-100".
+        let ids: Vec<&str> = loaded.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            ids.contains(&"op-stop-100") && ids.contains(&"op-restart-200"),
+            "expected both ids to round-trip, got {ids:?}"
+        );
+        let stop = loaded.iter().find(|e| e.id == "op-stop-100").expect("stop");
+        assert!(matches!(stop.status, PersistedOpStatus::Pending));
+
+        cleanup_profile(&profile);
+    }
+
+    #[tokio::test]
+    async fn save_state_async_round_trips_through_load_state() {
+        let profile = format!("save-state-async-{}", std::process::id());
+        let nodes = vec![Node {
+            node: "pve1".into(),
+            ..Default::default()
+        }];
+        let guests = vec![Guest {
+            vmid: 100,
+            name: "vm-test".into(),
+            node: "pve1".into(),
+            ..Default::default()
+        }];
+        let storage = vec![StoragePool {
+            storage: "local".into(),
+            ..Default::default()
+        }];
+        super::save_state_async(
+            Some(profile.clone()),
+            nodes.clone(),
+            guests.clone(),
+            storage.clone(),
+        )
+        .await
+        .expect("async save");
+
+        let loaded = load_state(Some(&profile)).expect("sync load");
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].node, "pve1");
+        assert_eq!(loaded.guests.len(), 1);
+        assert_eq!(loaded.guests[0].vmid, 100);
+        assert_eq!(loaded.guests[0].name, "vm-test");
+        assert_eq!(loaded.storage.len(), 1);
+        assert_eq!(loaded.storage[0].storage, "local");
+
+        cleanup_profile(&profile);
+    }
+
+    #[tokio::test]
+    async fn save_alert_dedup_async_round_trips_through_load_alert_dedup() {
+        let profile = format!("save-dedup-async-{}", std::process::id());
+        let entries = vec![
+            (
+                "rule-a".to_string(),
+                "vmid:100".to_string(),
+                1_700_000_000_u64,
+            ),
+            (
+                "rule-b".to_string(),
+                "node:pve1".to_string(),
+                1_700_000_100_u64,
+            ),
+        ];
+        super::save_alert_dedup_async(Some(profile.clone()), entries.clone())
+            .await
+            .expect("async save");
+
+        let mut loaded = load_alert_dedup(Some(&profile)).expect("sync load");
+        loaded.sort();
+        let mut expected = entries;
+        expected.sort();
+        assert_eq!(loaded, expected);
+
+        cleanup_profile(&profile);
     }
 }

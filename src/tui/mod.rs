@@ -391,13 +391,21 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
         // since the last tick. Done before render so the on-disk state
         // is always at-least-as-fresh-as what's drawn. Best-effort —
         // a transient SQLite error is logged but doesn't kill the loop.
+        //
+        // Phase 12 audit fix: route through `save_queue_async` so the
+        // SQLite write happens on `spawn_blocking` instead of pinning
+        // this runtime worker for up to `busy_timeout` (5000 ms) under
+        // WAL-checkpoint contention. Pre-fix, a contended write here
+        // would stall every keypress and every API tick for the same
+        // 5-second window.
         if state.queue_dirty {
             let entries: Vec<crate::app::cache::PersistedQueueEntry> = state
                 .op_queue
                 .iter()
                 .filter_map(super::app::queue::QueuedOp::to_persisted)
                 .collect();
-            if let Err(e) = crate::app::cache::save_queue(profile_name.as_deref(), &entries) {
+            if let Err(e) = crate::app::cache::save_queue_async(profile_name.clone(), entries).await
+            {
                 warn!("queue persistence write failed: {e:#}");
             }
             state.queue_dirty = false;
@@ -539,13 +547,17 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                         }
                         DataMsg::Storage(storage) => {
                             app::update(&mut state, Action::StorageLoaded(storage));
-                            // Save to cache once a full sync cycle is complete
-                            let _ = crate::app::cache::save_state(
-                                profile_name.as_deref(),
-                                &state.nodes,
-                                &state.guests,
-                                &state.storage
-                            );
+                            // Save to cache once a full sync cycle is complete.
+                            // Phase 12 audit fix: async wrapper so the SQLite
+                            // write doesn't pin this runtime worker through
+                            // the busy_timeout under WAL-checkpoint contention.
+                            let _ = crate::app::cache::save_state_async(
+                                profile_name.clone(),
+                                state.nodes.clone(),
+                                state.guests.clone(),
+                                state.storage.clone(),
+                            )
+                            .await;
                         }
                         DataMsg::ClusterTasks(tasks) => {
                             app::update(&mut state, Action::ClusterTasksLoaded(tasks));

@@ -575,8 +575,14 @@ pub async fn execute_alerts(
                         // Final flush so the dedup window survives the
                         // shutdown — operator restarts the daemon, the
                         // cache is current. Best-effort by design.
-                        if let Err(e) =
-                            crate::app::cache::save_alert_dedup(profile, &dedup.entries())
+                        // Phase 12 audit fix: async wrapper so a contended
+                        // SQLite flush at shutdown can't pin the runtime
+                        // and delay the systemd 90s SIGKILL window.
+                        if let Err(e) = crate::app::cache::save_alert_dedup_async(
+                            profile.map(str::to_owned),
+                            dedup.entries(),
+                        )
+                        .await
                         {
                             tracing::warn!(
                                 "alert daemon: dedup cache flush at shutdown failed: {e:#}"
@@ -626,8 +632,13 @@ pub async fn execute_alerts(
                         // `sleep` window costs at most one tick of
                         // dedup state. Best-effort — a transient I/O
                         // error must not kill the daemon.
-                        if let Err(e) =
-                            crate::app::cache::save_alert_dedup(profile, &dedup.entries())
+                        // Phase 12 audit fix: async wrapper — see the
+                        // shutdown branch above for rationale.
+                        if let Err(e) = crate::app::cache::save_alert_dedup_async(
+                            profile.map(str::to_owned),
+                            dedup.entries(),
+                        )
+                        .await
                         {
                             tracing::warn!("alert daemon: dedup cache save failed: {e:#}");
                         }
