@@ -126,6 +126,24 @@ fn main() -> Result<()> {
                     // `proxxx init --interactive`" beats "Proxmox rejected
                     // our credentials" without follow-up.
                     let hint = proxxx::api::error::extract_hint(&e);
+                    // Phase 11 — typed exit codes per docs/reference/
+                    // exit-codes.md. The doc has shipped the contract
+                    // for releases but proxxx itself always exited 1.
+                    // Walk the chain for typed errors and map: ApiError
+                    // variants → 4/5/7/1, PreflightRefusal → 6.
+                    // Anything else falls back to 1.
+                    let typed_exit = e.chain().find_map(|cause| {
+                        if let Some(api) = cause.downcast_ref::<proxxx::api::ApiError>() {
+                            return Some(api.exit_code());
+                        }
+                        if cause
+                            .downcast_ref::<proxxx::app::preflight::PreflightRefusal>()
+                            .is_some()
+                        {
+                            return Some(proxxx::app::preflight::PreflightRefusal::EXIT_CODE);
+                        }
+                        None
+                    });
                     if matches!(cli.format, util::format::OutputFormat::Json) {
                         let mut err_obj = serde_json::json!({
                             "error": e.to_string(),
@@ -156,7 +174,7 @@ fn main() -> Result<()> {
                             eprintln!("  hint: {h}");
                         }
                     }
-                    std::process::exit(1);
+                    std::process::exit(typed_exit.unwrap_or(1));
                 }
             }
         }

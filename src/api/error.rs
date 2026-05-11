@@ -141,6 +141,36 @@ impl ApiError {
         matches!(self, Self::NotFound(_))
     }
 
+    /// Map this variant to the process exit code documented in
+    /// [docs/reference/exit-codes.md].
+    ///
+    /// The contract is stable within a major version — shell scripts
+    /// and CI pipelines depend on these numbers (see `case $?` examples
+    /// in the doc). Changing what an existing code means is a major
+    /// bump; adding a new code (for a new variant) is minor.
+    ///
+    /// Mapping summary:
+    /// - `Unauthorized` / `Forbidden` → **4** (auth/authz)
+    /// - `NotFound` → **5** (resource gone)
+    /// - `RateLimited` / `StorageHang` → **7** (cluster transient)
+    /// - `Parse` / `Transport` / `PayloadTooLarge` / `Other` → **1**
+    ///   (generic; the retry / diagnosis strategy is variant-specific
+    ///   but proxxx exits with `1` because there's no shell-actionable
+    ///   distinction the operator can express via exit code alone —
+    ///   the hint and the error chain carry the detail)
+    #[must_use]
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Unauthorized(_) | Self::Forbidden(_) => 4,
+            Self::NotFound(_) => 5,
+            Self::RateLimited(_) | Self::StorageHang(_) => 7,
+            Self::Parse { .. }
+            | Self::Transport(_)
+            | Self::PayloadTooLarge(_)
+            | Self::Other { .. } => 1,
+        }
+    }
+
     /// One-line actionable hint to surface alongside the error message.
     /// The variant text already describes WHAT failed; this returns
     /// WHAT THE OPERATOR SHOULD DO NEXT.
@@ -389,5 +419,92 @@ mod tests {
             super::extract_hint(&any).is_none(),
             "extract_hint must not invent hints for non-API errors"
         );
+    }
+
+    // ── Phase 11 — exit_code() per documented mapping ─────────────
+
+    /// Auth-related variants → exit 4 (per docs/reference/exit-codes.md).
+    /// Pins both `Unauthorized` (401) and `Forbidden` (403) to the same
+    /// shell-actionable category — operators can branch on `$?==4` with
+    /// a single case arm regardless of the precise PVE response.
+    #[test]
+    fn unauthorized_and_forbidden_share_exit_code_4() {
+        assert_eq!(ApiError::Unauthorized("x".into()).exit_code(), 4);
+        assert_eq!(ApiError::Forbidden("x".into()).exit_code(), 4);
+    }
+
+    /// `NotFound` → exit 5. The "resource is gone" signal is its own
+    /// code because the right CI behaviour is often "treat as success
+    /// during teardown" (see the README's `rc=5` example).
+    #[test]
+    fn not_found_exit_code_5() {
+        assert_eq!(ApiError::NotFound("/vms/100".into()).exit_code(), 5);
+    }
+
+    /// Transient cluster failures (post-retry-budget) → exit 7.
+    /// Both `RateLimited` (429/502/503/504) and `StorageHang` (59x)
+    /// share this code — the right script response is "back off, retry
+    /// later" for both. Distinguishing them was deemed not script-
+    /// actionable; the hint and stderr message carry the detail.
+    #[test]
+    fn rate_limited_and_storage_hang_share_exit_code_7() {
+        assert_eq!(ApiError::RateLimited("x".into()).exit_code(), 7);
+        assert_eq!(ApiError::StorageHang("/x".into()).exit_code(), 7);
+    }
+
+    /// Generic / non-shell-actionable variants → exit 1.
+    /// `Parse` (schema drift) is not retryable; `Transport` (network)
+    /// might be retryable at a higher layer but proxxx itself doesn't
+    /// distinguish them via exit code — the chain + hint do.
+    #[test]
+    fn generic_variants_collapse_to_exit_1() {
+        let parse = ApiError::Parse {
+            path: "/x".into(),
+            source: serde_json::from_str::<u32>("garbage").unwrap_err(),
+        };
+        assert_eq!(parse.exit_code(), 1);
+        assert_eq!(ApiError::Transport("dns failure".into()).exit_code(), 1);
+        assert_eq!(ApiError::PayloadTooLarge("/x".into()).exit_code(), 1);
+        assert_eq!(
+            ApiError::Other {
+                path: "/x".into(),
+                status: 418,
+                body: "🫖".into(),
+            }
+            .exit_code(),
+            1
+        );
+    }
+
+    /// Verify the *full* documented contract in one assertion table —
+    /// catches a future contributor adding a variant and forgetting to
+    /// extend the `exit_code` match (clippy's exhaustiveness lint helps
+    /// at the compile level; this test pins the runtime semantics).
+    #[test]
+    fn exit_codes_match_documented_contract() {
+        let table: &[(ApiError, i32)] = &[
+            (ApiError::Unauthorized("x".into()), 4),
+            (ApiError::Forbidden("x".into()), 4),
+            (ApiError::NotFound("x".into()), 5),
+            (ApiError::RateLimited("x".into()), 7),
+            (ApiError::StorageHang("x".into()), 7),
+            (ApiError::Transport("x".into()), 1),
+            (ApiError::PayloadTooLarge("x".into()), 1),
+            (
+                ApiError::Other {
+                    path: "/x".into(),
+                    status: 599,
+                    body: String::new(),
+                },
+                1,
+            ),
+        ];
+        for (variant, expected) in table {
+            assert_eq!(
+                variant.exit_code(),
+                *expected,
+                "variant {variant:?} should map to exit {expected}"
+            );
+        }
     }
 }

@@ -50,18 +50,29 @@ GitHub Actions workflow, treating `5` as success on teardown:
 ## How exit codes are mapped from `ApiError`
 
 ```
-ApiError::Unauthorized  → 4
-ApiError::Forbidden     → 4
-ApiError::NotFound      → 5
-ApiError::RateLimited   → 7
-ApiError::StorageHang   → 7
+ApiError::Unauthorized    → 4
+ApiError::Forbidden       → 4
+ApiError::NotFound        → 5
+ApiError::RateLimited     → 7
+ApiError::StorageHang     → 7
 ApiError::PayloadTooLarge → 1
-ApiError::Transport     → 1   (network — generic; retry strategy belongs to caller)
-ApiError::Schema        → 1   (PVE returned non-JSON or unknown shape)
+ApiError::Transport       → 1   (network — generic; retry strategy belongs to caller)
+ApiError::Parse           → 1   (PVE returned non-JSON or unknown shape)
+ApiError::Other           → 1   (uncategorised HTTP status)
 ```
 
-Pre-flight refusal and configuration errors are caught before the API
-layer, so they map directly to `6` and `3` respectively.
+The wiring lives in `main.rs` — the CLI error path walks the anyhow
+chain via `Error::chain().find_map(downcast_ref::<ApiError>)` and
+calls `ApiError::exit_code()`. Non-API anyhow errors (or `ApiError`
+variants not in the table) fall through to `1`.
+
+Pre-flight refusal is surfaced as a typed `app::preflight::PreflightRefusal`
+error carried via anyhow; the same chain walker maps it to `6`.
+
+Configuration-load errors are not yet typed — they exit `1` today.
+That's a documentation drift this release acknowledges; a follow-up
+will introduce `ConfigError` and wire it to `3` once the variant set
+stabilises.
 
 ## Stability
 

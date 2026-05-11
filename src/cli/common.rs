@@ -135,10 +135,11 @@ pub async fn enforce_preflight(
     }
     let max = max_level(&risks);
     if max == RiskLevel::Severe && !force {
-        anyhow::bail!(
-            "refusing destructive op due to SEVERE pre-flight risk(s) above. \
-             Re-run with --allow-risk to override (you own the consequence)."
-        );
+        // Phase 11 — return a typed PreflightRefusal so main.rs can
+        // downcast and map to the documented exit code 6 instead of
+        // the generic 1. Anyhow carries the typed error transparently
+        // for callers that don't downcast.
+        return Err(anyhow::Error::from(crate::app::preflight::PreflightRefusal));
     }
     if max == RiskLevel::Severe && force {
         eprintln!("  --allow-risk passed; overriding SEVERE risk(s) and proceeding.");
@@ -601,6 +602,8 @@ mod enforce_preflight_tests {
 
     /// max == Severe, force == false → bails. The error message must
     /// mention `--allow-risk` so the operator knows the escape hatch.
+    /// The chain must also carry a typed `PreflightRefusal` so main.rs
+    /// can map it to exit code 6.
     #[tokio::test]
     async fn enforce_preflight_bails_on_severe_without_force() {
         let client = idle_client().await;
@@ -616,6 +619,17 @@ mod enforce_preflight_tests {
         assert!(
             msg.contains("SEVERE"),
             "error must name SEVERE risk level, got: {msg}"
+        );
+        // Phase 11: the chain must carry the typed PreflightRefusal so
+        // main.rs can downcast and map it to exit code 6. Without this
+        // assertion, a future refactor could revert to `anyhow::bail!`
+        // (untyped) and the exit-code contract would silently break.
+        let refusal = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<crate::app::preflight::PreflightRefusal>());
+        assert!(
+            refusal.is_some(),
+            "error chain must carry PreflightRefusal for exit-code 6 mapping"
         );
     }
 

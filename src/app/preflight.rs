@@ -26,6 +26,26 @@
 
 use crate::api::types::Guest;
 
+/// Typed error surfaced when `enforce_preflight` refuses a destructive
+/// op due to a `Severe` risk and the caller did not pass `--allow-risk`.
+///
+/// Carried via anyhow so callers that don't care about the variant keep
+/// working unchanged via `?`. main.rs downcasts to map this to exit
+/// code **6** ("Pre-flight risk refused") as documented in
+/// docs/reference/exit-codes.md.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing destructive op due to SEVERE pre-flight risk(s) above. \
+     Re-run with --allow-risk to override (you own the consequence)."
+)]
+pub struct PreflightRefusal;
+
+impl PreflightRefusal {
+    /// Process exit code for this error (matches the documented
+    /// "Pre-flight risk refused" contract).
+    pub const EXIT_CODE: i32 = 6;
+}
+
 /// Destructive operations the pre-flight framework knows how to grade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
