@@ -12,6 +12,58 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-05-11
+
+### Fixed — async SQLite writers (TUI render-loop latency)
+
+- **The three steady-state SQLite writers now run on `spawn_blocking`
+  instead of pinning the tokio runtime worker.** The v0.1.10 audit
+  flagged that `cache::save_queue` was called synchronously from the
+  TUI render loop; under WAL-checkpoint contention the writer can
+  block for up to `busy_timeout` (5000 ms), stalling every keypress
+  and every API tick in the same window. Same pattern as
+  `config::keyring_get` which already uses `spawn_blocking` for the
+  identical reason on the keychain side.
+
+  New async wrappers in `src/app/cache.rs`:
+  - `save_queue_async(Option<String>, Vec<PersistedQueueEntry>)`
+  - `save_state_async(Option<String>, Vec<Node>, Vec<Guest>, Vec<StoragePool>)`
+  - `save_alert_dedup_async(Option<String>, Vec<(String,String,u64)>)`
+
+  Each wrapper takes owned arguments (`spawn_blocking` requires
+  `'static`) and routes the synchronous `save_*` impl through
+  `tokio::task::spawn_blocking`. The sync versions stay intact for
+  any non-async callers.
+
+  Call-site updates:
+  - `src/tui/mod.rs:400` — queue persistence flush every render tick
+  - `src/tui/mod.rs:543` — full cluster-state snapshot after each
+    storage sync (every ~5 s)
+  - `src/cli/monitoring.rs:579,630` — alerts daemon tick + graceful
+    shutdown flush
+
+  Reads at TUI startup (`load_state`, `load_queue`, `load_state_at`)
+  and at daemon startup (`load_alert_dedup`) remain synchronous —
+  they're one-shot cold-path calls before any concurrent writer
+  exists, so spawn_blocking would add overhead without buying
+  anything.
+
+### Internal
+
+- 3 new lib tests in `src/app/cache.rs::concurrency_tests`:
+  - `save_queue_async_round_trips_through_load_queue`
+  - `save_state_async_round_trips_through_load_state`
+  - `save_alert_dedup_async_round_trips_through_load_alert_dedup`
+
+  Each writes via the async wrapper and reads back via the sync
+  loader, pinning that the wrapping doesn't break the data path.
+  The structural claim ("doesn't block the runtime") is left to
+  `spawn_blocking`'s own docs — we don't try to measure latency
+  here.
+
+- Total lib tests: 314 → 317. clippy --all-targets clean.
+- No public-API or CLI surface change.
+
 ## [0.1.15] — 2026-05-11
 
 ### Fixed — typed exit codes (closes documentation drift)
