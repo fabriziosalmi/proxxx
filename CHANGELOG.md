@@ -12,6 +12,48 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-05-11
+
+### Added — pre-flight risk gate coverage
+
+- **9 new unit tests** closing the pre-flight risk gate coverage gap
+  the v0.1.10 audit flagged. The cheap `assess()` path already had
+  6 tests pinning `Locked`/`HaManaged`/`Running`/`LongUptime`/
+  `TaggedProd`/`ActiveNetTraffic`, but the 5 deep-only variants and
+  the entire `--allow-risk` bypass semantic were unprotected:
+
+  - **`assess_deep` (5 tests in `src/app/preflight.rs`)** — each
+    exercises the corresponding code path via wiremock against PVE:
+    - `HasManySnapshots` (Op::Delete + 6 snapshots → Warning)
+    - `BackupAgeWarning` (Op::Delete + backup ctime 30h ago → Warning,
+      with a ±1h slop for clock drift)
+    - `NoBackupFound` (Op::Delete + empty backup storage, no PBS → Notice)
+    - `ListeningOnService` (running QEMU + QGA returns `LISTEN ... :80`
+      → Warning, `name: "http"`) — exercises the two-step
+      `agent/exec` POST + `agent/exec-status` GET wiring end-to-end
+    - `DeepCheckSkipped` for running LXC (no QGA path → Notice). The
+      test asserts **zero** HTTP calls hit the mock server, pinning
+      that the LXC short-circuit returns before any I/O.
+
+  - **`enforce_preflight` (4 tests in `src/cli/common.rs`)** — pins
+    the `--allow-risk` bypass contract that the audit found had zero
+    tests:
+    - `bails_on_severe_without_force` — Locked guest, force=false
+      surfaces an error that names both `SEVERE` and `--allow-risk`
+      so the operator sees the escape hatch.
+    - `proceeds_on_severe_with_force` — same Locked guest, force=true
+      returns Ok (operator owns the consequence).
+    - `proceeds_on_warning_without_force` — tagged-prod guest yields
+      `TaggedProd` (Warning); the gate only refuses on Severe.
+    - `returns_ok_on_clean_guest` — no risks: Ok regardless of force.
+
+  Total lib tests now: 302 (was 293). Cargo clippy --all-targets
+  clean (8 missing-backtick lints fixed inline).
+
+### Internal
+
+- No production code change; tests-only patch release.
+
 ## [0.1.12] — 2026-05-11
 
 ### Fixed — TUI concurrency hardening
