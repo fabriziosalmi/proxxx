@@ -1002,4 +1002,272 @@ tcp   0      0      :::443                  :::*                    LISTEN
             "no backup for vmid 100 → expected None, got {res:?}"
         );
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Phase 9 — coverage for the 5 deep-only risk variants the v0.1.10
+    // audit flagged as untested: HasManySnapshots, BackupAgeWarning,
+    // NoBackupFound, ListeningOnService, DeepCheckSkipped. These all
+    // live in `assess_deep` (not the pure `assess`), so we need a
+    // wiremocked PVE client to exercise them.
+    // ════════════════════════════════════════════════════════════════════
+
+    fn baseline_stopped_qemu(vmid: u32) -> Guest {
+        let mut g = baseline_running();
+        g.vmid = vmid;
+        g.status = GuestStatus::Stopped;
+        g.uptime = 0;
+        g
+    }
+
+    /// `Op::Delete` on a guest with >5 snapshots emits `HasManySnapshots`
+    /// at Warning level. The threshold is `MANY_SNAPSHOTS_THRESHOLD = 5`,
+    /// so we mock 6 to land just over.
+    #[tokio::test]
+    async fn assess_deep_flags_has_many_snapshots_on_delete() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+
+        // 6 real snapshots (above threshold) + the synthetic "current"
+        // entry which the helper filters out via is_current().
+        let mut snaps = vec![serde_json::json!({
+            "name": "current", "parent": "snap-3", "description": "",
+            "snaptime": 0, "vmstate": 0
+        })];
+        for i in 0_u64..6 {
+            snaps.push(serde_json::json!({
+                "name": format!("snap-{i}"),
+                "parent": if i == 0 { String::new() } else { format!("snap-{}", i - 1) },
+                "description": "",
+                "snaptime": 1_700_000_000_u64 + i * 3600,
+                "vmstate": 0,
+            }));
+        }
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/snapshot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": snaps
+            })))
+            .mount(&server)
+            .await;
+        // Empty backup-storages list — the backup-recency probe is part
+        // of the Delete-only path; we mock its inputs so it doesn't blow
+        // up but produces no BackupAgeWarning / NoBackupFound noise we
+        // don't want in THIS test's assertions.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/storage"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_pxclient(&server).await;
+        let g = baseline_stopped_qemu(100);
+        let risks = super::assess_deep(&client, None, Op::Delete, &g).await;
+
+        let (count, level) = risks
+            .iter()
+            .find_map(|(r, l)| match r {
+                Risk::HasManySnapshots { count } => Some((*count, *l)),
+                _ => None,
+            })
+            .expect("HasManySnapshots must be emitted for >5 snapshots on Delete");
+        assert_eq!(count, 6);
+        assert_eq!(level, RiskLevel::Warning);
+    }
+
+    /// `Op::Delete` on a guest with a stale backup (> 24h old) emits
+    /// `BackupAgeWarning` at Warning level. We mock a backup with ctime
+    /// = now - 30h.
+    #[tokio::test]
+    async fn assess_deep_flags_backup_age_warning_when_stale() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+
+        // No snapshots — keeps the test focused on the backup branch.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/snapshot"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/storage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"storage": "local", "type": "dir", "content": "backup",
+                     "active": 1, "total": 100, "used": 10, "avail": 90}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let thirty_hours_ago = now - 30 * 3600;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/storage/local/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"volid": "local:backup/vzdump-qemu-100-stale.vma",
+                     "vmid": 100, "ctime": thirty_hours_ago,
+                     "content": "backup", "size": 1, "format": "vma", "subtype": "qemu"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_pxclient(&server).await;
+        let g = baseline_stopped_qemu(100);
+        let risks = super::assess_deep(&client, None, Op::Delete, &g).await;
+
+        let (age, level) = risks
+            .iter()
+            .find_map(|(r, l)| match r {
+                Risk::BackupAgeWarning { age_hours } => Some((*age_hours, *l)),
+                _ => None,
+            })
+            .expect("BackupAgeWarning must be emitted for >24h-old backup");
+        // Newest backup is 30h old. Allow ±1h slop for test clock latency.
+        assert!((29..=31).contains(&age), "expected ~30h, got {age}h");
+        assert_eq!(level, RiskLevel::Warning);
+    }
+
+    /// `Op::Delete` with zero backups anywhere emits `NoBackupFound` at
+    /// Notice level (not Warning — proxxx can't tell intentional from
+    /// oversight). The PBS client is None, so only the PVE path runs.
+    #[tokio::test]
+    async fn assess_deep_flags_no_backup_found_when_storages_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/snapshot"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/storage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"storage": "local", "type": "dir", "content": "backup",
+                     "active": 1, "total": 100, "used": 10, "avail": 90}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/storage/local/content"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_pxclient(&server).await;
+        let g = baseline_stopped_qemu(100);
+        let risks = super::assess_deep(&client, None, Op::Delete, &g).await;
+
+        let level = risks
+            .iter()
+            .find_map(|(r, l)| matches!(r, Risk::NoBackupFound).then_some(*l))
+            .expect("NoBackupFound must be emitted when neither PVE nor PBS has a backup");
+        assert_eq!(level, RiskLevel::Notice);
+    }
+
+    /// `Op::Stop` on a running QEMU guest with QGA reporting port 80 in
+    /// `ss -tln` output emits `ListeningOnService { port: 80, name: "http" }`
+    /// at Warning level. Stronger production signal than `ActiveNetTraffic`
+    /// alone — pin the wiring end-to-end via the two-step agent/exec
+    /// + exec-status mock.
+    #[tokio::test]
+    async fn assess_deep_flags_listening_on_service_when_running_qemu() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+
+        // Step 1: agent/exec submit returns the pid.
+        Mock::given(method("POST"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/agent/exec"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "pid": 4242 }
+            })))
+            .mount(&server)
+            .await;
+        // Step 2: exec-status returns the command output (real `ss -H -tln`
+        // shape with port 80 listening — drives well_known_port("http")).
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/agent/exec-status"))
+            .and(query_param("pid", "4242"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "exited": true,
+                    "exitcode": 0,
+                    "out-data": "LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n",
+                    "err-data": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_pxclient(&server).await;
+        let mut g = baseline_running();
+        g.vmid = 100;
+        // Zero out fields that would emit other Warning-level risks
+        // we don't want to assert against here.
+        g.uptime = 60; // avoid LongUptime / ActiveNetTraffic noise
+        g.netin = 0;
+        g.netout = 0;
+        let risks = super::assess_deep(&client, None, Op::Stop, &g).await;
+
+        let (port, name, level) = risks
+            .iter()
+            .find_map(|(r, l)| match r {
+                Risk::ListeningOnService { port, name } => Some((*port, name.clone(), *l)),
+                _ => None,
+            })
+            .expect("ListeningOnService must be emitted for port 80 from QGA");
+        assert_eq!(port, 80);
+        assert_eq!(name, "http");
+        assert_eq!(level, RiskLevel::Warning);
+    }
+
+    /// Running LXC guest emits `DeepCheckSkipped` at Notice level —
+    /// the listening-port probe is structurally unavailable (PVE has
+    /// no QGA equivalent for containers). The audit explicitly flagged
+    /// this path as untested.
+    #[tokio::test]
+    async fn assess_deep_emits_deep_check_skipped_for_running_lxc() {
+        // No HTTP mocks at all — the LXC short-circuit returns BEFORE
+        // any I/O. If this test starts hitting a missing mock,
+        // assess_deep regressed and is making an API call for LXC.
+        let server = wiremock::MockServer::start().await;
+        let client = mock_pxclient(&server).await;
+        let mut g = baseline_running();
+        g.vmid = 100;
+        g.guest_type = GuestType::Lxc;
+        // No Delete, so snapshot/backup probes are skipped. Running LXC,
+        // so the listening-port branch fires its DeepCheckSkipped notice.
+        let risks = super::assess_deep(&client, None, Op::Stop, &g).await;
+
+        let (reason, level) = risks
+            .iter()
+            .find_map(|(r, l)| match r {
+                Risk::DeepCheckSkipped { reason } => Some((reason.clone(), *l)),
+                _ => None,
+            })
+            .expect("DeepCheckSkipped must be emitted for running LXC");
+        assert!(
+            reason.contains("LXC"),
+            "DeepCheckSkipped reason should mention LXC, got {reason:?}"
+        );
+        assert_eq!(level, RiskLevel::Notice);
+    }
 }

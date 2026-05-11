@@ -522,3 +522,140 @@ mod parse_kv_pairs_tests {
         assert!(err.to_string().contains("empty key"));
     }
 }
+
+#[cfg(test)]
+mod enforce_preflight_tests {
+    //! Phase 9 — pins the `--allow-risk` bypass semantics that the
+    //! v0.1.10 audit flagged as untested. The CLI flag flows through
+    //! to `force: bool` here; the contract is:
+    //!
+    //! - max risk == Severe  + force == false → bail with a paste-able
+    //!   "re-run with --allow-risk" message (this is the gate)
+    //! - max risk == Severe  + force == true  → proceed (operator owns it)
+    //! - max risk <= Warning + force any       → proceed (notices/warnings
+    //!   are informational)
+    //!
+    //! All four cases below construct a Guest that exercises the cheap
+    //! `assess` path so we don't need to mock anything more than the
+    //! shell `PxClient` wiremock harness — `assess_deep` short-circuits
+    //! before any I/O when the guest is Stopped (no listening probe)
+    //! AND the op is not Delete (no snapshot/backup probes).
+    use super::enforce_preflight;
+    use crate::api::types::{Guest, GuestStatus, GuestType};
+    use crate::app::preflight::Op;
+
+    /// Stock Stopped QEMU guest — no risks unless caller mutates a field.
+    fn stopped_qemu(vmid: u32) -> Guest {
+        Guest {
+            vmid,
+            name: "test".into(),
+            status: GuestStatus::Stopped,
+            guest_type: GuestType::Qemu,
+            node: "pve1".into(),
+            cpu: 0.0,
+            cpus: 1,
+            mem: 0,
+            maxmem: 0,
+            disk: 0,
+            maxdisk: 0,
+            uptime: 0,
+            tags: String::new(),
+            lock: String::new(),
+            hastate: String::new(),
+            template: false,
+            netin: 0,
+            netout: 0,
+        }
+    }
+
+    /// Build a `PxClient` pointed at a fresh wiremock server. No mocks
+    /// are mounted — the tests use `Op::Stop` on Stopped guests so
+    /// `assess_deep` makes no API calls. The client is just a structural
+    /// dependency of `enforce_preflight`.
+    async fn idle_client() -> crate::api::PxClient {
+        let server = wiremock::MockServer::start().await;
+        let cfg = crate::config::ProfileConfig {
+            url: server.uri(),
+            user: "root@pam".into(),
+            auth: "token".into(),
+            token_id: Some("test".into()),
+            token_secret: None,
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            rate_limit: Some(100),
+            policies: None,
+            telegram: None,
+            ssh: None,
+            pbs: None,
+            alerts: None,
+        };
+        // Server must outlive the client's first call. We never call,
+        // so dropping `server` immediately is fine, but keep the binding
+        // alive for the duration of the test to be defensive.
+        std::mem::forget(server);
+        crate::api::PxClient::new(cfg, Some("fake-secret"))
+            .await
+            .expect("client builds")
+    }
+
+    /// max == Severe, force == false → bails. The error message must
+    /// mention `--allow-risk` so the operator knows the escape hatch.
+    #[tokio::test]
+    async fn enforce_preflight_bails_on_severe_without_force() {
+        let client = idle_client().await;
+        let mut g = stopped_qemu(100);
+        g.lock = "backup".into(); // Locked → Severe regardless of op
+        let res = enforce_preflight(&client, None, Op::Stop, &g, false).await;
+        let err = res.expect_err("Severe + !force must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--allow-risk"),
+            "error must point operator at --allow-risk, got: {msg}"
+        );
+        assert!(
+            msg.contains("SEVERE"),
+            "error must name SEVERE risk level, got: {msg}"
+        );
+    }
+
+    /// max == Severe, force == true → proceeds. This is the bypass
+    /// path the v0.1.10 audit found zero coverage for.
+    #[tokio::test]
+    async fn enforce_preflight_proceeds_on_severe_with_force() {
+        let client = idle_client().await;
+        let mut g = stopped_qemu(100);
+        g.lock = "backup".into();
+        enforce_preflight(&client, None, Op::Stop, &g, true)
+            .await
+            .expect("Severe + force must proceed (operator owns the consequence)");
+    }
+
+    /// max == Warning, force == false → proceeds. Warnings are
+    /// informational only; the gate refuses ONLY on Severe.
+    /// `Op::Stop` on a tagged-prod stopped guest yields `TaggedProd` (Warning).
+    #[tokio::test]
+    async fn enforce_preflight_proceeds_on_warning_without_force() {
+        let client = idle_client().await;
+        let mut g = stopped_qemu(100);
+        g.tags = "production".into();
+        enforce_preflight(&client, None, Op::Stop, &g, false)
+            .await
+            .expect("Warning + !force must proceed (only Severe bails)");
+    }
+
+    /// No risks at all → Ok regardless of force. Empty-risk path: pure
+    /// stopped guest with no tags/lock/hastate. The function should
+    /// return Ok immediately without printing the risk header.
+    #[tokio::test]
+    async fn enforce_preflight_returns_ok_on_clean_guest() {
+        let client = idle_client().await;
+        let g = stopped_qemu(100);
+        enforce_preflight(&client, None, Op::Stop, &g, false)
+            .await
+            .expect("clean guest + !force must proceed");
+        enforce_preflight(&client, None, Op::Stop, &g, true)
+            .await
+            .expect("clean guest + force must proceed");
+    }
+}
