@@ -115,8 +115,26 @@ fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
+                    // Phase 10 audit fix: walk the anyhow chain for a
+                    // typed ApiError and surface its actionable hint
+                    // alongside the error. The v0.1.10 audit found that
+                    // is_unauthorized() / is_not_found() / etc. were
+                    // defined on ApiError but had zero call sites — the
+                    // typed-error architecture existed but the operator
+                    // saw the same generic message for 401/403/404/595.
+                    // The hint is the differentiator: "rotate token via
+                    // `proxxx init --interactive`" beats "Proxmox rejected
+                    // our credentials" without follow-up.
+                    let hint = proxxx::api::error::extract_hint(&e);
                     if matches!(cli.format, util::format::OutputFormat::Json) {
-                        let err_json = serde_json::json!([{ "error": e.to_string(), "status": "fatal_error" }]);
+                        let mut err_obj = serde_json::json!({
+                            "error": e.to_string(),
+                            "status": "fatal_error",
+                        });
+                        if let Some(h) = hint {
+                            err_obj["hint"] = serde_json::Value::String(h.to_string());
+                        }
+                        let err_json = serde_json::Value::Array(vec![err_obj]);
                         // Falls back to a hand-written JSON literal if
                         // pretty-printing fails (almost never — the
                         // payload is a tiny inline json! macro).
@@ -134,6 +152,9 @@ fn main() -> Result<()> {
                         // / TLS / IO error one level down, leaving the
                         // operator with nothing to act on.
                         eprintln!("Fatal Error: {e:#}");
+                        if let Some(h) = hint {
+                            eprintln!("  hint: {h}");
+                        }
                     }
                     std::process::exit(1);
                 }
