@@ -156,6 +156,23 @@ fn help_overlay_renders_keymap() {
     let dump = render_to_string(80, 30, |f| {
         widgets::modal::draw_help_overlay(f, f.area());
     });
+    // Phase 16: semantic assertions on top of the layout snapshot.
+    // The snapshot catches "anything visible changed"; these asserts
+    // catch "a critical key binding silently dropped from the help".
+    // Without them, `cargo insta accept` after a regression would
+    // silently lock the broken state in. We require the help to
+    // continue documenting the fundamental keys + at least one
+    // category header so a refactor that collapses sections breaks
+    // this test, not just the snapshot.
+    assert!(dump.contains("Help"), "help overlay must show title");
+    assert!(
+        dump.contains("Navigation"),
+        "help overlay must show Navigation section"
+    );
+    assert!(
+        dump.contains("quit"),
+        "help overlay must document quit binding"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -170,6 +187,16 @@ fn dashboard_empty_cluster_does_not_panic_and_shows_idle_state() {
     let dump = render_to_string(80, 24, |f| {
         views::dashboard::draw(f, f.area(), &state);
     });
+    // Phase 16: pin the "idle state" claim from the test name. The
+    // dashboard's empty-cluster branch MUST render a loading hint —
+    // if it ever rendered a blank panel instead, that's the regression
+    // the test name promises to catch but the snapshot alone wouldn't
+    // (snapshot diffs become noise the moment the layout shifts).
+    assert!(
+        dump.contains("Loading"),
+        "empty-cluster dashboard must show a loading hint, got:\n{dump}"
+    );
+    assert!(dump.contains("0 nodes"), "header must reflect 0 nodes");
     insta::assert_snapshot!(dump);
 }
 
@@ -189,6 +216,20 @@ fn dashboard_with_two_nodes_aggregates_correctly() {
     let dump = render_to_string(100, 30, |f| {
         views::dashboard::draw(f, f.area(), &state);
     });
+    // Phase 16: the entire point of this test is "aggregates
+    // correctly" — assert the aggregation actually surfaced both
+    // nodes. Without this, the snapshot could accept a regression
+    // where one node silently fell out of the listing (off-by-one
+    // in the iteration, filter that wasn't supposed to apply, etc.).
+    assert!(dump.contains("pve1"), "first node must render");
+    assert!(dump.contains("pve2"), "second node must render");
+    // Aggregate guest count "1/2" (1 running, 2 total) is the
+    // header summary — if this drifts, the aggregator stopped
+    // counting one of the two guests.
+    assert!(
+        dump.contains("1/2 guests"),
+        "header must aggregate 1 running of 2 guests, got:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -213,6 +254,32 @@ fn guests_table_with_mixed_status() {
     let dump = render_to_string(100, 20, |f| {
         views::guests::draw(f, f.area(), &state);
     });
+    // Phase 16: the ANSI-injection invariant from Phase 5.13 is the
+    // load-bearing claim. The snapshot CAN'T enforce "no raw ESC byte
+    // in the dump" reliably (the cell.symbol() pipeline may smuggle
+    // partial control bytes through depending on terminfo, and a
+    // human reviewing `cargo insta review` won't spot a U+001B in a
+    // text diff). Assert it explicitly.
+    assert!(
+        !dump.contains('\u{1b}'),
+        "rendered guests table contains raw ESC byte — sanitize wiring regressed: {dump:?}"
+    );
+    // Every queued guest must surface as a row. The vmid is a
+    // numeric anchor that survives sanitisation, ANSI escapes,
+    // table truncation — if any of these go missing it's a real
+    // dropped row, not a layout drift.
+    for vmid in [100, 101, 200, 999] {
+        assert!(
+            dump.contains(&vmid.to_string()),
+            "vmid {vmid} must appear in guests table, got:\n{dump}"
+        );
+    }
+    // Mixed status assertion mirrors the test name: BOTH running and
+    // stopped must render. A regression that hides one status (e.g.
+    // accidental `filter(|g| g.status == Running)`) would be invisible
+    // in a snapshot diff if the row got replaced with whitespace.
+    assert!(dump.contains("running"), "running guests must show status");
+    assert!(dump.contains("stopped"), "stopped guests must show status");
     insta::assert_snapshot!(dump);
 }
 
@@ -234,6 +301,15 @@ fn approval_view_empty_state() {
     let dump = render_to_string(80, 20, |f| {
         views::approval::draw(f, f.area(), &state);
     });
+    // Phase 16: empty-state hint pinned. If a refactor accidentally
+    // renders a blank panel (e.g. forgot the `if approvals.is_empty()`
+    // branch), the snapshot diff is just whitespace and easy to
+    // mindlessly accept. A literal assert protects the operator-facing
+    // contract that "no approvals" is rendered as text, not absence.
+    assert!(
+        dump.contains("No pending approvals"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -243,6 +319,10 @@ fn backup_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::backup::draw(f, f.area(), &state);
     });
+    assert!(
+        dump.contains("No guests to monitor"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -256,6 +336,19 @@ fn compare_view_with_two_selected_guests() {
     let dump = render_to_string(100, 20, |f| {
         views::compare::draw(f, f.area(), &state, &[100, 101]);
     });
+    // Phase 16: the "2 guests" claim is the test's whole point.
+    // Drift-detector silently rendering only one side after a
+    // refactor is the regression class. Both names + the
+    // panel-header guest count are explicit anchors.
+    assert!(dump.contains("vm-prod"), "first selected guest must render");
+    assert!(
+        dump.contains("vm-staging"),
+        "second selected guest must render"
+    );
+    assert!(
+        dump.contains("(2 guests)"),
+        "compare header must reflect 2-guest selection, got:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -292,6 +385,10 @@ fn heatmap_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::heatmap::draw(f, f.area(), &state);
     });
+    assert!(
+        dump.contains("No guests to monitor"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -310,6 +407,10 @@ fn queue_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::queue::draw(f, f.area(), &state);
     });
+    assert!(
+        dump.contains("Queue is empty"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -328,6 +429,10 @@ fn snaptree_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::snaptree::draw(f, f.area(), &state, 100);
     });
+    assert!(
+        dump.contains("No snapshot data"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -337,6 +442,10 @@ fn storage_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::storage::draw(f, f.area(), &state);
     });
+    assert!(
+        dump.contains("Loading storage"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -346,6 +455,18 @@ fn tasks_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::tasks::draw(f, f.area(), &state, "UPID:test:0:0:0:0:0:0:0:");
     });
+    assert!(
+        dump.contains("Waiting for logs"),
+        "empty-state hint missing:\n{dump}"
+    );
+    // The UPID is a forensic anchor — if the renderer ever drops it
+    // (e.g. truncating the header for "cleanliness"), the operator
+    // loses the only link between this log view and the task that
+    // triggered it. Pin the prefix at least.
+    assert!(
+        dump.contains("UPID:test"),
+        "task UPID must surface in header:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -355,6 +476,10 @@ fn timeline_view_empty_state() {
     let dump = render_to_string(100, 20, |f| {
         views::timeline::draw(f, f.area(), &state);
     });
+    assert!(
+        dump.contains("No data for this snapshot"),
+        "empty-state hint missing:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
 
@@ -419,6 +544,13 @@ fn ssh_session_with_pty_content() {
     let dump = render_to_string(80, 12, |f| {
         views::ssh_session::draw(f, f.area(), &input);
     });
+    // Phase 16: pty rendering is the whole point of this third
+    // ssh_session branch — without semantic anchors a snapshot
+    // diff for content that should clearly be in the dump just
+    // says "layout changed". Both the shell prompt and the
+    // `uname -a` echo are deterministic from the fed bytes above.
+    assert!(dump.contains("alpine"), "pty content must render:\n{dump}");
+    assert!(dump.contains("uname"), "pty echo must render:\n{dump}");
     insta::assert_snapshot!(dump);
 }
 
@@ -436,5 +568,19 @@ fn nodes_view_with_quorum_and_stale_stats_badges() {
     let dump = render_to_string(100, 15, |f| {
         views::nodes::draw(f, f.area(), &state);
     });
+    // Phase 16: the test name promises "quorum and stale-stats
+    // badges" — assert each badge claim explicitly. Without these,
+    // a refactor that breaks the badge code path (e.g. the stale-
+    // stats set lookup using `==` on the wrong field) renders the
+    // same layout with badges in the wrong column or missing, and
+    // the snapshot diff hides it.
+    assert!(dump.contains("pve1"), "first node must list");
+    assert!(dump.contains("pve2"), "second node must list");
+    // 2-total counter is in the header — if the renderer ever
+    // double-counts or filters this drops to 1.
+    assert!(
+        dump.contains("(2 total)"),
+        "nodes header must reflect 2 nodes, got:\n{dump}"
+    );
     insta::assert_snapshot!(dump);
 }
