@@ -491,13 +491,19 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                                         let area = terminal.size().unwrap_or_default();
                                         let cols = area.width.max(20);
                                         let rows = area.height.saturating_sub(2).max(5);
-                                        tokio::spawn(async move {
-                                            let res = h.open(vmid, cols, rows).await;
-                                            let error = res.err().map(|e| format!("{e:#}"));
-                                            let _ = tx_c
-                                                .send(DataMsg::SshSessionOpenResult { vmid, error })
-                                                .await;
-                                        });
+                                        crate::util::spawn_traced::spawn_traced(
+                                            "ssh_session_open",
+                                            async move {
+                                                let res = h.open(vmid, cols, rows).await;
+                                                let error = res.err().map(|e| format!("{e:#}"));
+                                                let _ = tx_c
+                                                    .send(DataMsg::SshSessionOpenResult {
+                                                        vmid,
+                                                        error,
+                                                    })
+                                                    .await;
+                                            },
+                                        );
                                     }
                                     Some(SideEffect::CloseSshSession) => {
                                         ssh_handler.close();
@@ -924,7 +930,7 @@ async fn dispatch_side_effect(
             let tx_cloned = tx.clone();
             let coord_clone = Arc::clone(hitl_coord);
             let tg_clone = tg_gateway.cloned();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("hitl_approval", async move {
                 let _ = tx_cloned
                     .send(DataMsg::HitlRequested(txn_id.clone(), desc))
                     .await;
@@ -993,7 +999,7 @@ async fn dispatch_side_effect(
                 info!("Starting guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("start_guest", async move {
                     match client_cloned.start_guest(&node, vmid, gt).await {
                         Ok(upid) => {
                             let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
@@ -1015,7 +1021,7 @@ async fn dispatch_side_effect(
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
                 // Bug #2 fix: force=false → graceful shutdown, force=true → hard stop.
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("stop_guest", async move {
                     let res = if force {
                         client_cloned.stop_guest(&node, vmid, gt, true).await
                     } else {
@@ -1080,7 +1086,7 @@ async fn dispatch_side_effect(
                 info!("Restarting guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("restart_guest", async move {
                     match client_cloned.restart_guest(&node, vmid, gt).await {
                         Ok(upid) => {
                             let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
@@ -1098,7 +1104,7 @@ async fn dispatch_side_effect(
                 info!("Creating snapshot {name} for guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("create_snapshot", async move {
                     match client_cloned.create_snapshot(&node, vmid, gt, &name).await {
                         Ok(upid) => {
                             let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
@@ -1115,7 +1121,7 @@ async fn dispatch_side_effect(
                 info!("Deleting guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("delete_guest", async move {
                     match client_cloned.delete_guest(&node, vmid, gt).await {
                         Ok(upid) => {
                             let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
@@ -1141,7 +1147,7 @@ async fn dispatch_side_effect(
             if let Some(gt) = gt {
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("migrate_guest", async move {
                     // TUI migrate path: assume online (TUI typically operates
                     // on running guests) and accept local-disks for now —
                     // a future TUI dialog can let the user opt out. PVE
@@ -1180,7 +1186,7 @@ async fn dispatch_side_effect(
             command,
         } => {
             let client_cloned = Arc::clone(client);
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("execute_guest_command", async move {
                 match client_cloned
                     .execute_guest_command(&node, vmid, &guest_type, &command)
                     .await
@@ -1203,7 +1209,7 @@ async fn dispatch_side_effect(
         SideEffect::FetchTaskLog { upid, node } => {
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("fetch_task_log", async move {
                 match client_cloned.get_task_log(&node, &upid, 0, 500).await {
                     Ok(log) => {
                         let _ = tx_cloned
@@ -1223,7 +1229,7 @@ async fn dispatch_side_effect(
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
 
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("execute_queue", async move {
                 for op in ops {
                     let id = op.id.clone();
                     let action = *op.action;
@@ -1479,7 +1485,7 @@ async fn dispatch_side_effect(
         } => {
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("download_iso", async move {
                 let (algo, hex): (Option<&str>, Option<&str>) = match checksum.as_ref() {
                     Some((a, h)) => (Some(a.as_str()), Some(h.as_str())),
                     None => (None, None),
@@ -1516,7 +1522,7 @@ async fn dispatch_side_effect(
             warn!("MoveDisk SideEffect bypassed queue — running directly for {vmid}");
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("move_disk", async move {
                 match client_cloned
                     .move_disk(
                         &node,
@@ -1545,7 +1551,7 @@ async fn dispatch_side_effect(
             warn!("ResizeDisk SideEffect bypassed queue — running directly for {vmid}");
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("resize_disk", async move {
                 match client_cloned
                     .resize_disk(&node, vmid, guest_type, &disk, &size)
                     .await
@@ -1564,7 +1570,7 @@ async fn dispatch_side_effect(
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
             let guests_snapshot = state.guests.clone();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("fetch_hardware", async move {
                 let (pci_res, usb_res) =
                     tokio::join!(client_cloned.list_pci(&node), client_cloned.list_usb(&node),);
                 let mut config_set = tokio::task::JoinSet::new();
@@ -1606,7 +1612,7 @@ async fn dispatch_side_effect(
                 .filter(|n| n.status == crate::api::types::NodeStatus::Online)
                 .map(|n| n.node.clone())
                 .collect();
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("fetch_ha_console", async move {
                 // (Gemini audit) — explicit per-call timeouts.
                 //
                 // reqwest already enforces a 30 s request-level timeout
@@ -1695,7 +1701,7 @@ async fn dispatch_side_effect(
             if let (Some(node), Some(gt)) = (get_node(vmid), get_type(vmid)) {
                 let client_cloned = Arc::clone(client);
                 let tx_cloned = tx.clone();
-                tokio::spawn(async move {
+                crate::util::spawn_traced::spawn_traced("fetch_snapshot_tree", async move {
                     match client_cloned.list_snapshots(&node, vmid, gt).await {
                         Ok(snaps) => {
                             let _ = tx_cloned
@@ -1725,7 +1731,7 @@ async fn dispatch_side_effect(
             let guests = state.guests.clone();
             let query_lower = query.to_lowercase();
 
-            tokio::spawn(async move {
+            crate::util::spawn_traced::spawn_traced("config_grep", async move {
                 let mut matches = Vec::new();
                 for guest in guests {
                     if let Ok(config) = client_cloned

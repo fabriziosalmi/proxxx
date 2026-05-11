@@ -3,3 +3,4 @@ pub mod panic_hook;
 pub mod sanitize;
 pub mod shutdown;
 pub mod sparkline;
+pub mod spawn_traced;
