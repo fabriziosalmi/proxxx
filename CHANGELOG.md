@@ -12,6 +12,78 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-05-12
+
+### Fixed — password-auth credential rotation + auth-failure UX
+
+- **`resolve_password()` had the resolution order BACKWARDS.** The
+  helper checked the inline `password =` value in config.toml
+  FIRST, then `PROXXX_PASSWORD` env, then keychain. So any profile
+  with a hand-edited inline password silently ignored the env-var
+  rotation path — `PROXXX_PASSWORD=new` would NEVER take effect
+  unless the operator first edited config.toml to remove the
+  inline value. This was inconsistent with `resolve_token_secret`,
+  which has always put env > inline.
+
+  Flipped to **env > inline > keychain**. Same hierarchy as
+  token-secret; matches the long-standing "env always wins"
+  promise in `docs/guide/secrets.md`.
+
+  Operator-visible behaviour change: a profile with BOTH inline
+  `password =` AND `$PROXXX_PASSWORD` set will now use the env
+  value. If you were intentionally relying on the inline value
+  while having a stale env var set, unset the env var.
+
+- **Password-auth 401 surfaced as "Failed to parse auth response"
+  instead of "401 Unauthorized".** `AuthMethod::login` called
+  `.json()` directly on PVE's response without checking the
+  status code first. When the credentials were wrong, PVE
+  returned 401 with a JSON body that didn't match
+  `TicketResponse`, so the visible error was a parse failure —
+  burying the actual cause and silently breaking any caller
+  grepping for "401" / "Unauthorized".
+
+  `login` now reads `resp.status()` first and bails with a
+  proper "Authentication failed: 401 Unauthorized from <url>
+  — <body snippet>" error, capped to 1 KiB of body so a hostile
+  server can't OOM the auth path.
+
+### Fixed — E2E test flakiness on clean cluster runs
+
+- **`e2e_alpha` (CRUD lifecycle) timed out 60s every clean run.**
+  PVE returns `500 "Configuration file 'nodes/X/lxc/N.conf' does
+  not exist"` (NOT 404) on `/status/current` for a deleted LXC.
+  Two poll loops in the test+harness classified that as transient
+  and retried until timeout: the in-test step-6 "guest 404s after
+  CLI delete" poll and the RAII teardown's "guest reaches stopped"
+  poll.
+
+  Both now recognise the PVE quirk via a new helper
+  `pve_error_is_gone(&err)` that matches the literal substring
+  pattern PVE actually emits (case-insensitive `"does not exist"`
+  alongside the existing `"404"` / `"not found"` checks). Added
+  a `guest_is_gone()` fast-path to `TestResourceGuard` so the
+  whole stop+poll+delete dance is skipped when the test has
+  already removed the guest.
+
+- **`e2e_beta::beta_bad_token_surfaces_401_cleanly`** assumed the
+  local config.toml uses token-auth and only overrode
+  `PROXXX_TOKEN_SECRET`. On password-auth configs the env-override
+  was a no-op (compounded by the resolve_password bug above) so
+  proxxx silently authenticated with the REAL password and the
+  test failed the "must exit non-zero" assertion. Now overrides
+  both `PROXXX_TOKEN_SECRET` AND `PROXXX_PASSWORD` so either
+  auth path lands a 401.
+
+### Internal
+
+- `pve_error_is_gone` + `guest_is_gone` helpers added to
+  [`tests/common/mod.rs`](tests/common/mod.rs) — reusable by any
+  future E2E test that needs to detect deleted-guest state.
+- 2 E2E tests now green that were pre-existingly broken on the
+  local cluster fixture; no other test changes.
+- Live gate (87 read + 47 mutation probes) green on every commit.
+
 ## [0.1.22] — 2026-05-12
 
 ### Breaking — HITL callbacks must now be HMAC-signed
