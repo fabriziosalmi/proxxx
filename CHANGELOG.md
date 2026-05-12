@@ -12,6 +12,56 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-05-12
+
+### Breaking — HITL callbacks must now be HMAC-signed
+
+- **The v0.1.21 backward-compat shim is gone.** Unsigned callbacks
+  (anything without a trailing `:<16-hex-char-tag>`) are refused
+  outright by both the standalone daemon (`proxxx hitl serve`) and
+  the in-process TUI poller. This was the explicit promise in
+  v0.1.21's CHANGELOG and in the test name
+  `legacy_unsigned_callback_still_accepted_in_v0_1_21`.
+
+- Refusal surface:
+  - Daemon: returns `CallbackOutcome::InvalidFormat`, answers the
+    user with `"❌ Unsigned callback refused — daemon upgrade needed"`,
+    no PVE-side mutation attempted.
+  - TUI poller: drops the callback, answers
+    `"❌ Unsigned callback refused — TUI upgrade needed"`,
+    `coord.resolve` is not called so any pending approval stays
+    in flight (the operator can re-issue after restart).
+  - Inverted test `legacy_unsigned_callback_is_refused_in_v0_1_22`
+    pins the contract; also asserts the refused txn does NOT
+    consume the replay-protection slot (a re-signed retry of the
+    same txn must not falsely 401 as replay).
+
+### Upgrade path
+
+- v0.1.21 → v0.1.22: restart the HITL daemon (or the TUI) so the
+  next `request_approval` mints a freshly-signed inline keyboard.
+  Approvals issued under v0.1.21-or-earlier daemons that haven't
+  been clicked yet will be refused — the operator must re-trigger
+  the destructive op so a new signed prompt is generated.
+- Skipping v0.1.21 entirely (v0.1.20 → v0.1.22 direct): same as
+  above. The HMAC key auto-bootstraps at
+  `<config_dir>/telegram_hmac.key` on first start.
+
+### Internal
+
+- 4 pre-existing tests (`replay_callback_does_not_re_execute`,
+  `pve_403_during_execute_surfaces_as_failure`,
+  `deny_callback_does_not_invoke_gateway`,
+  `fast_op_skips_intermediate_executing_edit`) constructed callbacks
+  by hand without a tag and silently passed under the v0.1.21 shim.
+  All now build their callback via the new `signed(key, payload)`
+  helper that mirrors what `request_approval` emits at runtime.
+- The `Replay.txn_id` assertion in
+  `replay_callback_does_not_re_execute` now matches the full signed
+  string (tag included) since that's what the dedup engine keys off.
+- 12 hitl_e2e tests pass; no production change beyond the two
+  parser sites (daemon + TUI poller).
+
 ## [0.1.21] — 2026-05-12
 
 ### Added — HMAC-signed HITL callback_data (defence-in-depth against bot-token leak)
