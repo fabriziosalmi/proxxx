@@ -47,7 +47,15 @@ impl AuthMethod {
         }
     }
 
-    /// Login with password, get a ticket
+    /// Login with password, get a ticket.
+    ///
+    /// 401 / 403 from PVE are surfaced explicitly with the status
+    /// code in the error chain so the operator sees
+    /// "401 Unauthorized" instead of "Failed to parse auth response"
+    /// (which is what `.json()` produced before, because PVE's
+    /// failed-auth body doesn't match `TicketResponse`). The
+    /// upstream `e2e_beta` test `beta_bad_token_surfaces_401_cleanly`
+    /// asserts on the literal "401" / "Unauthorized" substring.
     pub async fn login(
         client: &reqwest::Client,
         base_url: &str,
@@ -56,15 +64,38 @@ impl AuthMethod {
     ) -> Result<Self> {
         debug!("Authenticating to {} as {}", base_url, user);
 
-        let resp: TicketResponse = client
+        let resp = client
             .post(format!("{base_url}/api2/json/access/ticket"))
             .form(&[("username", user), ("password", password)])
             .send()
             .await
-            .context("Failed to connect to Proxmox")?
-            .json()
-            .await
-            .context("Failed to parse auth response")?;
+            .context("Failed to connect to Proxmox")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            // Read the body for diagnostics — PVE often includes a
+            // descriptive message even on 401. Cap to 1 KiB so a
+            // hostile server can't OOM us on the auth path. Body
+            // read errors don't block the error surface; we still
+            // produce a useful message with the status code alone.
+            let body_snippet = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(1024)
+                .collect::<String>();
+            anyhow::bail!(
+                "Authentication failed: {status} from {base_url}/api2/json/access/ticket{}",
+                if body_snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {body_snippet}")
+                }
+            );
+        }
+
+        let resp: TicketResponse = resp.json().await.context("Failed to parse auth response")?;
 
         Ok(Self::Password {
             ticket: Zeroizing::new(resp.data.ticket),

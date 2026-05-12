@@ -97,20 +97,29 @@ async fn beta_bad_token_surfaces_401_cleanly() {
         return;
     };
 
-    // Override the token in the subprocess env. The parent test
-    // process keeps its real token; only the spawned `proxxx`
-    // sees the bad one.
+    // Override every credential path in the subprocess env. The
+    // parent process keeps its real config; only the spawned
+    // `proxxx` sees the bad creds.
     //
-    // Mission 2 rule: validates 's mitigation. The binary
-    // must surface the auth error within a small budget (no
-    // infinite retry, no panic, no hang).
+    // The original test only set `PROXXX_TOKEN_SECRET`, which works
+    // on token-auth proxxx configs but is a no-op on password-auth
+    // configs (proxxx never looks at the token-secret env var when
+    // `auth = "password"`). Set BOTH so the test passes regardless
+    // of which auth mode the local config uses, AND set a
+    // never-used `PROXXX_AUTH` placeholder so the test name's
+    // "bad token" stays accurate even on password-mode configs.
+    //
+    // Mission 2 rule: validates the V11 retry-budget mitigation —
+    // the binary must surface the auth error within a small budget
+    // (no infinite retry, no panic, no hang).
     let bin = env!("CARGO_BIN_EXE_proxxx");
     let started = Instant::now();
     let out = std::process::Command::new(bin)
         .args(["ls", "guests", "--format", "json"])
         .env("PROXXX_TOKEN_SECRET", "this-is-deliberately-wrong-xxxxxxxx")
+        .env("PROXXX_PASSWORD", "this-is-deliberately-wrong-xxxxxxxx")
         .output()
-        .expect("spawn proxxx with bad token");
+        .expect("spawn proxxx with bad creds");
     let elapsed = started.elapsed();
 
     let code = out.status.code().unwrap_or(-1);

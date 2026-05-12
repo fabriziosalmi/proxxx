@@ -287,6 +287,29 @@ impl Drop for TestResourceGuard {
     }
 }
 
+/// Recognise PVE's "guest is gone" error shapes. PVE returns
+/// `404 Not Found` on some paths, `500 + "Configuration file 'nodes/X/lxc/N.conf' does not exist"`
+/// on `/status/current` for a deleted LXC, and equivalent shapes for
+/// QEMU. The teardown poll loop classified the 500 case as transient
+/// and timed out for 60s on every clean run — this helper lets the
+/// poll exit immediately when the guest is already gone.
+fn pve_error_is_gone(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}");
+    msg.contains("404")
+        || msg.contains("not found")
+        || msg.to_ascii_lowercase().contains("does not exist")
+}
+
+/// Cheap existence check used by the RAII teardown's fast-path: if
+/// the guest is already gone (test already deleted, or guard runs
+/// twice on a re-entry), skip the stop/poll/delete dance.
+async fn guest_is_gone(client: &Arc<PxClient>, node: &str, vmid: u32) -> bool {
+    match client.get_guest_status(node, vmid).await {
+        Ok(_) => false,
+        Err(e) => pve_error_is_gone(&e),
+    }
+}
+
 /// Best-effort cleanup of a single resource. Any error is logged but
 /// not raised — Drop semantics demand we keep going.
 async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
@@ -297,6 +320,15 @@ async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
             guest_type,
         } => {
             eprintln!("[guard] tearing down guest {vmid} on {node}");
+            // Fast-path: if the test already deleted the guest, skip
+            // the whole stop/poll/delete dance. PVE returns
+            //     500 "Configuration file 'nodes/X/lxc/N.conf' does not exist"
+            // for a missing LXC (NOT 404 — Proxmox quirk that bit the
+            // pre-fix teardown loop for 60s every clean run).
+            if guest_is_gone(client, node, *vmid).await {
+                eprintln!("[guard] guest {vmid} already gone — skipping teardown");
+                return;
+            }
             // Force-stop first; ignore errors (it may already be stopped).
             let _ = client.stop_guest(node, *vmid, *guest_type, true).await;
             // Wait until status is stopped — bounded so we don't hang
@@ -312,9 +344,13 @@ async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
                         }
                         Ok(_) => Ok(None),
                         Err(e) => {
-                            // Likely "VM not found" — already gone, treat as done.
-                            let msg = format!("{e:#}");
-                            if msg.contains("404") || msg.contains("not found") {
+                            // "Already gone" — treat as done. Covers
+                            // both the rare clean 404 (PVE >= 9 on
+                            // some paths) and the PVE 500 +
+                            // "Configuration file ... does not exist"
+                            // shape, which is what `/status/current`
+                            // emits for a missing LXC.
+                            if pve_error_is_gone(&e) {
                                 Ok(Some(()))
                             } else {
                                 Err(e)
@@ -324,6 +360,14 @@ async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
                 },
             )
             .await;
+            // Re-check existence before the delete call — if the test
+            // raced us and deleted between the poll exit and here,
+            // we'd hit the same misclassified 500 in delete_guest's
+            // pre-flight. Cheap idempotent skip.
+            if guest_is_gone(client, node, *vmid).await {
+                eprintln!("[guard] guest {vmid} disappeared mid-teardown — done");
+                return;
+            }
             // Now delete. The new TOCTOU pre-flight gate refuses if
             // status != Stopped, but since we just polled stopped
             // we should be safe. Still best-effort.

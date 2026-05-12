@@ -660,19 +660,29 @@ impl ProfileConfig {
         anyhow::bail!("Token secret not found. Check CLI args, PROXXX_TOKEN_SECRET, inline `token_secret =` in config.toml, token_secret_file, or keychain.")
     }
 
-    /// Resolve password from config, keychain, or env var. Async
-    /// because the keychain branch goes through `spawn_blocking`
-    /// (audit).
+    /// Resolve password from env, config, or keychain. Async because
+    /// the keychain branch goes through `spawn_blocking` (audit).
+    ///
+    /// Resolution order — env > inline config > keychain — matches
+    /// `resolve_token_secret` so operators get the SAME precedence
+    /// rules regardless of which auth method their profile uses. The
+    /// pre-Phase 18 order put inline-config first, which made
+    /// `PROXXX_PASSWORD` silently unreachable on any profile that
+    /// also had `password =` in `config.toml`. That broke
+    /// credential rotation at runtime (the documented escape hatch)
+    /// AND broke the `beta_bad_token_surfaces_401_cleanly` E2E test
+    /// on password-auth configs.
     pub async fn resolve_password(&self) -> Result<zeroize::Zeroizing<String>> {
+        // Env beats inline — matches the token-secret hierarchy and
+        // the long-standing "env always wins" promise in the docs.
+        if let Some(val) = env_var_secret("PROXXX_PASSWORD") {
+            return Ok(val);
+        }
+
         if let Some(ref pw) = self.password {
             if !pw.is_empty() {
                 return Ok(zeroize::Zeroizing::new(pw.clone()));
             }
-        }
-
-        // — bounded env var read for the PVE password.
-        if let Some(val) = env_var_secret("PROXXX_PASSWORD") {
-            return Ok(val);
         }
 
         #[cfg(feature = "keychain")]
@@ -682,7 +692,7 @@ impl ProfileConfig {
             }
         }
 
-        anyhow::bail!("Password not found. Set it via config, PROXXX_PASSWORD env var, or `proxxx auth login`")
+        anyhow::bail!("Password not found. Set it via PROXXX_PASSWORD env var, inline `password =` in config.toml, or `proxxx auth login`")
     }
 }
 

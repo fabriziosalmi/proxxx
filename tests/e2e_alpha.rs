@@ -268,8 +268,17 @@ async fn alpha_full_crud_lifecycle() {
                 match client.get_guest_status(&env.node, env.vmid).await {
                     Ok(_) => Ok(None),
                     Err(e) => {
+                        // PVE returns 500 (not 404) + "Configuration
+                        // file '...' does not exist" for a missing
+                        // LXC on `/status/current`. Treat that as the
+                        // "guest is gone" signal — the previous
+                        // string-match against "404" alone caused a
+                        // 60s timeout on every clean deletion.
                         let msg = format!("{e:#}");
-                        if msg.contains("404") {
+                        if msg.contains("404")
+                            || msg.contains("not found")
+                            || msg.to_ascii_lowercase().contains("does not exist")
+                        {
                             Ok(Some(()))
                         } else {
                             Err(e)
