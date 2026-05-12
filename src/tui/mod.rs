@@ -180,30 +180,37 @@ async fn run_hitl_poller(
                     // messages can't forge a valid tag without our
                     // separately-stored HMAC key).
                     //
-                    // Legacy unsigned format accepted for one release
-                    // (warn-only); v0.1.22 will refuse.
+                    // Phase 18 — every callback MUST carry a valid
+                    // HMAC tag. The v0.1.21 backward-compat shim that
+                    // accepted unsigned callbacks is gone; refuse and
+                    // drop. Symmetric with daemon::handle_callback_update.
                     let payload_for_resolve = {
                         let tail = data.rsplitn(2, ':').collect::<Vec<&str>>();
-                        if tail.len() == 2
-                            && tail[0].len() == 16
-                            && tail[0].chars().all(|c| c.is_ascii_hexdigit())
+                        if tail.len() != 2
+                            || tail[0].len() != 16
+                            || !tail[0].chars().all(|c| c.is_ascii_hexdigit())
                         {
-                            let head = tail[1];
-                            if !crate::hitl::hmac_key::verify(tg.hmac_key(), head, tail[0]) {
-                                warn!("TUI HITL callback failed HMAC verify; dropping: {data}");
-                                let _ = tg
-                                    .answer_callback(&cb.id, "❌ Signature verification failed")
-                                    .await;
-                                continue;
-                            }
-                            head.to_string()
-                        } else {
                             warn!(
-                                "TUI HITL callback without HMAC tag — accepting under \
-                                 v0.1.21 backward-compat shim; v0.1.22 will refuse: {data}"
+                                "TUI HITL callback without HMAC tag — refused (v0.1.22+ \
+                                 requires signed callbacks; restart the TUI so the next \
+                                 request_approval mints a fresh signed keyboard): {data}"
                             );
-                            data.clone()
+                            let _ = tg
+                                .answer_callback(
+                                    &cb.id,
+                                    "❌ Unsigned callback refused — TUI upgrade needed",
+                                )
+                                .await;
+                            continue;
                         }
+                        if !crate::hitl::hmac_key::verify(tg.hmac_key(), tail[1], tail[0]) {
+                            warn!("TUI HITL callback failed HMAC verify; dropping: {data}");
+                            let _ = tg
+                                .answer_callback(&cb.id, "❌ Signature verification failed")
+                                .await;
+                            continue;
+                        }
+                        tail[1].to_string()
                     };
 
                     let Some((decision, txn_id)) = payload_for_resolve.split_once(':') else {

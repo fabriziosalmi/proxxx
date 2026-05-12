@@ -87,53 +87,53 @@ pub async fn handle_callback_update(
     };
     info!("Received HITL callback: {}", data);
 
-    // Phase 17 audit fix: HMAC-verify the callback before any other
-    // parse step. Format introduced in Phase 17:
+    // Phase 18 — every callback MUST carry a valid HMAC tag. The
+    // v0.1.21 backward-compat shim that accepted unsigned legacy
+    // callbacks is gone, per the contract documented in v0.1.21's
+    // CHANGELOG and tested by `legacy_unsigned_callback_still_accepted_in_v0_1_21`
+    // (now inverted to `legacy_unsigned_callback_is_refused_in_v0_1_22`).
+    //
+    // Canonical shape after v0.1.22:
     //     decision:action:vmid[-timestamp]:hmac_hex
-    // Legacy format (pre-Phase 17):
-    //     decision:action:vmid[-timestamp]
+    // where hmac_hex is exactly 16 hex chars (8 raw bytes).
     //
-    // We still accept the legacy format for one release so in-flight
-    // approvals at upgrade time resolve cleanly — but log a warning.
-    // Phase 18 will flip the legacy branch to refusal.
-    //
-    // The HMAC tag is exactly 16 hex chars (8 raw bytes). Anything
-    // else in tail position is treated as part of the txn_id (legacy
-    // format), not a tag — this keeps the parser deterministic
-    // without needing version-tagging on the wire.
-    let (payload_for_parse, signed) = {
+    // The tag is split off at the LAST `:` so the txn_id segment can
+    // freely contain hyphens, digits, or any non-colon byte. A
+    // callback whose tail isn't a 16-hex-char chunk is refused
+    // outright — no quiet-acceptance branch, no telemetry alert
+    // window. Operators who haven't restarted their HITL daemon
+    // since v0.1.21 will see refusals; the message points them to
+    // upgrade.
+    let payload_for_parse = {
         let parts: Vec<&str> = data.rsplitn(2, ':').collect();
-        // rsplitn(2, ':') returns ["tail", "head"] for "head:tail" or
-        // a single-element vec when there's no colon. We check the
-        // tail for the canonical 16-hex tag shape.
-        if parts.len() == 2
-            && parts[0].len() == 16
-            && parts[0].chars().all(|c| c.is_ascii_hexdigit())
+        if parts.len() != 2
+            || parts[0].len() != 16
+            || !parts[0].chars().all(|c| c.is_ascii_hexdigit())
         {
-            let tail_tag = parts[0];
-            let head_payload = parts[1];
-            if !crate::hitl::hmac_key::verify(tg_gateway.hmac_key(), head_payload, tail_tag) {
-                warn!("HITL callback failed HMAC verify: {data}");
-                let _ = tg_gateway
-                    .answer_callback(&cb.id, "❌ Signature verification failed")
-                    .await;
-                return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-            }
-            (head_payload.to_string(), true)
-        } else {
             warn!(
-                "HITL callback without HMAC tag — accepting under v0.1.21 \
-                 backward-compat shim; v0.1.22 will refuse: {data}"
+                "HITL callback without HMAC tag — refused (v0.1.22+ requires \
+                 signed callbacks; restart your HITL daemon to mint a fresh \
+                 keyboard): {data}"
             );
-            (data.clone(), false)
+            let _ = tg_gateway
+                .answer_callback(
+                    &cb.id,
+                    "❌ Unsigned callback refused — daemon upgrade needed",
+                )
+                .await;
+            return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
         }
+        let tail_tag = parts[0];
+        let head_payload = parts[1];
+        if !crate::hitl::hmac_key::verify(tg_gateway.hmac_key(), head_payload, tail_tag) {
+            warn!("HITL callback failed HMAC verify: {data}");
+            let _ = tg_gateway
+                .answer_callback(&cb.id, "❌ Signature verification failed")
+                .await;
+            return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
+        }
+        head_payload.to_string()
     };
-    if !signed {
-        // Telemetry signal for operators upgrading from older proxxx —
-        // surfaced as a structured warning so an alert can fire on
-        // sustained unsigned traffic post-rollout.
-        tracing::warn!(target: "hitl.legacy_unsigned", "received unsigned callback");
-    }
 
     let parts: Vec<&str> = payload_for_parse.split(':').collect();
     if parts.len() < 3 {

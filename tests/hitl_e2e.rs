@@ -50,6 +50,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+/// Compose a signed `callback_data` string the way the daemon expects:
+/// `<payload>:<16-hex-tag>`. Used by every test that constructs a
+/// callback by hand (since v0.1.22 the daemon refuses unsigned shapes).
+///
+/// `key` MUST be the same key the gateway holds — `fake_gateway` uses
+/// an all-zeros 32-byte test key (see `TelegramGateway::with_base_url`).
+fn signed(key: &[u8], payload: &str) -> String {
+    let tag = proxxx::hitl::hmac_key::sign(key, payload);
+    format!("{payload}:{tag}")
+}
+
 /// Build a `CallbackQuery` with the given data string. The other fields
 /// are minimal — daemon code only reads `id` and `data`.
 fn callback_query(id: &str, data: &str) -> CallbackQuery {
@@ -1171,7 +1182,13 @@ async fn replay_callback_does_not_re_execute() {
     let pending = PendingApprovals::new();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
 
-    let cb = callback_query("cb-1", "approve:stop:100");
+    // v0.1.22: every callback MUST be HMAC-signed. Pre-compute the
+    // signed shape once and reuse it for both deliveries — the
+    // replay-protection store keys off the full callback_data string,
+    // so first → execute, second → Replay is the contract this test
+    // pins.
+    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let cb = callback_query("cb-1", &data);
     let upd = update(1, cb);
 
     // First delivery: should execute.
@@ -1188,8 +1205,8 @@ async fn replay_callback_does_not_re_execute() {
         .await
         .expect("second call");
     assert!(
-        matches!(out2, CallbackOutcome::Replay { ref txn_id } if txn_id == "approve:stop:100"),
-        "replay must be rejected, got {out2:?}"
+        matches!(out2, CallbackOutcome::Replay { ref txn_id } if txn_id == &data),
+        "replay must be rejected with full signed txn_id, got {out2:?}"
     );
 
     // Critical assertion: the gateway saw exactly one shutdown call.
@@ -1220,7 +1237,7 @@ async fn pve_403_during_execute_surfaces_as_failure() {
         .with_node_and_guest("pve01", guest(200, "vm-restricted"))
         .fail_mutations("403 Forbidden: token has no VM.PowerMgmt on /vms/200");
 
-    let cb = callback_query("cb-403", "approve:start:200");
+    let cb = callback_query("cb-403", &signed(tg.hmac_key(), "approve:start:200"));
     let upd = update(2, cb);
 
     let outcome = handle_callback_update(&upd, &pending, &client, &tg)
@@ -1339,7 +1356,7 @@ async fn deny_callback_does_not_invoke_gateway() {
     let pending = PendingApprovals::new();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(50, "vm-test"));
 
-    let cb = callback_query("cb-deny", "deny:stop:50");
+    let cb = callback_query("cb-deny", &signed(tg.hmac_key(), "deny:stop:50"));
     let upd = update(4, cb);
     let outcome = handle_callback_update(&upd, &pending, &client, &tg)
         .await
@@ -1393,11 +1410,13 @@ async fn fast_op_skips_intermediate_executing_edit() {
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
 
     // Build a CallbackQuery that includes a `message` so the daemon
-    // has a message_id to (potentially) edit.
+    // has a message_id to (potentially) edit. v0.1.22: sign the
+    // callback_data; unsigned shapes are refused upstream.
+    let data = signed(tg.hmac_key(), "approve:restart:100");
     let cb_json = serde_json::json!({
         "id": "cb-fast",
         "from": { "first_name": "tester" },
-        "data": "approve:restart:100",
+        "data": data,
         "message": { "message_id": 42 },
     });
     let upd: Update = serde_json::from_value(serde_json::json!({
@@ -1589,11 +1608,23 @@ async fn callback_signed_with_wrong_key_is_refused() {
     assert!(client.calls_for("shutdown_guest").is_empty());
 }
 
-/// Legacy unsigned callbacks still flow through (one-release shim).
-/// v0.1.22 will flip this to refusal — the test name itself documents
-/// the transient contract so the v0.1.22 PR knows to invert.
+/// v0.1.22: the one-release shim from v0.1.21 is gone. Unsigned
+/// callbacks are now refused outright — symmetric with the
+/// tampered-tag / wrong-key tests above. The test name was
+/// `legacy_unsigned_callback_still_accepted_in_v0_1_21` and is now
+/// inverted; the original test name is preserved in this comment so
+/// `git log --grep` finds the v0.1.21 → v0.1.22 transition.
+///
+/// Critical assertions:
+///   1. Outcome is `InvalidFormat`, not `Executed`.
+///   2. No PVE-side mutation was attempted (the unsigned callback is
+///      rejected BEFORE the gateway is touched).
+///   3. The replay-protection store stays untouched — a refused
+///      unsigned callback must not consume the txn slot, otherwise
+///      a re-signed retry of the SAME txn would falsely 401 as
+///      replay.
 #[tokio::test]
-async fn legacy_unsigned_callback_still_accepted_in_v0_1_21() {
+async fn legacy_unsigned_callback_is_refused_in_v0_1_22() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
     let pending = PendingApprovals::new();
@@ -1607,7 +1638,13 @@ async fn legacy_unsigned_callback_still_accepted_in_v0_1_21() {
         .await
         .expect("handle");
     assert!(
-        matches!(outcome, CallbackOutcome::Executed { vmid: 10, .. }),
-        "legacy unsigned callback must still execute under v0.1.21 shim, got {outcome:?}"
+        matches!(outcome, CallbackOutcome::InvalidFormat { .. }),
+        "legacy unsigned callback must be refused in v0.1.22+, got {outcome:?}"
+    );
+    assert!(client.calls_for("shutdown_guest").is_empty());
+    assert_eq!(
+        pending.consumed_count(),
+        0,
+        "refused txn must not consume the slot"
     );
 }
