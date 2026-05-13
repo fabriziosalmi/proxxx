@@ -231,6 +231,7 @@ impl crate::ssh::SshGateway for NoSsh {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum BatchOp {
     Start,
     Stop { force: bool, timeout_secs: u32 },
@@ -239,7 +240,203 @@ pub enum BatchOp {
     Resume,
 }
 
+/// Execution policy for multi-VMID batch operations.
+///
+/// - `Full`: fire all targets fully-parallel (capped at 32 in-flight).
+///   This is the existing default behaviour.
+/// - `Canary`: run on a small pilot slice first (ceil(N × percent / 100)
+///   targets). If any pilot target fails, the rest are skipped and the
+///   exit code reflects partial failure. If the pilot succeeds, the
+///   remaining targets run in `Full` parallel.
+/// - `Rolling`: run in sequential waves of `wave_size` targets. Each wave
+///   is fired fully-parallel within itself; the next wave only starts
+///   when the previous one completes without error. A failing wave aborts
+///   the remaining waves.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchPolicy {
+    Full,
+    Canary { percent: u8 },
+    Rolling { wave_size: usize },
+}
+
+impl BatchPolicy {
+    /// Parse from a user-supplied string:
+    /// - `"full"` → `Full`
+    /// - `"canary"` → `Canary { percent: 5 }`
+    /// - `"canary=N"` → `Canary { percent: N }` (N: 1–100)
+    /// - `"rolling"` → `Rolling { wave_size: 10 }`
+    /// - `"rolling=K"` → `Rolling { wave_size: K }` (K ≥ 1)
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("full") {
+            return Ok(Self::Full);
+        }
+        if let Some(rest) = s.to_ascii_lowercase().strip_prefix("canary") {
+            let percent = if rest.is_empty() {
+                5
+            } else if let Some(n) = rest.strip_prefix('=') {
+                n.parse::<u8>()
+                    .ok()
+                    .filter(|&p| p >= 1 && p <= 100)
+                    .ok_or_else(|| anyhow::anyhow!("canary percent must be 1–100, got {n}"))?
+            } else {
+                anyhow::bail!("unrecognised policy: {s}")
+            };
+            return Ok(Self::Canary { percent });
+        }
+        if let Some(rest) = s.to_ascii_lowercase().strip_prefix("rolling") {
+            let wave_size = if rest.is_empty() {
+                10
+            } else if let Some(n) = rest.strip_prefix('=') {
+                n.parse::<usize>()
+                    .ok()
+                    .filter(|&k| k >= 1)
+                    .ok_or_else(|| anyhow::anyhow!("rolling wave-size must be ≥ 1, got {n}"))?
+            } else {
+                anyhow::bail!("unrecognised policy: {s}")
+            };
+            return Ok(Self::Rolling { wave_size });
+        }
+        anyhow::bail!("unrecognised batch policy '{s}' (valid: full, canary[=N%], rolling[=K])")
+    }
+}
+
 pub async fn execute_batch_op(
+    client: &std::sync::Arc<crate::api::PxClient>,
+    op: BatchOp,
+    vmids: &[u32],
+    config: &crate::config::ProfileConfig,
+    strict: bool,
+) -> Result<(Value, i32)> {
+    execute_batch_op_with_policy(client, op, vmids, config, strict, BatchPolicy::Full).await
+}
+
+pub async fn execute_batch_op_with_policy(
+    client: &std::sync::Arc<crate::api::PxClient>,
+    op: BatchOp,
+    vmids: &[u32],
+    config: &crate::config::ProfileConfig,
+    strict: bool,
+    policy: BatchPolicy,
+) -> Result<(Value, i32)> {
+    match policy {
+        BatchPolicy::Full => execute_batch_op_full(client, op, vmids, config, strict).await,
+        BatchPolicy::Canary { percent } => {
+            let n = vmids.len();
+            // At least 1, at most N. Integer ceiling via (n * p + 99) / 100.
+            let pilot_count =
+                std::cmp::min(n, std::cmp::max(1, (n * usize::from(percent) + 99) / 100));
+            let (pilot, rest) = vmids.split_at(pilot_count);
+            tracing::info!(
+                "canary policy: running {pilot_count}/{n} pilot targets first ({}%)",
+                percent
+            );
+            let (mut pilot_val, pilot_code) =
+                execute_batch_op_full(client, op, pilot, config, strict).await?;
+            let pilot_arr = if let Some(a) = pilot_val.as_array_mut() {
+                a
+            } else {
+                unreachable!("execute_batch_op_full always returns Array")
+            };
+            let pilot_failed = pilot_arr
+                .iter()
+                .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("error"));
+            if pilot_failed {
+                tracing::warn!(
+                    "canary pilot had failures — skipping {} remaining target(s)",
+                    rest.len()
+                );
+                let mut all = pilot_arr.clone();
+                for &vmid in rest {
+                    all.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "skipped",
+                        "reason": "canary pilot failed — remainder aborted"
+                    }));
+                }
+                return Ok((serde_json::Value::Array(all), 2));
+            }
+            if rest.is_empty() {
+                return Ok((pilot_val, pilot_code));
+            }
+            tracing::info!(
+                "canary pilot succeeded — promoting {} remaining target(s)",
+                rest.len()
+            );
+            let (rest_val, rest_code) =
+                execute_batch_op_full(client, op, rest, config, strict).await?;
+            let mut all = pilot_arr.clone();
+            if let Some(arr) = rest_val.as_array() {
+                all.extend(arr.iter().cloned());
+            }
+            let code = if pilot_code != 0 || rest_code != 0 {
+                std::cmp::max(pilot_code, rest_code)
+            } else {
+                0
+            };
+            Ok((serde_json::Value::Array(all), code))
+        }
+        BatchPolicy::Rolling { wave_size } => {
+            let mut all_results = Vec::new();
+            let mut overall_code = 0_i32;
+            for (wave_idx, wave) in vmids.chunks(wave_size).enumerate() {
+                tracing::info!(
+                    "rolling policy: wave {} — {} target(s)",
+                    wave_idx + 1,
+                    wave.len()
+                );
+                let (wave_val, wave_code) =
+                    execute_batch_op_full(client, op, wave, config, strict).await?;
+                let wave_arr = wave_val.into_array().unwrap_or_default();
+                let wave_failed = wave_arr
+                    .iter()
+                    .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("error"));
+                all_results.extend(wave_arr);
+                if wave_code != 0 {
+                    overall_code = std::cmp::max(overall_code, wave_code);
+                }
+                if wave_failed {
+                    tracing::warn!(
+                        "rolling wave {} failed — skipping {} remaining target(s)",
+                        wave_idx + 1,
+                        vmids
+                            .len()
+                            .saturating_sub(wave_idx * wave_size + wave.len())
+                    );
+                    let remaining_start = (wave_idx + 1) * wave_size;
+                    for &vmid in vmids.get(remaining_start..).unwrap_or_default() {
+                        all_results.push(serde_json::json!({
+                            "vmid": vmid,
+                            "status": "skipped",
+                            "reason": format!("rolling wave {} failed — remainder aborted", wave_idx + 1)
+                        }));
+                    }
+                    if overall_code == 0 {
+                        overall_code = 2;
+                    }
+                    break;
+                }
+            }
+            Ok((serde_json::Value::Array(all_results), overall_code))
+        }
+    }
+}
+
+// Helper: `serde_json::Value::into_array` doesn't exist; add a local extension.
+trait IntoArray {
+    fn into_array(self) -> Option<Vec<serde_json::Value>>;
+}
+impl IntoArray for serde_json::Value {
+    fn into_array(self) -> Option<Vec<serde_json::Value>> {
+        if let serde_json::Value::Array(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+async fn execute_batch_op_full(
     client: &std::sync::Arc<crate::api::PxClient>,
     op: BatchOp,
     vmids: &[u32],
@@ -685,5 +882,111 @@ mod enforce_preflight_tests {
         enforce_preflight(&client, None, Op::Stop, &g, true)
             .await
             .expect("clean guest + force must proceed");
+    }
+}
+
+#[cfg(test)]
+mod batch_policy_tests {
+    use super::BatchPolicy;
+
+    #[test]
+    fn parse_full() {
+        assert!(matches!(
+            BatchPolicy::parse("full").unwrap(),
+            BatchPolicy::Full
+        ));
+        assert!(matches!(
+            BatchPolicy::parse("FULL").unwrap(),
+            BatchPolicy::Full
+        ));
+    }
+
+    #[test]
+    fn parse_canary_default() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary").unwrap() else {
+            panic!("expected Canary")
+        };
+        assert_eq!(percent, 5);
+    }
+
+    #[test]
+    fn parse_canary_custom() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary=20").unwrap() else {
+            panic!("expected Canary")
+        };
+        assert_eq!(percent, 20);
+    }
+
+    #[test]
+    fn parse_canary_100_is_valid() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary=100").unwrap() else {
+            panic!()
+        };
+        assert_eq!(percent, 100);
+    }
+
+    #[test]
+    fn parse_canary_0_is_rejected() {
+        assert!(BatchPolicy::parse("canary=0").is_err());
+    }
+
+    #[test]
+    fn parse_canary_101_is_rejected() {
+        assert!(BatchPolicy::parse("canary=101").is_err());
+    }
+
+    #[test]
+    fn parse_rolling_default() {
+        let BatchPolicy::Rolling { wave_size } = BatchPolicy::parse("rolling").unwrap() else {
+            panic!("expected Rolling")
+        };
+        assert_eq!(wave_size, 10);
+    }
+
+    #[test]
+    fn parse_rolling_custom() {
+        let BatchPolicy::Rolling { wave_size } = BatchPolicy::parse("rolling=25").unwrap() else {
+            panic!()
+        };
+        assert_eq!(wave_size, 25);
+    }
+
+    #[test]
+    fn parse_rolling_zero_is_rejected() {
+        assert!(BatchPolicy::parse("rolling=0").is_err());
+    }
+
+    #[test]
+    fn parse_unknown_is_rejected() {
+        assert!(BatchPolicy::parse("random").is_err());
+        assert!(BatchPolicy::parse("canary=abc").is_err());
+    }
+
+    /// Canary pilot slice sizing: ceil(N * percent / 100).
+    /// With 20 targets and 5%, ceil(20 * 5 / 100) = ceil(1) = 1.
+    /// With 20 targets and 10%, ceil(20 * 10 / 100) = 2.
+    /// With 3 targets and 5%, ceil(3 * 5 / 100) = ceil(0.15) = 1 (minimum 1).
+    #[test]
+    fn canary_pilot_count_formula() {
+        let n = 20_usize;
+        let percent = 5_usize;
+        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
+        assert_eq!(count, 1);
+
+        let percent = 10;
+        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
+        assert_eq!(count, 2);
+
+        // Minimum 1 even when percent rounds down to 0 of N.
+        let n = 3_usize;
+        let percent = 5;
+        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
+        assert_eq!(count, 1);
+
+        // 100% should equal all N.
+        let n = 7;
+        let percent = 100;
+        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
+        assert_eq!(count, 7);
     }
 }

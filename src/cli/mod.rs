@@ -17,7 +17,8 @@ mod storage;
 mod vm;
 
 use common::{
-    enforce_preflight, execute_batch_op, find_guest, find_guest_full, wait_and_classify, BatchOp,
+    enforce_preflight, execute_batch_op_with_policy, find_guest, find_guest_full,
+    wait_and_classify, BatchOp,
 };
 
 #[derive(Debug, Subcommand)]
@@ -34,6 +35,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Stop a guest
     Stop {
@@ -55,6 +59,9 @@ pub enum Command {
         /// `--force` is set. [default: 60]
         #[arg(long, default_value_t = 60)]
         stop_timeout: u32,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Restart a guest
     Restart {
@@ -65,6 +72,9 @@ pub enum Command {
         /// Override proxxx pre-flight risk checks.
         #[arg(long)]
         allow_risk: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Suspend a running guest (freeze vCPUs to RAM). Pair with `resume`.
     /// QEMU + LXC. Non-destructive — the guest holds memory until you
@@ -75,6 +85,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Resume a suspended guest — inverse of `suspend`.
     Resume {
@@ -82,6 +95,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Delete a guest (VM or LXC)
     Delete {
@@ -832,8 +848,13 @@ pub async fn execute(
             }
             other => anyhow::bail!("Unknown resource: {other}. Use: nodes, guests, storage"),
         },
-        Command::Start { vmids, strict } => {
-            execute_batch_op(&client, BatchOp::Start, &vmids, &config, strict).await
+        Command::Start {
+            vmids,
+            strict,
+            policy,
+        } => {
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Start, &vmids, &config, strict, bp).await
         }
         Command::Stop {
             vmids,
@@ -841,6 +862,7 @@ pub async fn execute(
             strict,
             allow_risk,
             stop_timeout,
+            policy,
         } => {
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
@@ -853,7 +875,8 @@ pub async fn execute(
                 )
                 .await?;
             }
-            execute_batch_op(
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(
                 &client,
                 BatchOp::Stop {
                     force,
@@ -862,6 +885,7 @@ pub async fn execute(
                 &vmids,
                 &config,
                 strict,
+                bp,
             )
             .await
         }
@@ -869,6 +893,7 @@ pub async fn execute(
             vmids,
             strict,
             allow_risk,
+            policy,
         } => {
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
@@ -881,16 +906,30 @@ pub async fn execute(
                 )
                 .await?;
             }
-            execute_batch_op(&client, BatchOp::Restart, &vmids, &config, strict).await
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Restart, &vmids, &config, strict, bp)
+                .await
         }
-        Command::Suspend { vmids, strict } => {
+        Command::Suspend {
+            vmids,
+            strict,
+            policy,
+        } => {
             // No preflight: suspend is non-destructive (RAM frozen,
             // no state lost on resume). Mirror Restart's batch-op
             // dispatch shape.
-            execute_batch_op(&client, BatchOp::Suspend, &vmids, &config, strict).await
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Suspend, &vmids, &config, strict, bp)
+                .await
         }
-        Command::Resume { vmids, strict } => {
-            execute_batch_op(&client, BatchOp::Resume, &vmids, &config, strict).await
+        Command::Resume {
+            vmids,
+            strict,
+            policy,
+        } => {
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Resume, &vmids, &config, strict, bp)
+                .await
         }
         Command::Delete {
             vmids,
