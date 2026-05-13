@@ -6020,6 +6020,59 @@ mod tests {
         assert!(cfg.contains("name: web-01"));
         assert!(cfg.contains("cores: 2"));
     }
+
+    // ── rollback_snapshot routing ────────────────────────────────────
+
+    #[tokio::test]
+    async fn qemu_rollback_snapshot_hits_rollback_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api2/json/nodes/pve1/qemu/100/snapshot/pre-upgrade/rollback",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": "UPID:pve1:00001234:rollback"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        let upid = c
+            .rollback_snapshot("pve1", 100, GuestType::Qemu, "pre-upgrade")
+            .await
+            .expect("rollback");
+        assert!(upid.contains("UPID:"));
+    }
+
+    #[tokio::test]
+    async fn lxc_rollback_snapshot_hits_lxc_rollback_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api2/json/nodes/pve1/lxc/200/snapshot/clean-state/rollback",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": "UPID:pve1:00005678:rollback"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path(
+            "/api2/json/nodes/pve1/qemu/200/snapshot/clean-state/rollback",
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+        let c = mock_client(&server).await;
+        let upid = c
+            .rollback_snapshot("pve1", 200, GuestType::Lxc, "clean-state")
+            .await
+            .expect("rollback lxc");
+        assert!(upid.contains("UPID:"));
+    }
 }
 
 #[test]

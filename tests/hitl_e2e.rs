@@ -556,6 +556,9 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn delete_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
         anyhow::bail!("unused")
     }
+    async fn rollback_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
+        Ok("UPID:mock:rollback".into())
+    }
     async fn update_guest_config(
         &self,
         _: &str,

@@ -1054,6 +1054,15 @@ mod tests {
         ) -> Result<String> {
             anyhow::bail!("unused")
         }
+        async fn rollback_snapshot(
+            &self,
+            _: &str,
+            _: u32,
+            _: crate::api::types::GuestType,
+            _: &str,
+        ) -> Result<String> {
+            Ok("UPID:mock:rollback".into())
+        }
         async fn list_snapshots(
             &self,
             _: &str,

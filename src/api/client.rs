@@ -1436,6 +1436,23 @@ impl ProxmoxGateway for PxClient {
         Ok(resp.data)
     }
 
+    async fn rollback_snapshot(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: crate::api::types::GuestType,
+        name: &str,
+    ) -> Result<String> {
+        let kind = type_path(guest_type);
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/{kind}/{vmid}/snapshot/{name}/rollback"),
+                &[],
+            )
+            .await?;
+        Ok(resp.data)
+    }
+
     async fn update_guest_config(
         &self,
         node: &str,

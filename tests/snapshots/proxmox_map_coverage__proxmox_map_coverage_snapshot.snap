@@ -1,6 +1,5 @@
 ---
 source: tests/proxmox_map_coverage.rs
-assertion_line: 391
 expression: report
 ---
 # proxxx API surface coverage
@@ -8,7 +7,7 @@ expression: report
 Map endpoints      : 190
 Covered            : 163 (85%)
 Uncovered          : 27
-Undocumented (drift): 0
+Undocumented (drift): 2
 
 ## Covered endpoints
 
@@ -210,4 +209,5 @@ Undocumented (drift): 0
 
 ## Undocumented client paths (in code, not in map)
 
-(none — every client path matches a map entry)
+- `/nodes/*/lxc/*/snapshot/*/rollback`
+- `/nodes/*/qemu/*/snapshot/*/rollback`

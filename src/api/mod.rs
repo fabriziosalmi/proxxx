@@ -516,6 +516,14 @@ pub trait ProxmoxGateway: Send + Sync {
         name: &str,
     ) -> Result<String>;
 
+    async fn rollback_snapshot(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: crate::api::types::GuestType,
+        name: &str,
+    ) -> Result<String>;
+
     // ── Guest config mutation ───────────────────────────
     /// Update a guest's running config. Pass a flat list of
     /// `(key, value)` pairs — PVE applies them atomically. The CLI
