@@ -164,11 +164,21 @@ async fn operator_can_restart_owned_vm() {
 
     // Try every node until we find one with the VMID. PVE rejects
     // requests against the wrong node with 595/500, not 403.
+    // Fall back from restart (works on running VM) to start (works on
+    // stopped VM) so the test is state-agnostic.
     let mut restarted = false;
     for n in &nodes {
-        let res = client
+        let res = match client
             .restart_guest(&n.node, env.owned_vmid, GuestType::Qemu)
-            .await;
+            .await
+        {
+            Ok(upid) => Ok(upid),
+            Err(_) => {
+                client
+                    .start_guest(&n.node, env.owned_vmid, GuestType::Qemu)
+                    .await
+            }
+        };
         if let Ok(upid) = res {
             assert!(upid.contains("UPID:"), "expected UPID, got {upid}");
             restarted = true;
@@ -177,7 +187,7 @@ async fn operator_can_restart_owned_vm() {
     }
     assert!(
         restarted,
-        "operator must be able to restart owned vmid {} on at least one node",
+        "operator must be able to start/restart owned vmid {} on at least one node",
         env.owned_vmid
     );
 }
@@ -352,23 +362,39 @@ async fn operator_bulk_partial_failure_is_deterministic() {
     let nodes = client.get_nodes().await.expect("nodes");
     let node = nodes.first().expect("at least one node visible");
 
-    // Owned: should succeed (positive control).
-    let owned_res = client
+    // Owned: should succeed (positive control). Fall back from restart
+    // (running VM) to start (stopped VM) so the test is state-agnostic.
+    let owned_res = match client
         .restart_guest(&node.node, env.owned_vmid, GuestType::Qemu)
-        .await;
+        .await
+    {
+        Ok(upid) => Ok(upid),
+        Err(_) => {
+            client
+                .start_guest(&node.node, env.owned_vmid, GuestType::Qemu)
+                .await
+        }
+    };
     if let Err(ref e) = owned_res {
-        // If the parent node isn't this one, restart returns
+        // If the parent node isn't this one, restart/start returns
         // 595/500/404 — try the others.
         eprintln!(
-            "[bulk] owned restart on {} returned {e:#} — trying other nodes",
+            "[bulk] owned restart/start on {} returned {e:#} — trying other nodes",
             node.node
         );
         for n in &nodes[1..] {
-            if client
+            let res = match client
                 .restart_guest(&n.node, env.owned_vmid, GuestType::Qemu)
                 .await
-                .is_ok()
             {
+                Ok(upid) => Ok(upid),
+                Err(_) => {
+                    client
+                        .start_guest(&n.node, env.owned_vmid, GuestType::Qemu)
+                        .await
+                }
+            };
+            if res.is_ok() {
                 break;
             }
         }
@@ -459,18 +485,27 @@ async fn privsep_tokens_have_own_acl_via_transitive_proof() {
     let nodes = client.get_nodes().await.expect("operator nodes");
     let mut succeeded = false;
     for n in &nodes {
-        if client
+        // Fall back from restart (running) to start (stopped) so the
+        // test is state-agnostic. Either success proves the ACL row exists.
+        let res = match client
             .restart_guest(&n.node, env.owned_vmid, GuestType::Qemu)
             .await
-            .is_ok()
         {
+            Ok(upid) => Ok(upid),
+            Err(_) => {
+                client
+                    .start_guest(&n.node, env.owned_vmid, GuestType::Qemu)
+                    .await
+            }
+        };
+        if res.is_ok() {
             succeeded = true;
             break;
         }
     }
     assert!(
         succeeded,
-        "operator restart MUST succeed; failure here means the privsep \
+        "operator restart/start MUST succeed; failure here means the privsep \
          token has no ACL row (fixture bug). Re-run tests/fixtures/setup_rbac.sh"
     );
 }
@@ -579,21 +614,29 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
             .mount(&server)
             .await;
     }
-    let tg = TelegramGateway::with_base_url(
+    // Use a known zero key so the test can sign the callback_data
+    // deterministically. `with_base_url_and_key` exposes the key to the
+    // daemon's HMAC verifier; the callback_data we build below uses the
+    // same key, so verification passes.
+    let zero_key = vec![0u8; 32];
+    let tg = TelegramGateway::with_base_url_and_key(
         "faketoken".to_string(),
         "1".to_string(),
         format!("{}/bot", server.uri()),
+        zero_key.clone(),
     );
 
     // Real operator client against the live PVE cluster.
     let client = env.operator().await.expect("operator client");
 
-    // Build the synthetic callback. Round-trip through serde_json
-    // because `CallbackQuery` only derives `Deserialize`. The data
-    // string `approve:restart:{blind_vmid}` is what Telegram would
-    // actually deliver — and the gate stores the FULL data string as
-    // the txn_id, so two identical Updates collide on it.
-    let callback_data = format!("approve:restart:{}", env.blind_vmid);
+    // Build the synthetic callback. Since v0.1.22 every callback must
+    // carry a valid HMAC tag (format: `{payload}:{16_hex_tag}`). Sign
+    // the payload with the same zero key the TelegramGateway holds so
+    // the daemon-side verifier accepts it. The gate stores the FULL
+    // data string as the txn_id; two identical Updates collide on it.
+    let cb_payload = format!("approve:restart:{}", env.blind_vmid);
+    let cb_tag = proxxx::hitl::hmac_key::sign(&zero_key, &cb_payload);
+    let callback_data = format!("{cb_payload}:{cb_tag}");
     let update_json = serde_json::json!({
         "update_id": 1_i64,
         "callback_query": {

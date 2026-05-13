@@ -7,6 +7,7 @@
 # `env.local.example` to `env.local` per the live README.
 tests/live/test_env.md
 tests/live/env.local
+tests/live/env.rbac.local
 tests/live/*.log
 tests/live/*_summary.md
 # Mission 2 — local E2E env (do NOT commit secrets); only the
@@ -29,3 +30,6 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 
 .DS_Store
+
+# Workspace settings - 2026-05-07
+tmp/
