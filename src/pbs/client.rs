@@ -20,7 +20,7 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::{debug, info};
 
-use super::types::{ArchiveInfo, DatastoreInfo, SnapshotInfo};
+use super::types::{ArchiveInfo, DatastoreInfo, PbsVersion, SnapshotInfo};
 use crate::api::types::ApiResponse;
 use crate::config::PbsConfig;
 
@@ -93,6 +93,19 @@ impl PbsClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                anyhow::bail!(
+                    "PBS authentication failed (401). Check token_id / token_secret for user '{}'. \
+                     Token format in config: user = \"user@pbs\", token_id = \"tokenid\".",
+                    self.base_url,
+                );
+            }
+            if status == reqwest::StatusCode::FORBIDDEN {
+                anyhow::bail!(
+                    "PBS returned 403 Forbidden for {path}. \
+                     The token may lack 'Datastore.Audit' privilege on the target datastore.",
+                );
+            }
             anyhow::bail!("PBS GET {path} returned {status}: {body}");
         }
         // same bounded-body read as the PVE client. A
@@ -127,6 +140,9 @@ impl PbsClient {
 /// server, different auth, different surface.
 #[async_trait::async_trait]
 pub trait PbsGateway: Send + Sync {
+    /// Probe PBS connectivity and auth. Hits `/api2/json/version`.
+    /// Returns the PBS version string on success, typed error on 401/403.
+    async fn version(&self) -> Result<PbsVersion>;
     async fn list_datastores(&self) -> Result<Vec<DatastoreInfo>>;
     async fn list_snapshots(
         &self,
@@ -145,6 +161,11 @@ pub trait PbsGateway: Send + Sync {
 
 #[async_trait::async_trait]
 impl PbsGateway for PbsClient {
+    async fn version(&self) -> Result<PbsVersion> {
+        let resp: ApiResponse<PbsVersion> = self.get("/version").await?;
+        Ok(resp.data)
+    }
+
     async fn list_datastores(&self) -> Result<Vec<DatastoreInfo>> {
         let resp: ApiResponse<Vec<DatastoreInfo>> = self.get("/admin/datastore").await?;
         Ok(resp.data)
