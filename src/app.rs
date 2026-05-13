@@ -111,6 +111,12 @@ pub struct AppState {
     /// Per-vmid raw configs (for the assignment scanner).
     pub hw_guest_configs: std::collections::HashMap<u32, std::collections::HashMap<String, String>>,
     pub hw_loading: bool,
+
+    /// Per-node errors from the last guest fetch cycle. Non-empty when
+    /// one or more nodes denied access (403) or were unreachable. Cleared
+    /// on each new GuestsLoaded so stale errors don't linger after a
+    /// token rotation.
+    pub guests_fetch_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -236,6 +242,8 @@ pub enum Action {
     /// live cluster quorum flag — drives the TUI banner.
     ClusterQuorateLoaded(bool),
     ErrorOccurred(String),
+    /// Per-node errors from the guest fetch (403, unreachable, …).
+    GuestsFetchErrorsLoaded(Vec<String>),
 
     // Guest operations
     StartGuest {
@@ -507,6 +515,7 @@ impl Default for AppState {
             hw_usb: Vec::new(),
             hw_guest_configs: std::collections::HashMap::new(),
             hw_loading: false,
+            guests_fetch_errors: Vec::new(),
         }
     }
 }
@@ -827,6 +836,11 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             audit_tag_changes(&state.guests, &guests);
             state.guests = guests;
             state.is_loading = false;
+            // Clear stale errors from the previous cycle — new data arrived.
+            state.guests_fetch_errors.clear();
+        }
+        Action::GuestsFetchErrorsLoaded(errs) => {
+            state.guests_fetch_errors = errs;
         }
         Action::StorageLoaded(storage) => {
             state.storage = storage;

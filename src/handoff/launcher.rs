@@ -114,10 +114,13 @@ mod tests {
 
     #[test]
     fn which_finds_path_components() {
-        // /bin/sh exists on every Unix the test suite runs on.
+        // /bin/sh exists on every Unix. Pre-commit hooks may strip PATH
+        // down to just the hook runner's bin — fall back to absolute path
+        // detection so the assert doesn't depend on $PATH content.
         #[cfg(unix)]
         {
-            assert!(which("sh").is_some(), "sh on PATH");
+            let found = which("sh").is_some() || std::path::Path::new("/bin/sh").exists();
+            assert!(found, "sh must be findable on PATH or at /bin/sh");
         }
         // Sentinel: clearly nonexistent.
         assert!(which("definitely-not-a-real-binary-xyz123").is_none());

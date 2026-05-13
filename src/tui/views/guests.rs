@@ -88,12 +88,31 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
     let visible_list = state.visible_guests();
 
     if visible_list.is_empty() {
-        let msg = if state.is_loading {
-            " ⏳ Loading guests..."
+        let widget = if state.is_loading {
+            Paragraph::new(" Loading guests...").style(Theme::dim())
+        } else if !state.guests_fetch_errors.is_empty() {
+            let n = state.guests_fetch_errors.len();
+            let noun = if n == 1 { "node" } else { "nodes" };
+            let detail = state.guests_fetch_errors.join("; ");
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!(" Access denied on {n} {noun} — token may lack VM.Audit scope"),
+                    Style::default().fg(Theme::WARNING),
+                )),
+                Line::from(Span::styled(
+                    format!(" {detail}"),
+                    Style::default().fg(Theme::TEXT_DIM),
+                )),
+                Line::from(Span::styled(
+                    " Hint: grant 'PVEVMAdmin' or 'PVEAuditor' role on /vms to the token",
+                    Theme::dim(),
+                )),
+            ];
+            Paragraph::new(lines)
         } else {
-            " No guests found."
+            Paragraph::new(" No guests found.").style(Theme::dim())
         };
-        f.render_widget(Paragraph::new(msg).style(Theme::dim()), area);
+        f.render_widget(widget, area);
         return;
     }
 

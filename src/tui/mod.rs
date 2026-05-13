@@ -99,6 +99,11 @@ enum DataMsg {
         cluster: Vec<crate::api::types::ClusterStatusEntry>,
         repl_status: Vec<crate::api::types::ReplicationStatus>,
     },
+    /// One or more nodes returned errors (403 / network) while fetching
+    /// guests. Carrying the per-node errors separately from DataMsg::Error
+    /// so the TUI can render a targeted hint in the guest list instead of
+    /// a generic dismissible banner.
+    GuestsFetchErrors(Vec<String>),
 }
 
 /// Coordinator for in-flight HITL approval requests.
@@ -615,6 +620,9 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                         DataMsg::ClusterQuorate(q) => {
                             app::update(&mut state, Action::ClusterQuorateLoaded(q));
                         }
+                        DataMsg::GuestsFetchErrors(errs) => {
+                            app::update(&mut state, Action::GuestsFetchErrorsLoaded(errs));
+                        }
                         DataMsg::Error(err) => {
                             app::update(&mut state, Action::ErrorOccurred(err));
                         }
@@ -773,12 +781,25 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
 
             let mut all_guests = Vec::new();
             let mut all_storage = Vec::new();
+            let mut guest_errors: Vec<String> = Vec::new();
 
             while let Some(res) = join_set.join_next().await {
                 if let Ok((node_name, guests_res, storage_res)) = res {
                     match guests_res {
                         Ok(guests) => all_guests.extend(guests),
-                        Err(e) => warn!("Failed to fetch guests from {node_name}: {e}"),
+                        Err(e) => {
+                            warn!("Failed to fetch guests from {node_name}: {e}");
+                            // Classify the error so the TUI can hint at the cause.
+                            let msg = if e.to_string().contains("403")
+                                || e.to_string().to_lowercase().contains("permission")
+                                || e.to_string().to_lowercase().contains("forbidden")
+                            {
+                                format!("{node_name}: permission denied (token missing VM.Audit?)")
+                            } else {
+                                format!("{node_name}: {e}")
+                            };
+                            guest_errors.push(msg);
+                        }
                     }
                     match storage_res {
                         Ok(pools) => all_storage.extend(pools),
@@ -789,6 +810,9 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
 
             let _ = tx.send(DataMsg::Guests(all_guests)).await;
             let _ = tx.send(DataMsg::Storage(all_storage)).await;
+            if !guest_errors.is_empty() {
+                let _ = tx.send(DataMsg::GuestsFetchErrors(guest_errors)).await;
+            }
 
             if let Ok(tasks) = client.get_cluster_tasks().await {
                 let _ = tx.send(DataMsg::ClusterTasks(tasks)).await;
