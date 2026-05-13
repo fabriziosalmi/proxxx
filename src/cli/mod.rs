@@ -641,6 +641,9 @@ pub enum Command {
     /// Both refuse to overwrite an existing config unless `--force`
     /// is passed (template-only path); the interactive flow offers
     /// backup-or-cancel instead.
+    /// List named profiles defined in config.toml ([profiles.NAME] sections).
+    /// Use `--profile NAME` to select one when starting the TUI or CLI.
+    Profiles,
     Init {
         /// Overwrite any existing config.toml at the target path.
         /// Without this flag, `init` refuses to clobber prior state.
@@ -770,6 +773,17 @@ pub async fn execute(
             return init_wizard::run().await;
         }
         return init::execute(*force);
+    }
+
+    // `proxxx profiles` lists named profiles without needing a valid config.
+    if matches!(&cmd, Command::Profiles) {
+        let names = crate::config::list_profiles()?;
+        let val = if names.is_empty() {
+            serde_json::json!({ "profiles": [], "hint": "Add [profiles.NAME] sections to config.toml to define named profiles." })
+        } else {
+            serde_json::json!({ "profiles": names })
+        };
+        return Ok((val, 0));
     }
 
     // Flight-recorder smoke: `dev-panic` is the panic-hook test fuel — it
@@ -1441,6 +1455,17 @@ pub async fn execute(
             // Kept here so the match remains exhaustive without an
             // `_ =>` catch-all.
             Ok((build_version_payload(), 0))
+        }
+        Command::Profiles => {
+            let names = crate::config::list_profiles()?;
+            if names.is_empty() {
+                Ok((
+                    serde_json::json!({ "profiles": [], "hint": "Add [profiles.NAME] sections to config.toml to define named profiles." }),
+                    0,
+                ))
+            } else {
+                Ok((serde_json::json!({ "profiles": names }), 0))
+            }
         }
         Command::Init {
             force: _,

@@ -755,10 +755,7 @@ impl ConfigError {
     pub const EXIT_CODE: i32 = 3;
 }
 
-/// Load configuration from TOML file. Errors carry a typed
-/// [`ConfigError`] through anyhow so main.rs can map them to exit
-/// code `3` ("Configuration error") instead of the generic `1`.
-pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
+fn config_path() -> std::path::PathBuf {
     let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
@@ -766,8 +763,20 @@ pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
             p.push(".config/proxxx");
             p
         });
+    config_dir.join("config.toml")
+}
 
-    let config_path = config_dir.join("config.toml");
+/// Load configuration from TOML file. Errors carry a typed
+/// [`ConfigError`] through anyhow so main.rs can map them to exit
+/// code `3` ("Configuration error") instead of the generic `1`.
+///
+/// When `profile_name` is `None` the flat top-level keys are used
+/// (backwards-compatible with configs that pre-date named profiles).
+/// When `profile_name` is `Some("x")` the `[profiles.x]` table is
+/// used; if it does not exist an error is returned listing the known
+/// profile names so the user knows what to pass to `--profile`.
+pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
+    let config_path = config_path();
 
     if !config_path.exists() {
         return Err(ConfigError::NotFound { path: config_path }.into());
@@ -777,11 +786,68 @@ pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
         path: config_path.clone(),
         source,
     })?;
-    let config: ProfileConfig = toml::from_str(&content).map_err(|source| ConfigError::Toml {
-        path: config_path,
+
+    let raw: toml::Value = toml::from_str(&content).map_err(|source| ConfigError::Toml {
+        path: config_path.clone(),
         source,
     })?;
-    Ok(config)
+
+    let profile_value: toml::Value = if let Some(name) = profile_name {
+        raw.get("profiles")
+            .and_then(|p| p.get(name))
+            .cloned()
+            .ok_or_else(|| {
+                let known = raw
+                    .get("profiles")
+                    .and_then(|p| p.as_table())
+                    .map(|t| t.keys().cloned().collect::<Vec<_>>().join(", "))
+                    .unwrap_or_else(|| "(none defined)".to_string());
+                anyhow::anyhow!(
+                    "Profile '{}' not found in config. Known profiles: {}",
+                    name,
+                    known,
+                )
+            })?
+    } else {
+        // Flat top-level config (backwards compat). Strip the [profiles]
+        // table before deserializing so unknown-field errors don't fire
+        // on parsers that use deny_unknown_fields in the future.
+        let mut v = raw;
+        if let Some(t) = v.as_table_mut() {
+            t.remove("profiles");
+        }
+        v
+    };
+
+    profile_value.try_into().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse{} profile from {}: {}",
+            profile_name.map_or(String::new(), |n| format!(" '{n}'")),
+            config_path.display(),
+            e,
+        )
+    })
+}
+
+/// Return the names of all named profiles in the config file.
+/// The flat top-level config (backwards-compat default) is not included.
+pub fn list_profiles() -> Result<Vec<String>> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let raw: toml::Value = toml::from_str(&content)?;
+    let names = raw
+        .get("profiles")
+        .and_then(|p| p.as_table())
+        .map(|t| {
+            let mut v: Vec<String> = t.keys().cloned().collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
+    Ok(names)
 }
 
 fn dirs_fallback() -> std::path::PathBuf {

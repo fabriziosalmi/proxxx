@@ -252,6 +252,14 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
 
             KeyCode::Char('R') => Some(Action::Tick), // force refresh
             KeyCode::Char('?') => Some(Action::ToggleHelp), // P1 fix: real overlay
+            KeyCode::Char('P') => {
+                let profiles = state.available_profiles.clone();
+                if profiles.is_empty() {
+                    None // no named profiles configured — silently ignore
+                } else {
+                    Some(Action::OpenProfilePicker { profiles })
+                }
+            }
             KeyCode::Char('c') => {
                 // P0 fix: the Guest list action bar advertises
                 // `c onsole` as a binding (views/guests.rs), but it
@@ -395,5 +403,12 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
         // any key dismisses the overlay; this arm is unreachable under
         // normal flow but the match must be exhaustive.
         AppMode::Help => Some(Action::ToggleHelp),
+        AppMode::ProfilePicker { .. } => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::NavigateDown),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::NavigateUp),
+            KeyCode::Enter => Some(Action::ConfirmProfileSwitch),
+            KeyCode::Esc | KeyCode::Char('q') => Some(Action::Back),
+            _ => None,
+        },
     }
 }

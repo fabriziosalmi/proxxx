@@ -241,7 +241,14 @@ async fn run_hitl_poller(
 }
 
 /// Main TUI entry point — runs until user quits
-pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) -> Result<()> {
+/// Run the TUI. Returns `Ok(Some(profile_name))` when the user switches
+/// profiles — the caller should re-enter `run()` with the new profile.
+/// Returns `Ok(None)` on normal quit.
+pub async fn run(
+    profile: Option<&str>,
+    cli_secret: Option<&str>,
+    secure: bool,
+) -> Result<Option<String>> {
     // ── Connect to Proxmox ──────────────────────────────
     let config = match config::load_config(profile) {
         Ok(c) => c,
@@ -334,6 +341,10 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
 
     // ── State ───────────────────────────────────────────
     let mut state = AppState::new();
+    // Populate available named profiles for the P-key profile picker.
+    // Best-effort: if the config file can't be read, the picker is empty
+    // (silently degrades — no popup rather than a hard error at startup).
+    state.available_profiles = config::list_profiles().unwrap_or_default();
     // Bug #7 fix: wire --secure CLI flag through to the reducer state.
     // Previously parsed but never applied → Self-HITL never triggered,
     // silently bypassing the gate the user thought they'd enabled.
@@ -420,6 +431,10 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
     let mut pending_pty_resize: Option<(u16, u16)> = None;
     let mut last_resize_event_at: Option<std::time::Instant> = None;
     const RESIZE_QUIET_MS: u128 = 50;
+
+    // Set to Some(name) when the user requests a profile switch;
+    // inspected after teardown to return the right value to main.rs.
+    let mut next_profile: Option<String> = None;
 
     loop {
         // flush a debounced PTY resize once the drag has
@@ -534,6 +549,10 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
                                 let effect = app::update(&mut state, action);
                                 match effect {
                                     Some(SideEffect::Quit) => break,
+                                    Some(SideEffect::SwitchProfile(name)) => {
+                                        next_profile = Some(name);
+                                        break;
+                                    }
                                     Some(SideEffect::OpenSshSession { vmid }) => {
                                         let h = Arc::clone(&ssh_handler);
                                         let tx_c = data_tx.clone();
@@ -757,7 +776,7 @@ pub async fn run(profile: Option<&str>, cli_secret: Option<&str>, secure: bool) 
     term_guard.restore()?;
 
     info!("TUI exited cleanly");
-    Ok(())
+    Ok(next_profile)
 }
 
 /// Fetch all data from Proxmox and send to controller
@@ -1058,7 +1077,8 @@ async fn dispatch_side_effect(
     };
 
     match effect {
-        SideEffect::Quit => {} // handled in caller
+        SideEffect::Quit => {}             // handled in caller
+        SideEffect::SwitchProfile(_) => {} // handled in caller (breaks the event loop)
         SideEffect::StartGuest { vmid } => {
             if check_hitl("start", vmid, SideEffect::StartGuest { vmid }) {
                 return;
@@ -1829,7 +1849,7 @@ async fn dispatch_side_effect(
 }
 
 /// Fallback demo mode when no Proxmox connection is available
-async fn run_demo() -> Result<()> {
+async fn run_demo() -> Result<Option<String>> {
     // — same TerminalGuard treatment as `run()`.
     let mut term_guard = TerminalGuard::install()?;
     let terminal = term_guard.terminal_mut();
@@ -1880,7 +1900,7 @@ async fn run_demo() -> Result<()> {
     }
 
     term_guard.restore()?;
-    Ok(())
+    Ok(None)
 }
 
 /// Minimum frame dimensions — below this we refuse to dispatch to any
@@ -1976,6 +1996,8 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
         &state.mode
     {
         widgets::input_bar::draw_input_bar(f, area, &state.mode, &state.command_input);
+    } else if let app::AppMode::ProfilePicker { profiles, selected } = &state.mode {
+        widgets::modal::draw_profile_picker(f, area, profiles, *selected);
     }
 
     // ── Global Status Overlays ───────────────────────────
