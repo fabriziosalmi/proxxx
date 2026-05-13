@@ -238,6 +238,104 @@ pub async fn handle_tool_call(
             let log = client.get_task_log(node, upid, 0, 500).await?;
             serde_json::to_string_pretty(&log)?
         }
+        ToolAction::SuspendGuest => {
+            let vmid = args
+                .get("guest_id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let (node, gt) = find_node_and_type(client, vmid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+            let upid = client.suspend_guest(&node, vmid, gt).await?;
+            format!("Suspended guest {vmid}. UPID: {upid}")
+        }
+        ToolAction::ResumeGuest => {
+            let vmid = args
+                .get("guest_id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let (node, gt) = find_node_and_type(client, vmid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+            let upid = client.resume_guest(&node, vmid, gt).await?;
+            format!("Resumed guest {vmid}. UPID: {upid}")
+        }
+        ToolAction::CloneGuest => {
+            let vmid = args
+                .get("guest_id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let (node, gt) = find_node_and_type(client, vmid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+            let newid_arg = args
+                .get("newid")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let newid = if newid_arg == 0 {
+                client.next_free_vmid().await?
+            } else {
+                newid_arg
+            };
+            let name = args.get("name").and_then(|v| v.as_str());
+            let full = args
+                .get("full")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let upid = client
+                .clone_guest(&node, vmid, gt, newid, name, None, None, full, None, None)
+                .await?;
+            format!("Cloned guest {vmid} → {newid}. UPID: {upid}")
+        }
+        ToolAction::MigrateGuest => {
+            let vmid = args
+                .get("guest_id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let target_node = args
+                .get("target_node")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let online = args
+                .get("online")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let (node, gt) = find_node_and_type(client, vmid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+            let upid = client
+                .migrate_guest(&node, vmid, gt, target_node, online, false, false)
+                .await?;
+            format!("Migrating guest {vmid} → {target_node}. UPID: {upid}")
+        }
+        ToolAction::GetClusterStatus => {
+            let status = client.cluster_status().await?;
+            serde_json::to_string_pretty(&status)?
+        }
+        ToolAction::ListTasks => {
+            let tasks = client.get_cluster_tasks().await?;
+            let node_filter = args.get("node").and_then(|v| v.as_str());
+            let filtered: Vec<_> = if let Some(n) = node_filter {
+                tasks.into_iter().filter(|t| t.node == n).collect()
+            } else {
+                tasks
+            };
+            serde_json::to_string_pretty(&filtered)?
+        }
+        ToolAction::GetNodeStatus => {
+            let node_name = args.get("node").and_then(|v| v.as_str()).unwrap_or("");
+            let status = client.node_status_detail(node_name).await?;
+            serde_json::to_string_pretty(&status)?
+        }
+        ToolAction::ListBackupJobs => {
+            let jobs = client.list_backup_jobs().await?;
+            serde_json::to_string_pretty(&jobs)?
+        }
+        ToolAction::GetReplicationStatus => {
+            let node_name = args.get("node").and_then(|v| v.as_str()).unwrap_or("");
+            let status = client.list_replication_status(node_name).await?;
+            serde_json::to_string_pretty(&status)?
+        }
     };
 
     Ok(json!({

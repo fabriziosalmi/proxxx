@@ -13,19 +13,34 @@ use std::hash::{Hash, Hasher};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAction {
-    ListNodes,
+    // ── Guest lifecycle ──────────────────────────────────
     ListGuests,
     GetGuestStatus,
     StartGuest,
     StopGuest,
     RestartGuest,
+    SuspendGuest,
+    ResumeGuest,
     DeleteGuest,
+    CloneGuest,
+    MigrateGuest,
+    // ── Snapshots ────────────────────────────────────────
     CreateSnapshot,
     ListSnapshots,
     DeleteSnapshot,
-    GetTaskLog,
+    // ── Nodes ────────────────────────────────────────────
+    ListNodes,
     GetNodeResources,
+    GetNodeStatus,
+    // ── Cluster ──────────────────────────────────────────
+    GetClusterStatus,
+    ListTasks,
+    GetTaskLog,
+    // ── Storage ──────────────────────────────────────────
     GetStoragePools,
+    // ── Backup / Replication ─────────────────────────────
+    ListBackupJobs,
+    GetReplicationStatus,
 }
 
 // ── Const Tool Definitions ──────────────────────────────
@@ -240,6 +255,196 @@ pub const TOOLS: &[ToolDef] = &[
             required: true,
         }],
         action: ToolAction::GetStoragePools,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    // ── Previously in ToolAction but not registered ──────
+    ToolDef {
+        name: "list_snapshots",
+        description: "List all snapshots for a VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::ListSnapshots,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_task_log",
+        description: "Retrieve the log output of a Proxmox task by UPID",
+        params: &[
+            ParamDef {
+                name: "node",
+                description: "Node name where the task ran",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "upid",
+                description: "Task UPID string",
+                param_type: ParamType::Str,
+                required: true,
+            },
+        ],
+        action: ToolAction::GetTaskLog,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_node_resources",
+        description: "Get CPU, memory and status detail for a specific node",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetNodeResources,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    // ── New tools ─────────────────────────────────────────
+    ToolDef {
+        name: "suspend_guest",
+        description: "Suspend (pause) a running VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::SuspendGuest,
+        destructive: false,
+        timeout_secs: 60,
+    },
+    ToolDef {
+        name: "resume_guest",
+        description: "Resume a suspended VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::ResumeGuest,
+        destructive: false,
+        timeout_secs: 60,
+    },
+    ToolDef {
+        name: "clone_guest",
+        description: "Clone a VM or container to a new ID",
+        params: &[
+            ParamDef {
+                name: "guest_id",
+                description: "Source VMID to clone",
+                param_type: ParamType::Int,
+                required: true,
+            },
+            ParamDef {
+                name: "newid",
+                description: "New VMID (0 = auto-assign next free)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "name",
+                description: "Name for the new guest",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "full",
+                description: "Full clone (true) vs linked clone (false, default)",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+        ],
+        action: ToolAction::CloneGuest,
+        destructive: false,
+        timeout_secs: 180,
+    },
+    ToolDef {
+        name: "migrate_guest",
+        description: "Live-migrate a VM or container to another node",
+        params: &[
+            ParamDef {
+                name: "guest_id",
+                description: "Guest VMID",
+                param_type: ParamType::Int,
+                required: true,
+            },
+            ParamDef {
+                name: "target_node",
+                description: "Destination node name",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "online",
+                description: "Live migration while guest is running (default true)",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+        ],
+        action: ToolAction::MigrateGuest,
+        destructive: true,
+        timeout_secs: 300,
+    },
+    ToolDef {
+        name: "get_cluster_status",
+        description: "Get cluster-wide status including quorum, nodes and services",
+        params: &[],
+        action: ToolAction::GetClusterStatus,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "list_tasks",
+        description: "List recent cluster tasks (running and completed)",
+        params: &[ParamDef {
+            name: "node",
+            description: "Filter by node (optional, omit for cluster-wide)",
+            param_type: ParamType::Str,
+            required: false,
+        }],
+        action: ToolAction::ListTasks,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_node_status",
+        description: "Get detailed status of a node (CPU, memory, disk, uptime, kernel)",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetNodeStatus,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "list_backup_jobs",
+        description: "List all configured backup (vzdump) jobs",
+        params: &[],
+        action: ToolAction::ListBackupJobs,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_replication_status",
+        description: "Get replication job status for a node",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetReplicationStatus,
         destructive: false,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
     },

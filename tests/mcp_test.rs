@@ -16,7 +16,7 @@ mod tests {
         // If someone adds a tool, this test forces them to update the count
         assert_eq!(
             TOOLS.len(),
-            10,
+            22,
             "Tool count changed! Update this test if intentional."
         );
     }
