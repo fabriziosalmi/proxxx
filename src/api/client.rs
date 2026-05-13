@@ -811,10 +811,22 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         vmid: u32,
         guest_type: crate::api::types::GuestType,
+        timeout_secs: u32,
     ) -> Result<String> {
         let kind = type_path(guest_type);
+        let ts = timeout_secs.to_string();
+        // forceStop=1: on QEMU, PVE SIGKILLs the process when timeout
+        // expires instead of leaving the task appended indefinitely.
+        // LXC rejects unknown params — only send for QEMU.
+        let params: &[(&str, &str)] = match guest_type {
+            crate::api::types::GuestType::Qemu => &[("timeout", &ts), ("forceStop", "1")],
+            crate::api::types::GuestType::Lxc => &[("timeout", &ts)],
+        };
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/shutdown"), &[])
+            .post(
+                &format!("/nodes/{node}/{kind}/{vmid}/status/shutdown"),
+                params,
+            )
             .await?;
         Ok(resp.data)
     }

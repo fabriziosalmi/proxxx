@@ -365,7 +365,7 @@ async fn handle_tool_call(
             let upid = if force {
                 client.stop_guest(&node, vmid, gt, true).await?
             } else {
-                client.shutdown_guest(&node, vmid, gt).await?
+                client.shutdown_guest(&node, vmid, gt, 60).await?
             };
             format!("Stopped guest {vmid}. UPID: {upid}")
         }

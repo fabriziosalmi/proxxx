@@ -1069,7 +1069,7 @@ async fn dispatch_side_effect(
                     let res = if force {
                         client_cloned.stop_guest(&node, vmid, gt, true).await
                     } else {
-                        client_cloned.shutdown_guest(&node, vmid, gt).await
+                        client_cloned.shutdown_guest(&node, vmid, gt, 60).await
                     };
                     let issued = res.is_ok();
                     match res {
@@ -1409,7 +1409,7 @@ async fn dispatch_side_effect(
                                     client_cloned.stop_guest(&node, vmid, g_type, true).await
                                 }
                                 app::Action::StopGuest { force: false, .. } => {
-                                    client_cloned.shutdown_guest(&node, vmid, g_type).await
+                                    client_cloned.shutdown_guest(&node, vmid, g_type, 60).await
                                 }
                                 app::Action::RestartGuest { .. } => {
                                     client_cloned.restart_guest(&node, vmid, g_type).await

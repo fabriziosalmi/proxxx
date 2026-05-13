@@ -242,7 +242,13 @@ impl ProxmoxGateway for HitlMockGateway {
         }
         Ok(format!("UPID:start:{vmid}"))
     }
-    async fn shutdown_guest(&self, _node: &str, vmid: u32, _gt: GuestType) -> Result<String> {
+    async fn shutdown_guest(
+        &self,
+        _node: &str,
+        vmid: u32,
+        _gt: GuestType,
+        _timeout_secs: u32,
+    ) -> Result<String> {
         self.record("shutdown_guest", vmid);
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")

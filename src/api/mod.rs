@@ -73,13 +73,18 @@ pub trait ProxmoxGateway: Send + Sync {
         guest_type: crate::api::types::GuestType,
         force: bool,
     ) -> Result<String>;
-    /// Graceful shutdown via ACPI/init. Falls back to hard stop after the
-    /// guest's own timeout (Proxmox-side, not us).
+    /// Graceful shutdown via ACPI/init. PVE will hard-kill the guest if it
+    /// has not stopped within `timeout_secs`. For QEMU, `forceStop=1` is
+    /// also sent so PVE SIGKILLs the qemu process on timeout instead of
+    /// leaving the task appended indefinitely (which saturates pvedaemon
+    /// worker threads and can render the node unresponsive). LXC does not
+    /// support `forceStop` — the LXC shutdown endpoint rejects unknown params.
     async fn shutdown_guest(
         &self,
         node: &str,
         vmid: u32,
         guest_type: crate::api::types::GuestType,
+        timeout_secs: u32,
     ) -> Result<String>;
     async fn restart_guest(
         &self,

@@ -867,9 +867,12 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_qemu_hits_shutdown_path() {
+        use wiremock::matchers::body_string_contains;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api2/json/nodes/pve1/qemu/100/status/shutdown"))
+            .and(body_string_contains("timeout=60"))
+            .and(body_string_contains("forceStop=1"))
             .respond_with(ok_upid("pve1"))
             .expect(1)
             .mount(&server)
@@ -881,24 +884,51 @@ mod tests {
             .mount(&server)
             .await;
         let c = mock_client(&server).await;
-        c.shutdown_guest("pve1", 100, GuestType::Qemu)
+        c.shutdown_guest("pve1", 100, GuestType::Qemu, 60)
             .await
             .expect("shutdown");
     }
 
     #[tokio::test]
-    async fn shutdown_lxc_hits_lxc_shutdown_path() {
+    async fn shutdown_qemu_custom_timeout_sends_correct_value() {
+        use wiremock::matchers::body_string_contains;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api2/json/nodes/pve1/lxc/200/status/shutdown"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/shutdown"))
+            .and(body_string_contains("timeout=30"))
+            .and(body_string_contains("forceStop=1"))
             .respond_with(ok_upid("pve1"))
             .expect(1)
             .mount(&server)
             .await;
         let c = mock_client(&server).await;
-        c.shutdown_guest("pve1", 200, GuestType::Lxc)
+        c.shutdown_guest("pve1", 100, GuestType::Qemu, 30)
             .await
-            .expect("shutdown");
+            .expect("shutdown custom timeout");
+    }
+
+    #[tokio::test]
+    async fn shutdown_lxc_hits_lxc_shutdown_path() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api2/json/nodes/pve1/lxc/200/status/shutdown"))
+            .and(body_string_contains("timeout=60"))
+            .respond_with(ok_upid("pve1"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Negative: LXC must NOT send forceStop
+        Mock::given(path("/api2/json/nodes/pve1/lxc/200/status/shutdown"))
+            .and(body_string_contains("forceStop=1"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        c.shutdown_guest("pve1", 200, GuestType::Lxc, 60)
+            .await
+            .expect("shutdown lxc");
     }
 
     #[tokio::test]

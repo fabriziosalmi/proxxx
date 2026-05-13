@@ -678,6 +678,7 @@ mod tests {
             _: &str,
             _: u32,
             _: crate::api::types::GuestType,
+            _: u32,
         ) -> Result<String> {
             anyhow::bail!("unused")
         }

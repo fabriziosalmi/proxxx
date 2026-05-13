@@ -255,7 +255,7 @@ pub async fn handle_callback_update(
         std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
     let api_fut: ApiFut = match action {
         "start" => Box::pin(client.start_guest(&node, vmid, gt)),
-        "stop" => Box::pin(client.shutdown_guest(&node, vmid, gt)),
+        "stop" => Box::pin(client.shutdown_guest(&node, vmid, gt, 60)),
         "restart" => Box::pin(client.restart_guest(&node, vmid, gt)),
         other => {
             warn!("Unknown action: {}", other);

@@ -233,7 +233,7 @@ impl crate::ssh::SshGateway for NoSsh {
 
 pub enum BatchOp {
     Start,
-    Stop { force: bool },
+    Stop { force: bool, timeout_secs: u32 },
     Restart,
     Suspend,
     Resume,
@@ -372,7 +372,13 @@ pub async fn execute_batch_op(
             let gt = guest.guest_type;
             let operation = match op {
                 BatchOp::Start => BatchOp::Start,
-                BatchOp::Stop { force } => BatchOp::Stop { force },
+                BatchOp::Stop {
+                    force,
+                    timeout_secs,
+                } => BatchOp::Stop {
+                    force,
+                    timeout_secs,
+                },
                 BatchOp::Restart => BatchOp::Restart,
                 BatchOp::Suspend => BatchOp::Suspend,
                 BatchOp::Resume => BatchOp::Resume,
@@ -382,8 +388,13 @@ pub async fn execute_batch_op(
                 // Bug #1+#2 fix: dispatch by guest_type, route force=false to shutdown.
                 let res = match operation {
                     BatchOp::Start => client_c.start_guest(&node, v, gt).await,
-                    BatchOp::Stop { force: true } => client_c.stop_guest(&node, v, gt, true).await,
-                    BatchOp::Stop { force: false } => client_c.shutdown_guest(&node, v, gt).await,
+                    BatchOp::Stop { force: true, .. } => {
+                        client_c.stop_guest(&node, v, gt, true).await
+                    }
+                    BatchOp::Stop {
+                        force: false,
+                        timeout_secs,
+                    } => client_c.shutdown_guest(&node, v, gt, timeout_secs).await,
                     BatchOp::Restart => client_c.restart_guest(&node, v, gt).await,
                     BatchOp::Suspend => client_c.suspend_guest(&node, v, gt).await,
                     BatchOp::Resume => client_c.resume_guest(&node, v, gt).await,
@@ -415,12 +426,13 @@ pub async fn execute_batch_op(
                     let _permit = sem.acquire_owned().await;
                     let res = match operation {
                         BatchOp::Start => client_c.start_guest(&node, v, gt).await,
-                        BatchOp::Stop { force: true } => {
+                        BatchOp::Stop { force: true, .. } => {
                             client_c.stop_guest(&node, v, gt, true).await
                         }
-                        BatchOp::Stop { force: false } => {
-                            client_c.shutdown_guest(&node, v, gt).await
-                        }
+                        BatchOp::Stop {
+                            force: false,
+                            timeout_secs,
+                        } => client_c.shutdown_guest(&node, v, gt, timeout_secs).await,
                         BatchOp::Restart => client_c.restart_guest(&node, v, gt).await,
                         BatchOp::Suspend => client_c.suspend_guest(&node, v, gt).await,
                         BatchOp::Resume => client_c.resume_guest(&node, v, gt).await,

@@ -50,6 +50,11 @@ pub enum Command {
         /// `--force`, which is PVE-level hard-kill semantics.
         #[arg(long)]
         allow_risk: bool,
+        /// Seconds PVE waits for graceful shutdown before hard-killing
+        /// the guest (QEMU: SIGKILL; LXC: init kill). Ignored when
+        /// `--force` is set. [default: 60]
+        #[arg(long, default_value_t = 60)]
+        stop_timeout: u32,
     },
     /// Restart a guest
     Restart {
@@ -809,6 +814,7 @@ pub async fn execute(
             force,
             strict,
             allow_risk,
+            stop_timeout,
         } => {
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
@@ -821,7 +827,17 @@ pub async fn execute(
                 )
                 .await?;
             }
-            execute_batch_op(&client, BatchOp::Stop { force }, &vmids, &config, strict).await
+            execute_batch_op(
+                &client,
+                BatchOp::Stop {
+                    force,
+                    timeout_secs: stop_timeout,
+                },
+                &vmids,
+                &config,
+                strict,
+            )
+            .await
         }
         Command::Restart {
             vmids,
