@@ -149,6 +149,19 @@ pub enum MetricsCommand {
         #[arg(long, value_enum, default_value_t = CfCli::Average)]
         cf: CfCli,
     },
+    /// Start a Prometheus metrics exporter. Scrapes nodes, guests and
+    /// storage from the PVE API on every pull and serves them in
+    /// Prometheus text format on GET /metrics. No auth — bind to
+    /// localhost and put a reverse proxy or firewall in front for
+    /// production deployments.
+    Serve {
+        /// Bind address (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Listen port (default: 9100)
+        #[arg(long, default_value_t = 9100)]
+        port: u16,
+    },
     /// Pre-rendered PNG graph reference (server-side path) for a guest.
     /// Distinct from `vm`/`ct` which return numeric series — this is
     /// for UI/export pipelines wanting an existing image.
@@ -717,6 +730,12 @@ pub async fn execute_metrics(
         ));
     }
 
+    // `metrics serve` is long-running — handle before the sparkline path.
+    if let MetricsCommand::Serve { bind, port } = action {
+        crate::metrics::run_metrics_server(Arc::clone(client), &bind, port).await?;
+        return Ok((serde_json::json!({"status": "exited"}), 0));
+    }
+
     // Helper: extract one optional metric from each point. Used for
     // both the sparkline render path AND the summary stats.
     fn extract(p: &RrdPoint, field: MetricField) -> Option<f64> {
@@ -824,6 +843,7 @@ pub async fn execute_metrics(
         }
         // Unreachable — short-circuited above.
         MetricsCommand::RrdPng { .. } => unreachable!("RrdPng handled by early return"),
+        MetricsCommand::Serve { .. } => unreachable!("Serve handled by early return"),
     };
 
     // Pull the requested field from every point as Option<f64>.
