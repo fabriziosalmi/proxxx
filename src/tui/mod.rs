@@ -100,7 +100,7 @@ enum DataMsg {
         repl_status: Vec<crate::api::types::ReplicationStatus>,
     },
     /// One or more nodes returned errors (403 / network) while fetching
-    /// guests. Carrying the per-node errors separately from DataMsg::Error
+    /// guests. Carrying the per-node errors separately from `DataMsg::Error`
     /// so the TUI can render a targeted hint in the guest list instead of
     /// a generic dismissible banner.
     GuestsFetchErrors(Vec<String>),
@@ -1857,6 +1857,7 @@ async fn run_demo() -> Result<()> {
         ssh: None,
         pbs: None,
         alerts: None,
+        mcp_token: None,
     });
 
     loop {

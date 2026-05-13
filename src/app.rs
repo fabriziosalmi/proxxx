@@ -114,7 +114,7 @@ pub struct AppState {
 
     /// Per-node errors from the last guest fetch cycle. Non-empty when
     /// one or more nodes denied access (403) or were unreachable. Cleared
-    /// on each new GuestsLoaded so stale errors don't linger after a
+    /// on each new `GuestsLoaded` so stale errors don't linger after a
     /// token rotation.
     pub guests_fetch_errors: Vec<String>,
 }

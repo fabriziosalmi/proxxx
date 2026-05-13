@@ -102,6 +102,11 @@ vt100 = { package = "vt100-ctt", version = "0.17", default-features = false }
 # pull in native-tls / openssl-sys as a new system dep.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# HTTP server for MCP Streamable HTTP transport (2025-03-26 spec).
+# axum is already tokio-native; tower-http adds SSE + timeout middleware.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tower-http = { version = "0.6", default-features = false, features = ["timeout"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
 # `tokio-util io` adapts an async `File` into a Stream so multipart
 # uploads can be POSTed without buffering multi-GB files in RAM.
 tokio-util = { version = "0.7", default-features = false, features = ["io"] }

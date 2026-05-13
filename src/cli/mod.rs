@@ -704,8 +704,20 @@ pub enum HitlCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
-    /// Start MCP server
+    /// Start MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
     Serve,
+    /// Start MCP HTTP server (Streamable HTTP transport, spec 2025-03-26)
+    ServeHttp {
+        /// Address to bind (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Port to listen on (default: 3000)
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Bearer token for auth (overrides `mcp_token` in config)
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// List available tools
     Tools {
         #[arg(long)]
@@ -1155,6 +1167,21 @@ pub async fn execute(
                 )
                 .await?;
                 Ok((serde_json::json!({"status": "MCP server stopped"}), 0))
+            }
+            McpCommand::ServeHttp { bind, port, token } => {
+                let mut cfg = config;
+                // CLI --token overrides the profile's mcp_token.
+                if token.is_some() {
+                    cfg.mcp_token = token;
+                }
+                crate::mcp::http_server::run_http_server(
+                    std::sync::Arc::clone(&client),
+                    std::sync::Arc::new(cfg),
+                    &bind,
+                    port,
+                )
+                .await?;
+                Ok((serde_json::json!({"status": "MCP HTTP server stopped"}), 0))
             }
             _ => unreachable!(),
         },

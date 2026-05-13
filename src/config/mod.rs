@@ -30,6 +30,11 @@ pub struct ProfileConfig {
     pub pbs: Option<PbsConfig>,
     /// Alert rules (feature #8). Empty/missing = no alerting.
     pub alerts: Option<Vec<AlertRuleConfig>>,
+    /// Bearer token for the MCP HTTP transport. When set, all POST /mcp and
+    /// GET /mcp requests must carry `Authorization: Bearer <token>`. Leave
+    /// unset (the default) to run the HTTP server without auth — only do this
+    /// on a trusted network or behind a reverse proxy that enforces auth.
+    pub mcp_token: Option<String>,
 }
 
 /// One alert rule, declared in TOML.

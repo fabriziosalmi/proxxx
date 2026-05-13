@@ -135,6 +135,7 @@ impl E2eEnv {
             ssh: None,
             pbs: None,
             alerts: None,
+            mcp_token: None,
         };
         let client = PxClient::new(cfg, Some(&self.token_secret))
             .await

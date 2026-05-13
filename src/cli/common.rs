@@ -603,6 +603,7 @@ mod enforce_preflight_tests {
             ssh: None,
             pbs: None,
             alerts: None,
+            mcp_token: None,
         };
         // Server must outlive the client's first call. We never call,
         // so dropping `server` immediately is fine, but keep the binding
