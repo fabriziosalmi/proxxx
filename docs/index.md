@@ -12,7 +12,7 @@ hero:
   # path as if served from the site root.
   image:
     src: /demo.svg
-    alt: proxxx animated demo — six panels cycling through TUI guest list, CLI batch canary, MCP and HITL approval, pre-flight risk gate, Prometheus metrics, and future vision
+    alt: proxxx animated demo — a destructive command refused by the pre-flight risk gate, approved via Telegram HITL, then executed
   actions:
     - theme: brand
       text: Get started

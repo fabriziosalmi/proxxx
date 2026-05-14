@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.svg" alt="proxxx animated demo — six panels: TUI guest list, CLI batch canary, MCP + HITL approval, pre-flight risk gate, Prometheus metrics and alert watch, future vision" width="900">
+  <img src="assets/demo.svg" alt="proxxx animated demo — a destructive command is typed, refused by the pre-flight risk gate, then approved via Telegram HITL and executed" width="900">
 </p>
 
 ---
