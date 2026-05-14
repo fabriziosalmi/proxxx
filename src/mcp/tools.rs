@@ -362,7 +362,7 @@ pub const TOOLS: &[ToolDef] = &[
             },
         ],
         action: ToolAction::CloneGuest,
-        destructive: false,
+        destructive: true,
         timeout_secs: 180,
     },
     ToolDef {

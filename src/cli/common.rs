@@ -21,14 +21,28 @@ pub async fn find_guest(
 ) -> Result<(String, crate::api::types::GuestType)> {
     use crate::api::ProxmoxGateway;
     let nodes = client.get_nodes().await?;
+    let mut node_errors: Vec<String> = Vec::new();
     for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok((n.node.clone(), g.guest_type));
+        match client.get_guests(&n.node).await {
+            Ok(guests) => {
+                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
+                    return Ok((n.node.clone(), g.guest_type));
+                }
+            }
+            Err(e) => {
+                node_errors.push(format!("{}: {}", n.node, e));
             }
         }
     }
-    anyhow::bail!("Guest {vmid} not found")
+    if node_errors.is_empty() {
+        anyhow::bail!("Guest {vmid} not found on any node")
+    } else {
+        anyhow::bail!(
+            "Guest {vmid} not found; {} node(s) returned errors: {}",
+            node_errors.len(),
+            node_errors.join("; ")
+        )
+    }
 }
 
 /// Same scan as `find_guest`, but returns the full `Guest` so the
@@ -40,14 +54,28 @@ pub async fn find_guest_full(
 ) -> Result<crate::api::types::Guest> {
     use crate::api::ProxmoxGateway;
     let nodes = client.get_nodes().await?;
+    let mut node_errors: Vec<String> = Vec::new();
     for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok(g.clone());
+        match client.get_guests(&n.node).await {
+            Ok(guests) => {
+                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
+                    return Ok(g.clone());
+                }
+            }
+            Err(e) => {
+                node_errors.push(format!("{}: {}", n.node, e));
             }
         }
     }
-    anyhow::bail!("Guest {vmid} not found")
+    if node_errors.is_empty() {
+        anyhow::bail!("Guest {vmid} not found on any node")
+    } else {
+        anyhow::bail!(
+            "Guest {vmid} not found; {} node(s) returned errors: {}",
+            node_errors.len(),
+            node_errors.join("; ")
+        )
+    }
 }
 
 /// Poll a long-running PVE task to completion. Used by `--wait` on
@@ -338,9 +366,13 @@ pub async fn execute_batch_op_with_policy(
             } else {
                 unreachable!("execute_batch_op_full always returns Array")
             };
-            let pilot_failed = pilot_arr
+            // Abort if any pilot target errored OR if the pilot as a whole
+            // produced a non-zero exit (covers HITL-pending exit=3, strict
+            // abort exit=1, partial-failure exit=2 — all mean "don't promote").
+            let pilot_has_error = pilot_arr
                 .iter()
                 .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("error"));
+            let pilot_failed = pilot_has_error || pilot_code >= 2;
             if pilot_failed {
                 tracing::warn!(
                     "canary pilot had failures — skipping {} remaining target(s)",
@@ -396,14 +428,14 @@ pub async fn execute_batch_op_with_policy(
                     overall_code = std::cmp::max(overall_code, wave_code);
                 }
                 if wave_failed {
+                    // Use the actual end-of-wave offset, not (wave_idx+1)*wave_size
+                    // — the last wave may be shorter than wave_size.
+                    let remaining_start = wave_idx * wave_size + wave.len();
                     tracing::warn!(
                         "rolling wave {} failed — skipping {} remaining target(s)",
                         wave_idx + 1,
-                        vmids
-                            .len()
-                            .saturating_sub(wave_idx * wave_size + wave.len())
+                        vmids.len().saturating_sub(remaining_start)
                     );
-                    let remaining_start = (wave_idx + 1) * wave_size;
                     for &vmid in vmids.get(remaining_start..).unwrap_or_default() {
                         all_results.push(serde_json::json!({
                             "vmid": vmid,
@@ -460,9 +492,17 @@ async fn execute_batch_op_full(
     }
 
     while let Some(res) = join_set.join_next().await {
-        if let Ok((_node_name, Ok(guests))) = res {
-            for g in guests {
-                guest_map.insert(g.vmid, g);
+        match res {
+            Ok((_node_name, Ok(guests))) => {
+                for g in guests {
+                    guest_map.insert(g.vmid, g);
+                }
+            }
+            Ok((node_name, Err(e))) => {
+                tracing::warn!("get_guests({node_name}) failed during batch scan: {e:#}");
+            }
+            Err(join_err) => {
+                tracing::warn!("get_guests task panicked during batch scan: {join_err}");
             }
         }
     }
@@ -650,24 +690,26 @@ async fn execute_batch_op_full(
 
     if !strict {
         while let Some(res) = op_join_set.join_next().await {
-            if let Ok((vmid, api_res)) = res {
-                match api_res {
-                    Ok(upid) => {
-                        results.push(serde_json::json!({
-                            "vmid": vmid,
-                            "status": "success",
-                            "upid": upid
-                        }));
-                    }
-                    Err(e) => {
-                        warn!("Operation failed for guest {}: {}", vmid, e);
-                        results.push(serde_json::json!({
-                            "vmid": vmid,
-                            "status": "error",
-                            "message": e.to_string()
-                        }));
-                        has_failure = true;
-                    }
+            match res {
+                Ok((vmid, Ok(upid))) => {
+                    results.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "success",
+                        "upid": upid
+                    }));
+                }
+                Ok((vmid, Err(e))) => {
+                    warn!("Operation failed for guest {vmid}: {e}");
+                    results.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "error",
+                        "message": e.to_string()
+                    }));
+                    has_failure = true;
+                }
+                Err(join_err) => {
+                    warn!("Batch op task panicked: {join_err}");
+                    has_failure = true;
                 }
             }
         }
@@ -782,7 +824,10 @@ mod enforce_preflight_tests {
     /// are mounted — the tests use `Op::Stop` on Stopped guests so
     /// `assess_deep` makes no API calls. The client is just a structural
     /// dependency of `enforce_preflight`.
-    async fn idle_client() -> crate::api::PxClient {
+    ///
+    /// Returns `(client, server)` — callers must keep `_server` alive for the
+    /// duration of the test so the bound port stays open.
+    async fn idle_client() -> (crate::api::PxClient, wiremock::MockServer) {
         let server = wiremock::MockServer::start().await;
         let cfg = crate::config::ProfileConfig {
             url: server.uri(),
@@ -802,13 +847,10 @@ mod enforce_preflight_tests {
             alerts: None,
             mcp_token: None,
         };
-        // Server must outlive the client's first call. We never call,
-        // so dropping `server` immediately is fine, but keep the binding
-        // alive for the duration of the test to be defensive.
-        std::mem::forget(server);
-        crate::api::PxClient::new(cfg, Some("fake-secret"))
+        let client = crate::api::PxClient::new(cfg, Some("fake-secret"))
             .await
-            .expect("client builds")
+            .expect("client builds");
+        (client, server)
     }
 
     /// max == Severe, force == false → bails. The error message must
@@ -817,7 +859,7 @@ mod enforce_preflight_tests {
     /// can map it to exit code 6.
     #[tokio::test]
     async fn enforce_preflight_bails_on_severe_without_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.lock = "backup".into(); // Locked → Severe regardless of op
         let res = enforce_preflight(&client, None, Op::Stop, &g, false).await;
@@ -848,7 +890,7 @@ mod enforce_preflight_tests {
     /// path the v0.1.10 audit found zero coverage for.
     #[tokio::test]
     async fn enforce_preflight_proceeds_on_severe_with_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.lock = "backup".into();
         enforce_preflight(&client, None, Op::Stop, &g, true)
@@ -861,7 +903,7 @@ mod enforce_preflight_tests {
     /// `Op::Stop` on a tagged-prod stopped guest yields `TaggedProd` (Warning).
     #[tokio::test]
     async fn enforce_preflight_proceeds_on_warning_without_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.tags = "production".into();
         enforce_preflight(&client, None, Op::Stop, &g, false)
@@ -874,7 +916,7 @@ mod enforce_preflight_tests {
     /// return Ok immediately without printing the risk header.
     #[tokio::test]
     async fn enforce_preflight_returns_ok_on_clean_guest() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let g = stopped_qemu(100);
         enforce_preflight(&client, None, Op::Stop, &g, false)
             .await

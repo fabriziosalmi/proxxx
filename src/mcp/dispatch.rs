@@ -40,7 +40,7 @@ pub async fn handle_tool_call(
     if tool_def.destructive {
         if let Some(guest_id) = args.get("guest_id").and_then(serde_json::Value::as_u64) {
             let vmid = guest_id as u32;
-            let action_str = name.split('_').next().unwrap_or("unknown");
+            let action_str = name;
 
             let mut tags = Vec::new();
             if let Ok(nodes) = client.get_nodes().await {

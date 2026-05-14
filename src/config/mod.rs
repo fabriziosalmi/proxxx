@@ -9,9 +9,9 @@ pub struct ProfileConfig {
     #[serde(default = "default_auth")]
     pub auth: String,
     pub token_id: Option<String>,
-    pub token_secret: Option<String>,
+    pub token_secret: Option<zeroize::Zeroizing<String>>,
     pub token_secret_file: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<zeroize::Zeroizing<String>>,
     #[serde(default)]
     pub verify_tls: bool,
     /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
@@ -113,7 +113,7 @@ pub struct PbsConfig {
     pub token_id: String,
     /// Token secret. Resolution order matches `PROXXX_PBS_TOKEN_SECRET`
     /// env, then `token_secret_file`, then OS keychain.
-    pub token_secret: Option<String>,
+    pub token_secret: Option<zeroize::Zeroizing<String>>,
     pub token_secret_file: Option<String>,
     /// TLS verification. Default true — PBS in homelabs often uses
     /// self-signed certs but we never silently disable verification.
@@ -199,7 +199,7 @@ impl PbsConfig {
         }
         if let Some(ref s) = self.token_secret {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.clone()));
+                return Ok(s.clone());
             }
         }
         if let Some(ref file_path) = self.token_secret_file {
@@ -623,7 +623,7 @@ impl ProfileConfig {
         // the two resolvers.
         if let Some(ref s) = self.token_secret {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.clone()));
+                return Ok(s.clone());
             }
         }
 
@@ -686,7 +686,7 @@ impl ProfileConfig {
 
         if let Some(ref pw) = self.password {
             if !pw.is_empty() {
-                return Ok(zeroize::Zeroizing::new(pw.clone()));
+                return Ok(pw.clone());
             }
         }
 

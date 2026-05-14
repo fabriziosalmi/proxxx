@@ -115,7 +115,7 @@ mod tests {
         // SHA-256 of registry_json().to_string() — stable across builds.
         // If this assertion fails, a tool definition changed; update this
         // constant AND record the reason in the commit message.
-        const EXPECTED: &str = "9751af62bd32d95f5e4da06ceaa2f829d1de7272779117dec2302ebf80bb2de4";
+        const EXPECTED: &str = "2fc2a8985760ad37ec4562b5560dead5eec16df78ac359a9f8e75cf443d08be6";
         assert_eq!(hash1, hash2, "Checksum must be deterministic across calls");
         assert_eq!(
             hash1, EXPECTED,

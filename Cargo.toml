@@ -132,7 +132,7 @@ tempfile = "3"
 # so a core dump or swap-out after the secret has been released cannot
 # leak the Proxmox / PBS / Telegram credentials. The wrapper has no
 # performance cost on the hot path; only the Drop call does the memset.
-zeroize = { version = "1", features = ["zeroize_derive"] }
+zeroize = { version = "1", features = ["zeroize_derive", "serde"] }
 
 [features]
 default = ["keychain"]

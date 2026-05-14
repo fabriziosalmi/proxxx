@@ -85,6 +85,9 @@ impl MetricWriter {
 pub async fn scrape(client: &PxClient) -> String {
     let mut w = MetricWriter::new();
 
+    // Fetch the node list once and reuse it for all three scrape sections.
+    let nodes = client.get_nodes().await.unwrap_or_default();
+
     // ── Nodes ─────────────────────────────────────────────────────
     w.help("proxxx_node_up", "1 if node is online");
     w.help("proxxx_node_cpu_usage_ratio", "CPU utilisation 0.0–1.0");
@@ -95,8 +98,9 @@ pub async fn scrape(client: &PxClient) -> String {
     w.help("proxxx_node_disk_total_bytes", "Root disk total bytes");
     w.help("proxxx_node_uptime_seconds", "Node uptime seconds");
 
-    if let Ok(nodes) = client.get_nodes().await {
-        for n in &nodes {
+    {
+        let nodes = &nodes;
+        for n in nodes {
             let node = n.node.as_str();
             let up = if n.status == crate::api::types::NodeStatus::Online {
                 1.0
@@ -128,8 +132,7 @@ pub async fn scrape(client: &PxClient) -> String {
     w.help("proxxx_guest_disk_total_bytes", "Guest disk total bytes");
     w.help("proxxx_guest_uptime_seconds", "Guest uptime seconds");
 
-    // Fetch guests from all nodes in parallel.
-    let all_guests: Vec<crate::api::types::Guest> = if let Ok(nodes) = client.get_nodes().await {
+    let all_guests: Vec<crate::api::types::Guest> = {
         let mut out = Vec::new();
         for n in &nodes {
             if let Ok(gs) = client.get_guests(&n.node).await {
@@ -137,8 +140,6 @@ pub async fn scrape(client: &PxClient) -> String {
             }
         }
         out
-    } else {
-        Vec::new()
     };
     for g in &all_guests {
         let vmid_s = g.vmid.to_string();
@@ -176,7 +177,7 @@ pub async fn scrape(client: &PxClient) -> String {
     w.help("proxxx_storage_avail_bytes", "Storage pool available bytes");
     w.help("proxxx_storage_active", "1 if storage pool is active");
 
-    if let Ok(nodes) = client.get_nodes().await {
+    {
         for n in &nodes {
             if let Ok(pools) = client.get_storage_pools(&n.node).await {
                 for p in &pools {
