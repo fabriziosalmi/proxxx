@@ -112,9 +112,16 @@ mod tests {
     fn test_checksum_is_deterministic() {
         let hash1 = registry_checksum();
         let hash2 = registry_checksum();
+        // SHA-256 of registry_json().to_string() — stable across builds.
+        // If this assertion fails, a tool definition changed; update this
+        // constant AND record the reason in the commit message.
+        const EXPECTED: &str = "9751af62bd32d95f5e4da06ceaa2f829d1de7272779117dec2302ebf80bb2de4";
         assert_eq!(hash1, hash2, "Checksum must be deterministic across calls");
-        assert!(!hash1.is_empty());
-        assert_eq!(hash1.len(), 16, "Checksum should be 16 hex chars");
+        assert_eq!(
+            hash1, EXPECTED,
+            "Tool registry changed — update EXPECTED if intentional"
+        );
+        assert_eq!(hash1.len(), 64, "Checksum should be 64 hex chars (SHA-256)");
     }
 
     #[test]

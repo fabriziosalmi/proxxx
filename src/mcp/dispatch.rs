@@ -392,10 +392,13 @@ pub async fn dispatch_rpc(
                 "serverInfo": {"name": "proxxx-mcp", "version": env!("CARGO_PKG_VERSION")}
             }),
         ),
-        "notifications/initialized" | "ping" => ok_result(id, &json!({})),
+        // JSON-RPC 2.0 §4: notifications have no "id" field and MUST NOT
+        // receive a response. Returning Value::Null signals callers to skip
+        // the write step. "ping" is a request (has id) → respond normally.
+        "notifications/initialized" => Value::Null,
+        "ping" => ok_result(id, &json!({})),
         "tools/list" => {
-            let registry = crate::mcp::tools::registry_json();
-            let tools = registry.get("tools").unwrap_or(&json!([])).clone();
+            let tools = crate::mcp::tools::tools_list_schema();
             ok_result(id, &json!({"tools": tools}))
         }
         "tools/call" => {

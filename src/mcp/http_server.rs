@@ -9,8 +9,10 @@
 // request must carry `Authorization: Bearer <token>`. Requests without or
 // with a wrong token get HTTP 401. The health endpoint is always open.
 //
-// Session: stateless. The spec's Mcp-Session-Id is accepted but not enforced
-// in this release — each request is independently authenticated and dispatched.
+// Session: stateless. The spec's Mcp-Session-Id header is not inspected —
+// each request is independently authenticated and dispatched. Session
+// affinity is not required for the current tool set (all ops are idempotent
+// read-or-dispatch; no streaming continuations yet).
 
 use anyhow::Result;
 use axum::{
@@ -73,26 +75,10 @@ impl McpState {
 }
 
 fn sha256_bytes(s: &str) -> [u8; 32] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // We use a two-pass double-hash trick with DefaultHasher as a lightweight
-    // stand-in. For a production token store use ring/sha2; here the token is
-    // a shared secret in a TOML file, so the goal is avoid storing plaintext
-    // in memory longer than needed, not cryptographic agility.
-    //
-    // TODO: replace with ring::digest::SHA256 when ring is added to deps.
-    let mut h1 = DefaultHasher::new();
-    s.hash(&mut h1);
-    let v1 = h1.finish();
-    let mut h2 = DefaultHasher::new();
-    (s, v1).hash(&mut h2);
-    let v2 = h2.finish();
-    let mut out = [0u8; 32];
-    out[..8].copy_from_slice(&v1.to_le_bytes());
-    out[8..16].copy_from_slice(&v2.to_le_bytes());
-    out[16..24].copy_from_slice(&v1.wrapping_add(v2).to_le_bytes());
-    out[24..].copy_from_slice(&v1.wrapping_mul(v2 | 1).to_le_bytes());
-    out
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    hasher.finalize().into()
 }
 
 /// `POST /mcp` — JSON-RPC 2.0 request handler.
@@ -104,6 +90,7 @@ async fn post_mcp(
     if !state.auth_ok(&headers) {
         return (
             StatusCode::UNAUTHORIZED,
+            [("WWW-Authenticate", "Bearer realm=\"proxxx-mcp\"")],
             Json(json!({"error": "Unauthorized"})),
         )
             .into_response();
@@ -113,12 +100,25 @@ async fn post_mcp(
     if let Some(arr) = body.as_array() {
         let mut responses = Vec::with_capacity(arr.len());
         for req in arr {
-            responses.push(handle_single(&state, req).await);
+            let r = handle_single(&state, req).await;
+            // Notifications return Value::Null — omit from batch response (JSON-RPC §4).
+            if !r.is_null() {
+                responses.push(r);
+            }
+        }
+        // If every item was a notification, return HTTP 204 No Content.
+        if responses.is_empty() {
+            return StatusCode::NO_CONTENT.into_response();
         }
         return Json(Value::Array(responses)).into_response();
     }
 
-    Json(handle_single(&state, &body).await).into_response()
+    let r = handle_single(&state, &body).await;
+    // Single notification → 204 No Content (no body to send).
+    if r.is_null() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    Json(r).into_response()
 }
 
 async fn handle_single(state: &McpState, req: &Value) -> Value {
@@ -148,7 +148,12 @@ async fn handle_single(state: &McpState, req: &Value) -> Value {
 /// task completion events) will be added in a future release.
 async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Response {
     if !state.auth_ok(&headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("WWW-Authenticate", "Bearer realm=\"proxxx-mcp\"")],
+            "Unauthorized",
+        )
+            .into_response();
     }
 
     let stream =

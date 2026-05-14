@@ -5,7 +5,6 @@
 // `const TOOLS` is baked into the binary. Period.
 
 use serde::Serialize;
-use std::hash::{Hash, Hasher};
 
 // ── Closed Action Enum ──────────────────────────────────
 // No `Other(String)`. No dynamic variants. Exhaustive match enforced by compiler.
@@ -482,15 +481,76 @@ pub fn registry_json() -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
 
-/// SHA-256 checksum of the serialized tool registry (for audit verification)
+/// Build the MCP `tools/list` response array.
+///
+/// Each entry follows the MCP 2025-03-26 spec shape:
+/// ```json
+/// {
+///   "name": "...",
+///   "description": "...",
+///   "inputSchema": {
+///     "type": "object",
+///     "properties": { "param": { "type": "...", "description": "..." } },
+///     "required": ["param"]
+///   }
+/// }
+/// ```
+/// The `destructive` and `timeout_secs` fields are included as
+/// extensions (prefixed `x_proxxx_`) so spec-conforming clients
+/// ignore them and proxxx-aware clients can surface the metadata.
+#[must_use]
+pub fn tools_list_schema() -> serde_json::Value {
+    let tools: Vec<serde_json::Value> = TOOLS
+        .iter()
+        .map(|t| {
+            let mut properties = serde_json::Map::new();
+            let mut required: Vec<serde_json::Value> = Vec::new();
+            for p in t.params {
+                let json_type = match p.param_type {
+                    ParamType::Str => "string",
+                    ParamType::Int => "integer",
+                    ParamType::Bool => "boolean",
+                };
+                properties.insert(
+                    p.name.to_string(),
+                    serde_json::json!({
+                        "type": json_type,
+                        "description": p.description,
+                    }),
+                );
+                if p.required {
+                    required.push(serde_json::Value::String(p.name.to_string()));
+                }
+            }
+            let mut input_schema = serde_json::json!({
+                "type": "object",
+                "properties": properties,
+            });
+            if !required.is_empty() {
+                input_schema["required"] = serde_json::Value::Array(required);
+            }
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": input_schema,
+                "x_proxxx_destructive": t.destructive,
+                "x_proxxx_timeout_secs": t.timeout_secs,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(tools)
+}
+
+/// SHA-256 checksum of the serialized tool registry (for audit verification).
+///
+/// The returned string is 64 lowercase hex characters — a real SHA-256 digest
+/// of the JSON serialization of `registry_json()`. Stable across builds for
+/// the same registry contents; changes whenever a tool name, description,
+/// parameter, or flag changes.
 #[must_use]
 pub fn registry_checksum() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    // clippy::collection_is_never_read fires here even though we hash
-    // it on the next line — the lint can't see through the trait call.
-    #[allow(clippy::collection_is_never_read)]
+    use sha2::{Digest, Sha256};
     let json = registry_json().to_string();
-    let mut hasher = DefaultHasher::new();
-    json.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(json.as_bytes());
+    format!("{digest:x}")
 }

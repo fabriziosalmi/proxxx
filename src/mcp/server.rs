@@ -111,6 +111,10 @@ pub async fn run_server(client: Arc<PxClient>, config: Arc<ProfileConfig>) -> Re
         )
         .await;
 
+        // Notifications return Value::Null — do not write a response (JSON-RPC §4).
+        if response.is_null() {
+            continue;
+        }
         write_response(&mut stdout, response).await?;
     }
 
