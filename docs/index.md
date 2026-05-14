@@ -26,11 +26,11 @@ hero:
 
 features:
   - title: One binary, three callers
-    details: CLI, TUI, and MCP server in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 10-tool registry for LLM agents.
+    details: CLI, TUI, and MCP server in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 23-tool registry (stdio + Streamable HTTP transports) for LLM agents.
   - title: No agent on the cluster
     details: Direct REST against PVE (token or password) and PBS (token only), with typed error categories so callers match on the failure shape instead of grepping prose. SSH only for the paths PVE never exposed over REST — patch apply, full effective-permissions, per-guest interactive sessions.
   - title: Six-stage commit gate, no skip flags
-    details: cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, the full test suite, 88 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
+    details: cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, the full test suite, 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
   - title: Pre-flight risk gate plus HITL
     details: 11 risk variants — running, locked, HA-managed, tagged prod, listening on service, no recent backup — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy.
 ---
@@ -105,14 +105,14 @@ onMounted(() => {
 
 | Surface               | Today                                                    |
 | :-------------------- | :------------------------------------------------------- |
-| Source                | ~28 KLOC Rust · ~5 KLOC tests                            |
+| Source                | ~44 KLOC Rust · ~14 KLOC tests                           |
 | Quality gate          | 6 stages · ~80–260 s wall time                           |
-| Live cluster coverage | 88 read probes + full mutation lifecycle per gate run    |
+| Live cluster coverage | 87 read probes + full mutation lifecycle per gate run    |
 | Mutation lifecycle    | LXC create→start→snapshot→stop→delete · cluster-level CRUD (pool / firewall-cluster / backup-jobs / notifications / storage-defs) · QEMU 9998 from alpine ISO · opt-in QGA round-trips |
 | Binary                | 6–9 MB stripped depending on target · single static · no installer |
 | Supply chain          | `cargo audit --deny warnings` per push + nightly cron    |
 | System dependencies   | 0 — rustls only, no native-tls, no openssl               |
-| MCP tool registry     | 10 tools · SHA-256 pinned · compile-time fixed           |
+| MCP tool registry     | 23 tools · stdio + HTTP · SHA-256 pinned · compile-time fixed |
 
 ## A taste
 
@@ -129,6 +129,7 @@ proxxx start 100 101 102
 proxxx delete 100 --yes
 proxxx migrate 100 pve2 --yes
 proxxx snapshot create 100 --name pre-upgrade
+proxxx snapshot rollback 100 --name pre-upgrade --yes
 proxxx disk move 100 --disk scsi0 --storage ceph-rbd --yes
 proxxx patch apply --reboot=auto --dry-run
 
