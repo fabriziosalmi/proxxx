@@ -1,9 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 237
+assertion_line: 313
 expression: dump
 ---
- 🛡️  HITL Approval Gateway  (0 operations)
+ HITL approvals  0 pending
 
 ────────────────────────────────────────────────────────────────────────────────
  No pending approvals.

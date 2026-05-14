@@ -1,9 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 246
+assertion_line: 326
 expression: dump
 ---
- 🛡️  Backup Health Board (Cluster-wide VZDump Audit)
+ Backup health  cluster-wide vzdump audit
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  No guests to monitor.

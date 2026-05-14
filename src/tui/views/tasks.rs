@@ -20,9 +20,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState, upid: &str) {
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" 📝 ", Style::default().fg(Theme::ACCENT)),
-        Span::styled("Live Task Log ", Theme::title()),
-        Span::styled(format!("(UPID: {upid})"), Theme::dim()),
+        Span::styled(" Live task log ", Theme::title()),
+        Span::styled(format!(" upid {upid} "), Theme::dim()),
     ]))
     .block(
         Block::default()
@@ -33,7 +32,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState, upid: &str) {
 
     if state.current_task_log.is_empty() {
         f.render_widget(
-            Paragraph::new(" ⏳ Waiting for logs...").style(Theme::dim()),
+            Paragraph::new(" waiting for logs…").style(Theme::dim()),
             chunks[1],
         );
         return;

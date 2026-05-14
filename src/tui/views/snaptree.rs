@@ -78,7 +78,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     };
     let hint = if let Some(t) = state.snap_tree.as_ref() {
         format!(
-            " {} snapshots, {} orphans │ j/k navigate │ Esc back ",
+            " {} snapshots  {} orphans ",
             t.total_count(),
             t.orphans.len()
         )

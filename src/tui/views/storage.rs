@@ -26,9 +26,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" 💾 ", Style::default().fg(Theme::ACCENT)),
-        Span::styled("Storage Pools", Theme::title()),
-        Span::styled(format!("  ({} total)", state.storage.len()), Theme::dim()),
+        Span::styled(" Storage pools ", Theme::title()),
+        Span::styled(format!(" {} total ", state.storage.len()), Theme::dim()),
     ]))
     .block(
         Block::default()
@@ -43,9 +42,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
     if state.storage.is_empty() {
         let msg = if state.is_loading {
-            " ⏳ Loading storage..."
+            " loading storage…"
         } else {
-            " No storage pools found."
+            " no storage pools found."
         };
         f.render_widget(Paragraph::new(msg).style(Theme::dim()), area);
         return;
@@ -70,7 +69,7 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
         .map(|(vi, pool)| {
             let actual_index = scroll_offset + vi;
 
-            let status_icon = if pool.active { "🟢" } else { "🔴" };
+            let status_icon = if pool.active { "*" } else { " " };
             let active_str = if pool.active { "yes" } else { "no" };
 
             let usage_pct = if pool.total > 0 {
@@ -185,26 +184,9 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
 // `widgets::status_footer`.
 
 fn make_bar(percent: f64, width: usize) -> String {
-    let blocks = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
-    let total_eighths = ((percent / 100.0) * (width * 8) as f64).round() as usize;
-    let full_blocks = total_eighths / 8;
-    let remainder = total_eighths % 8;
-
-    let mut s = String::new();
-    for _ in 0..full_blocks {
-        s.push('█');
-    }
-
-    if full_blocks < width {
-        s.push_str(blocks[remainder]);
-    }
-
-    let empty = width.saturating_sub(full_blocks + usize::from(remainder > 0));
-    for _ in 0..empty {
-        s.push(' ');
-    }
-
-    s
+    let filled = ((percent / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
 fn format_bytes(bytes: u64) -> String {

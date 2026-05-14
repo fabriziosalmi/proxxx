@@ -47,20 +47,13 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
                 .fg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )]))
-        .title_bottom(Line::from(vec![
-            Span::styled(
-                format!(" {} entries │ ", LIBRARY.len()),
-                Style::default().fg(Theme::TEXT_DIM),
+        .title_bottom(Line::from(vec![Span::styled(
+            format!(
+                " {} entries  default storage: {storage_hint} ",
+                LIBRARY.len()
             ),
-            Span::styled(
-                format!("default storage: {storage_hint} │ "),
-                Style::default().fg(Theme::TEXT_DIM),
-            ),
-            Span::styled(
-                "j/k navigate │ Enter download │ Esc back ",
-                Style::default().fg(Theme::TEXT_DIM),
-            ),
-        ]));
+            Style::default().fg(Theme::TEXT_DIM),
+        )]));
     f.render_widget(block, area);
 }
 
@@ -189,7 +182,7 @@ fn draw_detail(f: &mut Frame, area: Rect, entry: &IsoEntry, state: &AppState) {
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "press Enter → server-side download to default storage",
+            "Enter: server-side download to default storage",
             Style::default().fg(Theme::TEXT_DIM),
         )));
     }

@@ -1,8 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
+assertion_line: 449
 expression: dump
 ---
- 💾  Storage Pools  (0 total)
+ Storage pools  0 total
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- ⏳  Loading storage...
+ loading storage…

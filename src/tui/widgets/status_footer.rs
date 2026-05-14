@@ -42,7 +42,7 @@ pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
             .bg(Theme::ACCENT)
             .add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(" │ ", Style::default().fg(Theme::TEXT_MUTED)));
+    spans.push(Span::styled(" · ", Style::default().fg(Theme::TEXT_MUTED)));
 
     for (i, (key, label)) in bindings.iter().enumerate() {
         if i > 0 {
@@ -95,7 +95,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         return vec![("Ctrl+]", "exit SSH")];
     }
     if matches!(mode, AppMode::ProfilePicker { .. }) {
-        return vec![("j/k", "nav"), ("↵", "switch"), ("Esc", "cancel")];
+        return vec![("j/k", "nav"), ("Enter", "switch"), ("Esc", "cancel")];
     }
     if matches!(
         mode,
@@ -104,7 +104,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         // Input bar overlays the footer in these modes; we still
         // return a useful set so the visible-row order doesn't shift
         // if the overlay ever shrinks.
-        return vec![("Esc", "cancel"), ("↵", "submit")];
+        return vec![("Esc", "cancel"), ("Enter", "submit")];
     }
 
     // Truth-in-binds: `q` is hardcoded to Action::Quit (always exits the
@@ -117,7 +117,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
     // separately so the legend matches the keymap.
     match view {
         View::Dashboard => vec![
-            ("↵", "open"),
+            ("Enter", "open"),
             ("/", "search"),
             ("g", "guests"),
             ("n", "nodes"),
@@ -127,7 +127,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         ],
         View::NodeList => vec![
             ("j/k", "nav"),
-            ("↵", "detail"),
+            ("Enter", "detail"),
             ("/", "search"),
             ("Esc", "back"),
             ("?", "help"),
@@ -135,7 +135,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         ],
         View::GuestList => vec![
             ("j/k", "nav"),
-            ("↵", "detail"),
+            ("Enter", "detail"),
             ("s", "start"),
             ("S", "stop"),
             ("r", "restart"),
@@ -156,7 +156,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         ],
         View::StorageList => vec![
             ("j/k", "nav"),
-            ("↵", "detail"),
+            ("Enter", "detail"),
             ("Esc", "back"),
             ("?", "help"),
             ("q", "quit"),
@@ -210,7 +210,7 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         ],
         View::IsoLibrary => vec![
             ("j/k", "nav"),
-            ("↵", "download"),
+            ("Enter", "download"),
             ("Esc", "back"),
             ("?", "help"),
             ("q", "quit"),
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn dashboard_has_navigation_keys() {
         let b = bindings_for(&View::Dashboard, &AppMode::Normal);
-        assert!(b.iter().any(|(k, _)| *k == "↵"));
+        assert!(b.iter().any(|(k, _)| *k == "Enter"));
         assert!(b.iter().any(|(k, _)| *k == "/"));
         assert!(b.iter().any(|(k, _)| *k == "?"));
         assert!(b.iter().any(|(k, _)| *k == "q"));
@@ -275,7 +275,7 @@ mod tests {
         ] {
             let b = bindings_for(&View::GuestList, mode);
             assert!(b.iter().any(|(k, _)| *k == "Esc"));
-            assert!(b.iter().any(|(k, _)| *k == "↵"));
+            assert!(b.iter().any(|(k, _)| *k == "Enter"));
         }
     }
 

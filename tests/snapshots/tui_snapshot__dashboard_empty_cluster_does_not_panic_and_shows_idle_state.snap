@@ -1,8 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
+assertion_line: 200
 expression: dump
 ---
- ⚡  proxxx │ 0 nodes │ 0/0 guests
+ proxxx  0 nodes  0/0 guests
 
 ────────────────────────────────────────────────────────────────────────────────
- ⏳  Loading cluster data...
+ loading cluster data…

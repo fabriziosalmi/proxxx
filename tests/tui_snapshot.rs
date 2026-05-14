@@ -193,7 +193,7 @@ fn dashboard_empty_cluster_does_not_panic_and_shows_idle_state() {
     // the test name promises to catch but the snapshot alone wouldn't
     // (snapshot diffs become noise the moment the layout shifts).
     assert!(
-        dump.contains("Loading"),
+        dump.contains("loading"),
         "empty-cluster dashboard must show a loading hint, got:\n{dump}"
     );
     assert!(dump.contains("0 nodes"), "header must reflect 0 nodes");
@@ -443,7 +443,7 @@ fn storage_view_empty_state() {
         views::storage::draw(f, f.area(), &state);
     });
     assert!(
-        dump.contains("Loading storage"),
+        dump.contains("loading storage"),
         "empty-state hint missing:\n{dump}"
     );
     insta::assert_snapshot!(dump);
@@ -456,7 +456,7 @@ fn tasks_view_empty_state() {
         views::tasks::draw(f, f.area(), &state, "UPID:test:0:0:0:0:0:0:0:");
     });
     assert!(
-        dump.contains("Waiting for logs"),
+        dump.contains("waiting for logs"),
         "empty-state hint missing:\n{dump}"
     );
     // The UPID is a forensic anchor — if the renderer ever drops it
@@ -579,7 +579,7 @@ fn nodes_view_with_quorum_and_stale_stats_badges() {
     // 2-total counter is in the header — if the renderer ever
     // double-counts or filters this drops to 1.
     assert!(
-        dump.contains("(2 total)"),
+        dump.contains("2 total"),
         "nodes header must reflect 2 nodes, got:\n{dump}"
     );
     insta::assert_snapshot!(dump);

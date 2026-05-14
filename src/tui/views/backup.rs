@@ -17,9 +17,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" 🛡️ ", Style::default().fg(Theme::INFO)),
-        Span::styled("Backup Health Board", Theme::title()),
-        Span::styled(" (Cluster-wide VZDump Audit)", Theme::dim()),
+        Span::styled(" Backup health ", Theme::title()),
+        Span::styled(" cluster-wide vzdump audit ", Theme::dim()),
     ]))
     .block(
         Block::default()

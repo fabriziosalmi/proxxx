@@ -1,9 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 349
+assertion_line: 470
 expression: dump
 ---
- 📝  Live Task Log (UPID: UPID:test:0:0:0:0:0:0:0:)
+ Live task log  upid UPID:test:0:0:0:0:0:0:0:
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- ⏳  Waiting for logs...
+ waiting for logs…

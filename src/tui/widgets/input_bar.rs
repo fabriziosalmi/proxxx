@@ -2,7 +2,7 @@ use crate::app::AppMode;
 use crate::tui::theme::Theme;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -29,8 +29,7 @@ pub fn draw_input_bar(f: &mut Frame, area: Rect, mode: &AppMode, query: &str) {
     let content = Line::from(vec![
         Span::styled(prefix, Style::default().fg(Theme::ACCENT)),
         Span::styled(query, Style::default()),
-        // Fake cursor
-        Span::styled("█", Style::default().fg(Theme::ACCENT)),
+        Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
     ]);
 
     let block = Block::default()

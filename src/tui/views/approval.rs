@@ -20,10 +20,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" 🛡️ ", Style::default().fg(Theme::ACCENT)),
-        Span::styled("HITL Approval Gateway", Theme::title()),
+        Span::styled(" HITL approvals ", Theme::title()),
         Span::styled(
-            format!("  ({} operations)", state.pending_approvals.len()),
+            format!(" {} pending ", state.pending_approvals.len()),
             Theme::dim(),
         ),
     ]))
@@ -42,7 +41,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let header = Row::new(vec!["STATUS", "TXN ID", "DESCRIPTION"])
+    let header = Row::new(vec!["status", "txn id", "description"])
         .style(Theme::header())
         .height(1);
 
@@ -50,15 +49,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .pending_approvals
         .iter()
         .map(|approval| {
-            let (icon, style) = match approval.status {
-                ApprovalStatus::Pending => ("⏳ PENDING", Theme::dim()),
-                ApprovalStatus::Approved => ("✅ APPROVED", Style::default().fg(Theme::ONLINE)),
-                ApprovalStatus::Denied => ("❌ DENIED", Style::default().fg(Theme::DANGER)),
-                ApprovalStatus::Timeout => ("⏰ TIMEOUT", Style::default().fg(Theme::WARNING)),
+            let (label, style) = match approval.status {
+                ApprovalStatus::Pending => ("pending", Theme::dim()),
+                ApprovalStatus::Approved => ("approved", Style::default().fg(Theme::ONLINE)),
+                ApprovalStatus::Denied => ("denied", Style::default().fg(Theme::DANGER)),
+                ApprovalStatus::Timeout => ("timeout", Style::default().fg(Theme::WARNING)),
             };
 
             Row::new(vec![
-                icon.to_string(),
+                label.to_string(),
                 approval.txn_id.clone(),
                 approval.description.clone(),
             ])
@@ -67,7 +66,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .collect();
 
     let widths = [
-        Constraint::Length(12), // status
+        Constraint::Length(10), // status
         Constraint::Length(20), // txn
         Constraint::Min(30),    // desc
     ];

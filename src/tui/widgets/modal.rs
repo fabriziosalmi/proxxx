@@ -15,44 +15,25 @@ pub fn draw_confirm_modal(f: &mut Frame, area: Rect, description: &str) {
     f.render_widget(Clear, modal_area);
 
     let content = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "⚠️ WARNING",
-            Style::default()
-                .fg(Theme::DANGER)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
         Line::from(description),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Press ", Theme::dim()),
             Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" to confirm, or ", Theme::dim()),
+            Span::styled(" confirm   ", Theme::dim()),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" to cancel", Theme::dim()),
-        ]),
-        Line::from(""),
-        // Break-glass option — only visible here so users learn it
-        // organically (the help overlay also lists it). Capital F
-        // (intentional friction) bypasses the client-side guard.
-        Line::from(vec![
-            Span::styled("Emergency: ", Theme::dim()),
+            Span::styled(" cancel   ", Theme::dim()),
             Span::styled(
                 "F",
                 Style::default()
                     .fg(Theme::DANGER)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to force (bypasses lock/HA gate, audit-logged)",
-                Theme::dim(),
-            ),
+            Span::styled(" force (audit-logged)", Theme::dim()),
         ]),
     ];
 
     let block = Block::default()
-        .title(" Confirm Action ")
+        .title(" confirm ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::DANGER));
 

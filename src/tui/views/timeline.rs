@@ -27,13 +27,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 fn draw_header(f: &mut Frame, area: Rect) {
     let text = Line::from(vec![
         Span::styled(
-            " 🕒 Audit Timeline ",
+            " Audit timeline ",
             Style::default()
                 .fg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("│ ", Style::default().fg(Theme::BORDER)),
-        Span::raw("Scrub through historical cluster state to find changes."),
+        Span::raw(" scrub through historical cluster state "),
     ]);
 
     let block = Block::default()
@@ -72,7 +71,7 @@ fn draw_timeline_slider(f: &mut Frame, area: Rect, state: &AppState) {
         1.0
     };
 
-    let label = format!(" [←/→] Snapshot {}/{} : {} ", current_idx + 1, total, dt);
+    let label = format!(" [h/l] snapshot {}/{} : {} ", current_idx + 1, total, dt);
 
     let gauge = Gauge::default()
         .block(

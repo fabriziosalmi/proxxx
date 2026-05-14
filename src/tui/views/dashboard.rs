@@ -43,24 +43,22 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
 
     let header = Line::from(vec![
         Span::styled(
-            " ⚡ proxxx ",
+            " proxxx ",
             Style::default()
                 .fg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("│ ", Style::default().fg(Theme::BORDER)),
         Span::styled(
-            format!("{node_count} nodes"),
+            format!(" {node_count} nodes "),
             Style::default().fg(Theme::TEXT),
         ),
-        Span::styled(" │ ", Style::default().fg(Theme::BORDER)),
         Span::styled(
-            format!("{running}/{guest_count} guests"),
+            format!(" {running}/{guest_count} guests "),
             Style::default().fg(Theme::SUCCESS),
         ),
         if pending > 0 {
             Span::styled(
-                format!(" │ ⏳ {pending} pending"),
+                format!(" {pending} pending "),
                 Style::default().fg(Theme::WARNING),
             )
         } else {
@@ -80,9 +78,9 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
 fn draw_aggregate_stats(f: &mut Frame, area: Rect, state: &AppState) {
     if state.nodes.is_empty() {
         let loading = Paragraph::new(if state.is_loading {
-            " ⏳ Loading cluster data..."
+            " loading cluster data…"
         } else {
-            " ⚠ No nodes found. Check your configuration."
+            " no nodes found. check your configuration."
         })
         .style(Theme::dim());
         f.render_widget(loading, area);

@@ -1,9 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 358
+assertion_line: 483
 expression: dump
 ---
- 🕒  Audit Timeline │ Scrub through historical cluster state to find changes.
+ Audit timeline  scrub through historical cluster state
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 No data for this snapshot.

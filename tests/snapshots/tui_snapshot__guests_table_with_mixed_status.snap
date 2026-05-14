@@ -1,16 +1,17 @@
 ---
 source: tests/tui_snapshot.rs
+assertion_line: 283
 expression: dump
 ---
- ⚡  Guests  4 total │ 🟢  3 🔴  1 │ VM:3 LXC:1
+ Guests  4 total  3 running  1 stopped  3 VM  1 LXC
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ┌ Guests ──────────────────────────────────────────────────────────────────────────────────────────┐
 │    VMID   NAME                 TYPE STATUS    CPU   RAM   DISK     NODE       TAGS               │
-│🟢   100    vm-prod-01           VM   running   5%    25%   16.0G    pve1       -                  │
-│🟢   101    vm-prod-02           VM   running   5%    25%   16.0G    pve1       -                  │
-│🔴   200    ct-staging           LXC  stopped   -     -     -        pve2       -                  │
-│🟢   999    vm-[2J[Hattacker     VM   running   5%    25%   16.0G    pve1       -                  │
+│    100    vm-prod-01           VM   running   5%    25%   16.0G    pve1       -                  │
+│    101    vm-prod-02           VM   running   5%    25%   16.0G    pve1       -                  │
+│    200    ct-staging           LXC  stopped   -     -     -        pve2       -                  │
+│    999    vm-[2J[Hattacker     VM   running   5%    25%   16.0G    pve1       -                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

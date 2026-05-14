@@ -51,14 +51,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
             };
 
             let (icon, main_text, sub_text) = match item {
-                SearchItem::Node { name, status } => ("🖥", name.clone(), status.clone()),
+                SearchItem::Node { name, status } => ("node", name.clone(), status.clone()),
                 SearchItem::Guest {
                     vmid, name, node, ..
-                } => ("⚡", format!("{vmid} ({name})"), format!("on {node}")),
+                } => ("guest", format!("{vmid} ({name})"), format!("on {node}")),
                 SearchItem::Storage { pool, type_str, .. } => {
-                    ("💾", pool.clone(), format!("type: {type_str}"))
+                    ("stor", pool.clone(), format!("type: {type_str}"))
                 }
-                SearchItem::Command { desc, .. } => ("🚀", desc.clone(), "action".to_string()),
+                SearchItem::Command { desc, .. } => ("cmd", desc.clone(), "action".to_string()),
             };
 
             Row::new(vec![icon.to_string(), main_text, sub_text]).style(style)
@@ -66,7 +66,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .collect();
 
     let widths = [
-        Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Min(20),
         Constraint::Length(20),
     ];

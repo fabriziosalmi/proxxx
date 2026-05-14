@@ -1,11 +1,11 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 304
+assertion_line: 401
 expression: dump
 ---
  ISO / cloud-image library
 
- 6 entries │ default storage: <no storage> │ j/k navigate │ Enter download │ Esc back ──────────────
+ 6 entries  default storage: <no storage> ──────────────────────────────────────────────────────────
 ┌ library ───────────────────────────────────────┐┌ details ───────────────────────────────────────┐
 │ubuntu-22.04-cloud      Ubuntu        22.04 LTS ││id:        ubuntu-22.04-cloud                   │
 │ubuntu-24.04-cloud      Ubuntu        24.04 LTS ││distro:    Ubuntu 22.04 LTS (Jammy) build       │

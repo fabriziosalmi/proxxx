@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 277
+assertion_line: 370
 expression: dump
 ---
 ┌ cluster status ──────────────────────────────────────────────────────────────────────────────────┐
@@ -11,7 +11,7 @@ expression: dump
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ HA groups (0) ───────────────────────┐┌ HA resources (0) ────────────────────────────────────────┐
-│group            priority             ││sid       group    node      state    if-fails →          │
+│group            priority             ││sid       group    node      state    if-fails ->         │
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │

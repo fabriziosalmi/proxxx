@@ -61,17 +61,17 @@ fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
         .count();
 
     let title = Line::from(vec![
-        Span::styled(" ⚡ ", Style::default().fg(Theme::ACCENT)),
-        Span::styled("Guests", Theme::title()),
-        Span::styled(format!("  {total} total"), Theme::dim()),
-        Span::styled(" │ ", Style::default().fg(Theme::BORDER)),
-        Span::styled(format!("🟢 {running}"), Style::default().fg(Theme::ONLINE)),
+        Span::styled(" Guests ", Theme::title()),
+        Span::styled(format!(" {total} total "), Theme::dim()),
         Span::styled(
-            format!(" 🔴 {stopped}"),
+            format!(" {running} running "),
+            Style::default().fg(Theme::ONLINE),
+        ),
+        Span::styled(
+            format!(" {stopped} stopped "),
             Style::default().fg(Theme::OFFLINE),
         ),
-        Span::styled(" │ ", Style::default().fg(Theme::BORDER)),
-        Span::styled(format!("VM:{vms} LXC:{lxc}"), Theme::dim()),
+        Span::styled(format!(" {vms} VM  {lxc} LXC "), Theme::dim()),
     ]);
 
     f.render_widget(
@@ -150,15 +150,9 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
             let actual_index = scroll_offset + vi;
 
             let mut status_icon = if state.selected_guests.contains(&guest.vmid) {
-                "☑ "
+                "*"
             } else {
-                match guest.status {
-                    GuestStatus::Running => "🟢",
-                    GuestStatus::Stopped => "🔴",
-                    GuestStatus::Paused => "🟡",
-                    GuestStatus::Suspended => "🟣",
-                    GuestStatus::Unknown => "⚪",
-                }
+                " "
             };
 
             let type_str = match guest.guest_type {
@@ -208,7 +202,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
             };
 
             if let Some(task) = state.active_tasks.get(&guest.vmid) {
-                status_icon = "⏳";
+                status_icon = ">";
                 status_text = task.clone();
                 if !state.selected_guests.contains(&guest.vmid) {
                     style = style.fg(Theme::WARNING);
@@ -299,22 +293,22 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
         ])
         .split(area);
 
-    // Header
-    let status_icon = match guest.status {
-        GuestStatus::Running => "🟢",
-        GuestStatus::Stopped => "🔴",
-        GuestStatus::Paused => "🟡",
-        GuestStatus::Suspended => "🟣",
-        GuestStatus::Unknown => "⚪",
+    // Header — status color carries semantic; row text shows the word.
+    let status_style = match guest.status {
+        GuestStatus::Running => Style::default().fg(Theme::ONLINE),
+        GuestStatus::Stopped => Style::default().fg(Theme::OFFLINE),
+        GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::PAUSED),
+        GuestStatus::Unknown => Style::default().fg(Theme::STALE),
     };
+    let status_word = format!("{:?}", guest.status).to_lowercase();
 
     let title = Line::from(vec![
-        Span::styled(format!(" {status_icon} "), Style::default()),
+        Span::styled(format!(" {status_word} "), status_style),
         Span::styled(
             format!("{} ", sanitize_display(&guest.name)),
             Theme::title(),
         ),
-        Span::styled(format!("(VMID: {})", guest.vmid), Theme::dim()),
+        Span::styled(format!("vmid {}", guest.vmid), Theme::dim()),
     ]);
 
     f.render_widget(
@@ -453,26 +447,9 @@ fn format_uptime(secs: u64) -> String {
 }
 
 fn make_bar(percent: f64, width: usize) -> String {
-    let blocks = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
-    let total_eighths = ((percent / 100.0) * (width * 8) as f64).round() as usize;
-    let full_blocks = total_eighths / 8;
-    let remainder = total_eighths % 8;
-
-    let mut s = String::new();
-    for _ in 0..full_blocks {
-        s.push('█');
-    }
-
-    if full_blocks < width {
-        s.push_str(blocks[remainder]);
-    }
-
-    let empty = width.saturating_sub(full_blocks + usize::from(remainder > 0));
-    for _ in 0..empty {
-        s.push(' '); // or "░" but space looks much cleaner with high-def blocks
-    }
-
-    s
+    let filled = ((percent / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
 /// Compute the slice bounds for the virtual-scroll window. Pure math —

@@ -211,7 +211,7 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
             } else {
                 match preview_failover(r, &state.ha_groups, &online, &cur, &cur) {
                     FailoverPreview::Relocate { target, priority } => {
-                        format!("→ {target} (prio {priority})")
+                        format!("-> {target} (prio {priority})")
                     }
                     FailoverPreview::Stuck {
                         restricted: true, ..
@@ -219,7 +219,7 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
                     FailoverPreview::Stuck {
                         restricted: false,
                         chosen: Some(n),
-                    } => format!("→ {n} (fallback)"),
+                    } => format!("-> {n} (fallback)"),
                     FailoverPreview::Stuck {
                         restricted: false,
                         chosen: None,
@@ -247,7 +247,7 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
         ],
     )
     .header(
-        Row::new(vec!["sid", "group", "node", "state", "if-fails →"])
+        Row::new(vec!["sid", "group", "node", "state", "if-fails ->"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(

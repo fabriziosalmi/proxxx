@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 322
+assertion_line: 423
 expression: dump
 ---
 
@@ -11,11 +11,11 @@ expression: dump
                     │>                                                         │
                     └──────────────────────────────────────────────────────────┘
                     ┌──────────────────────────────────────────────────────────┐
-                    │🚀   View: Dashboard                   action              │
-                    │🚀   View: Nodes                       action              │
-                    │🚀   View: Guests                      action              │
-                    │🚀   View: Storage                     action              │
-                    │🚀   View: Hotspot Heatmap             action              │
-                    │🚀   View: Backup Health Board         action              │
-                    │🚀   View: Audit Timeline              action              │
+                    │cmd   View: Dashboard                 action              │
+                    │cmd   View: Nodes                     action              │
+                    │cmd   View: Guests                    action              │
+                    │cmd   View: Storage                   action              │
+                    │cmd   View: Hotspot Heatmap           action              │
+                    │cmd   View: Backup Health Board       action              │
+                    │cmd   View: Audit Timeline            action              │
                     └──────────────────────────────────────────────────────────┘

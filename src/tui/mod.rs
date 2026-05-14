@@ -253,7 +253,7 @@ pub async fn run(
     let config = match config::load_config(profile) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("⚠ Config error: {e}");
+            eprintln!("Config error: {e}");
             eprintln!("  Run with `--profile <name>` or create ~/.config/proxxx/config.toml");
             eprintln!("  Starting with demo data...\n");
             // Fall back to demo mode
@@ -267,7 +267,7 @@ pub async fn run(
     let client = match PxClient::new(config, cli_secret).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            eprintln!("⚠ Connection failed: {e}");
+            eprintln!("Connection failed: {e}");
             eprintln!("  Starting with demo data...\n");
             return run_demo().await;
         }
@@ -2005,7 +2005,7 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
 
     if let Some(err) = &state.error {
         status_spans.push(ratatui::text::Span::styled(
-            format!(" ⚠️ {err} "),
+            format!(" {err} "),
             ratatui::style::Style::default()
                 .bg(theme::Theme::DANGER)
                 .fg(ratatui::style::Color::White)
@@ -2019,7 +2019,7 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
     // could be silently stale at this point.
     if state.cluster_quorate == Some(false) {
         status_spans.push(ratatui::text::Span::styled(
-            " 🚨 QUORUM LOST — STALE DATA ".to_string(),
+            " QUORUM LOST — STALE DATA ".to_string(),
             ratatui::style::Style::default()
                 .bg(theme::Theme::DANGER)
                 .fg(ratatui::style::Color::White)

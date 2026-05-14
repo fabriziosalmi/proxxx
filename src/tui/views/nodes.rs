@@ -32,9 +32,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
     // Title
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" ⚡ ", Style::default().fg(Theme::ACCENT)),
-        Span::styled("Nodes", Theme::title()),
-        Span::styled(format!("  ({} total)", state.nodes.len()), Theme::dim()),
+        Span::styled(" Nodes ", Theme::title()),
+        Span::styled(format!(" {} total ", state.nodes.len()), Theme::dim()),
     ]))
     .block(
         Block::default()
@@ -50,9 +49,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
     if state.nodes.is_empty() {
         let msg = if state.is_loading {
-            " ⏳ Loading..."
+            " loading…"
         } else {
-            " No nodes found."
+            " no nodes found."
         };
         f.render_widget(Paragraph::new(msg).style(Theme::dim()), area);
         return;
