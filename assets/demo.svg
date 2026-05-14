@@ -1,0 +1,455 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+  <defs>
+    <style>
+      * { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; }
+
+      .bg   { fill: #1e1e2e; }
+      .chrome{ fill: #181825; }
+      .bar  { fill: #11111b; }
+      .dim  { fill: #45475a; }
+      .text { fill: #cdd6f4; }
+      .sub  { fill: #6c7086; }
+      .grn  { fill: #a6e3a1; }
+      .red  { fill: #f38ba8; }
+      .yel  { fill: #f9e2af; }
+      .blu  { fill: #89b4fa; }
+      .pur  { fill: #cba6f7; }
+      .pnk  { fill: #f5c2e7; }
+      .cyn  { fill: #94e2d5; }
+      .ora  { fill: #fab387; }
+      .mono { font-size: 12px; }
+      .sm   { font-size: 10px; }
+      .lg   { font-size: 14px; }
+      .xl   { font-size: 16px; }
+      .xxl  { font-size: 22px; }
+      .bold { font-weight: 700; }
+      .pill {
+        rx: 10; ry: 10;
+        fill: none;
+        stroke-width: 1.5;
+      }
+
+      /* panel fade animation — 6 panels × 5s each = 30s loop */
+      @keyframes show {
+        0%   { opacity: 0; }
+        3%   { opacity: 1; }
+        14%  { opacity: 1; }
+        17%  { opacity: 0; }
+        100% { opacity: 0; }
+      }
+
+      .p1 { animation: show 30s ease-in-out infinite 0s;   }
+      .p2 { animation: show 30s ease-in-out infinite 5s;   }
+      .p3 { animation: show 30s ease-in-out infinite 10s;  }
+      .p4 { animation: show 30s ease-in-out infinite 15s;  }
+      .p5 { animation: show 30s ease-in-out infinite 20s;  }
+      .p6 { animation: show 30s ease-in-out infinite 25s;  }
+    </style>
+
+    <!-- terminal chrome gradient -->
+    <linearGradient id="hdr" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#313244"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+
+    <!-- glow filter for accent elements -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <clipPath id="clip"><rect width="900" height="520" rx="12"/></clipPath>
+  </defs>
+
+  <!-- ── outer frame ──────────────────────────────────────── -->
+  <rect width="900" height="520" rx="12" class="chrome"/>
+
+  <!-- title bar -->
+  <rect width="900" height="36" rx="12" fill="url(#hdr)"/>
+  <rect y="18" width="900" height="18" fill="#181825"/>
+
+  <!-- traffic lights -->
+  <circle cx="20" cy="18" r="6" fill="#f38ba8"/>
+  <circle cx="40" cy="18" r="6" fill="#f9e2af"/>
+  <circle cx="60" cy="18" r="6" fill="#a6e3a1"/>
+
+  <!-- title -->
+  <text x="450" y="23" text-anchor="middle" class="sm sub">proxxx — Proxmox VE automation · TUI · CLI · MCP · HITL</text>
+
+  <!-- ── PANEL 1: TUI Guest List ───────────────────────────── -->
+  <g class="p1" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <!-- status bar top -->
+    <rect y="36" width="900" height="22" class="bar"/>
+    <text x="12" y="52" class="sm grn">● connected</text>
+    <text x="120" y="52" class="sm sub">pve-cluster-01  │  3 nodes  │  42 guests</text>
+    <text x="700" y="52" class="sm pur">proxxx v0.1.25</text>
+    <text x="820" y="52" class="sm sub">F1:help  Q:quit</text>
+
+    <!-- column headers -->
+    <rect y="58" width="900" height="18" fill="#313244"/>
+    <text x="14" y="71" class="sm bold blu">VMID</text>
+    <text x="72" y="71" class="sm bold blu">NAME</text>
+    <text x="240" y="71" class="sm bold blu">NODE</text>
+    <text x="330" y="71" class="sm bold blu">STATUS</text>
+    <text x="420" y="71" class="sm bold blu">CPU%</text>
+    <text x="490" y="71" class="sm bold blu">MEM</text>
+    <text x="570" y="71" class="sm bold blu">DISK</text>
+    <text x="650" y="71" class="sm bold blu">UPTIME</text>
+    <text x="740" y="71" class="sm bold blu">TYPE</text>
+
+    <!-- selected row -->
+    <rect y="76" width="580" height="18" fill="#313244" rx="2"/>
+    <text x="14"  y="89" class="sm yel">▶ 100</text>
+    <text x="72"  y="89" class="sm text bold">web-frontend-01</text>
+    <text x="240" y="89" class="sm text">pve-node-01</text>
+    <text x="330" y="89" class="sm grn">● running</text>
+    <text x="420" y="89" class="sm grn">12.4</text>
+    <text x="490" y="89" class="sm text">4.1/8G</text>
+    <text x="570" y="89" class="sm text">32G</text>
+    <text x="650" y="89" class="sm sub">3d 14h</text>
+    <text x="740" y="89" class="sm pur">qemu</text>
+
+    <!-- rows -->
+    <text x="14"  y="107" class="sm sub">  101</text>
+    <text x="72"  y="107" class="sm text">db-postgres-01</text>
+    <text x="240" y="107" class="sm text">pve-node-01</text>
+    <text x="330" y="107" class="sm grn">● running</text>
+    <text x="420" y="107" class="sm yel">78.2</text>
+    <text x="490" y="107" class="sm text">14.2/16G</text>
+    <text x="570" y="107" class="sm text">200G</text>
+    <text x="650" y="107" class="sm sub">14d 2h</text>
+    <text x="740" y="107" class="sm pur">qemu</text>
+
+    <text x="14"  y="125" class="sm sub">  102</text>
+    <text x="72"  y="125" class="sm text">nginx-proxy</text>
+    <text x="240" y="125" class="sm text">pve-node-02</text>
+    <text x="330" y="125" class="sm grn">● running</text>
+    <text x="420" y="125" class="sm grn">3.1</text>
+    <text x="490" y="125" class="sm text">512M/1G</text>
+    <text x="570" y="125" class="sm text">8G</text>
+    <text x="650" y="125" class="sm sub">7d 0h</text>
+    <text x="740" y="125" class="sm cyn">lxc</text>
+
+    <text x="14"  y="143" class="sm sub">  103</text>
+    <text x="72"  y="143" class="sm text">dev-sandbox</text>
+    <text x="240" y="143" class="sm text">pve-node-02</text>
+    <text x="330" y="143" class="sm red">○ stopped</text>
+    <text x="420" y="143" class="sm sub">—</text>
+    <text x="490" y="143" class="sm sub">—</text>
+    <text x="570" y="143" class="sm text">40G</text>
+    <text x="650" y="143" class="sm sub">—</text>
+    <text x="740" y="143" class="sm pur">qemu</text>
+
+    <text x="14"  y="161" class="sm sub">  200</text>
+    <text x="72"  y="161" class="sm text">monitoring-stack</text>
+    <text x="240" y="161" class="sm text">pve-node-03</text>
+    <text x="330" y="161" class="sm grn">● running</text>
+    <text x="420" y="161" class="sm grn">5.7</text>
+    <text x="490" y="161" class="sm text">2.1/4G</text>
+    <text x="570" y="161" class="sm text">20G</text>
+    <text x="650" y="161" class="sm sub">21d 8h</text>
+    <text x="740" y="161" class="sm cyn">lxc</text>
+
+    <text x="14"  y="179" class="sm sub">  201</text>
+    <text x="72"  y="179" class="sm text">backup-agent</text>
+    <text x="240" y="179" class="sm text">pve-node-03</text>
+    <text x="330" y="179" class="sm yel">⟳ migrating</text>
+    <text x="420" y="179" class="sm sub">—</text>
+    <text x="490" y="179" class="sm text">1G/2G</text>
+    <text x="570" y="179" class="sm text">10G</text>
+    <text x="650" y="179" class="sm sub">5d 22h</text>
+    <text x="740" y="179" class="sm cyn">lxc</text>
+
+    <!-- vertical divider -->
+    <line x1="580" y1="58" x2="580" y2="480" stroke="#313244" stroke-width="1"/>
+
+    <!-- detail pane right -->
+    <text x="594" y="75" class="sm bold blu">Guest Detail</text>
+    <line x1="590" y1="80" x2="888" y2="80" stroke="#313244" stroke-width="1"/>
+
+    <text x="594" y="98"  class="sm sub">VMID</text>
+    <text x="694" y="98"  class="sm text">100</text>
+    <text x="594" y="116" class="sm sub">Name</text>
+    <text x="694" y="116" class="sm text">web-frontend-01</text>
+    <text x="594" y="134" class="sm sub">Node</text>
+    <text x="694" y="134" class="sm text">pve-node-01</text>
+    <text x="594" y="152" class="sm sub">Status</text>
+    <text x="694" y="152" class="sm grn">running</text>
+    <text x="594" y="170" class="sm sub">CPU</text>
+    <text x="694" y="170" class="sm text">4 vCPUs  12.4%</text>
+    <text x="594" y="188" class="sm sub">Memory</text>
+    <text x="694" y="188" class="sm text">4.1 / 8.0 GiB</text>
+
+    <!-- mem bar -->
+    <rect x="594" y="193" width="280" height="6" rx="3" fill="#313244"/>
+    <rect x="594" y="193" width="143" height="6" rx="3" fill="#89b4fa"/>
+
+    <text x="594" y="216" class="sm sub">Disk</text>
+    <text x="694" y="216" class="sm text">32 GiB  (local-lvm)</text>
+    <text x="594" y="234" class="sm sub">Uptime</text>
+    <text x="694" y="234" class="sm text">3d 14h 22m</text>
+    <text x="594" y="252" class="sm sub">Snapshots</text>
+    <text x="694" y="252" class="sm text">3  (latest: 2h ago)</text>
+    <text x="594" y="270" class="sm sub">Tags</text>
+    <text x="694" y="270" class="sm pnk">prod  web  tier-1</text>
+
+    <line x1="590" y1="282" x2="888" y2="282" stroke="#313244" stroke-width="1"/>
+    <text x="594" y="298" class="sm bold blu">Actions</text>
+    <text x="594" y="316" class="sm text">S:snapshot  R:restart  X:stop</text>
+    <text x="594" y="334" class="sm text">M:migrate   C:clone    D:delete</text>
+
+    <!-- scrollbar hint -->
+    <rect x="574" y="76" width="4" height="40" rx="2" fill="#45475a"/>
+
+    <!-- bottom status -->
+    <rect y="480" width="900" height="20" class="bar"/>
+    <text x="12"  y="494" class="sm sub">6/42 guests shown  │  ↑↓:navigate  /: filter  Tab:focus pane</text>
+    <text x="680" y="494" class="sm grn">✓ cluster healthy</text>
+    <text x="800" y="494" class="sm sub">05-14 09:42:17</text>
+
+    <!-- panel label -->
+    <text x="450" y="516" text-anchor="middle" class="sm sub">① TUI Guest List — 18 interactive views</text>
+  </g>
+
+  <!-- ── PANEL 2: CLI Batch Canary ─────────────────────────── -->
+  <g class="p2" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <text x="14" y="68" class="sm sub">$ proxxx batch stop --vmids 100,101,102,103,104,105,106,107,108,109 --policy canary=10%</text>
+
+    <text x="14" y="94"  class="sm dim">────────────────────────────────────────────────────────────────</text>
+    <text x="14" y="112" class="sm bold blu">proxxx batch-stop</text>
+    <text x="14" y="130" class="sm text">Policy  : canary 10%  (pilot = 1 of 10 guests)</text>
+    <text x="14" y="148" class="sm text">Targets : 100 101 102 103 104 105 106 107 108 109</text>
+    <text x="14" y="166" class="sm dim">────────────────────────────────────────────────────────────────</text>
+
+    <text x="14" y="190" class="sm bold yel">Phase 1 — canary pilot (1 guest)</text>
+    <text x="14" y="208" class="sm text">  Stopping VMID 100 (web-frontend-01) …</text>
+    <text x="14" y="226" class="sm grn">  ✓ VMID 100 stopped  [0.8s]</text>
+    <text x="14" y="244" class="sm text">  Waiting 30s for canary observation window …</text>
+    <text x="14" y="262" class="sm grn">  ✓ No errors detected — canary passed</text>
+    <text x="14" y="280" class="sm dim">────────────────────────────────────────────────────────────────</text>
+
+    <text x="14" y="304" class="sm bold yel">Phase 2 — remaining 9 guests</text>
+    <text x="14" y="322" class="sm text">  Stopping VMID 101 (db-postgres-01)    …  </text><text x="430" y="322" class="sm grn">✓ [1.1s]</text>
+    <text x="14" y="340" class="sm text">  Stopping VMID 102 (nginx-proxy)        …  </text><text x="430" y="340" class="sm grn">✓ [0.6s]</text>
+    <text x="14" y="358" class="sm text">  Stopping VMID 103 (dev-sandbox)        …  </text><text x="430" y="358" class="sm grn">✓ [0.4s]</text>
+    <text x="14" y="376" class="sm text">  Stopping VMID 104 …                    …  </text><text x="430" y="376" class="sm grn">✓ [0.7s]</text>
+    <text x="14" y="394" class="sm text">  Stopping VMID 105 …                    …  </text><text x="430" y="394" class="sm grn">✓ [0.9s]</text>
+    <text x="14" y="412" class="sm yel">  Stopping VMID 106 …                    …  </text><text x="430" y="412" class="sm yel">↻ retrying (timeout)</text>
+    <text x="14" y="430" class="sm text">  Stopping VMID 107–109 …</text>
+    <text x="14" y="448" class="sm dim">────────────────────────────────────────────────────────────────</text>
+    <text x="14" y="466" class="sm bold grn">✓ 9/10 guests stopped  │  1 retry  │  total 38.4s</text>
+
+    <text x="450" y="516" text-anchor="middle" class="sm sub">② CLI Batch Operations — canary · parallel · policy-driven</text>
+  </g>
+
+  <!-- ── PANEL 3: MCP + HITL ───────────────────────────────── -->
+  <g class="p3" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <!-- left column: MCP tool call -->
+    <rect x="8" y="44" width="428" height="430" rx="6" fill="#181825" stroke="#313244" stroke-width="1"/>
+    <text x="20" y="62" class="sm bold pur">MCP Client (Claude / GPT-4)</text>
+    <line x1="12" y1="68" x2="432" y2="68" stroke="#313244" stroke-width="1"/>
+
+    <text x="20" y="86"  class="sm sub">tool_call:</text>
+    <text x="20" y="104" class="sm blu">  name:  </text><text x="90" y="104" class="sm grn">"stop_guest"</text>
+    <text x="20" y="122" class="sm blu">  args:</text>
+    <text x="20" y="140" class="sm text">    guest_id:  </text><text x="120" y="140" class="sm yel">101</text>
+    <text x="20" y="158" class="sm sub">    # reason: "nightly maintenance window"</text>
+
+    <line x1="12" y1="170" x2="432" y2="170" stroke="#313244" stroke-width="1"/>
+    <text x="20" y="188" class="sm sub">tool_result:</text>
+    <text x="20" y="206" class="sm grn">  "Guest 101 stopped successfully."</text>
+    <text x="20" y="224" class="sm sub">  "UPID: UPID:pve-node-01:00A1B2C3:..."</text>
+
+    <line x1="12" y1="236" x2="432" y2="236" stroke="#313244" stroke-width="1"/>
+    <text x="20" y="254" class="sm sub">tool_call:</text>
+    <text x="20" y="272" class="sm blu">  name:  </text><text x="90" y="272" class="sm grn">"migrate_guest"</text>
+    <text x="20" y="290" class="sm blu">  args:</text>
+    <text x="20" y="308" class="sm text">    guest_id:    </text><text x="120" y="308" class="sm yel">200</text>
+    <text x="20" y="326" class="sm text">    target_node: </text><text x="130" y="326" class="sm pnk">"pve-node-03"</text>
+    <text x="20" y="344" class="sm text">    online:      </text><text x="115" y="344" class="sm cyn">true</text>
+
+    <line x1="12" y1="356" x2="432" y2="356" stroke="#313244" stroke-width="1"/>
+    <text x="20" y="374" class="sm yel bold">⏳ awaiting HITL approval …</text>
+    <text x="20" y="392" class="sm sub">   tool is marked destructive=true</text>
+    <text x="20" y="410" class="sm sub">   approval gate enforced by proxxx</text>
+
+    <!-- right column: HITL gate -->
+    <rect x="460" y="44" width="432" height="430" rx="6" fill="#181825" stroke="#313244" stroke-width="1"/>
+    <text x="472" y="62" class="sm bold ora">proxxx HITL Gate</text>
+    <line x1="464" y1="68" x2="888" y2="68" stroke="#313244" stroke-width="1"/>
+
+    <text x="472" y="86"  class="sm sub">Pre-flight risk analysis …</text>
+    <text x="472" y="104" class="sm text">  Action   : migrate_guest</text>
+    <text x="472" y="122" class="sm text">  Guest    : 200  (monitoring-stack)</text>
+    <text x="472" y="140" class="sm text">  Target   : pve-node-03</text>
+    <text x="472" y="158" class="sm yel">  Risk     : MEDIUM — live migration</text>
+    <text x="472" y="176" class="sm text">  Impact   : brief network pause (~2s)</text>
+
+    <line x1="464" y1="188" x2="888" y2="188" stroke="#313244" stroke-width="1"/>
+    <text x="472" y="206" class="sm pur bold">Telegram → @fab_proxxx_bot</text>
+    <text x="472" y="226" class="sm text">┌──────────────────────────────────┐</text>
+    <text x="472" y="244" class="sm text">│ 🔐 proxxx approval required      │</text>
+    <text x="472" y="262" class="sm text">│                                  │</text>
+    <text x="472" y="280" class="sm text">│ migrate_guest(200 → pve-node-03) │</text>
+    <text x="472" y="298" class="sm text">│ online=true   risk=MEDIUM        │</text>
+    <text x="472" y="316" class="sm text">│                                  │</text>
+    <text x="472" y="334" class="sm grn">│  [✅ APPROVE]  [❌ DENY]         │</text>
+    <text x="472" y="352" class="sm text">└──────────────────────────────────┘</text>
+
+    <line x1="464" y1="364" x2="888" y2="364" stroke="#313244" stroke-width="1"/>
+    <text x="472" y="382" class="sm grn bold">✓ Approved by @fabrizio  (2s)</text>
+    <text x="472" y="400" class="sm text">  Migrating guest 200 …</text>
+    <text x="472" y="418" class="sm grn">  ✓ Migration complete  [18.4s]</text>
+    <text x="472" y="436" class="sm sub">  Audit entry written to SQLite cache</text>
+
+    <text x="450" y="516" text-anchor="middle" class="sm sub">③ MCP Server (22 tools) + HITL Telegram approval gate</text>
+  </g>
+
+  <!-- ── PANEL 4: Pre-flight Risk Gate ────────────────────── -->
+  <g class="p4" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <text x="14" y="68"  class="sm sub">$ proxxx stop --vmid 101 --node pve-node-01</text>
+    <text x="14" y="90"  class="sm dim">────────────────────────────────────────────────────────</text>
+
+    <text x="14" y="112" class="sm bold blu">Pre-flight Risk Assessment</text>
+    <text x="14" y="130" class="sm text">  Action : stop  VMID 101  (db-postgres-01)</text>
+    <text x="14" y="148" class="sm text">  Node   : pve-node-01</text>
+
+    <text x="14" y="172" class="sm sub">  Checking tags …</text>
+    <text x="14" y="190" class="sm red">    ⚠ tags: prod, db, tier-1</text>
+    <text x="14" y="208" class="sm sub">  Checking uptime …</text>
+    <text x="14" y="226" class="sm red">    ⚠ uptime: 14 days (long-running production guest)</text>
+    <text x="14" y="244" class="sm sub">  Checking active connections …</text>
+    <text x="14" y="262" class="sm red">    ⚠ 47 active DB connections detected</text>
+    <text x="14" y="280" class="sm sub">  Checking backup recency …</text>
+    <text x="14" y="298" class="sm grn">    ✓ last backup: 4h ago  (within 24h window)</text>
+
+    <text x="14" y="322" class="sm dim">────────────────────────────────────────────────────────</text>
+    <text x="14" y="342" class="sm red bold">RISK LEVEL: SEVERE  (score 87/100)</text>
+    <text x="14" y="360" class="sm red">Refusing destructive action on production guest.</text>
+    <text x="14" y="378" class="sm text">To override:  proxxx stop --vmid 101 --allow-risk SEVERE</text>
+    <text x="14" y="396" class="sm dim">────────────────────────────────────────────────────────</text>
+
+    <text x="14" y="416" class="sm sub">$ proxxx stop --vmid 101 --allow-risk SEVERE</text>
+    <text x="14" y="434" class="sm yel">  ⚠ Risk override accepted — proceeding</text>
+    <text x="14" y="452" class="sm text">  Requesting HITL approval for SEVERE action …</text>
+    <text x="14" y="470" class="sm grn">  ✓ Approved — stopping VMID 101</text>
+
+    <text x="450" y="516" text-anchor="middle" class="sm sub">④ Pre-flight risk gate — 5 levels · tag-aware · connection-aware</text>
+  </g>
+
+  <!-- ── PANEL 5: Metrics + Alerts ───────────────────────── -->
+  <g class="p5" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <!-- left: prometheus output -->
+    <text x="14" y="62"  class="sm sub">$ proxxx metrics --format prometheus</text>
+    <text x="14" y="80"  class="sm sub"># HELP proxxx_guest_cpu_usage_percent Guest CPU usage</text>
+    <text x="14" y="98"  class="sm sub"># TYPE proxxx_guest_cpu_usage_percent gauge</text>
+    <text x="14" y="116" class="sm blu">proxxx_guest_cpu_usage_percent</text><text x="272" y="116" class="sm text">{vmid="100",name="web-frontend-01",node="pve-node-01"} </text><text x="720" y="116" class="sm grn">12.4</text>
+    <text x="14" y="134" class="sm blu">proxxx_guest_cpu_usage_percent</text><text x="272" y="134" class="sm text">{vmid="101",name="db-postgres-01",node="pve-node-01"} </text><text x="720" y="134" class="sm red">78.2</text>
+    <text x="14" y="152" class="sm blu">proxxx_guest_cpu_usage_percent</text><text x="272" y="152" class="sm text">{vmid="102",name="nginx-proxy",node="pve-node-02"}    </text><text x="720" y="152" class="sm grn">3.1</text>
+    <text x="14" y="170" class="sm sub"># HELP proxxx_guest_memory_usage_bytes Guest memory</text>
+    <text x="14" y="188" class="sm blu">proxxx_guest_memory_usage_bytes</text><text x="278" y="188" class="sm text">{vmid="100",...} </text><text x="450" y="188" class="sm text">4404019200</text>
+    <text x="14" y="206" class="sm blu">proxxx_node_cpu_usage_percent</text><text x="266" y="206" class="sm text">   {node="pve-node-01"} </text><text x="460" y="206" class="sm yel">51.3</text>
+    <text x="14" y="224" class="sm blu">proxxx_node_memory_usage_percent</text><text x="290" y="224" class="sm text">{node="pve-node-01"} </text><text x="470" y="224" class="sm yel">67.8</text>
+    <text x="14" y="242" class="sm sub"># … 38 more metrics</text>
+
+    <line x1="8" y1="258" x2="892" y2="258" stroke="#313244" stroke-width="1"/>
+
+    <!-- bottom: alerts watch -->
+    <text x="14" y="278" class="sm sub">$ proxxx alerts watch --threshold cpu=&gt;80% --interval 30s</text>
+    <text x="14" y="296" class="sm dim">────────────────────────────────────────────────────────</text>
+    <text x="14" y="314" class="sm text">Watching cluster — alert on cpu &gt; 80%   (Ctrl-C to stop)</text>
+
+    <text x="14" y="338" class="sm sub">09:40:01  </text><text x="90" y="338" class="sm text">No alerts.</text>
+    <text x="14" y="356" class="sm sub">09:40:31  </text><text x="90" y="356" class="sm text">No alerts.</text>
+    <text x="14" y="374" class="sm sub">09:41:01  </text><text x="90" y="374" class="sm red bold">ALERT  VMID 101 (db-postgres-01)  cpu=93.1%  node=pve-node-01</text>
+    <text x="14" y="392" class="sm sub">09:41:31  </text><text x="90" y="392" class="sm red bold">ALERT  VMID 101 (db-postgres-01)  cpu=88.4%  node=pve-node-01</text>
+    <text x="14" y="410" class="sm sub">09:42:01  </text><text x="90" y="410" class="sm yel">WARN   VMID 101  cpu=81.0%  — sustained high load (3 intervals)</text>
+    <text x="14" y="428" class="sm sub">09:42:31  </text><text x="90" y="428" class="sm text">No alerts.  VMID 101 recovered (cpu=74.2%)</text>
+    <text x="14" y="446" class="sm dim">────────────────────────────────────────────────────────</text>
+    <text x="14" y="464" class="sm sub">^C  Alert log written to ~/.cache/proxxx/alerts.db</text>
+
+    <text x="450" y="516" text-anchor="middle" class="sm sub">⑤ Prometheus metrics export · alert watch daemon · SQLite persistence</text>
+  </g>
+
+  <!-- ── PANEL 6: Future Vision ────────────────────────────── -->
+  <g class="p6" clip-path="url(#clip)">
+    <rect y="36" width="900" height="484" class="bg"/>
+
+    <text x="450" y="80" text-anchor="middle" class="xl bold pur" filter="url(#glow)">proxxx · today &amp; tomorrow</text>
+    <text x="450" y="100" text-anchor="middle" class="sm sub">Open-source Proxmox VE automation layer — CLI · TUI · MCP · HITL</text>
+
+    <!-- today column -->
+    <text x="160" y="128" text-anchor="middle" class="sm bold grn">AVAILABLE NOW</text>
+    <line x1="30" y1="134" x2="290" y2="134" stroke="#a6e3a1" stroke-width="1" opacity="0.4"/>
+
+    <text x="44" y="155" class="sm grn">✓</text><text x="60" y="155" class="sm text">18 TUI views  (guests · nodes · snapshots)</text>
+    <text x="44" y="173" class="sm grn">✓</text><text x="60" y="173" class="sm text">40+ CLI subcommands</text>
+    <text x="44" y="191" class="sm grn">✓</text><text x="60" y="191" class="sm text">22 MCP tools for AI agents</text>
+    <text x="44" y="209" class="sm grn">✓</text><text x="60" y="209" class="sm text">HITL Telegram approval gate</text>
+    <text x="44" y="227" class="sm grn">✓</text><text x="60" y="227" class="sm text">Pre-flight risk scoring (5 levels)</text>
+    <text x="44" y="245" class="sm grn">✓</text><text x="60" y="245" class="sm text">Batch ops with canary policy</text>
+    <text x="44" y="263" class="sm grn">✓</text><text x="60" y="263" class="sm text">Prometheus metrics export</text>
+    <text x="44" y="281" class="sm grn">✓</text><text x="60" y="281" class="sm text">Alert watch daemon + SQLite log</text>
+    <text x="44" y="299" class="sm grn">✓</text><text x="60" y="299" class="sm text">PBS integration (backup · restore)</text>
+    <text x="44" y="317" class="sm grn">✓</text><text x="60" y="317" class="sm text">RBAC-aware (root/operator/auditor)</text>
+    <text x="44" y="335" class="sm grn">✓</text><text x="60" y="335" class="sm text">Static musl binary — zero deps</text>
+
+    <!-- future column -->
+    <text x="610" y="128" text-anchor="middle" class="sm bold yel">ON THE HORIZON</text>
+    <line x1="470" y1="134" x2="870" y2="134" stroke="#f9e2af" stroke-width="1" opacity="0.4"/>
+
+    <text x="484" y="155" class="sm yel">◆</text><text x="500" y="155" class="sm text">Multi-cluster federation</text>
+    <text x="484" y="173" class="sm yel">◆</text><text x="500" y="173" class="sm text">Slack / Matrix HITL channels</text>
+    <text x="484" y="191" class="sm yel">◆</text><text x="500" y="191" class="sm text">AI capacity planning (Claude API)</text>
+    <text x="484" y="209" class="sm yel">◆</text><text x="500" y="209" class="sm text">Drift detection + auto-remediation</text>
+    <text x="484" y="227" class="sm yel">◆</text><text x="500" y="227" class="sm text">OpenTelemetry traces</text>
+    <text x="484" y="245" class="sm yel">◆</text><text x="500" y="245" class="sm text">GitOps-style desired-state engine</text>
+    <text x="484" y="263" class="sm yel">◆</text><text x="500" y="263" class="sm text">Web dashboard (VitePress + API)</text>
+    <text x="484" y="281" class="sm yel">◆</text><text x="500" y="281" class="sm text">Policy-as-code (Rego / CEL)</text>
+    <text x="484" y="299" class="sm yel">◆</text><text x="500" y="299" class="sm text">ARM64 / RISC-V musl targets</text>
+    <text x="484" y="317" class="sm yel">◆</text><text x="500" y="317" class="sm text">Homebrew + .deb / .rpm packages</text>
+    <text x="484" y="335" class="sm yel">◆</text><text x="500" y="335" class="sm text">Ansible collection wrapper</text>
+
+    <!-- divider -->
+    <line x1="450" y1="128" x2="450" y2="360" stroke="#313244" stroke-width="1"/>
+
+    <!-- bottom CTA -->
+    <line x1="30" y1="360" x2="870" y2="360" stroke="#313244" stroke-width="1"/>
+    <text x="450" y="386" text-anchor="middle" class="sm text">Built in Rust · MIT license · Catppuccin Mocha theme</text>
+    <text x="450" y="408" text-anchor="middle" class="sm pur bold">github.com/fabriziosalmi/proxxx</text>
+
+    <!-- pill badges -->
+    <rect x="180" y="420" width="80" height="22" rx="11" fill="none" stroke="#a6e3a1" stroke-width="1.5"/>
+    <text x="220" y="436" text-anchor="middle" class="sm grn">Rust 2021</text>
+
+    <rect x="275" y="420" width="70" height="22" rx="11" fill="none" stroke="#89b4fa" stroke-width="1.5"/>
+    <text x="310" y="436" text-anchor="middle" class="sm blu">MCP v1</text>
+
+    <rect x="360" y="420" width="68" height="22" rx="11" fill="none" stroke="#cba6f7" stroke-width="1.5"/>
+    <text x="394" y="436" text-anchor="middle" class="sm pur">HITL</text>
+
+    <rect x="443" y="420" width="82" height="22" rx="11" fill="none" stroke="#f38ba8" stroke-width="1.5"/>
+    <text x="484" y="436" text-anchor="middle" class="sm red">OpenSSF ✓</text>
+
+    <rect x="540" y="420" width="80" height="22" rx="11" fill="none" stroke="#f9e2af" stroke-width="1.5"/>
+    <text x="580" y="436" text-anchor="middle" class="sm yel">musl static</text>
+
+    <rect x="635" y="420" width="88" height="22" rx="11" fill="none" stroke="#94e2d5" stroke-width="1.5"/>
+    <text x="679" y="436" text-anchor="middle" class="sm cyn">MIT license</text>
+
+    <text x="450" y="516" text-anchor="middle" class="sm sub">⑥ Vision — multi-cluster · AI-native · policy-as-code · GitOps</text>
+  </g>
+
+  <!-- ── outer border on top ──────────────────────────────── -->
+  <rect width="900" height="520" rx="12" fill="none" stroke="#45475a" stroke-width="1.5"/>
+</svg>

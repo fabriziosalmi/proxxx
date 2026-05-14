@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/proxxx-overview.jpg" alt="proxxx overview — six panels covering installation, authentication wizard, cluster navigation, pre-flight risk gate, HITL approval workflow, and the contributor quality gate" width="900">
+  <img src="assets/demo.svg" alt="proxxx animated demo — six panels: TUI guest list, CLI batch canary, MCP + HITL approval, pre-flight risk gate, Prometheus metrics and alert watch, future vision" width="900">
 </p>
 
 ---
