@@ -28,6 +28,11 @@ on:
     # commit time.
     - cron: "17 4 * * *"
 
+# Minimal top-level permissions — satisfy OpenSSF Scorecard TokenPermissions.
+# Individual jobs that need write access declare it explicitly below.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

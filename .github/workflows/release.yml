@@ -34,9 +34,10 @@ on:
 #                         pins the issuer + workflow path so a leaked
 #                         cert from another repo can't validate against
 #                         our bundles.
+# Minimal top-level permissions — satisfy OpenSSF Scorecard TokenPermissions.
+# contents:write and id-token:write are scoped to the jobs that need them.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   # ──────────────────────────────────────────────────────────
@@ -190,6 +191,9 @@ jobs:
     name: Publish GitHub release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub release + upload assets
+      id-token: write   # sigstore OIDC keyless signing
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
