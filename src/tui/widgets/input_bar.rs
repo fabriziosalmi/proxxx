@@ -16,10 +16,12 @@ pub fn draw_input_bar(f: &mut Frame, area: Rect, mode: &AppMode, query: &str) {
         _ => return,
     };
 
-    // Place the input bar at the bottom
+    // Place the input bar at the bottom — single divider line above
+    // the input, no side/bottom chrome (the prefix `/` `:` glyph carries
+    // the mode signal alongside the title).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
         .split(area);
 
     let input_area = *chunks.get(1).unwrap_or(&area);
@@ -34,7 +36,7 @@ pub fn draw_input_bar(f: &mut Frame, area: Rect, mode: &AppMode, query: &str) {
 
     let block = Block::default()
         .title(title)
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(Theme::border_focus());
 
     f.render_widget(Paragraph::new(content).block(block), input_area);

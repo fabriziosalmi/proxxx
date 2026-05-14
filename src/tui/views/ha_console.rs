@@ -128,7 +128,8 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
     )));
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
+        .border_style(Theme::border())
         .title(" cluster status ");
     f.render_widget(
         Paragraph::new(lines)
@@ -182,7 +183,8 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
     )
     .block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
+            .border_style(Theme::border())
             .title(format!(" HA groups ({}) ", state.ha_groups.len())),
     );
     f.render_widget(groups_table, cols[0]);
@@ -252,7 +254,8 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
     )
     .block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
+            .border_style(Theme::border())
             .title(format!(" HA resources ({}) ", state.ha_resources.len())),
     );
     f.render_widget(resources_table, cols[1]);
@@ -313,7 +316,8 @@ fn draw_replication(f: &mut Frame, area: Rect, state: &AppState) {
     )
     .block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
+            .border_style(Theme::border())
             .title(Line::from(vec![
                 Span::raw(" replication jobs ("),
                 Span::raw(format!("{} ", state.repl_status.len())),
