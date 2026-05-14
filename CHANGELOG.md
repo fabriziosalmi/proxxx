@@ -12,6 +12,179 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.26] — 2026-05-14
+
+Headline release: **MCP registry expands 10 → 23 tools**, Streamable HTTP
+transport, multi-profile TUI switching, Prometheus exporter, batch
+execution policies, full audit campaign sweep (HIGH + MEDIUM + LOW), and
+the README hero asset rebuilt from scratch.
+
+### Added — MCP surface expansion
+
+- **MCP tool registry: 10 → 23 tools** (`feat(mcp): expand tool registry
+  10 → 22 tools`). New tools: `suspend_guest`, `resume_guest`,
+  `clone_guest`, `migrate_guest`, `get_cluster_status`, `list_tasks`,
+  `get_node_status`, `list_backup_jobs`, `get_replication_status`, plus
+  registry-completeness fixes for `list_snapshots`, `get_task_log`,
+  `get_node_resources` (which had `ToolAction` variants but no
+  `ToolDef`). Registry remains compile-time-fixed and SHA-256 pinned;
+  fetch the new checksum via `proxxx mcp tools --checksum`. **The
+  append-only SemVer promise is honoured** — no tool was renamed or
+  removed.
+
+- **Streamable HTTP transport for MCP** (`feat(mcp): add Streamable HTTP
+  transport — POST /mcp + GET /mcp SSE`). Opt-in via
+  `proxxx mcp serve --transport http --bind 127.0.0.1:8080`. Stdio
+  remains the default (no behaviour change for existing Claude Code /
+  Cursor integrations). Unlocks remote LLM agents and multi-tenant
+  deployments without the per-call fork/exec cost of stdio.
+
+### Added — operational surface
+
+- **Multi-profile TUI switching** (`feat(tui): multi-profile support`).
+  `Tab` cycles between configured clusters without restarting the
+  binary. Cached state is now segregated per profile — see RBAC row 108
+  test below.
+
+- **Prometheus exporter** (`feat(metrics): proxxx metrics serve`).
+  Exposes guest CPU / memory / disk + node + storage metrics in the
+  Prometheus text format on a configurable port. Cardinality-bounded
+  labels (`vmid`, `name`, `node`, `storage`); designed for Grafana
+  scraping at sub-30 s intervals.
+
+- **Batch execution policies — canary + rolling** (`feat(batch): canary
+  + rolling execution policies for multi-guest ops`).
+  `--policy canary=N%` runs the first percentile, waits an observation
+  window, then continues only if no errors. `--policy rolling=N` caps
+  concurrency. Replaces the previous all-at-once behaviour for
+  `batch stop` / `batch restart`. Pilot count uses ceiling division
+  (`min(n, max(1, ceil(n·p)))`) — see `canary_pilot_count` for the
+  exact contract.
+
+- **PBS typed auth errors + `pbs ping` command** (`feat(pbs): typed auth
+  errors + pbs ping command`). Auth failures now surface as
+  `AuthFailed` rather than generic `RequestFailed`, so callers can
+  match on error category instead of grepping prose.
+
+- **TUI blind-persona hardening** (`feat(tui): blind-persona hardening
+  — surface guest fetch errors in VM list`). When a guest fetch fails
+  (typically RBAC blocking `/nodes/X/qemu`), the VM list now surfaces
+  the per-node error inline instead of silently dropping the row.
+  Operators with restricted permissions can now SEE what they cannot
+  see — closes a long-standing footgun.
+
+### Fixed — draconian audit campaign
+
+- **HIGH findings** (`fix(audit): HIGH findings`). Seven correctness
+  fixes: batch policy parser rejected `canary=10%`, `find_guest`
+  accepted ambiguous cross-node matches, JoinError in the retry path
+  was silently swallowed, the HITL approval gate could double-fire
+  under a tight race, `clone_guest` was incorrectly classified
+  non-destructive (allowed an LLM agent to clone without HITL),
+  sensitive config fields (`token_secret`, `password`, PBS
+  `token_secret`) are now wrapped in `Zeroizing<String>` and
+  zero-on-drop, and the Prometheus exporter called `get_nodes()` once
+  per metric kind instead of once per scrape.
+
+- **MEDIUM findings** (`fix(audit): MEDIUM findings`). Six fixes: the
+  `watch` subcommand had no timeout cap (now `--timeout 300s` default
+  with `<` / `>` comparator parsing); cache directory was not created
+  on first run for non-state callers; SSH `--cmd` arg now rejects NUL
+  / CR / LF (command-injection prevention); `poll_task_until_done`
+  honoured `timeout_secs=0` as "poll forever" (now capped at
+  `DEFAULT_TASK_TIMEOUT_SECS=3600`); `escape_label` did not escape
+  `\r` (Prometheus label-injection vector closed); `idle_client()`
+  test helper now returns the `MockServer` so it cannot be
+  drop-killed mid-test (RBAC E2E flake source).
+
+- **LOW findings**. Clock-before-UNIX-epoch now surfaces a typed error
+  instead of silently saturating with `unwrap_or_default()`; alert-dedup
+  persistence assertions use `assert_eq!(count, 1, …)` instead of the
+  weaker `>= 1`.
+
+- **MCP correctness** (`fix(mcp): 3 correctness issues from draconian
+  audit`). `action_str` dropped the suffix on multi-word tool names
+  (so audit logs showed `stop` instead of `stop_guest`); `clone_guest`
+  was incorrectly classified non-destructive; registry checksum test
+  was pinned to a stale SHA.
+
+- **Cache directory creation moved into `open_db`** (`fix(cache):
+  ensure_cache_dir in open_db — covers all callers, not just
+  save_state`). The original audit fix had `ensure_cache_dir()` only
+  in `load_state` / `save_state`. CI revealed
+  `alert_dedup_persistence_round_trip` failed on clean runners because
+  `save_alert_dedup` (and four other callers) did not call it.
+  `create_dir_all` now lives in `open_db` itself, so the invariant
+  holds for every SQLite opener — no future caller can forget.
+
+- **Shutdown daemon-saturation, follow-up** — see also v0.1.25.
+
+### Security
+
+- **OpenSSF Scorecard `TokenPermissions` alerts**
+  (`ci: add explicit permissions`). Both `.github/workflows/ci.yml`
+  and `.github/workflows/release.yml` now declare minimal top-level
+  `permissions: contents: read`, with `release.yml` explicitly
+  elevating only the `release` job to `contents: write, id-token:
+  write`. Scorecard `TokenPermissions` score moves from 0 → 10.
+
+### Tests
+
+- **RBAC cache segregation per-profile** (`test(rbac): cache
+  segregation per-profile — closes row 108`). The multi-profile TUI
+  switching above (the feature) is paired with the test that pins the
+  contract: a switch between two profiles does not leak cached cluster
+  state between them. Row 108 of the RBAC test matrix now passes.
+
+### Documentation
+
+- **README hero asset rebuilt from scratch.** The AI-generated
+  `assets/proxxx-overview.jpg` is gone; in its place is
+  `assets/demo.svg` — a 13 KB animated SVG storyboard generated by
+  [firstframe](https://github.com/fabriziosalmi/firstframe) (a small
+  companion tool that produces beat-based animated terminal demos
+  from TOML manifests). The demo types a destructive command,
+  the pre-flight risk gate refuses it, HITL approval arrives via
+  Telegram, the action executes. Same SVG is the VitePress home hero.
+  Respects `prefers-reduced-motion`.
+
+- README + `docs/index.md` numbers refreshed: source 28 → 44 KLOC,
+  tests 5 → 14 KLOC, MCP tool registry 10 → 23 tools.
+
+## [0.1.25] — 2026-05-13
+
+### Fixed — shutdown daemon-saturation
+
+- **`shutdown_guest` did not pass a timeout to PVE**, so any guest
+  that did not respond to ACPI (or had a stuck init) would leave the
+  `qmshutdown` task appended indefinitely on the node — saturating
+  `pvedaemon` worker threads. Observed in production as a node-level
+  hardware freeze requiring a manual reset.
+
+  `shutdown_guest` now takes `timeout_secs` (default 60 at every call
+  site) and forwards both `timeout=N` and `forceStop=1` to PVE for
+  QEMU (PVE rejects `forceStop` for LXC, so only `timeout=N` is sent
+  there). CLI gains `--stop-timeout <secs>`; ignored with `--force`.
+  Three wiremock tests assert per-guest-type body params.
+
+## [0.1.24] — 2026-05-13
+
+### Added — `snapshot rollback`
+
+- **`proxxx snapshot rollback --vmid N --name S --yes`** rolls a
+  guest back to a named snapshot via
+  `POST .../snapshot/{name}/rollback`. Trait method, `PxClient` impl,
+  mock stubs (`patch.rs` + `hitl_e2e.rs`), and two wiremock routing
+  tests (QEMU + LXC, with a negative guard on wrong guest type)
+  included. Map-coverage snapshot updated.
+
+### Fixed — live RBAC test failures
+
+- Six live RBAC E2E tests were flaking intermittently; root cause was
+  test-side HITL callback signing using the wrong HMAC key when the
+  runner had `PROXXX_HITL_SECRET` set globally. Tests now sign with
+  the per-test ephemeral key — no production code change.
+
 ## [0.1.23] — 2026-05-12
 
 ### Fixed — password-auth credential rotation + auth-failure UX
