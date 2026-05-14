@@ -51,7 +51,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .map(|approval| {
             let (label, style) = match approval.status {
                 ApprovalStatus::Pending => ("pending", Theme::dim()),
-                ApprovalStatus::Approved => ("approved", Style::default().fg(Theme::ONLINE)),
+                ApprovalStatus::Approved => ("approved", Style::default().fg(Theme::SUCCESS)),
                 ApprovalStatus::Denied => ("denied", Style::default().fg(Theme::DANGER)),
                 ApprovalStatus::Timeout => ("timeout", Style::default().fg(Theme::WARNING)),
             };

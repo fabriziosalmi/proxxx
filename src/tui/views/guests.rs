@@ -65,11 +65,11 @@ fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
         Span::styled(format!(" {total} total "), Theme::dim()),
         Span::styled(
             format!(" {running} running "),
-            Style::default().fg(Theme::ONLINE),
+            Style::default().fg(Theme::SUCCESS),
         ),
         Span::styled(
             format!(" {stopped} stopped "),
-            Style::default().fg(Theme::OFFLINE),
+            Style::default().fg(Theme::DANGER),
         ),
         Span::styled(format!(" {vms} VM  {lxc} LXC "), Theme::dim()),
     ]);
@@ -197,7 +197,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 match guest.status {
                     GuestStatus::Running => Style::default(),
                     GuestStatus::Stopped => Theme::dim(),
-                    _ => Style::default().fg(Theme::STALE),
+                    _ => Style::default().fg(Theme::WARNING),
                 }
             };
 
@@ -295,10 +295,10 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
 
     // Header — status color carries semantic; row text shows the word.
     let status_style = match guest.status {
-        GuestStatus::Running => Style::default().fg(Theme::ONLINE),
-        GuestStatus::Stopped => Style::default().fg(Theme::OFFLINE),
-        GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::PAUSED),
-        GuestStatus::Unknown => Style::default().fg(Theme::STALE),
+        GuestStatus::Running => Style::default().fg(Theme::SUCCESS),
+        GuestStatus::Stopped => Style::default().fg(Theme::DANGER),
+        GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::INFO),
+        GuestStatus::Unknown => Style::default().fg(Theme::WARNING),
     };
     let status_word = format!("{:?}", guest.status).to_lowercase();
 

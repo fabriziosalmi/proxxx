@@ -9,13 +9,12 @@ pub struct Theme;
 
 #[allow(dead_code)]
 impl Theme {
-    // ── Brand Colors ────────────────────────────────────
-    pub const ACCENT: Color = Color::Rgb(99, 102, 241); // Indigo-500
-    pub const ACCENT_DIM: Color = Color::Rgb(67, 56, 202); // Indigo-700
-    pub const SUCCESS: Color = Color::Rgb(34, 197, 94); // Green-500
-    pub const WARNING: Color = Color::Rgb(234, 179, 8); // Yellow-500
-    pub const DANGER: Color = Color::Rgb(239, 68, 68); // Red-500
-    pub const INFO: Color = Color::Rgb(59, 130, 246); // Blue-500
+    // ── Semantic Colors ─────────────────────────────────
+    pub const ACCENT: Color = Color::Rgb(99, 102, 241); // Indigo-500 (brand)
+    pub const SUCCESS: Color = Color::Rgb(34, 197, 94); // Green-500 (running, ok, low-usage)
+    pub const WARNING: Color = Color::Rgb(234, 179, 8); // Yellow-500 (stale, mid-usage)
+    pub const DANGER: Color = Color::Rgb(239, 68, 68); // Red-500 (stopped, high-usage, errors)
+    pub const INFO: Color = Color::Rgb(59, 130, 246); // Blue-500 (paused, intentional state)
 
     // ── Surfaces ────────────────────────────────────────
     pub const BG: Color = Color::Rgb(15, 15, 20); // Near-black
@@ -28,17 +27,6 @@ impl Theme {
     pub const TEXT: Color = Color::Rgb(229, 231, 235); // Gray-200
     pub const TEXT_DIM: Color = Color::Rgb(107, 114, 128); // Gray-500
     pub const TEXT_MUTED: Color = Color::Rgb(75, 85, 99); // Gray-600
-
-    // ── Status Colors ───────────────────────────────────
-    pub const ONLINE: Color = Color::Rgb(34, 197, 94); // Green
-    pub const OFFLINE: Color = Color::Rgb(239, 68, 68); // Red
-    pub const STALE: Color = Color::Rgb(234, 179, 8); // Yellow
-    pub const PAUSED: Color = Color::Rgb(168, 85, 247); // Purple
-
-    // ── Gauge Colors ────────────────────────────────────
-    pub const GAUGE_LOW: Color = Color::Rgb(34, 197, 94); // Green (<50%)
-    pub const GAUGE_MED: Color = Color::Rgb(234, 179, 8); // Yellow (50-80%)
-    pub const GAUGE_HIGH: Color = Color::Rgb(239, 68, 68); // Red (>80%)
 
     // ── Preset Styles ───────────────────────────────────
 
@@ -61,20 +49,20 @@ impl Theme {
 
     pub fn status_badge(status: &str) -> Style {
         match status {
-            "running" | "online" => Style::default().fg(Self::ONLINE),
-            "stopped" | "offline" => Style::default().fg(Self::OFFLINE),
-            "paused" | "suspended" => Style::default().fg(Self::PAUSED),
-            _ => Style::default().fg(Self::STALE),
+            "running" | "online" => Style::default().fg(Self::SUCCESS),
+            "stopped" | "offline" => Style::default().fg(Self::DANGER),
+            "paused" | "suspended" => Style::default().fg(Self::INFO),
+            _ => Style::default().fg(Self::WARNING),
         }
     }
 
     pub fn gauge_color(percent: f64) -> Color {
         if percent < 50.0 {
-            Self::GAUGE_LOW
+            Self::SUCCESS
         } else if percent < 80.0 {
-            Self::GAUGE_MED
+            Self::WARNING
         } else {
-            Self::GAUGE_HIGH
+            Self::DANGER
         }
     }
 

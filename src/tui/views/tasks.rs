@@ -50,7 +50,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState, upid: &str) {
             // highlight keywords like "TASK OK", "ERROR"
             let t = &log.t;
             let style = if t.contains("TASK OK") {
-                Style::default().fg(Theme::ONLINE)
+                Style::default().fg(Theme::SUCCESS)
             } else if t.contains("ERROR") || t.contains("FAILED") {
                 Style::default().fg(Theme::DANGER)
             } else if t.contains("WARNING") {
