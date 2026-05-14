@@ -12,6 +12,69 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.1.27] — 2026-05-14
+
+Headline: **draconian TUI polish** — the rendered surface is now native
+ASCII / sentence-case throughout, no emoji, fewer borders, smaller
+palette. No behaviour, CLI, MCP, or config-schema changes.
+
+### Changed — TUI only
+
+- **Glyph purge** (`refactor(tui): glyph purge`). Removed every emoji
+  from rendered surfaces: status icons (🟢🔴🟡⏳⏰), title decoration
+  (⚡📝🕒🛡️💾🖥🚀), banner glyphs (⚠️🚨), modal "⚠️ WARNING" header.
+  Status carries via row color + the status word column. Telegram
+  callback strings retain emoji (different audience, not TUI surface).
+
+- **Separators unified**. Footer drops `│` after the mode pill and uses
+  `·` only. View titles drop inline `│` between header spans (use
+  whitespace). Arrows `↵ ← → ↑ ↓` replaced with keyboard letters
+  (`Enter`, `h/l`) or ASCII (`->`). snaptree's `│  ` tree-drawing
+  lines kept (semantic).
+
+- **Progress bars consolidated**. Sub-block precision glyphs
+  (`▏▎▍▌▋▊▉`) duplicated in guests + storage collapsed to full-block
+  + light-shade `█░` (matches nodes.rs). Input-bar fake cursor `█`
+  now a `Modifier::REVERSED` space — the terminal's native cursor look.
+
+- **Color palette: 18 → 13** (`refactor(tui): palette diet`). Removed
+  `ACCENT_DIM` (unused). Collapsed `ONLINE / OFFLINE / STALE / PAUSED`
+  onto `SUCCESS / DANGER / WARNING / INFO` (purple paused → blue, since
+  paused is an intentional state, not a warning). Removed
+  `GAUGE_LOW / MED / HIGH` (triple-aliased SUCCESS / WARNING / DANGER).
+  `status_badge()` and `gauge_color()` reference semantic colors
+  directly. 9 callsites in guests / approval / tasks migrated.
+
+- **Density pass** (`refactor(tui): density pass`). ha_console's 4
+  stacked sections each wrapped in `Borders::ALL` (box-of-boxes feel)
+  now use `Borders::TOP` only — single underlined title line per
+  section. Reclaims ~6 vertical rows + ~80 char columns of border
+  chrome on a 100-col terminal. Input bar: `Length(3) + Borders::ALL`
+  → `Length(2) + Borders::TOP` (the prompt prefix `/` `:` already
+  carries the mode signal).
+
+- **Text discipline** (`refactor(tui): text discipline`). Lowercased
+  all user-visible labels — table column headers (VMID → vmid),
+  status badges (HEALTHY / STALE / FAILING / QUORATE / NO QUORUM /
+  STUCK / DEGRADED / UNPROTECTED / DIRECT / CREATED / DELETED →
+  lowercase), mode pill labels (NORMAL / SEARCH / CONFIG GREP →
+  lowercase). Color still carries severity. External Proxmox output
+  ("TASK OK", "ERROR", "FAILED") and log/warn! lines untouched.
+
+### Test surface
+
+- 13 TUI snapshot tests regenerated to match the polished rendering.
+  4 `dump.contains(...)` assertions updated for the new sentence-case
+  strings. All 22 snapshot tests + 355 lib tests + 224 integration
+  tests pass.
+
+### SemVer note
+
+Per `CHANGELOG.md` SemVer contract, TUI layout changes are explicitly
+NOT covered. This release is therefore a patch bump despite the broad
+visual change — no CLI command, exit code, `--format json` field, MCP
+tool, or config schema was touched.
+
 ## [0.1.26] — 2026-05-14
 
 Headline release: **MCP registry expands 10 → 23 tools**, Streamable HTTP
