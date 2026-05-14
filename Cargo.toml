@@ -59,7 +59,7 @@ governor = "0.8"
 nucleo = "0.5"
 
 # OS keychain
-keyring = { version = "3", optional = true }
+keyring = { version = "4", optional = true }
 
 # Async trait
 async-trait = "0.1"
