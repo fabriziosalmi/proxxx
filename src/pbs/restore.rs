@@ -282,7 +282,7 @@ mod tests {
             url: "https://pbs.lan:8007".into(),
             user: "proxxx@pbs".into(),
             token_id: "reader".into(),
-            token_secret: Some("test".into()),
+            token_secret: Some(zeroize::Zeroizing::new("test".into())),
             token_secret_file: None,
             verify_tls: true,
             rate_limit: None,

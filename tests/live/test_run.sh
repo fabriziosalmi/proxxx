@@ -97,13 +97,17 @@ probe "access roles"   access roles
 probe "access realms"  access realms
 probe "token list root@pam" token list "root@pam"
 
-# ── Phase 6: PBS browse ──
+# ── Phase 6: PBS auth + browse ──
 # Opt-in via PROXXX_E2E_PBS_ENABLE=1 — clusters without a PBS
 # server configured (no `[pbs]` block in config.toml) skip cleanly
 # instead of failing the gate. Same pattern as the QGA probes in
 # test_mutation.sh.
+# `pbs ping` is the primary auth probe: it hits /api2/json/version
+# and returns a typed error on 401/403, catching wrong-token and
+# missing-privilege failures before trying a datastore list.
 if [ "${PROXXX_E2E_PBS_ENABLE:-0}" = "1" ]; then
-    probe "pbs datastores" pbs datastores
+    probe "pbs ping (auth)"  pbs ping
+    probe "pbs datastores"   pbs datastores
 fi
 
 # ── Phase 7: ISO library ──

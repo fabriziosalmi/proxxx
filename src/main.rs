@@ -189,13 +189,21 @@ fn main() -> Result<()> {
                 }
             }
         }
-        // TUI mode: full ratatui
+        // TUI mode: full ratatui. Loops when user requests a profile
+        // switch (tui::run returns Some(name)); exits on normal quit.
         None => {
-            rt.block_on(tui::run(
-                cli.profile.as_deref(),
-                cli.token_secret.as_deref(),
-                cli.secure,
-            ))?;
+            let mut active_profile: Option<String> = cli.profile.clone();
+            loop {
+                let next = rt.block_on(tui::run(
+                    active_profile.as_deref(),
+                    cli.token_secret.as_deref(),
+                    cli.secure,
+                ))?;
+                match next {
+                    Some(name) => active_profile = Some(name),
+                    None => break,
+                }
+            }
         }
     }
 

@@ -317,6 +317,12 @@ pub async fn execute_ssh(
         .arg("--")
         .arg(format!("{}@{}", target.user, target.host));
     if let Some(c) = cmd {
+        // The command is passed as a single argv element to `ssh`, which forwards
+        // it to the remote login shell. NUL bytes and newlines cannot appear in a
+        // legitimate command and would corrupt the remote shell's argument parsing.
+        if c.contains('\0') || c.contains('\n') || c.contains('\r') {
+            anyhow::bail!("--cmd contains a NUL byte or newline — refusing to forward");
+        }
         cmd_builder.arg(c);
     }
     // stdio inherits by default for std::process::Command. Status

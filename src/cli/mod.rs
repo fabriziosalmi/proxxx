@@ -17,7 +17,8 @@ mod storage;
 mod vm;
 
 use common::{
-    enforce_preflight, execute_batch_op, find_guest, find_guest_full, wait_and_classify, BatchOp,
+    enforce_preflight, execute_batch_op_with_policy, find_guest, find_guest_full,
+    wait_and_classify, BatchOp,
 };
 
 #[derive(Debug, Subcommand)]
@@ -34,6 +35,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Stop a guest
     Stop {
@@ -55,6 +59,9 @@ pub enum Command {
         /// `--force` is set. [default: 60]
         #[arg(long, default_value_t = 60)]
         stop_timeout: u32,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Restart a guest
     Restart {
@@ -65,6 +72,9 @@ pub enum Command {
         /// Override proxxx pre-flight risk checks.
         #[arg(long)]
         allow_risk: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Suspend a running guest (freeze vCPUs to RAM). Pair with `resume`.
     /// QEMU + LXC. Non-destructive — the guest holds memory until you
@@ -75,6 +85,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Resume a suspended guest — inverse of `suspend`.
     Resume {
@@ -82,6 +95,9 @@ pub enum Command {
         vmids: Vec<u32>,
         #[arg(long)]
         strict: bool,
+        /// Execution policy: full (default), canary[=N%], rolling[=K]
+        #[arg(long, default_value = "full")]
+        policy: String,
     },
     /// Delete a guest (VM or LXC)
     Delete {
@@ -293,9 +309,13 @@ pub enum Command {
         #[arg(long, short)]
         target: Option<String>,
 
-        /// Wait until condition is met (e.g. status=running, usage<70%)
+        /// Wait until condition is met (e.g. status=running, usage=<70%, usage=>80%)
         #[arg(long, short)]
         until: Option<String>,
+
+        /// Abort watching after this many seconds (default 300)
+        #[arg(long, default_value = "300")]
+        timeout: u64,
 
         /// Channel to notify when condition is met (e.g. telegram)
         #[arg(long, short)]
@@ -641,6 +661,9 @@ pub enum Command {
     /// Both refuse to overwrite an existing config unless `--force`
     /// is passed (template-only path); the interactive flow offers
     /// backup-or-cancel instead.
+    /// List named profiles defined in config.toml ([profiles.NAME] sections).
+    /// Use `--profile NAME` to select one when starting the TUI or CLI.
+    Profiles,
     Init {
         /// Overwrite any existing config.toml at the target path.
         /// Without this flag, `init` refuses to clobber prior state.
@@ -704,8 +727,20 @@ pub enum HitlCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
-    /// Start MCP server
+    /// Start MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
     Serve,
+    /// Start MCP HTTP server (Streamable HTTP transport, spec 2025-03-26)
+    ServeHttp {
+        /// Address to bind (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Port to listen on (default: 3000)
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Bearer token for auth (overrides `mcp_token` in config)
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// List available tools
     Tools {
         #[arg(long)]
@@ -760,6 +795,17 @@ pub async fn execute(
         return init::execute(*force);
     }
 
+    // `proxxx profiles` lists named profiles without needing a valid config.
+    if matches!(&cmd, Command::Profiles) {
+        let names = crate::config::list_profiles()?;
+        let val = if names.is_empty() {
+            serde_json::json!({ "profiles": [], "hint": "Add [profiles.NAME] sections to config.toml to define named profiles." })
+        } else {
+            serde_json::json!({ "profiles": names })
+        };
+        return Ok((val, 0));
+    }
+
     // Flight-recorder smoke: `dev-panic` is the panic-hook test fuel — it
     // intentionally panics regardless of cluster connectivity. The
     // integration test in `tests/panic_hook_test.rs` runs proxxx as a
@@ -806,8 +852,13 @@ pub async fn execute(
             }
             other => anyhow::bail!("Unknown resource: {other}. Use: nodes, guests, storage"),
         },
-        Command::Start { vmids, strict } => {
-            execute_batch_op(&client, BatchOp::Start, &vmids, &config, strict).await
+        Command::Start {
+            vmids,
+            strict,
+            policy,
+        } => {
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Start, &vmids, &config, strict, bp).await
         }
         Command::Stop {
             vmids,
@@ -815,6 +866,7 @@ pub async fn execute(
             strict,
             allow_risk,
             stop_timeout,
+            policy,
         } => {
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
@@ -827,7 +879,8 @@ pub async fn execute(
                 )
                 .await?;
             }
-            execute_batch_op(
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(
                 &client,
                 BatchOp::Stop {
                     force,
@@ -836,6 +889,7 @@ pub async fn execute(
                 &vmids,
                 &config,
                 strict,
+                bp,
             )
             .await
         }
@@ -843,6 +897,7 @@ pub async fn execute(
             vmids,
             strict,
             allow_risk,
+            policy,
         } => {
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
@@ -855,16 +910,30 @@ pub async fn execute(
                 )
                 .await?;
             }
-            execute_batch_op(&client, BatchOp::Restart, &vmids, &config, strict).await
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Restart, &vmids, &config, strict, bp)
+                .await
         }
-        Command::Suspend { vmids, strict } => {
+        Command::Suspend {
+            vmids,
+            strict,
+            policy,
+        } => {
             // No preflight: suspend is non-destructive (RAM frozen,
             // no state lost on resume). Mirror Restart's batch-op
             // dispatch shape.
-            execute_batch_op(&client, BatchOp::Suspend, &vmids, &config, strict).await
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Suspend, &vmids, &config, strict, bp)
+                .await
         }
-        Command::Resume { vmids, strict } => {
-            execute_batch_op(&client, BatchOp::Resume, &vmids, &config, strict).await
+        Command::Resume {
+            vmids,
+            strict,
+            policy,
+        } => {
+            let bp = crate::cli::common::BatchPolicy::parse(&policy)?;
+            execute_batch_op_with_policy(&client, BatchOp::Resume, &vmids, &config, strict, bp)
+                .await
         }
         Command::Delete {
             vmids,
@@ -1156,6 +1225,21 @@ pub async fn execute(
                 .await?;
                 Ok((serde_json::json!({"status": "MCP server stopped"}), 0))
             }
+            McpCommand::ServeHttp { bind, port, token } => {
+                let mut cfg = config;
+                // CLI --token overrides the profile's mcp_token.
+                if token.is_some() {
+                    cfg.mcp_token = token;
+                }
+                crate::mcp::http_server::run_http_server(
+                    std::sync::Arc::clone(&client),
+                    std::sync::Arc::new(cfg),
+                    &bind,
+                    port,
+                )
+                .await?;
+                Ok((serde_json::json!({"status": "MCP HTTP server stopped"}), 0))
+            }
             _ => unreachable!(),
         },
         Command::Replay { timestamp } => {
@@ -1166,23 +1250,41 @@ pub async fn execute(
             since,
             target,
             until,
+            timeout,
             notify,
         } => {
             if let Some(target) = target {
                 let until = until.unwrap_or_else(|| "status=running".to_string());
                 use crate::api::ProxmoxGateway;
-                use tokio::time::{sleep, Duration};
+                use tokio::time::{sleep, Duration, Instant};
 
-                let (key, value) = if let Some((k, v)) = until.split_once('=') {
+                // Parse `key=<comparator><value>`, e.g. `usage=<70%` or `status=running`.
+                let (key, raw_value) = if let Some((k, v)) = until.split_once('=') {
                     (k.trim().to_lowercase(), v.trim().to_lowercase())
                 } else {
-                    anyhow::bail!("Invalid condition format. Use key=value");
+                    anyhow::bail!(
+                        "Invalid condition format. Use key=value, key=<value or key=>value"
+                    );
+                };
+                // Split leading comparator from the numeric/string value.
+                let (comparator, value_str) = if raw_value.starts_with('<') {
+                    ('<', raw_value.trim_start_matches('<'))
+                } else if raw_value.starts_with('>') {
+                    ('>', raw_value.trim_start_matches('>'))
+                } else {
+                    ('=', raw_value.as_str())
                 };
 
                 let mut met = false;
-                tracing::info!("Watching {} until {}={}", target, key, value);
+                tracing::info!("Watching {} until {}={}", target, key, raw_value);
+                let deadline = Instant::now() + Duration::from_secs(timeout);
 
                 while !met {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "watch timed out after {timeout}s — condition not met: {until}"
+                        );
+                    }
                     sleep(Duration::from_secs(2)).await;
 
                     if target.starts_with("vm-") || target.chars().all(char::is_numeric) {
@@ -1204,7 +1306,7 @@ pub async fn execute(
                                             }
                                         };
 
-                                        if current_val == value {
+                                        if current_val == value_str {
                                             met = true;
                                         }
                                         break;
@@ -1229,14 +1331,13 @@ pub async fn execute(
                                     if key == "usage" {
                                         let usage_pct =
                                             (pool.used as f64 / pool.total as f64) * 100.0;
-                                        let threshold: f64 = value.trim_end_matches('%').parse()?;
-                                        if value.starts_with('<') {
-                                            if usage_pct < threshold {
-                                                met = true;
-                                            }
-                                        } else if usage_pct > threshold {
-                                            met = true;
-                                        }
+                                        let threshold: f64 =
+                                            value_str.trim_end_matches('%').parse()?;
+                                        met = match comparator {
+                                            '<' => usage_pct < threshold,
+                                            '>' => usage_pct > threshold,
+                                            _ => (usage_pct - threshold).abs() < 0.01,
+                                        };
                                     } else {
                                         anyhow::bail!(
                                             "Unsupported condition key for storage: {key}"
@@ -1414,6 +1515,17 @@ pub async fn execute(
             // Kept here so the match remains exhaustive without an
             // `_ =>` catch-all.
             Ok((build_version_payload(), 0))
+        }
+        Command::Profiles => {
+            let names = crate::config::list_profiles()?;
+            if names.is_empty() {
+                Ok((
+                    serde_json::json!({ "profiles": [], "hint": "Add [profiles.NAME] sections to config.toml to define named profiles." }),
+                    0,
+                ))
+            } else {
+                Ok((serde_json::json!({ "profiles": names }), 0))
+            }
         }
         Command::Init {
             force: _,

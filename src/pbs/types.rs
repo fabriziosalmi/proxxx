@@ -7,6 +7,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// PBS server version. Returned by `GET /api2/json/version` (no auth required
+/// on PBS ≥ 2.x, auth required on older builds — we send creds anyway).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PbsVersion {
+    pub version: String,
+    pub release: String,
+    #[serde(rename = "repoid", default)]
+    pub repo_id: String,
+}
+
 /// One datastore on the PBS server. Matches `GET /admin/datastore`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatastoreInfo {

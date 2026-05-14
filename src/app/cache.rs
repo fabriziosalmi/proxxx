@@ -44,6 +44,17 @@ use crate::api::types::{Guest, Node, StoragePool};
 const SCHEMA_VERSION: u32 = 2;
 
 fn open_db(path: &Path) -> anyhow::Result<Connection> {
+    // Ensure the parent directory exists before SQLite tries to open the file.
+    // Without this, SQLite returns error code 14 ("unable to open database file")
+    // with no indication of the real cause (missing directory vs permissions).
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot create cache directory {}: {e} — check permissions",
+                parent.display()
+            )
+        })?;
+    }
     let conn = Connection::open(path)?;
 
     // — `auto_vacuum` is sticky: persisted in the DB header,
@@ -169,14 +180,27 @@ pub struct ClusterStateCache {
     pub timestamp: u64,
 }
 
-fn get_db_path(profile_name: Option<&str>) -> PathBuf {
+fn get_db_dir() -> PathBuf {
     let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("proxxx");
-    std::fs::create_dir_all(&path).ok();
+    path
+}
 
+fn get_db_path(profile_name: Option<&str>) -> PathBuf {
+    let mut path = get_db_dir();
     let profile = profile_name.unwrap_or("default");
     path.push(format!("{profile}_state.db"));
     path
+}
+
+fn ensure_cache_dir() -> anyhow::Result<()> {
+    let dir = get_db_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot create cache directory {}: {e} — check permissions",
+            dir.display()
+        )
+    })
 }
 
 fn init_db(conn: &Connection) -> anyhow::Result<()> {
@@ -237,7 +261,7 @@ pub fn save_state(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|e| anyhow::anyhow!("system clock is before UNIX epoch: {e}"))?
         .as_secs();
 
     let cache = ClusterStateCache {
@@ -715,7 +739,7 @@ mod concurrency_tests {
             .expect("read should not block");
         // The committed snapshot (timestamp=1) is visible. The
         // uncommitted one is not — that's correct WAL isolation.
-        assert!(count >= 1, "reader should see committed rows");
+        assert_eq!(count, 1, "reader should see exactly the one committed row");
 
         writer.execute("COMMIT", []).expect("commit");
 
@@ -943,5 +967,71 @@ mod concurrency_tests {
         assert_eq!(loaded, expected);
 
         cleanup_profile(&profile);
+    }
+
+    /// RBAC cache-segregation invariant: writing cluster state under
+    /// profile "root" MUST NOT be visible to a load under profile
+    /// "auditor". Two distinct profile names map to distinct DB files;
+    /// a load on the other profile must return `Err("No cache found")`.
+    ///
+    /// This test closes the ❌ row in pre-commit/01-feature-coverage.md
+    /// under "RBAC & multi-persona · SQLite cache segregation per-profile".
+    /// The invariant was previously blocked on multi-profile support
+    /// arriving (Gap #4); `get_db_path` has always segregated by name.
+    #[test]
+    fn cache_is_segregated_per_profile() {
+        let pid = std::process::id();
+        let root_profile = format!("seg-root-{pid}");
+        let auditor_profile = format!("seg-auditor-{pid}");
+
+        // Write root-only state: one node named "pve-root".
+        let nodes = vec![Node {
+            node: "pve-root".into(),
+            ..Default::default()
+        }];
+        save_state(Some(&root_profile), &nodes, &[], &[]).expect("save root state");
+
+        // Load under the auditor profile — MUST find nothing.
+        let auditor_result = load_state(Some(&auditor_profile));
+        assert!(
+            auditor_result.is_err(),
+            "auditor profile must not see root's state, got: {:?}",
+            auditor_result.as_ref().map(|c| &c.nodes)
+        );
+
+        // Root profile load must still succeed and contain the correct node.
+        let root_cache = load_state(Some(&root_profile)).expect("root state round-trips");
+        assert_eq!(root_cache.nodes.len(), 1);
+        assert_eq!(root_cache.nodes[0].node, "pve-root");
+
+        cleanup_profile(&root_profile);
+        cleanup_profile(&auditor_profile);
+    }
+
+    /// Complementary: writing to "auditor" then switching to "root"
+    /// must not leak the auditor's VM list into root's view.
+    #[test]
+    fn cache_write_to_auditor_does_not_pollute_root() {
+        let pid = std::process::id();
+        let root_profile = format!("seg2-root-{pid}");
+        let auditor_profile = format!("seg2-auditor-{pid}");
+
+        let auditor_guests = vec![Guest {
+            vmid: 7777,
+            name: "auditor-vm".into(),
+            node: "pve1".into(),
+            ..Default::default()
+        }];
+        save_state(Some(&auditor_profile), &[], &auditor_guests, &[]).expect("save auditor state");
+
+        // Root never wrote — its load must return Err.
+        let root_result = load_state(Some(&root_profile));
+        assert!(
+            root_result.is_err(),
+            "root profile must not see auditor's VMs"
+        );
+
+        cleanup_profile(&root_profile);
+        cleanup_profile(&auditor_profile);
     }
 }

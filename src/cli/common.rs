@@ -21,14 +21,28 @@ pub async fn find_guest(
 ) -> Result<(String, crate::api::types::GuestType)> {
     use crate::api::ProxmoxGateway;
     let nodes = client.get_nodes().await?;
+    let mut node_errors: Vec<String> = Vec::new();
     for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok((n.node.clone(), g.guest_type));
+        match client.get_guests(&n.node).await {
+            Ok(guests) => {
+                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
+                    return Ok((n.node.clone(), g.guest_type));
+                }
+            }
+            Err(e) => {
+                node_errors.push(format!("{}: {}", n.node, e));
             }
         }
     }
-    anyhow::bail!("Guest {vmid} not found")
+    if node_errors.is_empty() {
+        anyhow::bail!("Guest {vmid} not found on any node")
+    } else {
+        anyhow::bail!(
+            "Guest {vmid} not found; {} node(s) returned errors: {}",
+            node_errors.len(),
+            node_errors.join("; ")
+        )
+    }
 }
 
 /// Same scan as `find_guest`, but returns the full `Guest` so the
@@ -40,14 +54,28 @@ pub async fn find_guest_full(
 ) -> Result<crate::api::types::Guest> {
     use crate::api::ProxmoxGateway;
     let nodes = client.get_nodes().await?;
+    let mut node_errors: Vec<String> = Vec::new();
     for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok(g.clone());
+        match client.get_guests(&n.node).await {
+            Ok(guests) => {
+                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
+                    return Ok(g.clone());
+                }
+            }
+            Err(e) => {
+                node_errors.push(format!("{}: {}", n.node, e));
             }
         }
     }
-    anyhow::bail!("Guest {vmid} not found")
+    if node_errors.is_empty() {
+        anyhow::bail!("Guest {vmid} not found on any node")
+    } else {
+        anyhow::bail!(
+            "Guest {vmid} not found; {} node(s) returned errors: {}",
+            node_errors.len(),
+            node_errors.join("; ")
+        )
+    }
 }
 
 /// Poll a long-running PVE task to completion. Used by `--wait` on
@@ -56,8 +84,10 @@ pub async fn find_guest_full(
 ///
 /// `interval` defaults to 1.5s — fast enough that a 10-second backup
 /// returns within ~12s, slow enough that a 5-minute disk migrate
-/// only generates ~200 polls. `timeout_secs = 0` means "no timeout"
-/// (poll forever).
+/// only generates ~200 polls. `timeout_secs = 0` uses the default cap
+/// of 3600 s (1 hour) — tasks that run longer should pass an explicit budget.
+const DEFAULT_TASK_TIMEOUT_SECS: u64 = 3600;
+
 pub async fn poll_task_until_done(
     client: &crate::api::PxClient,
     node: &str,
@@ -67,23 +97,22 @@ pub async fn poll_task_until_done(
     use crate::api::ProxmoxGateway;
     use std::time::Duration;
     let interval = Duration::from_millis(1500);
-    let deadline = if timeout_secs > 0 {
-        Some(tokio::time::Instant::now() + Duration::from_secs(timeout_secs))
+    let effective = if timeout_secs > 0 {
+        timeout_secs
     } else {
-        None
+        DEFAULT_TASK_TIMEOUT_SECS
     };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(effective);
     loop {
         let status = client.get_task_status(node, upid).await?;
         if status.is_done() {
             return Ok(status);
         }
-        if let Some(d) = deadline {
-            if tokio::time::Instant::now() >= d {
-                anyhow::bail!(
-                    "task {upid} did not complete within {timeout_secs}s (status: {})",
-                    status.status
-                );
-            }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "task {upid} did not complete within {effective}s (status: {})",
+                status.status
+            );
         }
         tokio::time::sleep(interval).await;
     }
@@ -231,6 +260,7 @@ impl crate::ssh::SshGateway for NoSsh {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum BatchOp {
     Start,
     Stop { force: bool, timeout_secs: u32 },
@@ -239,7 +269,210 @@ pub enum BatchOp {
     Resume,
 }
 
+/// Execution policy for multi-VMID batch operations.
+///
+/// - `Full`: fire all targets fully-parallel (capped at 32 in-flight).
+///   This is the existing default behaviour.
+/// - `Canary`: run on a small pilot slice first (ceil(N × percent / 100)
+///   targets). If any pilot target fails, the rest are skipped and the
+///   exit code reflects partial failure. If the pilot succeeds, the
+///   remaining targets run in `Full` parallel.
+/// - `Rolling`: run in sequential waves of `wave_size` targets. Each wave
+///   is fired fully-parallel within itself; the next wave only starts
+///   when the previous one completes without error. A failing wave aborts
+///   the remaining waves.
+#[derive(Debug, Clone, Copy)]
+pub enum BatchPolicy {
+    Full,
+    Canary { percent: u8 },
+    Rolling { wave_size: usize },
+}
+
+impl BatchPolicy {
+    /// Parse from a user-supplied string:
+    /// - `"full"` → `Full`
+    /// - `"canary"` → `Canary { percent: 5 }`
+    /// - `"canary=N"` → `Canary { percent: N }` (N: 1–100)
+    /// - `"rolling"` → `Rolling { wave_size: 10 }`
+    /// - `"rolling=K"` → `Rolling { wave_size: K }` (K ≥ 1)
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("full") {
+            return Ok(Self::Full);
+        }
+        if let Some(rest) = s.to_ascii_lowercase().strip_prefix("canary") {
+            let percent = if rest.is_empty() {
+                5
+            } else if let Some(n) = rest.strip_prefix('=') {
+                n.parse::<u8>()
+                    .ok()
+                    .filter(|&p| p >= 1 && p <= 100)
+                    .ok_or_else(|| anyhow::anyhow!("canary percent must be 1–100, got {n}"))?
+            } else {
+                anyhow::bail!("unrecognised policy: {s}")
+            };
+            return Ok(Self::Canary { percent });
+        }
+        if let Some(rest) = s.to_ascii_lowercase().strip_prefix("rolling") {
+            let wave_size = if rest.is_empty() {
+                10
+            } else if let Some(n) = rest.strip_prefix('=') {
+                n.parse::<usize>()
+                    .ok()
+                    .filter(|&k| k >= 1)
+                    .ok_or_else(|| anyhow::anyhow!("rolling wave-size must be ≥ 1, got {n}"))?
+            } else {
+                anyhow::bail!("unrecognised policy: {s}")
+            };
+            return Ok(Self::Rolling { wave_size });
+        }
+        anyhow::bail!("unrecognised batch policy '{s}' (valid: full, canary[=N%], rolling[=K])")
+    }
+}
+
 pub async fn execute_batch_op(
+    client: &std::sync::Arc<crate::api::PxClient>,
+    op: BatchOp,
+    vmids: &[u32],
+    config: &crate::config::ProfileConfig,
+    strict: bool,
+) -> Result<(Value, i32)> {
+    execute_batch_op_with_policy(client, op, vmids, config, strict, BatchPolicy::Full).await
+}
+
+/// Canary pilot slice size: ceil(N × percent / 100), clamped to [1, N].
+pub fn canary_pilot_count(n: usize, percent: u8) -> usize {
+    std::cmp::min(n, std::cmp::max(1, (n * usize::from(percent) + 99) / 100))
+}
+
+pub async fn execute_batch_op_with_policy(
+    client: &std::sync::Arc<crate::api::PxClient>,
+    op: BatchOp,
+    vmids: &[u32],
+    config: &crate::config::ProfileConfig,
+    strict: bool,
+    policy: BatchPolicy,
+) -> Result<(Value, i32)> {
+    match policy {
+        BatchPolicy::Full => execute_batch_op_full(client, op, vmids, config, strict).await,
+        BatchPolicy::Canary { percent } => {
+            let n = vmids.len();
+            let pilot_count = canary_pilot_count(n, percent);
+            let (pilot, rest) = vmids.split_at(pilot_count);
+            tracing::info!(
+                "canary policy: running {pilot_count}/{n} pilot targets first ({}%)",
+                percent
+            );
+            let (mut pilot_val, pilot_code) =
+                execute_batch_op_full(client, op, pilot, config, strict).await?;
+            let pilot_arr = if let Some(a) = pilot_val.as_array_mut() {
+                a
+            } else {
+                unreachable!("execute_batch_op_full always returns Array")
+            };
+            // Abort if any pilot target errored OR if the pilot as a whole
+            // produced a non-zero exit (covers HITL-pending exit=3, strict
+            // abort exit=1, partial-failure exit=2 — all mean "don't promote").
+            let pilot_has_error = pilot_arr
+                .iter()
+                .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("error"));
+            let pilot_failed = pilot_has_error || pilot_code >= 2;
+            if pilot_failed {
+                tracing::warn!(
+                    "canary pilot had failures — skipping {} remaining target(s)",
+                    rest.len()
+                );
+                let mut all = pilot_arr.clone();
+                for &vmid in rest {
+                    all.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "skipped",
+                        "reason": "canary pilot failed — remainder aborted"
+                    }));
+                }
+                return Ok((serde_json::Value::Array(all), 2));
+            }
+            if rest.is_empty() {
+                return Ok((pilot_val, pilot_code));
+            }
+            tracing::info!(
+                "canary pilot succeeded — promoting {} remaining target(s)",
+                rest.len()
+            );
+            let (rest_val, rest_code) =
+                execute_batch_op_full(client, op, rest, config, strict).await?;
+            let mut all = pilot_arr.clone();
+            if let Some(arr) = rest_val.as_array() {
+                all.extend(arr.iter().cloned());
+            }
+            let code = if pilot_code != 0 || rest_code != 0 {
+                std::cmp::max(pilot_code, rest_code)
+            } else {
+                0
+            };
+            Ok((serde_json::Value::Array(all), code))
+        }
+        BatchPolicy::Rolling { wave_size } => {
+            let mut all_results = Vec::new();
+            let mut overall_code = 0_i32;
+            for (wave_idx, wave) in vmids.chunks(wave_size).enumerate() {
+                tracing::info!(
+                    "rolling policy: wave {} — {} target(s)",
+                    wave_idx + 1,
+                    wave.len()
+                );
+                let (wave_val, wave_code) =
+                    execute_batch_op_full(client, op, wave, config, strict).await?;
+                let wave_arr = wave_val.into_array().unwrap_or_default();
+                let wave_failed = wave_arr
+                    .iter()
+                    .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("error"));
+                all_results.extend(wave_arr);
+                if wave_code != 0 {
+                    overall_code = std::cmp::max(overall_code, wave_code);
+                }
+                if wave_failed {
+                    // Use the actual end-of-wave offset, not (wave_idx+1)*wave_size
+                    // — the last wave may be shorter than wave_size.
+                    let remaining_start = wave_idx * wave_size + wave.len();
+                    tracing::warn!(
+                        "rolling wave {} failed — skipping {} remaining target(s)",
+                        wave_idx + 1,
+                        vmids.len().saturating_sub(remaining_start)
+                    );
+                    for &vmid in vmids.get(remaining_start..).unwrap_or_default() {
+                        all_results.push(serde_json::json!({
+                            "vmid": vmid,
+                            "status": "skipped",
+                            "reason": format!("rolling wave {} failed — remainder aborted", wave_idx + 1)
+                        }));
+                    }
+                    if overall_code == 0 {
+                        overall_code = 2;
+                    }
+                    break;
+                }
+            }
+            Ok((serde_json::Value::Array(all_results), overall_code))
+        }
+    }
+}
+
+// Helper: `serde_json::Value::into_array` doesn't exist; add a local extension.
+trait IntoArray {
+    fn into_array(self) -> Option<Vec<serde_json::Value>>;
+}
+impl IntoArray for serde_json::Value {
+    fn into_array(self) -> Option<Vec<serde_json::Value>> {
+        if let serde_json::Value::Array(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+async fn execute_batch_op_full(
     client: &std::sync::Arc<crate::api::PxClient>,
     op: BatchOp,
     vmids: &[u32],
@@ -263,9 +496,17 @@ pub async fn execute_batch_op(
     }
 
     while let Some(res) = join_set.join_next().await {
-        if let Ok((_node_name, Ok(guests))) = res {
-            for g in guests {
-                guest_map.insert(g.vmid, g);
+        match res {
+            Ok((_node_name, Ok(guests))) => {
+                for g in guests {
+                    guest_map.insert(g.vmid, g);
+                }
+            }
+            Ok((node_name, Err(e))) => {
+                tracing::warn!("get_guests({node_name}) failed during batch scan: {e:#}");
+            }
+            Err(join_err) => {
+                tracing::warn!("get_guests task panicked during batch scan: {join_err}");
             }
         }
     }
@@ -453,24 +694,26 @@ pub async fn execute_batch_op(
 
     if !strict {
         while let Some(res) = op_join_set.join_next().await {
-            if let Ok((vmid, api_res)) = res {
-                match api_res {
-                    Ok(upid) => {
-                        results.push(serde_json::json!({
-                            "vmid": vmid,
-                            "status": "success",
-                            "upid": upid
-                        }));
-                    }
-                    Err(e) => {
-                        warn!("Operation failed for guest {}: {}", vmid, e);
-                        results.push(serde_json::json!({
-                            "vmid": vmid,
-                            "status": "error",
-                            "message": e.to_string()
-                        }));
-                        has_failure = true;
-                    }
+            match res {
+                Ok((vmid, Ok(upid))) => {
+                    results.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "success",
+                        "upid": upid
+                    }));
+                }
+                Ok((vmid, Err(e))) => {
+                    warn!("Operation failed for guest {vmid}: {e}");
+                    results.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "error",
+                        "message": e.to_string()
+                    }));
+                    has_failure = true;
+                }
+                Err(join_err) => {
+                    warn!("Batch op task panicked: {join_err}");
+                    has_failure = true;
                 }
             }
         }
@@ -585,7 +828,10 @@ mod enforce_preflight_tests {
     /// are mounted — the tests use `Op::Stop` on Stopped guests so
     /// `assess_deep` makes no API calls. The client is just a structural
     /// dependency of `enforce_preflight`.
-    async fn idle_client() -> crate::api::PxClient {
+    ///
+    /// Returns `(client, server)` — callers must keep `_server` alive for the
+    /// duration of the test so the bound port stays open.
+    async fn idle_client() -> (crate::api::PxClient, wiremock::MockServer) {
         let server = wiremock::MockServer::start().await;
         let cfg = crate::config::ProfileConfig {
             url: server.uri(),
@@ -603,14 +849,12 @@ mod enforce_preflight_tests {
             ssh: None,
             pbs: None,
             alerts: None,
+            mcp_token: None,
         };
-        // Server must outlive the client's first call. We never call,
-        // so dropping `server` immediately is fine, but keep the binding
-        // alive for the duration of the test to be defensive.
-        std::mem::forget(server);
-        crate::api::PxClient::new(cfg, Some("fake-secret"))
+        let client = crate::api::PxClient::new(cfg, Some("fake-secret"))
             .await
-            .expect("client builds")
+            .expect("client builds");
+        (client, server)
     }
 
     /// max == Severe, force == false → bails. The error message must
@@ -619,7 +863,7 @@ mod enforce_preflight_tests {
     /// can map it to exit code 6.
     #[tokio::test]
     async fn enforce_preflight_bails_on_severe_without_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.lock = "backup".into(); // Locked → Severe regardless of op
         let res = enforce_preflight(&client, None, Op::Stop, &g, false).await;
@@ -650,7 +894,7 @@ mod enforce_preflight_tests {
     /// path the v0.1.10 audit found zero coverage for.
     #[tokio::test]
     async fn enforce_preflight_proceeds_on_severe_with_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.lock = "backup".into();
         enforce_preflight(&client, None, Op::Stop, &g, true)
@@ -663,7 +907,7 @@ mod enforce_preflight_tests {
     /// `Op::Stop` on a tagged-prod stopped guest yields `TaggedProd` (Warning).
     #[tokio::test]
     async fn enforce_preflight_proceeds_on_warning_without_force() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let mut g = stopped_qemu(100);
         g.tags = "production".into();
         enforce_preflight(&client, None, Op::Stop, &g, false)
@@ -676,7 +920,7 @@ mod enforce_preflight_tests {
     /// return Ok immediately without printing the risk header.
     #[tokio::test]
     async fn enforce_preflight_returns_ok_on_clean_guest() {
-        let client = idle_client().await;
+        let (client, _server) = idle_client().await;
         let g = stopped_qemu(100);
         enforce_preflight(&client, None, Op::Stop, &g, false)
             .await
@@ -684,5 +928,98 @@ mod enforce_preflight_tests {
         enforce_preflight(&client, None, Op::Stop, &g, true)
             .await
             .expect("clean guest + force must proceed");
+    }
+}
+
+#[cfg(test)]
+mod batch_policy_tests {
+    use super::BatchPolicy;
+
+    #[test]
+    fn parse_full() {
+        assert!(matches!(
+            BatchPolicy::parse("full").unwrap(),
+            BatchPolicy::Full
+        ));
+        assert!(matches!(
+            BatchPolicy::parse("FULL").unwrap(),
+            BatchPolicy::Full
+        ));
+    }
+
+    #[test]
+    fn parse_canary_default() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary").unwrap() else {
+            panic!("expected Canary")
+        };
+        assert_eq!(percent, 5);
+    }
+
+    #[test]
+    fn parse_canary_custom() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary=20").unwrap() else {
+            panic!("expected Canary")
+        };
+        assert_eq!(percent, 20);
+    }
+
+    #[test]
+    fn parse_canary_100_is_valid() {
+        let BatchPolicy::Canary { percent } = BatchPolicy::parse("canary=100").unwrap() else {
+            panic!()
+        };
+        assert_eq!(percent, 100);
+    }
+
+    #[test]
+    fn parse_canary_0_is_rejected() {
+        assert!(BatchPolicy::parse("canary=0").is_err());
+    }
+
+    #[test]
+    fn parse_canary_101_is_rejected() {
+        assert!(BatchPolicy::parse("canary=101").is_err());
+    }
+
+    #[test]
+    fn parse_rolling_default() {
+        let BatchPolicy::Rolling { wave_size } = BatchPolicy::parse("rolling").unwrap() else {
+            panic!("expected Rolling")
+        };
+        assert_eq!(wave_size, 10);
+    }
+
+    #[test]
+    fn parse_rolling_custom() {
+        let BatchPolicy::Rolling { wave_size } = BatchPolicy::parse("rolling=25").unwrap() else {
+            panic!()
+        };
+        assert_eq!(wave_size, 25);
+    }
+
+    #[test]
+    fn parse_rolling_zero_is_rejected() {
+        assert!(BatchPolicy::parse("rolling=0").is_err());
+    }
+
+    #[test]
+    fn parse_unknown_is_rejected() {
+        assert!(BatchPolicy::parse("random").is_err());
+        assert!(BatchPolicy::parse("canary=abc").is_err());
+    }
+
+    /// Canary pilot slice sizing: ceil(N * percent / 100).
+    /// With 20 targets and 5%, ceil(20 * 5 / 100) = ceil(1) = 1.
+    /// With 20 targets and 10%, ceil(20 * 10 / 100) = 2.
+    /// With 3 targets and 5%, ceil(3 * 5 / 100) = ceil(0.15) = 1 (minimum 1).
+    #[test]
+    fn canary_pilot_count_formula() {
+        use super::canary_pilot_count;
+        assert_eq!(canary_pilot_count(20, 5), 1);
+        assert_eq!(canary_pilot_count(20, 10), 2);
+        // Minimum 1 even when percent rounds down to 0 of N.
+        assert_eq!(canary_pilot_count(3, 5), 1);
+        // 100% should equal all N.
+        assert_eq!(canary_pilot_count(7, 100), 7);
     }
 }

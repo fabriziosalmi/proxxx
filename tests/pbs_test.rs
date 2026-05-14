@@ -28,7 +28,7 @@ mod tests {
             url: server.uri(),
             user: "proxxx@pbs".into(),
             token_id: "reader".into(),
-            token_secret: Some("s3cret".into()),
+            token_secret: Some(zeroize::Zeroizing::new("s3cret".into())),
             token_secret_file: None,
             verify_tls: false,
             rate_limit: Some(100),

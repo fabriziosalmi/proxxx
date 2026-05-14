@@ -16,7 +16,7 @@ mod tests {
         // If someone adds a tool, this test forces them to update the count
         assert_eq!(
             TOOLS.len(),
-            10,
+            22,
             "Tool count changed! Update this test if intentional."
         );
     }
@@ -112,9 +112,16 @@ mod tests {
     fn test_checksum_is_deterministic() {
         let hash1 = registry_checksum();
         let hash2 = registry_checksum();
+        // SHA-256 of registry_json().to_string() — stable across builds.
+        // If this assertion fails, a tool definition changed; update this
+        // constant AND record the reason in the commit message.
+        const EXPECTED: &str = "2fc2a8985760ad37ec4562b5560dead5eec16df78ac359a9f8e75cf443d08be6";
         assert_eq!(hash1, hash2, "Checksum must be deterministic across calls");
-        assert!(!hash1.is_empty());
-        assert_eq!(hash1.len(), 16, "Checksum should be 16 hex chars");
+        assert_eq!(
+            hash1, EXPECTED,
+            "Tool registry changed — update EXPECTED if intentional"
+        );
+        assert_eq!(hash1.len(), 64, "Checksum should be 64 hex chars (SHA-256)");
     }
 
     #[test]

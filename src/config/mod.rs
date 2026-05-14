@@ -9,9 +9,9 @@ pub struct ProfileConfig {
     #[serde(default = "default_auth")]
     pub auth: String,
     pub token_id: Option<String>,
-    pub token_secret: Option<String>,
+    pub token_secret: Option<zeroize::Zeroizing<String>>,
     pub token_secret_file: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<zeroize::Zeroizing<String>>,
     #[serde(default)]
     pub verify_tls: bool,
     /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
@@ -30,6 +30,11 @@ pub struct ProfileConfig {
     pub pbs: Option<PbsConfig>,
     /// Alert rules (feature #8). Empty/missing = no alerting.
     pub alerts: Option<Vec<AlertRuleConfig>>,
+    /// Bearer token for the MCP HTTP transport. When set, all POST /mcp and
+    /// GET /mcp requests must carry `Authorization: Bearer <token>`. Leave
+    /// unset (the default) to run the HTTP server without auth — only do this
+    /// on a trusted network or behind a reverse proxy that enforces auth.
+    pub mcp_token: Option<String>,
 }
 
 /// One alert rule, declared in TOML.
@@ -108,7 +113,7 @@ pub struct PbsConfig {
     pub token_id: String,
     /// Token secret. Resolution order matches `PROXXX_PBS_TOKEN_SECRET`
     /// env, then `token_secret_file`, then OS keychain.
-    pub token_secret: Option<String>,
+    pub token_secret: Option<zeroize::Zeroizing<String>>,
     pub token_secret_file: Option<String>,
     /// TLS verification. Default true — PBS in homelabs often uses
     /// self-signed certs but we never silently disable verification.
@@ -194,7 +199,7 @@ impl PbsConfig {
         }
         if let Some(ref s) = self.token_secret {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.clone()));
+                return Ok(s.clone());
             }
         }
         if let Some(ref file_path) = self.token_secret_file {
@@ -618,7 +623,7 @@ impl ProfileConfig {
         // the two resolvers.
         if let Some(ref s) = self.token_secret {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.clone()));
+                return Ok(s.clone());
             }
         }
 
@@ -681,7 +686,7 @@ impl ProfileConfig {
 
         if let Some(ref pw) = self.password {
             if !pw.is_empty() {
-                return Ok(zeroize::Zeroizing::new(pw.clone()));
+                return Ok(pw.clone());
             }
         }
 
@@ -750,10 +755,7 @@ impl ConfigError {
     pub const EXIT_CODE: i32 = 3;
 }
 
-/// Load configuration from TOML file. Errors carry a typed
-/// [`ConfigError`] through anyhow so main.rs can map them to exit
-/// code `3` ("Configuration error") instead of the generic `1`.
-pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
+fn config_path() -> std::path::PathBuf {
     let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
@@ -761,8 +763,20 @@ pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
             p.push(".config/proxxx");
             p
         });
+    config_dir.join("config.toml")
+}
 
-    let config_path = config_dir.join("config.toml");
+/// Load configuration from TOML file. Errors carry a typed
+/// [`ConfigError`] through anyhow so main.rs can map them to exit
+/// code `3` ("Configuration error") instead of the generic `1`.
+///
+/// When `profile_name` is `None` the flat top-level keys are used
+/// (backwards-compatible with configs that pre-date named profiles).
+/// When `profile_name` is `Some("x")` the `[profiles.x]` table is
+/// used; if it does not exist an error is returned listing the known
+/// profile names so the user knows what to pass to `--profile`.
+pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
+    let config_path = config_path();
 
     if !config_path.exists() {
         return Err(ConfigError::NotFound { path: config_path }.into());
@@ -772,11 +786,68 @@ pub fn load_config(_profile_name: Option<&str>) -> Result<ProfileConfig> {
         path: config_path.clone(),
         source,
     })?;
-    let config: ProfileConfig = toml::from_str(&content).map_err(|source| ConfigError::Toml {
-        path: config_path,
+
+    let raw: toml::Value = toml::from_str(&content).map_err(|source| ConfigError::Toml {
+        path: config_path.clone(),
         source,
     })?;
-    Ok(config)
+
+    let profile_value: toml::Value = if let Some(name) = profile_name {
+        raw.get("profiles")
+            .and_then(|p| p.get(name))
+            .cloned()
+            .ok_or_else(|| {
+                let known = raw
+                    .get("profiles")
+                    .and_then(|p| p.as_table())
+                    .map(|t| t.keys().cloned().collect::<Vec<_>>().join(", "))
+                    .unwrap_or_else(|| "(none defined)".to_string());
+                anyhow::anyhow!(
+                    "Profile '{}' not found in config. Known profiles: {}",
+                    name,
+                    known,
+                )
+            })?
+    } else {
+        // Flat top-level config (backwards compat). Strip the [profiles]
+        // table before deserializing so unknown-field errors don't fire
+        // on parsers that use deny_unknown_fields in the future.
+        let mut v = raw;
+        if let Some(t) = v.as_table_mut() {
+            t.remove("profiles");
+        }
+        v
+    };
+
+    profile_value.try_into().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse{} profile from {}: {}",
+            profile_name.map_or(String::new(), |n| format!(" '{n}'")),
+            config_path.display(),
+            e,
+        )
+    })
+}
+
+/// Return the names of all named profiles in the config file.
+/// The flat top-level config (backwards-compat default) is not included.
+pub fn list_profiles() -> Result<Vec<String>> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let raw: toml::Value = toml::from_str(&content)?;
+    let names = raw
+        .get("profiles")
+        .and_then(|p| p.as_table())
+        .map(|t| {
+            let mut v: Vec<String> = t.keys().cloned().collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
+    Ok(names)
 }
 
 fn dirs_fallback() -> std::path::PathBuf {

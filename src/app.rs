@@ -114,9 +114,14 @@ pub struct AppState {
 
     /// Per-node errors from the last guest fetch cycle. Non-empty when
     /// one or more nodes denied access (403) or were unreachable. Cleared
-    /// on each new GuestsLoaded so stale errors don't linger after a
+    /// on each new `GuestsLoaded` so stale errors don't linger after a
     /// token rotation.
     pub guests_fetch_errors: Vec<String>,
+
+    /// Sorted list of named profiles from config. Populated at TUI
+    /// startup; used by the `P` keybinding to open the profile picker.
+    /// Empty when no `[profiles.NAME]` sections exist.
+    pub available_profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -149,6 +154,12 @@ pub enum AppMode {
     /// shell. The reducer never sees those keys.
     SshSession {
         vmid: u32,
+    },
+    /// Profile picker overlay. `profiles` is the sorted list of named
+    /// profiles from config; `selected` is the cursor row.
+    ProfilePicker {
+        profiles: Vec<String>,
+        selected: usize,
     },
 }
 
@@ -221,6 +232,12 @@ pub enum Action {
     Quit,
     Back,
     NavigateDown,
+    /// Open the profile picker overlay.
+    OpenProfilePicker {
+        profiles: Vec<String>,
+    },
+    /// Confirm the highlighted profile in the picker.
+    ConfirmProfileSwitch,
     NavigateUp,
     Select,
     SwitchView(View),
@@ -516,6 +533,7 @@ impl Default for AppState {
             hw_guest_configs: std::collections::HashMap::new(),
             hw_loading: false,
             guests_fetch_errors: Vec::new(),
+            available_profiles: Vec::new(),
         }
     }
 }
@@ -679,6 +697,20 @@ fn guest_block_reason(state: &AppState, vmid: u32, op_label: &str) -> Option<Str
 pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
     match action {
         Action::Quit => return Some(SideEffect::Quit),
+        Action::OpenProfilePicker { profiles } => {
+            state.mode = AppMode::ProfilePicker {
+                profiles,
+                selected: 0,
+            };
+        }
+        Action::ConfirmProfileSwitch => {
+            if let AppMode::ProfilePicker { profiles, selected } = &state.mode {
+                if let Some(name) = profiles.get(*selected).cloned() {
+                    return Some(SideEffect::SwitchProfile(name));
+                }
+            }
+            state.mode = AppMode::Normal;
+        }
         Action::Back => {
             if !matches!(state.mode, AppMode::Normal) {
                 state.mode = AppMode::Normal;
@@ -689,13 +721,23 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             }
         }
         Action::NavigateDown => {
-            let max = item_count(state);
-            if max > 0 && state.selected_index < max - 1 {
-                state.selected_index += 1;
+            if let AppMode::ProfilePicker { profiles, selected } = &mut state.mode {
+                if *selected + 1 < profiles.len() {
+                    *selected += 1;
+                }
+            } else {
+                let max = item_count(state);
+                if max > 0 && state.selected_index < max - 1 {
+                    state.selected_index += 1;
+                }
             }
         }
         Action::NavigateUp => {
-            if state.selected_index > 0 {
+            if let AppMode::ProfilePicker { selected, .. } = &mut state.mode {
+                if *selected > 0 {
+                    *selected -= 1;
+                }
+            } else if state.selected_index > 0 {
                 state.selected_index -= 1;
             }
         }
@@ -1720,6 +1762,11 @@ pub enum SideEffect {
         disk: String,
         size: String,
     },
+
+    /// Tear down the current TUI session and restart with `profile`.
+    /// The TUI run() loop returns `Ok(Some(profile))` to main.rs, which
+    /// re-enters run() with the new profile — zero binary restart.
+    SwitchProfile(String),
 }
 
 fn item_count(state: &AppState) -> usize {

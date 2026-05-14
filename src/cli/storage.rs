@@ -363,6 +363,8 @@ pub enum AplinfoCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PbsCommand {
+    /// Verify PBS connectivity and authentication. Prints PBS version on success.
+    Ping,
     /// List datastores on the configured PBS server.
     Datastores,
     /// List snapshots in a datastore. Optional filters by guest type/id.
@@ -1041,6 +1043,19 @@ pub async fn execute_pbs(
     })?;
 
     match action {
+        PbsCommand::Ping => {
+            let client = PbsClient::new(pbs_cfg, cli_secret).await?;
+            let v = client.version().await?;
+            Ok((
+                serde_json::json!({
+                    "ok": true,
+                    "version": v.version,
+                    "release": v.release,
+                    "repo_id": v.repo_id,
+                }),
+                0,
+            ))
+        }
         PbsCommand::Datastores => {
             let client = PbsClient::new(pbs_cfg, cli_secret).await?;
             let stores = client.list_datastores().await?;

@@ -106,6 +106,7 @@ impl RbacEnv {
             ssh: None,
             pbs: None,
             alerts: None,
+            mcp_token: None,
         };
         Ok(Arc::new(PxClient::new(cfg, Some(secret)).await?))
     }

@@ -5,7 +5,6 @@
 // `const TOOLS` is baked into the binary. Period.
 
 use serde::Serialize;
-use std::hash::{Hash, Hasher};
 
 // ── Closed Action Enum ──────────────────────────────────
 // No `Other(String)`. No dynamic variants. Exhaustive match enforced by compiler.
@@ -13,19 +12,34 @@ use std::hash::{Hash, Hasher};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAction {
-    ListNodes,
+    // ── Guest lifecycle ──────────────────────────────────
     ListGuests,
     GetGuestStatus,
     StartGuest,
     StopGuest,
     RestartGuest,
+    SuspendGuest,
+    ResumeGuest,
     DeleteGuest,
+    CloneGuest,
+    MigrateGuest,
+    // ── Snapshots ────────────────────────────────────────
     CreateSnapshot,
     ListSnapshots,
     DeleteSnapshot,
-    GetTaskLog,
+    // ── Nodes ────────────────────────────────────────────
+    ListNodes,
     GetNodeResources,
+    GetNodeStatus,
+    // ── Cluster ──────────────────────────────────────────
+    GetClusterStatus,
+    ListTasks,
+    GetTaskLog,
+    // ── Storage ──────────────────────────────────────────
     GetStoragePools,
+    // ── Backup / Replication ─────────────────────────────
+    ListBackupJobs,
+    GetReplicationStatus,
 }
 
 // ── Const Tool Definitions ──────────────────────────────
@@ -243,6 +257,196 @@ pub const TOOLS: &[ToolDef] = &[
         destructive: false,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
     },
+    // ── Previously in ToolAction but not registered ──────
+    ToolDef {
+        name: "list_snapshots",
+        description: "List all snapshots for a VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::ListSnapshots,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_task_log",
+        description: "Retrieve the log output of a Proxmox task by UPID",
+        params: &[
+            ParamDef {
+                name: "node",
+                description: "Node name where the task ran",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "upid",
+                description: "Task UPID string",
+                param_type: ParamType::Str,
+                required: true,
+            },
+        ],
+        action: ToolAction::GetTaskLog,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_node_resources",
+        description: "Get CPU, memory and status detail for a specific node",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetNodeResources,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    // ── New tools ─────────────────────────────────────────
+    ToolDef {
+        name: "suspend_guest",
+        description: "Suspend (pause) a running VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::SuspendGuest,
+        destructive: false,
+        timeout_secs: 60,
+    },
+    ToolDef {
+        name: "resume_guest",
+        description: "Resume a suspended VM or container",
+        params: &[ParamDef {
+            name: "guest_id",
+            description: "Guest VMID",
+            param_type: ParamType::Int,
+            required: true,
+        }],
+        action: ToolAction::ResumeGuest,
+        destructive: false,
+        timeout_secs: 60,
+    },
+    ToolDef {
+        name: "clone_guest",
+        description: "Clone a VM or container to a new ID",
+        params: &[
+            ParamDef {
+                name: "guest_id",
+                description: "Source VMID to clone",
+                param_type: ParamType::Int,
+                required: true,
+            },
+            ParamDef {
+                name: "newid",
+                description: "New VMID (0 = auto-assign next free)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "name",
+                description: "Name for the new guest",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "full",
+                description: "Full clone (true) vs linked clone (false, default)",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+        ],
+        action: ToolAction::CloneGuest,
+        destructive: true,
+        timeout_secs: 180,
+    },
+    ToolDef {
+        name: "migrate_guest",
+        description: "Live-migrate a VM or container to another node",
+        params: &[
+            ParamDef {
+                name: "guest_id",
+                description: "Guest VMID",
+                param_type: ParamType::Int,
+                required: true,
+            },
+            ParamDef {
+                name: "target_node",
+                description: "Destination node name",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "online",
+                description: "Live migration while guest is running (default true)",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+        ],
+        action: ToolAction::MigrateGuest,
+        destructive: true,
+        timeout_secs: 300,
+    },
+    ToolDef {
+        name: "get_cluster_status",
+        description: "Get cluster-wide status including quorum, nodes and services",
+        params: &[],
+        action: ToolAction::GetClusterStatus,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "list_tasks",
+        description: "List recent cluster tasks (running and completed)",
+        params: &[ParamDef {
+            name: "node",
+            description: "Filter by node (optional, omit for cluster-wide)",
+            param_type: ParamType::Str,
+            required: false,
+        }],
+        action: ToolAction::ListTasks,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_node_status",
+        description: "Get detailed status of a node (CPU, memory, disk, uptime, kernel)",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetNodeStatus,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "list_backup_jobs",
+        description: "List all configured backup (vzdump) jobs",
+        params: &[],
+        action: ToolAction::ListBackupJobs,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "get_replication_status",
+        description: "Get replication job status for a node",
+        params: &[ParamDef {
+            name: "node",
+            description: "Node name",
+            param_type: ParamType::Str,
+            required: true,
+        }],
+        action: ToolAction::GetReplicationStatus,
+        destructive: false,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
 ];
 
 /// Serialize the entire tool registry to JSON (for `proxxx mcp tools --json`)
@@ -277,15 +481,76 @@ pub fn registry_json() -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
 
-/// SHA-256 checksum of the serialized tool registry (for audit verification)
+/// Build the MCP `tools/list` response array.
+///
+/// Each entry follows the MCP 2025-03-26 spec shape:
+/// ```json
+/// {
+///   "name": "...",
+///   "description": "...",
+///   "inputSchema": {
+///     "type": "object",
+///     "properties": { "param": { "type": "...", "description": "..." } },
+///     "required": ["param"]
+///   }
+/// }
+/// ```
+/// The `destructive` and `timeout_secs` fields are included as
+/// extensions (prefixed `x_proxxx_`) so spec-conforming clients
+/// ignore them and proxxx-aware clients can surface the metadata.
+#[must_use]
+pub fn tools_list_schema() -> serde_json::Value {
+    let tools: Vec<serde_json::Value> = TOOLS
+        .iter()
+        .map(|t| {
+            let mut properties = serde_json::Map::new();
+            let mut required: Vec<serde_json::Value> = Vec::new();
+            for p in t.params {
+                let json_type = match p.param_type {
+                    ParamType::Str => "string",
+                    ParamType::Int => "integer",
+                    ParamType::Bool => "boolean",
+                };
+                properties.insert(
+                    p.name.to_string(),
+                    serde_json::json!({
+                        "type": json_type,
+                        "description": p.description,
+                    }),
+                );
+                if p.required {
+                    required.push(serde_json::Value::String(p.name.to_string()));
+                }
+            }
+            let mut input_schema = serde_json::json!({
+                "type": "object",
+                "properties": properties,
+            });
+            if !required.is_empty() {
+                input_schema["required"] = serde_json::Value::Array(required);
+            }
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": input_schema,
+                "x_proxxx_destructive": t.destructive,
+                "x_proxxx_timeout_secs": t.timeout_secs,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(tools)
+}
+
+/// SHA-256 checksum of the serialized tool registry (for audit verification).
+///
+/// The returned string is 64 lowercase hex characters — a real SHA-256 digest
+/// of the JSON serialization of `registry_json()`. Stable across builds for
+/// the same registry contents; changes whenever a tool name, description,
+/// parameter, or flag changes.
 #[must_use]
 pub fn registry_checksum() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    // clippy::collection_is_never_read fires here even though we hash
-    // it on the next line — the lint can't see through the trait call.
-    #[allow(clippy::collection_is_never_read)]
+    use sha2::{Digest, Sha256};
     let json = registry_json().to_string();
-    let mut hasher = DefaultHasher::new();
-    json.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(json.as_bytes());
+    format!("{digest:x}")
 }

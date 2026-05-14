@@ -146,6 +146,35 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
     f.render_widget(p, modal_area);
 }
 
+/// Profile picker overlay. Shows a scrollable list of named profiles;
+/// the highlighted row (selected) is rendered in reverse video.
+/// `j`/`k` navigate, `Enter` confirms, `Esc`/`q` dismisses.
+pub fn draw_profile_picker(f: &mut Frame, area: Rect, profiles: &[String], selected: usize) {
+    let modal_area = centered_rect(40, 50, area);
+    f.render_widget(Clear, modal_area);
+
+    let lines: Vec<Line> = profiles
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let style = if i == selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(format!("  {name}  "), style))
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(" Switch profile (Enter=confirm Esc=cancel) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::ACCENT));
+
+    let p = Paragraph::new(lines).block(block);
+    f.render_widget(p, modal_area);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)

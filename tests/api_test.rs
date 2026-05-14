@@ -50,6 +50,7 @@ mod tests {
             ssh: None,
             pbs: None,
             alerts: None,
+            mcp_token: None,
         };
         PxClient::new(cfg, Some("fake-secret"))
             .await

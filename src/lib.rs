@@ -24,6 +24,7 @@ pub mod config;
 pub mod handoff;
 pub mod hitl;
 pub mod mcp;
+pub mod metrics;
 pub mod pbs;
 pub mod ssh;
 pub mod tui;
