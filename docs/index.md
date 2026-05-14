@@ -2,7 +2,6 @@
 layout: home
 
 hero:
-  name: proxxx
   text: Terminal cockpit for Proxmox VE & PBS.
   tagline: A Rust TUI and CLI that talks to real Proxmox clusters. REST against PVE and PBS, SSH for the rest. No agent on the cluster.
   # Animated SVG slideshow mirroring the README hero (assets/demo.svg).
@@ -15,10 +14,10 @@ hero:
     alt: proxxx animated demo — a destructive command refused by the pre-flight risk gate, approved via Telegram HITL, then executed
   actions:
     - theme: brand
-      text: Get started
+      text: Install in 60 s
       link: /guide/installation
     - theme: alt
-      text: Quick start
+      text: 5-min quickstart
       link: /guide/quick-start
     - theme: alt
       text: GitHub
@@ -32,7 +31,7 @@ features:
   - title: Six-stage commit gate, no skip flags
     details: cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, the full test suite, 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
   - title: Pre-flight risk gate plus HITL
-    details: 11 risk variants — running, locked, HA-managed, tagged prod, listening on service, no recent backup — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy.
+    details: 11 risk variants — running, long-uptime, locked, HA-managed, tagged prod, active net traffic, listening on service, many snapshots, backup age warning, no backup found, deep-check skipped — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy.
 ---
 
 <script setup>
@@ -95,7 +94,7 @@ onMounted(() => {
 
 <div class="status-row">
   <span><span class="ok">●</span> <strong>main</strong> · gate green</span>
-  <span><strong>v0.1.7</strong></span>
+  <span><strong>v0.1.26</strong></span>
   <span><strong>full mutation lifecycle</strong> · LXC + cluster + QEMU + QGA</span>
   <span><strong>0</strong> system deps · rustls only</span>
   <span><strong>MIT</strong></span>
