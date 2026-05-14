@@ -44,6 +44,17 @@ use crate::api::types::{Guest, Node, StoragePool};
 const SCHEMA_VERSION: u32 = 2;
 
 fn open_db(path: &Path) -> anyhow::Result<Connection> {
+    // Ensure the parent directory exists before SQLite tries to open the file.
+    // Without this, SQLite returns error code 14 ("unable to open database file")
+    // with no indication of the real cause (missing directory vs permissions).
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot create cache directory {}: {e} — check permissions",
+                parent.display()
+            )
+        })?;
+    }
     let conn = Connection::open(path)?;
 
     // — `auto_vacuum` is sticky: persisted in the DB header,
@@ -205,7 +216,6 @@ fn init_db(conn: &Connection) -> anyhow::Result<()> {
 }
 
 pub fn load_state(profile_name: Option<&str>) -> anyhow::Result<ClusterStateCache> {
-    ensure_cache_dir()?;
     let path = get_db_path(profile_name);
     let conn = open_db(&path)?;
     init_db(&conn)?;
@@ -245,7 +255,6 @@ pub fn save_state(
     guests: &[Guest],
     storage: &[StoragePool],
 ) -> anyhow::Result<()> {
-    ensure_cache_dir()?;
     let path = get_db_path(profile_name);
     let mut conn = open_db(&path)?;
     init_db(&conn)?;
