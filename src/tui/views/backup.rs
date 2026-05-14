@@ -36,13 +36,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let header = Row::new(vec![
-        "VMID",
-        "NAME",
-        "NODE",
-        "LAST OK",
-        "DURATION",
-        "FAILURES (30D)",
-        "HEALTH",
+        "vmid",
+        "name",
+        "node",
+        "last ok",
+        "duration",
+        "fails (30d)",
+        "health",
     ])
     .style(Theme::header())
     .height(1);
@@ -98,20 +98,20 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
         let (health_str, health_style) = if last_ok_time == 0 {
             (
-                "UNPROTECTED".to_string(),
+                "unprotected".to_string(),
                 Style::default()
                     .fg(Theme::DANGER)
                     .add_modifier(Modifier::BOLD),
             )
         } else if days_since_ok > 7 {
             (
-                format!("STALE ({days_since_ok}d)"),
+                format!("stale ({days_since_ok}d)"),
                 Style::default().fg(Theme::WARNING),
             )
         } else if failures > 0 {
-            ("DEGRADED".to_string(), Style::default().fg(Theme::WARNING))
+            ("degraded".to_string(), Style::default().fg(Theme::WARNING))
         } else {
-            ("HEALTHY".to_string(), Style::default().fg(Theme::SUCCESS))
+            ("healthy".to_string(), Style::default().fg(Theme::SUCCESS))
         };
 
         let last_ok_str = if last_ok_time > 0 {

@@ -28,15 +28,15 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests
 
     // Properties to compare
     let properties = vec![
-        "VMID",
-        "Name",
-        "Type",
-        "Status",
-        "Node",
-        "CPU Cores",
-        "RAM",
-        "Disk",
-        "Tags",
+        "vmid",
+        "name",
+        "type",
+        "status",
+        "node",
+        "cpu cores",
+        "ram",
+        "disk",
+        "tags",
     ];
 
     let mut rows = Vec::new();
@@ -49,15 +49,15 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests
 
         for guest in &selected_guests {
             let val = match prop {
-                "VMID" => guest.vmid.to_string(),
-                "Name" => sanitize_display(&guest.name).into_owned(),
-                "Type" => format!("{:?}", guest.guest_type),
-                "Status" => format!("{:?}", guest.status),
-                "Node" => sanitize_display(&guest.node).into_owned(),
-                "CPU Cores" => guest.cpus.to_string(),
-                "RAM" => format_bytes(guest.maxmem),
-                "Disk" => format_bytes(guest.maxdisk),
-                "Tags" => sanitize_display(&guest.tags).into_owned(),
+                "vmid" => guest.vmid.to_string(),
+                "name" => sanitize_display(&guest.name).into_owned(),
+                "type" => format!("{:?}", guest.guest_type),
+                "status" => format!("{:?}", guest.status),
+                "node" => sanitize_display(&guest.node).into_owned(),
+                "cpu cores" => guest.cpus.to_string(),
+                "ram" => format_bytes(guest.maxmem),
+                "disk" => format_bytes(guest.maxdisk),
+                "tags" => sanitize_display(&guest.tags).into_owned(),
                 _ => String::new(),
             };
 

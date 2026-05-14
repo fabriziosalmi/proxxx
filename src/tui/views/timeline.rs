@@ -138,7 +138,7 @@ fn draw_diff_table(f: &mut Frame, area: Rect, state: &AppState) {
                     Span::raw(format!("{}", c.vmid)),
                     Span::raw(c.name.clone()),
                     Span::raw(c.node.clone()),
-                    Span::styled("CREATED", Style::default().fg(Theme::SUCCESS)),
+                    Span::styled("created", Style::default().fg(Theme::SUCCESS)),
                 ]));
             }
             (Some(p), None) => {
@@ -153,7 +153,7 @@ fn draw_diff_table(f: &mut Frame, area: Rect, state: &AppState) {
                     Span::raw(format!("{}", p.vmid)),
                     Span::raw(p.name.clone()),
                     Span::raw(p.node.clone()),
-                    Span::styled("DELETED", Style::default().fg(Theme::DANGER)),
+                    Span::styled("deleted", Style::default().fg(Theme::DANGER)),
                 ]));
             }
             (Some(p), Some(c)) => {

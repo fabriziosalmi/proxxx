@@ -138,7 +138,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
     let visible_guests = &visible_list[window];
 
     let header = Row::new(vec![
-        "", "VMID", "NAME", "TYPE", "STATUS", "CPU", "RAM", "DISK", "NODE", "TAGS",
+        "", "vmid", "name", "type", "status", "cpu", "ram", "disk", "node", "tags",
     ])
     .style(Theme::header())
     .height(1);

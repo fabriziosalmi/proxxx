@@ -7,7 +7,7 @@ expression: dump
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ┌ Guests ──────────────────────────────────────────────────────────────────────────────────────────┐
-│    VMID   NAME                 TYPE STATUS    CPU   RAM   DISK     NODE       TAGS               │
+│    vmid   name                 type status    cpu   ram   disk     node       tags               │
 │    100    vm-prod-01           VM   running   5%    25%   16.0G    pve1       -                  │
 │    101    vm-prod-02           VM   running   5%    25%   16.0G    pve1       -                  │
 │    200    ct-staging           LXC  stopped   -     -     -        pve2       -                  │

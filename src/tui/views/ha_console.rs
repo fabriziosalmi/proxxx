@@ -61,14 +61,14 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
     let quorate = state.cluster_entries.iter().any(|e| e.quorate);
     let quorate_span = if quorate {
         Span::styled(
-            "QUORATE",
+            "quorate",
             Style::default()
                 .fg(Theme::SUCCESS)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
-            "NO QUORUM",
+            "no quorum",
             Style::default()
                 .fg(Theme::DANGER)
                 .add_modifier(Modifier::BOLD),
@@ -217,7 +217,7 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
                     }
                     FailoverPreview::Stuck {
                         restricted: true, ..
-                    } => "STUCK (restricted)".to_string(),
+                    } => "stuck (restricted)".to_string(),
                     FailoverPreview::Stuck {
                         restricted: false,
                         chosen: Some(n),
@@ -225,7 +225,7 @@ fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
                     FailoverPreview::Stuck {
                         restricted: false,
                         chosen: None,
-                    } => "STUCK (cluster down)".to_string(),
+                    } => "stuck (cluster down)".to_string(),
                     FailoverPreview::NotAffected => "—".to_string(),
                 }
             };
@@ -274,19 +274,19 @@ fn draw_replication(f: &mut Frame, area: Rect, state: &AppState) {
     let summary_health = summarise_replication_health(&state.repl_status, now, period_secs);
     let summary_label = match summary_health {
         ReplicationHealth::Healthy => Span::styled(
-            "HEALTHY",
+            "healthy",
             Style::default()
                 .fg(Theme::SUCCESS)
                 .add_modifier(Modifier::BOLD),
         ),
         ReplicationHealth::Stale => Span::styled(
-            "STALE",
+            "stale",
             Style::default()
                 .fg(Theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ),
         ReplicationHealth::Failing => Span::styled(
-            "FAILING",
+            "failing",
             Style::default()
                 .fg(Theme::DANGER)
                 .add_modifier(Modifier::BOLD),

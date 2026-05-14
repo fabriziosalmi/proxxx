@@ -165,7 +165,7 @@ fn draw_conflicts(f: &mut Frame, area: Rect, state: &AppState) {
             PciConflict::DirectShared { address, vmids } => {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        "DIRECT  ",
+                        "direct  ",
                         Style::default()
                             .fg(Theme::DANGER)
                             .add_modifier(Modifier::BOLD),

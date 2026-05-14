@@ -1,13 +1,13 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 268
+assertion_line: 361
 expression: dump
 ---
 ┌ Cluster-wide Config Grep (Enter to search, Esc to exit) ─────────────────────────────────────────┐
 │ Query:                                                                                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ 0 Matches ───────────────────────────────────────────────────────────────────────────────────────┐
-│VMID      Name                  Key                   Value                                       │
+│vmid      name                  key                   value                                       │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

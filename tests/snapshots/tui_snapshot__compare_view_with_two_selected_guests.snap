@@ -1,20 +1,20 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 259
+assertion_line: 352
 expression: dump
 ---
 ┌ Config Drift Detector (2 guests) ────────────────────────────────────────────────────────────────┐
 │Property        100 (vm-prod)                             101 (vm-staging)                        │
 │                                                                                                  │
-│VMID            100                                       101                                     │
-│Name            vm-prod                                   vm-staging                              │
-│Type            Qemu                                      Qemu                                    │
-│Status          Running                                   Running                                 │
-│Node            pve1                                      pve1                                    │
-│CPU Cores       2                                         2                                       │
-│RAM             2.0G                                      2.0G                                    │
-│Disk            16.0G                                     16.0G                                   │
-│Tags                                                                                              │
+│vmid            100                                       101                                     │
+│name            vm-prod                                   vm-staging                              │
+│type            Qemu                                      Qemu                                    │
+│status          Running                                   Running                                 │
+│node            pve1                                      pve1                                    │
+│cpu cores       2                                         2                                       │
+│ram             2.0G                                      2.0G                                    │
+│disk            16.0G                                     16.0G                                   │
+│tags                                                                                              │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

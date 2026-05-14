@@ -75,7 +75,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
             ],
         )
         .header(
-            Row::new(vec!["VMID", "Name", "Key", "Value"])
+            Row::new(vec!["vmid", "name", "key", "value"])
                 .style(
                     Style::default()
                         .fg(Theme::TEXT)

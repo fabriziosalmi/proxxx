@@ -59,15 +59,15 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
 
     let header = Row::new(vec![
         "",
-        "NODE",
-        "STATUS",
-        "CPU",
-        "CPU USAGE",
-        "RAM",
-        "RAM USAGE",
-        "DISK",
-        "UPTIME",
-        "GUESTS",
+        "node",
+        "status",
+        "cpu",
+        "cpu usage",
+        "ram",
+        "ram usage",
+        "disk",
+        "uptime",
+        "guests",
     ])
     .style(Theme::header())
     .height(1);

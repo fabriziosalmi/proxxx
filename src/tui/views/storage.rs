@@ -58,7 +58,7 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
     let visible_storage = &state.storage[window];
 
     let header = Row::new(vec![
-        "", "STORAGE", "TYPE", "ACTIVE", "USED", "USAGE", "TOTAL", "TREND", "ETA", "CONTENT",
+        "", "storage", "type", "active", "used", "usage", "total", "trend", "eta", "content",
     ])
     .style(Theme::header())
     .height(1);

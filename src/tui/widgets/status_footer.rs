@@ -72,16 +72,16 @@ pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
 /// at all. Centralised here so every view shows the same.
 const fn mode_label_for(mode: &AppMode) -> &'static str {
     match mode {
-        AppMode::Normal => "NORMAL",
-        AppMode::Search => "SEARCH",
-        AppMode::Command => "COMMAND",
-        AppMode::InputTag => "INPUT TAG",
-        AppMode::InputBroadcast => "BROADCAST",
-        AppMode::ConfigGrep => "CONFIG GREP",
-        AppMode::Confirm { .. } => "CONFIRM",
-        AppMode::SshSession { .. } => "SSH",
-        AppMode::Help => "HELP",
-        AppMode::ProfilePicker { .. } => "PROFILE",
+        AppMode::Normal => "normal",
+        AppMode::Search => "search",
+        AppMode::Command => "command",
+        AppMode::InputTag => "input tag",
+        AppMode::InputBroadcast => "broadcast",
+        AppMode::ConfigGrep => "config grep",
+        AppMode::Confirm { .. } => "confirm",
+        AppMode::SshSession { .. } => "ssh",
+        AppMode::Help => "help",
+        AppMode::ProfilePicker { .. } => "profile",
     }
 }
 
