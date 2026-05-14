@@ -309,9 +309,13 @@ pub enum Command {
         #[arg(long, short)]
         target: Option<String>,
 
-        /// Wait until condition is met (e.g. status=running, usage<70%)
+        /// Wait until condition is met (e.g. status=running, usage=<70%, usage=>80%)
         #[arg(long, short)]
         until: Option<String>,
+
+        /// Abort watching after this many seconds (default 300)
+        #[arg(long, default_value = "300")]
+        timeout: u64,
 
         /// Channel to notify when condition is met (e.g. telegram)
         #[arg(long, short)]
@@ -1246,23 +1250,41 @@ pub async fn execute(
             since,
             target,
             until,
+            timeout,
             notify,
         } => {
             if let Some(target) = target {
                 let until = until.unwrap_or_else(|| "status=running".to_string());
                 use crate::api::ProxmoxGateway;
-                use tokio::time::{sleep, Duration};
+                use tokio::time::{sleep, Duration, Instant};
 
-                let (key, value) = if let Some((k, v)) = until.split_once('=') {
+                // Parse `key=<comparator><value>`, e.g. `usage=<70%` or `status=running`.
+                let (key, raw_value) = if let Some((k, v)) = until.split_once('=') {
                     (k.trim().to_lowercase(), v.trim().to_lowercase())
                 } else {
-                    anyhow::bail!("Invalid condition format. Use key=value");
+                    anyhow::bail!(
+                        "Invalid condition format. Use key=value, key=<value or key=>value"
+                    );
+                };
+                // Split leading comparator from the numeric/string value.
+                let (comparator, value_str) = if raw_value.starts_with('<') {
+                    ('<', raw_value.trim_start_matches('<'))
+                } else if raw_value.starts_with('>') {
+                    ('>', raw_value.trim_start_matches('>'))
+                } else {
+                    ('=', raw_value.as_str())
                 };
 
                 let mut met = false;
-                tracing::info!("Watching {} until {}={}", target, key, value);
+                tracing::info!("Watching {} until {}={}", target, key, raw_value);
+                let deadline = Instant::now() + Duration::from_secs(timeout);
 
                 while !met {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "watch timed out after {timeout}s — condition not met: {until}"
+                        );
+                    }
                     sleep(Duration::from_secs(2)).await;
 
                     if target.starts_with("vm-") || target.chars().all(char::is_numeric) {
@@ -1284,7 +1306,7 @@ pub async fn execute(
                                             }
                                         };
 
-                                        if current_val == value {
+                                        if current_val == value_str {
                                             met = true;
                                         }
                                         break;
@@ -1309,14 +1331,13 @@ pub async fn execute(
                                     if key == "usage" {
                                         let usage_pct =
                                             (pool.used as f64 / pool.total as f64) * 100.0;
-                                        let threshold: f64 = value.trim_end_matches('%').parse()?;
-                                        if value.starts_with('<') {
-                                            if usage_pct < threshold {
-                                                met = true;
-                                            }
-                                        } else if usage_pct > threshold {
-                                            met = true;
-                                        }
+                                        let threshold: f64 =
+                                            value_str.trim_end_matches('%').parse()?;
+                                        met = match comparator {
+                                            '<' => usage_pct < threshold,
+                                            '>' => usage_pct > threshold,
+                                            _ => (usage_pct - threshold).abs() < 0.01,
+                                        };
                                     } else {
                                         anyhow::bail!(
                                             "Unsupported condition key for storage: {key}"

@@ -51,7 +51,7 @@
 
 use proxxx::api::{ApiError, ProxmoxGateway, PxClient};
 use proxxx::config::ProfileConfig;
-use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::matchers::{body_string_contains, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 // ── Shared scaffolding ─────────────────────────────────────────────────
@@ -184,6 +184,9 @@ async fn operator_can_stop_owned_vm() {
 
     Mock::given(method("POST"))
         .and(path("/api2/json/nodes/pve1/qemu/200/status/stop"))
+        // Verify the client actually sends the Authorization header so this
+        // test catches RBAC regressions, not just mock-level wiring.
+        .and(header_exists("authorization"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": "UPID:pve1:00000001:00000001:test:qmstop:200:operator@pve!rbac-test:"
         })))

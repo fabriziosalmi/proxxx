@@ -84,8 +84,10 @@ pub async fn find_guest_full(
 ///
 /// `interval` defaults to 1.5s — fast enough that a 10-second backup
 /// returns within ~12s, slow enough that a 5-minute disk migrate
-/// only generates ~200 polls. `timeout_secs = 0` means "no timeout"
-/// (poll forever).
+/// only generates ~200 polls. `timeout_secs = 0` uses the default cap
+/// of 3600 s (1 hour) — tasks that run longer should pass an explicit budget.
+const DEFAULT_TASK_TIMEOUT_SECS: u64 = 3600;
+
 pub async fn poll_task_until_done(
     client: &crate::api::PxClient,
     node: &str,
@@ -95,23 +97,22 @@ pub async fn poll_task_until_done(
     use crate::api::ProxmoxGateway;
     use std::time::Duration;
     let interval = Duration::from_millis(1500);
-    let deadline = if timeout_secs > 0 {
-        Some(tokio::time::Instant::now() + Duration::from_secs(timeout_secs))
+    let effective = if timeout_secs > 0 {
+        timeout_secs
     } else {
-        None
+        DEFAULT_TASK_TIMEOUT_SECS
     };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(effective);
     loop {
         let status = client.get_task_status(node, upid).await?;
         if status.is_done() {
             return Ok(status);
         }
-        if let Some(d) = deadline {
-            if tokio::time::Instant::now() >= d {
-                anyhow::bail!(
-                    "task {upid} did not complete within {timeout_secs}s (status: {})",
-                    status.status
-                );
-            }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "task {upid} did not complete within {effective}s (status: {})",
+                status.status
+            );
         }
         tokio::time::sleep(interval).await;
     }
@@ -339,6 +340,11 @@ pub async fn execute_batch_op(
     execute_batch_op_with_policy(client, op, vmids, config, strict, BatchPolicy::Full).await
 }
 
+/// Canary pilot slice size: ceil(N × percent / 100), clamped to [1, N].
+pub fn canary_pilot_count(n: usize, percent: u8) -> usize {
+    std::cmp::min(n, std::cmp::max(1, (n * usize::from(percent) + 99) / 100))
+}
+
 pub async fn execute_batch_op_with_policy(
     client: &std::sync::Arc<crate::api::PxClient>,
     op: BatchOp,
@@ -351,9 +357,7 @@ pub async fn execute_batch_op_with_policy(
         BatchPolicy::Full => execute_batch_op_full(client, op, vmids, config, strict).await,
         BatchPolicy::Canary { percent } => {
             let n = vmids.len();
-            // At least 1, at most N. Integer ceiling via (n * p + 99) / 100.
-            let pilot_count =
-                std::cmp::min(n, std::cmp::max(1, (n * usize::from(percent) + 99) / 100));
+            let pilot_count = canary_pilot_count(n, percent);
             let (pilot, rest) = vmids.split_at(pilot_count);
             tracing::info!(
                 "canary policy: running {pilot_count}/{n} pilot targets first ({}%)",
@@ -1010,25 +1014,12 @@ mod batch_policy_tests {
     /// With 3 targets and 5%, ceil(3 * 5 / 100) = ceil(0.15) = 1 (minimum 1).
     #[test]
     fn canary_pilot_count_formula() {
-        let n = 20_usize;
-        let percent = 5_usize;
-        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
-        assert_eq!(count, 1);
-
-        let percent = 10;
-        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
-        assert_eq!(count, 2);
-
+        use super::canary_pilot_count;
+        assert_eq!(canary_pilot_count(20, 5), 1);
+        assert_eq!(canary_pilot_count(20, 10), 2);
         // Minimum 1 even when percent rounds down to 0 of N.
-        let n = 3_usize;
-        let percent = 5;
-        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
-        assert_eq!(count, 1);
-
+        assert_eq!(canary_pilot_count(3, 5), 1);
         // 100% should equal all N.
-        let n = 7;
-        let percent = 100;
-        let count = std::cmp::min(n, std::cmp::max(1, (n * percent + 99) / 100));
-        assert_eq!(count, 7);
+        assert_eq!(canary_pilot_count(7, 100), 7);
     }
 }

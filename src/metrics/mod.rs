@@ -47,6 +47,7 @@ fn escape_label(v: &str) -> String {
     v.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 struct MetricWriter {
@@ -237,6 +238,7 @@ mod tests {
         assert_eq!(escape_label(r#"foo"bar"#), r#"foo\"bar"#);
         assert_eq!(escape_label("foo\\bar"), r"foo\\bar");
         assert_eq!(escape_label("foo\nbar"), r"foo\nbar");
+        assert_eq!(escape_label("foo\rbar"), r"foo\rbar");
         assert_eq!(escape_label("plain"), "plain");
     }
 

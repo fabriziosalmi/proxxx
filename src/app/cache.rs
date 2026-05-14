@@ -169,14 +169,27 @@ pub struct ClusterStateCache {
     pub timestamp: u64,
 }
 
-fn get_db_path(profile_name: Option<&str>) -> PathBuf {
+fn get_db_dir() -> PathBuf {
     let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("proxxx");
-    std::fs::create_dir_all(&path).ok();
+    path
+}
 
+fn get_db_path(profile_name: Option<&str>) -> PathBuf {
+    let mut path = get_db_dir();
     let profile = profile_name.unwrap_or("default");
     path.push(format!("{profile}_state.db"));
     path
+}
+
+fn ensure_cache_dir() -> anyhow::Result<()> {
+    let dir = get_db_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot create cache directory {}: {e} — check permissions",
+            dir.display()
+        )
+    })
 }
 
 fn init_db(conn: &Connection) -> anyhow::Result<()> {
@@ -192,6 +205,7 @@ fn init_db(conn: &Connection) -> anyhow::Result<()> {
 }
 
 pub fn load_state(profile_name: Option<&str>) -> anyhow::Result<ClusterStateCache> {
+    ensure_cache_dir()?;
     let path = get_db_path(profile_name);
     let conn = open_db(&path)?;
     init_db(&conn)?;
@@ -231,13 +245,14 @@ pub fn save_state(
     guests: &[Guest],
     storage: &[StoragePool],
 ) -> anyhow::Result<()> {
+    ensure_cache_dir()?;
     let path = get_db_path(profile_name);
     let mut conn = open_db(&path)?;
     init_db(&conn)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|e| anyhow::anyhow!("system clock is before UNIX epoch: {e}"))?
         .as_secs();
 
     let cache = ClusterStateCache {
@@ -715,7 +730,7 @@ mod concurrency_tests {
             .expect("read should not block");
         // The committed snapshot (timestamp=1) is visible. The
         // uncommitted one is not — that's correct WAL isolation.
-        assert!(count >= 1, "reader should see committed rows");
+        assert_eq!(count, 1, "reader should see exactly the one committed row");
 
         writer.execute("COMMIT", []).expect("commit");
 
