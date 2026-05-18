@@ -30,6 +30,19 @@ SemVer contract:
 - **MCP tool `create_guest`** (tool #23) — LLM-callable guest creation for both
   QEMU and LXC; node, type, name, memory, cores, storage, disk_size, template/iso,
   bridge. Registry SHA-256 updated; counter 22→23.
+- **Config hot-reload** — `SIGHUP` atomically swaps the live config in the
+  `alerts watch`, `mcp serve`, and `mcp serve-http` daemons. After `kill -HUP
+  $(pgrep proxxx)`, the next tick/request picks up new `[[alerts]]` rules,
+  `[[policies]]`, `[telegram]` structure, and `mcp_token` without restarting.
+  Fields baked into `PxClient` at startup (`url`, `user`, `token_id`,
+  `token_secret`) and Telegram bot credentials require a full restart. The
+  `ConfigHandle` (`Arc<RwLock<ProfileConfig>>`) is re-exported from
+  `crate::config` for downstream use.
+- **MCP schema type validation** — `dispatch_rpc` now validates every param
+  against its declared `ParamType` (Int/Bool/Str) and returns a clear error
+  (`"Parameter 'guest_id': expected integer, got \"abc\""`) rather than
+  silently misrouting the value.
+- **EU & compliance section** in README — NIS2/ISO 27001/GDPR alignment table.
 
 ## [0.1.27] — 2026-05-14
 

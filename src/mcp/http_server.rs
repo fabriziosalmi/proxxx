@@ -30,35 +30,33 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio_stream::StreamExt as _;
 
 use crate::api::PxClient;
-use crate::config::ProfileConfig;
+use crate::config::ConfigHandle;
 use crate::mcp::dispatch;
 
 /// Server state shared across handlers.
 #[derive(Clone)]
 struct McpState {
     client: Arc<PxClient>,
-    config: Arc<ProfileConfig>,
-    /// Pre-hashed bearer token for constant-time comparison, if configured.
-    token_hash: Option<[u8; 32]>,
+    config: ConfigHandle,
 }
 
 impl McpState {
-    fn new(client: Arc<PxClient>, config: Arc<ProfileConfig>) -> Self {
-        let token_hash = config.mcp_token.as_deref().map(sha256_bytes);
-        Self {
-            client,
-            config,
-            token_hash,
-        }
+    fn new(client: Arc<PxClient>, config: ConfigHandle) -> Self {
+        Self { client, config }
     }
 
     /// Returns `true` if the request carries a valid bearer token (or if no
     /// token is configured). Constant-time comparison via XOR fold prevents
     /// timing side-channels leaking token length or prefix.
-    fn auth_ok(&self, headers: &HeaderMap) -> bool {
-        let Some(expected_hash) = self.token_hash else {
+    ///
+    /// Reads `mcp_token` from the live config so a SIGHUP token rotation
+    /// takes effect on the next request without a restart.
+    async fn auth_ok(&self, headers: &HeaderMap) -> bool {
+        let expected = self.config.read().await.mcp_token.clone();
+        let Some(expected) = expected else {
             return true; // no token configured → open
         };
+        let expected_hash = sha256_bytes(&expected);
         let bearer = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -87,7 +85,7 @@ async fn post_mcp(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if !state.auth_ok(&headers) {
+    if !state.auth_ok(&headers).await {
         return (
             StatusCode::UNAUTHORIZED,
             [("WWW-Authenticate", "Bearer realm=\"proxxx-mcp\"")],
@@ -147,7 +145,7 @@ async fn handle_single(state: &McpState, req: &Value) -> Value {
 /// proxies and load balancers. Actual server-initiated notifications (e.g.
 /// task completion events) will be added in a future release.
 async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Response {
-    if !state.auth_ok(&headers) {
+    if !state.auth_ok(&headers).await {
         return (
             StatusCode::UNAUTHORIZED,
             [("WWW-Authenticate", "Bearer realm=\"proxxx-mcp\"")],
@@ -191,7 +189,7 @@ async fn health() -> Json<Value> {
 /// If `config.mcp_token` is set, all MCP endpoints require Bearer auth.
 pub async fn run_http_server(
     client: Arc<PxClient>,
-    config: Arc<ProfileConfig>,
+    config: ConfigHandle,
     bind: &str,
     port: u16,
 ) -> Result<()> {

@@ -463,7 +463,7 @@ pub enum ReplicationCommand {
 /// Feature #8 — alerts CLI dispatch.
 pub async fn execute_alerts(
     client: &Arc<crate::api::PxClient>,
-    config: &crate::config::ProfileConfig,
+    config: crate::config::ConfigHandle,
     profile: Option<&str>,
     action: AlertsCommand,
 ) -> Result<(Value, i32)> {
@@ -495,7 +495,7 @@ pub async fn execute_alerts(
 
     match action {
         AlertsCommand::Eval => {
-            let rules = config.alerts.clone().unwrap_or_default();
+            let rules = config.read().await.alerts.clone().unwrap_or_default();
             if rules.is_empty() {
                 return Ok((
                     serde_json::json!({"events": [], "warning": "no [[alerts]] rules configured"}),
@@ -517,37 +517,30 @@ pub async fn execute_alerts(
             ))
         }
         AlertsCommand::Watch { interval } => {
-            let rules = config.alerts.clone().unwrap_or_default();
-            if rules.is_empty() {
-                anyhow::bail!("no [[alerts]] rules configured — nothing to watch");
+            // Bail immediately if no rules are configured at startup.
+            // After that, an empty-rules reload is handled gracefully per-tick.
+            {
+                let initial_rules = config.read().await.alerts.clone().unwrap_or_default();
+                if initial_rules.is_empty() {
+                    anyhow::bail!("no [[alerts]] rules configured — nothing to watch");
+                }
             }
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
-            let tg = match config.telegram.as_ref() {
-                None => None,
-                Some(cfg) => Some(crate::hitl::telegram::TelegramGateway::from_config(cfg).await?),
+            // Telegram gateway is initialised once from the current config.
+            // Credential changes (bot_token) require a daemon restart; structural
+            // changes (chat_id, etc.) are picked up on the next tick via the
+            // per-tick rule re-read. This matches the documented hot-reload scope.
+            let tg = {
+                let snap = config.read().await;
+                match snap.telegram.as_ref() {
+                    None => None,
+                    Some(cfg) => {
+                        Some(crate::hitl::telegram::TelegramGateway::from_config(cfg).await?)
+                    }
+                }
             };
-
-            // Pre-parse routes once — invalid specs are reported then.
-            let parsed_routes: Vec<(crate::config::AlertRuleConfig, Vec<crate::alerts::Channel>)> =
-                rules
-                    .iter()
-                    .map(|r| {
-                        let chans: Vec<crate::alerts::Channel> = r
-                            .route
-                            .iter()
-                            .filter_map(|s| {
-                                let p = parse_route(s);
-                                if p.is_none() {
-                                    tracing::warn!("rule {}: ignoring unknown route {s:?}", r.name);
-                                }
-                                p
-                            })
-                            .collect();
-                        (r.clone(), chans)
-                    })
-                    .collect();
 
             let mut state = EngineState::default();
             // Cache schema v2 — persist the dedup window across daemon
@@ -570,11 +563,7 @@ pub async fn execute_alerts(
                     DedupCache::default()
                 }
             };
-            tracing::info!(
-                "alert daemon starting: {} rules, interval {}s",
-                rules.len(),
-                interval
-            );
+            tracing::info!("alert daemon starting: interval {}s", interval);
             // (macro audit) — graceful shutdown on
             // SIGTERM/SIGINT. The select! races the daemon's tick
             // against the signal handler; whichever fires first wins.
@@ -617,6 +606,41 @@ pub async fn execute_alerts(
                                 continue;
                             }
                         };
+
+                        // Re-read rules and routes from the live config on every tick.
+                        // A SIGHUP reload takes effect here — no restart required.
+                        let rules = config.read().await.alerts.clone().unwrap_or_default();
+                        if rules.is_empty() {
+                            tracing::info!(
+                                "alert daemon: no rules in current config — idle tick"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                            continue;
+                        }
+                        let parsed_routes: Vec<(
+                            crate::config::AlertRuleConfig,
+                            Vec<crate::alerts::Channel>,
+                        )> = rules
+                            .iter()
+                            .map(|r| {
+                                let chans: Vec<crate::alerts::Channel> = r
+                                    .route
+                                    .iter()
+                                    .filter_map(|s| {
+                                        let p = parse_route(s);
+                                        if p.is_none() {
+                                            tracing::warn!(
+                                                "rule {}: ignoring unknown route {s:?}",
+                                                r.name
+                                            );
+                                        }
+                                        p
+                                    })
+                                    .collect();
+                                (r.clone(), chans)
+                            })
+                            .collect();
+
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs())
@@ -666,7 +690,8 @@ pub async fn execute_alerts(
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()?;
-            let tg = match config.telegram.as_ref() {
+            let telegram_cfg = config.read().await.telegram.clone();
+            let tg = match telegram_cfg.as_ref() {
                 None => None,
                 Some(cfg) => Some(crate::hitl::telegram::TelegramGateway::from_config(cfg).await?),
             };

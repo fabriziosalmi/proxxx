@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::api::PxClient;
-use crate::config::ProfileConfig;
+use crate::config::ConfigHandle;
 use crate::mcp::dispatch;
 
 #[derive(Deserialize, Debug)]
@@ -30,7 +30,7 @@ struct RpcRequest {
     params: Option<Value>,
 }
 
-pub async fn run_server(client: Arc<PxClient>, config: Arc<ProfileConfig>) -> Result<()> {
+pub async fn run_server(client: Arc<PxClient>, config: ConfigHandle) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);

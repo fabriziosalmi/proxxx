@@ -1261,11 +1261,12 @@ pub async fn execute(
         Command::Snapshot { action } => vm::execute_snapshot(&client, action).await,
         Command::Mcp { action } => match action {
             McpCommand::Serve => {
-                crate::mcp::server::run_server(
-                    std::sync::Arc::clone(&client),
-                    std::sync::Arc::new(config),
-                )
-                .await?;
+                let handle = crate::config::watcher::new_handle(config);
+                crate::config::watcher::spawn_reload_on_sighup(
+                    std::sync::Arc::clone(&handle),
+                    profile.map(str::to_owned),
+                );
+                crate::mcp::server::run_server(std::sync::Arc::clone(&client), handle).await?;
                 Ok((serde_json::json!({"status": "MCP server stopped"}), 0))
             }
             McpCommand::ServeHttp { bind, port, token } => {
@@ -1274,9 +1275,14 @@ pub async fn execute(
                 if token.is_some() {
                     cfg.mcp_token = token;
                 }
+                let handle = crate::config::watcher::new_handle(cfg);
+                crate::config::watcher::spawn_reload_on_sighup(
+                    std::sync::Arc::clone(&handle),
+                    profile.map(str::to_owned),
+                );
                 crate::mcp::http_server::run_http_server(
                     std::sync::Arc::clone(&client),
-                    std::sync::Arc::new(cfg),
+                    handle,
                     &bind,
                     port,
                 )
@@ -1522,7 +1528,12 @@ pub async fn execute(
         Command::Acme { action } => storage::execute_acme(&client, action).await,
         Command::ClusterBootstrap { action } => cluster::execute_bootstrap(&client, action).await,
         Command::Alerts { action } => {
-            monitoring::execute_alerts(&client, &config, profile, action).await
+            let handle = crate::config::watcher::new_handle(config.clone());
+            crate::config::watcher::spawn_reload_on_sighup(
+                std::sync::Arc::clone(&handle),
+                profile.map(str::to_owned),
+            );
+            monitoring::execute_alerts(&client, handle, profile, action).await
         }
         Command::Access { action } => access::execute_access(&client, action).await,
         Command::Token { action } => access::execute_token(&client, action).await,

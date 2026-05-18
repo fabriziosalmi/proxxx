@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::api::PxClient;
-use crate::config::ProfileConfig;
+use crate::config::{ConfigHandle, ProfileConfig};
 use crate::mcp::tools::{ToolAction, TOOLS};
 
 /// Execute a single MCP tool call and return the MCP content envelope.
@@ -486,7 +486,7 @@ pub fn err_result(id: &Value, code: i32, message: &str) -> Value {
 /// Returns the complete JSON-RPC response value.
 pub async fn dispatch_rpc(
     client: Arc<PxClient>,
-    config: Arc<ProfileConfig>,
+    config: ConfigHandle,
     method: &str,
     id: Value,
     params: Option<Value>,
@@ -523,6 +523,10 @@ pub async fn dispatch_rpc(
             };
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+            // Snapshot the config once for the duration of this tool call so
+            // a concurrent SIGHUP reload can't change policies mid-dispatch.
+            let config_snap = config.read().await.clone();
+
             let budget_secs = TOOLS
                 .iter()
                 .find(|t| t.name == name)
@@ -530,7 +534,7 @@ pub async fn dispatch_rpc(
 
             match tokio::time::timeout(
                 Duration::from_secs(budget_secs),
-                handle_tool_call(&client, &config, &name, &args),
+                handle_tool_call(&client, &config_snap, &name, &args),
             )
             .await
             {

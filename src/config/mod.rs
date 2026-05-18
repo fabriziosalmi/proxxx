@@ -1,3 +1,6 @@
+pub mod watcher;
+pub use watcher::ConfigHandle;
+
 use anyhow::Result;
 use serde::Deserialize;
 
