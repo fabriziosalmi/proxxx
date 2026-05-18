@@ -447,6 +447,59 @@ pub async fn handle_tool_call(
                 }]
             }));
         }
+        ToolAction::ListClusterEvents => {
+            let limit = args
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(50)
+                .min(200) as usize;
+            let running_only = args
+                .get("running_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let mut tasks = client.get_cluster_tasks().await?;
+            if running_only {
+                tasks.retain(|t| t.endtime.is_none());
+            }
+            tasks.truncate(limit);
+
+            let enriched: Vec<serde_json::Value> = tasks
+                .iter()
+                .map(|t| {
+                    let elapsed_secs = if let Some(end) = t.endtime {
+                        end.saturating_sub(t.starttime)
+                    } else if t.starttime > 0 {
+                        now.saturating_sub(t.starttime)
+                    } else {
+                        0
+                    };
+                    serde_json::json!({
+                        "upid":         t.upid,
+                        "node":         t.node,
+                        "type":         t.task_type,
+                        "id":           t.id,
+                        "user":         t.user,
+                        "status":       t.status,
+                        "starttime":    t.starttime,
+                        "endtime":      t.endtime,
+                        "elapsed_secs": elapsed_secs,
+                        "running":      t.endtime.is_none(),
+                    })
+                })
+                .collect();
+
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": enriched.len(),
+                "running_only": running_only,
+                "events": enriched,
+            }))?
+        }
     };
 
     Ok(json!({

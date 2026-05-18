@@ -9,6 +9,7 @@ mod common;
 mod console;
 mod ct;
 mod doctor;
+mod events;
 mod firewall;
 mod init;
 mod init_wizard;
@@ -179,6 +180,13 @@ pub enum Command {
         /// When set, fetch tasks from this node only (`/nodes/{n}/tasks`).
         #[arg(long)]
         node: Option<String>,
+    },
+    /// Real-time cluster event stream. Polls task queues across all nodes
+    /// (or a single node with --node) and prints new task starts and
+    /// completions as they happen. Press Ctrl-C to stop.
+    Events {
+        #[command(subcommand)]
+        action: events::EventsCommand,
     },
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
@@ -1101,6 +1109,7 @@ pub async fn execute(
             let cfg = client.get_guest_config(&node, vmid, &gt).await?;
             Ok((serde_json::to_value(cfg)?, 0))
         }
+        Command::Events { action } => events::execute_events(&client, action).await,
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
