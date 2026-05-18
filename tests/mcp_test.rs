@@ -171,4 +171,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_all_params_have_valid_types() {
+        // ParamType must be one of the three known variants — no default/fallback.
+        // This catches any copy-paste that leaves a field unset and gets the
+        // wrong default, which would silently misclassify the type at validation time.
+        use proxxx::mcp::tools::ParamType;
+        for tool in TOOLS {
+            for param in tool.params {
+                let valid = matches!(
+                    param.param_type,
+                    ParamType::Str | ParamType::Int | ParamType::Bool
+                );
+                assert!(
+                    valid,
+                    "Tool {} param '{}' has unexpected ParamType",
+                    tool.name, param.name
+                );
+            }
+        }
+    }
 }
