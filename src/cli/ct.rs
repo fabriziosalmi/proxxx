@@ -5,7 +5,9 @@ use clap::Subcommand;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::cli::common::{classify_pending, find_guest, parse_kv_pairs, require_non_empty_params};
+use crate::cli::common::{
+    classify_pending, find_guest, parse_kv_pairs, require_non_empty_params, wait_and_classify,
+};
 
 /// LXC `ct` subcommand tree. Smaller than VM — no cloud-init.
 #[derive(Debug, Subcommand)]
@@ -44,6 +46,39 @@ pub enum CtCommand {
     /// QGA `network-get-interfaces` — works without an agent in
     /// the container.
     Interfaces { vmid: u32 },
+    /// Create a new LXC container from an OS template. Returns the UPID.
+    Create {
+        /// Target node name
+        #[arg(long)]
+        node: String,
+        /// VMID (auto-assigned from cluster if omitted)
+        #[arg(long)]
+        vmid: Option<u32>,
+        /// Container hostname
+        #[arg(long)]
+        hostname: Option<String>,
+        /// OS template volid (e.g. `local:vztmpl/debian-12-standard_12.0-1_amd64.tar.zst`)
+        #[arg(long, required = true)]
+        template: String,
+        /// Memory in MiB
+        #[arg(long, default_value_t = 512)]
+        memory: u64,
+        /// CPU cores
+        #[arg(long, default_value_t = 1)]
+        cores: u32,
+        /// Root filesystem spec — `storage:sizeG`
+        #[arg(long, default_value = "local-lvm:8")]
+        rootfs: String,
+        /// Network bridge
+        #[arg(long, default_value = "vmbr0")]
+        bridge: String,
+        /// Root password (set in container)
+        #[arg(long)]
+        password: Option<String>,
+        /// Wait for creation task to complete before returning
+        #[arg(long)]
+        wait: bool,
+    },
 }
 
 pub async fn execute(
@@ -134,6 +169,50 @@ pub async fn execute(
                 serde_json::json!({"vmid": vmid, "node": node, "interfaces": ifaces}),
                 0,
             ))
+        }
+        CtCommand::Create {
+            node,
+            vmid,
+            hostname,
+            template,
+            memory,
+            cores,
+            rootfs,
+            bridge,
+            password,
+            wait,
+        } => {
+            let vmid = match vmid {
+                Some(v) => v,
+                None => client.get_next_vmid().await?,
+            };
+            let mut params: Vec<(String, String)> = vec![
+                ("vmid".into(), vmid.to_string()),
+                ("ostemplate".into(), template.clone()),
+                ("memory".into(), memory.to_string()),
+                ("cores".into(), cores.to_string()),
+                ("rootfs".into(), rootfs.clone()),
+                ("net0".into(), format!("name=eth0,bridge={bridge},ip=dhcp")),
+            ];
+            if let Some(h) = &hostname {
+                params.push(("hostname".into(), h.clone()));
+            }
+            if let Some(p) = &password {
+                params.push(("password".into(), p.clone()));
+            }
+            let as_refs: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let upid = client.create_lxc(&node, &as_refs).await?;
+            if wait && !upid.is_empty() {
+                wait_and_classify(client, &node, &upid).await
+            } else {
+                Ok((
+                    serde_json::json!({"vmid": vmid, "upid": upid, "node": node}),
+                    0,
+                ))
+            }
         }
     }
 }

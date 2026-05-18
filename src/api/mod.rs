@@ -1401,4 +1401,16 @@ pub trait ProxmoxGateway: Send + Sync {
     /// Detailed node status (uptime, kernel, version). Used by the
     /// patching orchestrator to verify post-reboot liveness.
     async fn node_status_detail(&self, node: &str) -> Result<crate::api::types::NodeStatusDetail>;
+
+    /// Fetch the next available VMID from the cluster.
+    /// `GET /cluster/nextid`.
+    async fn get_next_vmid(&self) -> Result<u32>;
+
+    /// Create a new QEMU VM. Returns the task UPID.
+    /// `POST /nodes/{node}/qemu`.
+    async fn create_qemu(&self, node: &str, params: &[(&str, &str)]) -> Result<String>;
+
+    /// Create a new LXC container. Returns the task UPID.
+    /// `POST /nodes/{node}/lxc`.
+    async fn create_lxc(&self, node: &str, params: &[(&str, &str)]) -> Result<String>;
 }

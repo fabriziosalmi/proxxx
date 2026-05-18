@@ -4,7 +4,7 @@
 // module appeared twice (once per crate target). Now main.rs is a thin
 // orchestrator and the lib is the single compilation unit.
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use tracing::info;
 
 use proxxx::{cli, tui, util};
@@ -93,6 +93,12 @@ fn main() -> Result<()> {
     match cli.command {
         // CLI mode: no ratatui, no crossterm, just stdout
         Some(cmd) => {
+            if let cli::Command::Completions { shell } = &cmd {
+                let mut clap_cmd = Cli::command();
+                clap_complete::generate(*shell, &mut clap_cmd, "proxxx", &mut std::io::stdout());
+                return Ok(());
+            }
+
             match rt.block_on(cli::execute(
                 cmd,
                 cli.profile.as_deref(),

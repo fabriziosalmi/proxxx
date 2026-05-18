@@ -19,6 +19,7 @@ pub mod access;
 pub mod alerts;
 pub mod api;
 pub mod app;
+pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod handoff;

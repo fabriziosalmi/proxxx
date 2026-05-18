@@ -336,6 +336,97 @@ pub async fn handle_tool_call(
             let status = client.list_replication_status(node_name).await?;
             serde_json::to_string_pretty(&status)?
         }
+        ToolAction::CreateGuest => {
+            use crate::api::ProxmoxGateway;
+            let node = args
+                .get("node")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("create_guest: missing required param 'node'"))?;
+            let guest_type = args
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("create_guest: missing required param 'type'"))?;
+
+            let vmid = if let Some(id) = args.get("vmid").and_then(serde_json::Value::as_u64) {
+                id as u32
+            } else {
+                client.get_next_vmid().await?
+            };
+
+            let name = args.get("name").and_then(serde_json::Value::as_str);
+            let memory = args
+                .get("memory")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(if guest_type == "lxc" { 512 } else { 1024 });
+            let cores = args
+                .get("cores")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1);
+            let bridge = args
+                .get("bridge")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("vmbr0");
+            let storage = args.get("storage").and_then(serde_json::Value::as_str);
+            let disk_size = args.get("disk_size").and_then(serde_json::Value::as_u64);
+
+            let upid = if guest_type == "lxc" {
+                let template = args
+                    .get("template")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("create_guest lxc: missing 'template'"))?;
+                let size = disk_size.unwrap_or(8);
+                let rootfs_storage = storage.unwrap_or("local-lvm");
+                let rootfs = format!("{rootfs_storage}:{size}");
+                let mut params: Vec<(String, String)> = vec![
+                    ("vmid".into(), vmid.to_string()),
+                    ("ostemplate".into(), template.to_string()),
+                    ("memory".into(), memory.to_string()),
+                    ("cores".into(), cores.to_string()),
+                    ("rootfs".into(), rootfs),
+                    ("net0".into(), format!("name=eth0,bridge={bridge},ip=dhcp")),
+                ];
+                if let Some(n) = name {
+                    params.push(("hostname".into(), n.to_string()));
+                }
+                let as_refs: Vec<(&str, &str)> = params
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                client.create_lxc(node, &as_refs).await?
+            } else {
+                let iso = args.get("iso").and_then(serde_json::Value::as_str);
+                let size = disk_size.unwrap_or(32);
+                let mut params: Vec<(String, String)> = vec![
+                    ("vmid".into(), vmid.to_string()),
+                    ("memory".into(), memory.to_string()),
+                    ("cores".into(), cores.to_string()),
+                    ("ostype".into(), "l26".into()),
+                    ("scsihw".into(), "virtio-scsi-pci".into()),
+                    ("net0".into(), format!("virtio,bridge={bridge}")),
+                ];
+                if let Some(n) = name {
+                    params.push(("name".into(), n.to_string()));
+                }
+                if let Some(st) = storage {
+                    params.push(("scsi0".into(), format!("{st}:{size}")));
+                }
+                if let Some(i) = iso {
+                    params.push(("cdrom".into(), i.to_string()));
+                }
+                let as_refs: Vec<(&str, &str)> = params
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                client.create_qemu(node, &as_refs).await?
+            };
+
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Guest {vmid} ({guest_type}) creation started on {node}. UPID: {upid}")
+                }]
+            }));
+        }
     };
 
     Ok(json!({

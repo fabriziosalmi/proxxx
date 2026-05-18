@@ -3220,4 +3220,29 @@ impl ProxmoxGateway for PxClient {
             self.get(&format!("/nodes/{node}/status")).await?;
         Ok(resp.data)
     }
+
+    async fn get_next_vmid(&self) -> Result<u32> {
+        let resp: ApiResponse<serde_json::Value> = self.get("/cluster/nextid").await?;
+        let id = match &resp.data {
+            serde_json::Value::String(s) => {
+                s.parse::<u32>().context("cluster/nextid: parse error")?
+            }
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("cluster/nextid: not u64"))?
+                as u32,
+            other => anyhow::bail!("cluster/nextid: unexpected shape {other}"),
+        };
+        Ok(id)
+    }
+
+    async fn create_qemu(&self, node: &str, params: &[(&str, &str)]) -> Result<String> {
+        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/qemu"), params).await?;
+        Ok(resp.data)
+    }
+
+    async fn create_lxc(&self, node: &str, params: &[(&str, &str)]) -> Result<String> {
+        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/lxc"), params).await?;
+        Ok(resp.data)
+    }
 }

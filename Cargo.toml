@@ -1,6 +1,6 @@
 [package]
 name = "proxxx"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2021"
 authors = ["Fabrizio Salmi <fabrizio.salmi@gmail.com>"]
 description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
@@ -33,6 +33,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # Config
 toml = "0.8"
