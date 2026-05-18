@@ -38,6 +38,7 @@ Pick the row that matches you and jump straight to the right page.
 | **DevOps** scripting Proxmox in pipelines | typed exit codes, deterministic JSON, pre-flight risk gate, batch ops with `--yes` | [CLI reference](https://fabriziosalmi.github.io/proxxx/reference/cli) · [Exit codes](https://fabriziosalmi.github.io/proxxx/reference/exit-codes) |
 | **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP server (stdio + Streamable HTTP), compile-time-fixed 23-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
 | **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [`SECURITY.md`](SECURITY.md) |
+| **EU-regulated ops** (NIS2 / ISO 27001 / GDPR) | append-only SQLite audit log with HMAC-SHA256 chain, `proxxx audit verify`, zero telemetry, fully self-hosted | [EU & compliance](#eu--compliance) |
 | **Contributor** sending a PR | 7-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
 
 ---
@@ -53,6 +54,25 @@ Pick the row that matches you and jump straight to the right page.
 - **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision.
 - **MCP server** — stdio JSON-RPC for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned.
 - **Verifiable releases** — every tarball ships with three layers: SHA-256 sidecar, sigstore keyless cosign signature pinned to this exact workflow path (offline-verifiable; transparency-log inclusion proof embedded), and a CycloneDX SBOM generated from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`.
+
+## EU & compliance
+
+proxxx is designed for operators who need auditability, data sovereignty, and supply-chain transparency — requirements increasingly mandated under NIS2, ISO 27001, and GDPR in the EU.
+
+| Requirement | How proxxx addresses it |
+| :--- | :--- |
+| **No telemetry** | Zero outbound connections except to your configured PVE/PBS endpoints and, if you opt in, your own Telegram bot. No analytics, no crash-reporting, no version-check pings. |
+| **Data sovereignty** | All state — config, cache, audit log, HITL keys — lives on-prem, under paths you control (`~/.config/proxxx/` / `~/.local/share/proxxx/` on Linux). Nothing leaves your environment unless you push it there. |
+| **Append-only audit log** | `proxxx audit log` — every mutation (start, stop, delete, snapshot, patch, create) is written to a local SQLite database with a per-entry HMAC-SHA256 chain. Tampering any record breaks the chain. |
+| **Cryptographic chain verification** | `proxxx audit verify` walks every entry, recomputes the HMAC chain from the keyed root, and reports the first broken link. CI-friendly: exits 0 on pass, 1 on violation — wire it into your compliance pipeline. |
+| **Export for SIEM** | `proxxx audit export --format json` or `--format csv` — pipe into Splunk, Elastic, Wazuh, or any log aggregator without an agent. |
+| **Supply-chain** | Every release ships: SHA-256 sidecar, sigstore keyless cosign signature (pinned to the exact workflow path, offline-verifiable, transparency-log proof embedded), and a CycloneDX SBOM from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`. |
+| **Self-diagnostic** | `proxxx doctor` validates config, cluster connectivity, auth, Telegram HITL, PBS, SSH key, and audit log integrity in one pass. Exits 0 if all critical checks pass. |
+| **Secrets hygiene** | All secret values live in `Zeroizing<String>` (heap-wiped on Drop). HMAC and audit keys are stored at 0600 paths; proxxx refuses to start if a key file has world-readable permissions. |
+
+> **Note:** proxxx is a management tool, not a compliance product. `proxxx audit verify` provides integrity assurance for the local mutation log; it does not replace a SIEM or a formal audit trail required by a certification body. Use it as one control layer in a broader NIS2 / ISO 27001 implementation.
+
+---
 
 ## Install
 

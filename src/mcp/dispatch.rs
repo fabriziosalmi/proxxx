@@ -31,6 +31,26 @@ pub async fn handle_tool_call(
         if p.required && args.get(p.name).is_none() {
             anyhow::bail!("Missing required parameter: {}", p.name);
         }
+        if let Some(val) = args.get(p.name) {
+            use crate::mcp::tools::ParamType;
+            match p.param_type {
+                ParamType::Int => {
+                    if !val.is_u64() && !val.is_i64() {
+                        anyhow::bail!("Parameter '{}': expected integer, got {}", p.name, val);
+                    }
+                }
+                ParamType::Bool => {
+                    if !val.is_boolean() {
+                        anyhow::bail!("Parameter '{}': expected boolean, got {}", p.name, val);
+                    }
+                }
+                ParamType::Str => {
+                    if !val.is_string() {
+                        anyhow::bail!("Parameter '{}': expected string, got {}", p.name, val);
+                    }
+                }
+            }
+        }
     }
 
     use crate::api::ProxmoxGateway;
