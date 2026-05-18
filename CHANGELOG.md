@@ -30,6 +30,13 @@ SemVer contract:
 - **MCP tool `create_guest`** (tool #23) — LLM-callable guest creation for both
   QEMU and LXC; node, type, name, memory, cores, storage, disk_size, template/iso,
   bridge. Registry SHA-256 updated; counter 22→23.
+- **Real-time event stream** — `proxxx events stream` polls cluster task
+  queues and prints new task starts/completions as they appear (STARTED /
+  DONE / FAIL). Supports `--node`, `--type`, `--vmid` filters, `--interval`
+  (default 2 s), and `--format json` for NDJSON piping. Shows currently-running
+  tasks at startup; `--no-existing` skips the snapshot.
+- **MCP tool `list_cluster_events`** (tool #24) — returns recent cluster-wide
+  task events with elapsed time; `limit` (default 50) and `running_only` params.
 - **Config hot-reload** — `SIGHUP` atomically swaps the live config in the
   `alerts watch`, `mcp serve`, and `mcp serve-http` daemons. After `kill -HUP
   $(pgrep proxxx)`, the next tick/request picks up new `[[alerts]]` rules,

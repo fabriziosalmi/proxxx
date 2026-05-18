@@ -42,6 +42,8 @@ pub enum ToolAction {
     GetReplicationStatus,
     // ── Guest creation ───────────────────────────────────
     CreateGuest,
+    // ── Events ───────────────────────────────────────────
+    ListClusterEvents,
 }
 
 // ── Const Tool Definitions ──────────────────────────────
@@ -523,6 +525,28 @@ pub const TOOLS: &[ToolDef] = &[
         action: ToolAction::CreateGuest,
         destructive: true,
         timeout_secs: 120,
+    },
+    // Tool #24 — cluster event history
+    ToolDef {
+        name: "list_cluster_events",
+        description: "Return recent cluster-wide task events from all nodes. Shows task type, vmid, node, user, outcome, and elapsed time. Useful for understanding what has recently happened on the cluster.",
+        params: &[
+            ParamDef {
+                name: "limit",
+                description: "Maximum number of events to return (default 50, max 200)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "running_only",
+                description: "When true, return only tasks that are currently running",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+        ],
+        action: ToolAction::ListClusterEvents,
+        destructive: false,
+        timeout_secs: 15,
     },
 ];
 
