@@ -40,6 +40,8 @@ pub enum ToolAction {
     // ── Backup / Replication ─────────────────────────────
     ListBackupJobs,
     GetReplicationStatus,
+    // ── Guest creation ───────────────────────────────────
+    CreateGuest,
 }
 
 // ── Const Tool Definitions ──────────────────────────────
@@ -446,6 +448,81 @@ pub const TOOLS: &[ToolDef] = &[
         action: ToolAction::GetReplicationStatus,
         destructive: false,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
+    },
+    ToolDef {
+        name: "create_guest",
+        description: "Create a new QEMU VM or LXC container. For QEMU: provide node, type=qemu, memory, cores, and optionally iso. For LXC: provide node, type=lxc, template (ostemplate volid), memory, cores. Returns vmid and task UPID.",
+        params: &[
+            ParamDef {
+                name: "node",
+                description: "Target Proxmox node name",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "type",
+                description: "Guest type: qemu or lxc",
+                param_type: ParamType::Str,
+                required: true,
+            },
+            ParamDef {
+                name: "vmid",
+                description: "VMID to assign (auto-assigned from cluster nextid if omitted)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "name",
+                description: "VM name (QEMU) or hostname (LXC)",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "memory",
+                description: "Memory in MiB (default: 1024 for QEMU, 512 for LXC)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "cores",
+                description: "CPU cores (default: 1)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "storage",
+                description: "Storage id for boot disk (e.g. local-lvm). If omitted, no disk is created.",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "disk_size",
+                description: "Disk size in GiB (default: 32 QEMU, 8 LXC)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "template",
+                description: "LXC only: ostemplate volid (e.g. local:vztmpl/debian-12-standard_12.0-1_amd64.tar.zst)",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "iso",
+                description: "QEMU only: ISO image volid for CD-ROM (e.g. local:iso/ubuntu-24.04.iso)",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "bridge",
+                description: "Network bridge (default: vmbr0)",
+                param_type: ParamType::Str,
+                required: false,
+            },
+        ],
+        action: ToolAction::CreateGuest,
+        destructive: true,
+        timeout_secs: 120,
     },
 ];
 

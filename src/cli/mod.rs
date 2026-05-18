@@ -3,10 +3,12 @@ use clap::Subcommand;
 use serde_json::Value;
 
 mod access;
+mod audit_cmd;
 mod cluster;
 mod common;
 mod console;
 mod ct;
+mod doctor;
 mod firewall;
 mod init;
 mod init_wizard;
@@ -15,6 +17,8 @@ mod node;
 mod patch;
 mod storage;
 mod vm;
+
+pub use audit_cmd::AuditAction;
 
 use common::{
     enforce_preflight, execute_batch_op_with_policy, find_guest, find_guest_full,
@@ -680,6 +684,29 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         interactive: bool,
     },
+    /// Print shell completion script to stdout. Pipe to your shell's
+    /// completion directory to enable tab-completion for proxxx.
+    ///
+    /// Examples:
+    ///   proxxx completions bash >> ~/.bashrc
+    ///   proxxx completions zsh > ~/.zfunc/_proxxx
+    ///   proxxx completions fish > ~/.config/fish/completions/proxxx.fish
+    ///   proxxx completions powershell >> $PROFILE
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+    /// Self-diagnostic: validate config, cluster connectivity, auth,
+    /// Telegram HITL, PBS, SSH key, and audit log in one pass. Prints
+    /// a status table and exits 0 if all critical checks pass, 1 if
+    /// any critical check fails.
+    Doctor,
+    /// Audit log management — view, export, and cryptographically verify
+    /// the append-only mutation log.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
     /// QEMU VM hardware/options/cloud-init management. The typed
     /// subcommands (`set`, `cloudinit`) cover the well-trodden config
     /// keys with parse-time validation; `raw-set` is the documented
@@ -817,6 +844,22 @@ pub async fn execute(
         {
             panic!("[dev-panic] {message}");
         }
+    }
+
+    if matches!(cmd, Command::Doctor) {
+        return doctor::run().await;
+    }
+
+    if let Command::Audit { ref action } = cmd {
+        return match action {
+            AuditAction::Log { limit, since } => audit_cmd::execute_log(*limit, since.as_deref()),
+            AuditAction::Export {
+                format,
+                limit,
+                since,
+            } => audit_cmd::execute_export(format, *limit, since.as_deref()),
+            AuditAction::Verify => audit_cmd::execute_verify(),
+        };
     }
 
     let config = crate::config::load_config(profile)?;
@@ -1535,6 +1578,9 @@ pub async fn execute(
             // works on a fresh machine. Kept here for exhaustiveness.
             unreachable!("Init handled in early-exit block")
         }
+        Command::Completions { .. } => Ok((serde_json::json!({}), 0)),
+        Command::Doctor => Ok((serde_json::json!({}), 0)),
+        Command::Audit { .. } => Ok((serde_json::json!({}), 0)),
         Command::Vm { action } => vm::execute_vm(&client, action).await,
         Command::Ct { action } => ct::execute(&client, action).await,
         Command::Firewall { scope } => firewall::execute_firewall(&client, scope).await,

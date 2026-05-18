@@ -104,6 +104,41 @@ pub enum VmCommand {
         #[arg(long, default_value = "user")]
         kind: String,
     },
+    /// Create a new QEMU VM from scratch. Returns the UPID — track via
+    /// `proxxx tasks`. For cloning from a template, use `proxxx clone`.
+    Create {
+        /// Target node name
+        #[arg(long)]
+        node: String,
+        /// VMID (auto-assigned from cluster if omitted)
+        #[arg(long)]
+        vmid: Option<u32>,
+        /// VM display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Memory in MiB
+        #[arg(long, default_value_t = 1024)]
+        memory: u64,
+        /// CPU cores
+        #[arg(long, default_value_t = 1)]
+        cores: u32,
+        /// Boot disk — `storage:sizeG` (e.g. `local-lvm:32`).
+        /// Omit for diskless (e.g. net-boot).
+        #[arg(long)]
+        disk: Option<String>,
+        /// ISO image volid for CD-ROM (e.g. `local:iso/ubuntu-24.04.iso`)
+        #[arg(long)]
+        iso: Option<String>,
+        /// Guest OS type (l26, win11, other, …)
+        #[arg(long, default_value = "l26")]
+        ostype: String,
+        /// Network bridge
+        #[arg(long, default_value = "vmbr0")]
+        bridge: String,
+        /// Wait for creation task to complete before returning
+        #[arg(long)]
+        wait: bool,
+    },
 }
 
 /// Cloud-init operations. After `set`, run `regen` to rebuild the
@@ -377,6 +412,53 @@ pub async fn execute_vm(
                 }),
                 0,
             ))
+        }
+        VmCommand::Create {
+            node,
+            vmid,
+            name,
+            memory,
+            cores,
+            disk,
+            iso,
+            ostype,
+            bridge,
+            wait,
+        } => {
+            let vmid = match vmid {
+                Some(v) => v,
+                None => client.get_next_vmid().await?,
+            };
+            let mut params: Vec<(String, String)> = vec![
+                ("vmid".into(), vmid.to_string()),
+                ("memory".into(), memory.to_string()),
+                ("cores".into(), cores.to_string()),
+                ("ostype".into(), ostype.clone()),
+                ("scsihw".into(), "virtio-scsi-pci".into()),
+                ("net0".into(), format!("virtio,bridge={bridge}")),
+            ];
+            if let Some(n) = &name {
+                params.push(("name".into(), n.clone()));
+            }
+            if let Some(d) = &disk {
+                params.push(("scsi0".into(), d.clone()));
+            }
+            if let Some(i) = &iso {
+                params.push(("cdrom".into(), i.clone()));
+            }
+            let as_refs: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let upid = client.create_qemu(&node, &as_refs).await?;
+            if wait && !upid.is_empty() {
+                wait_and_classify(client, &node, &upid).await
+            } else {
+                Ok((
+                    serde_json::json!({"vmid": vmid, "upid": upid, "node": node}),
+                    0,
+                ))
+            }
         }
     }
 }

@@ -1174,6 +1174,15 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn node_status_detail(&self, _: &str) -> Result<proxxx::api::types::NodeStatusDetail> {
         Ok(proxxx::api::types::NodeStatusDetail::default())
     }
+    async fn get_next_vmid(&self) -> anyhow::Result<u32> {
+        Ok(999)
+    }
+    async fn create_qemu(&self, _node: &str, _params: &[(&str, &str)]) -> anyhow::Result<String> {
+        Ok("UPID:pve01:00000000:00000000:create-qemu::root@pam:".into())
+    }
+    async fn create_lxc(&self, _node: &str, _params: &[(&str, &str)]) -> anyhow::Result<String> {
+        Ok("UPID:pve01:00000000:00000000:create-lxc::root@pam:".into())
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

@@ -1667,6 +1667,15 @@ mod tests {
                 .push(format!("node_status_detail:{node}"));
             Ok(self.node_status.get(node).cloned().unwrap_or_default())
         }
+        async fn get_next_vmid(&self) -> Result<u32> {
+            Ok(999)
+        }
+        async fn create_qemu(&self, _: &str, _: &[(&str, &str)]) -> Result<String> {
+            anyhow::bail!("unused")
+        }
+        async fn create_lxc(&self, _: &str, _: &[(&str, &str)]) -> Result<String> {
+            anyhow::bail!("unused")
+        }
     }
 
     /// SSH mock that records exec calls and returns scripted exit codes.

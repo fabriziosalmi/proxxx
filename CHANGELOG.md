@@ -10,7 +10,26 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
-## [Unreleased]
+## [Unreleased] — v0.1.28
+
+### Added
+- **Shell completions** — `proxxx completions {bash|zsh|fish|powershell}` prints the shell
+  completion script to stdout; pipe to your shell's completions dir.
+- **`proxxx doctor`** — self-diagnostic: validates config, cluster connectivity, auth,
+  Telegram HITL, PBS, SSH key, and audit log in one pass. Exits 0 if all critical
+  checks pass, 1 otherwise. Pipeline-friendly JSON output.
+- **Audit log v2** — SQLite append-only log with per-entry HMAC-SHA256 chain.
+  New subcommand `proxxx audit {log,export,verify}`:
+  - `log` — show recent entries (filterable by time, default 50)
+  - `export` — dump to JSON or CSV for SIEM ingestion
+  - `verify` — walk the full chain and check every HMAC (NIS2/ISO27001 alignment)
+- **`proxxx vm create`** — create a new QEMU VM from scratch (node, vmid, name,
+  memory, cores, disk, iso, ostype, bridge). VMID auto-assigned if omitted.
+- **`proxxx ct create`** — create a new LXC container (node, vmid, hostname,
+  template, memory, cores, rootfs, bridge, password). VMID auto-assigned if omitted.
+- **MCP tool `create_guest`** (tool #23) — LLM-callable guest creation for both
+  QEMU and LXC; node, type, name, memory, cores, storage, disk_size, template/iso,
+  bridge. Registry SHA-256 updated; counter 22→23.
 
 ## [0.1.27] — 2026-05-14
 
