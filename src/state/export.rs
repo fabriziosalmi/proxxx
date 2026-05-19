@@ -227,8 +227,14 @@ async fn export_storage<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<Sto
         .map(|s| StorageDecl {
             storage: s.storage,
             storage_type: s.storage_type,
-            content: s.content,
-            nodes: s.nodes,
+            // PVE returns the `content` and `nodes` CSVs in non-
+            // deterministic order across API calls — `local` might
+            // come back as `"backup,iso"` one call and
+            // `"iso,backup"` the next. Sort the comma-separated
+            // tokens on export so the resulting TOML is byte-stable
+            // across runs. Confirmed by the live smoke test.
+            content: normalize_csv(&s.content),
+            nodes: normalize_csv(&s.nodes),
             disable: s.disable,
             shared: s.shared,
             path: s.path,
@@ -242,6 +248,19 @@ async fn export_storage<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<Sto
             thinpool: s.thinpool,
         })
         .collect())
+}
+
+/// Sort the comma-separated tokens of a CSV-style PVE field. Empty
+/// input maps to empty output. Whitespace around commas is preserved
+/// (PVE doesn't emit any; if it ever does, we'd reformat on round-
+/// trip rather than break declared-vs-live equality on whitespace).
+fn normalize_csv(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = s.split(',').collect();
+    parts.sort_unstable();
+    parts.join(",")
 }
 
 /// Project one `PoolMember` to its identity string (`qemu/100`,
