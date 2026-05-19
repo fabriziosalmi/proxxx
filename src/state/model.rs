@@ -1,0 +1,180 @@
+//! Serde model for cluster state — the on-disk schema of the
+//! declaratively-managed slice of a Proxmox cluster.
+//!
+//! Each resource family is a separate `*Decl` struct. The top-level
+//! [`ClusterState`] is a forest of those: a partial state (e.g. only
+//! `[[pools]]`) is a valid file, since every field defaults to empty.
+//! This lets operators export only what they care about and merge
+//! cross-PR without conflict.
+//!
+//! Identity rules:
+//! * Pools — keyed by `poolid`.
+//! * Members of a pool — encoded as stable strings (`qemu/100`,
+//!   `lxc/200`, `storage/<name>`) so a member set is a `Vec<String>`
+//!   directly serialisable as a TOML array.
+//!
+//! Future resource families (ACL, storage, firewall, backup jobs,
+//! notifications) will follow the same shape: a `*Decl` struct with
+//! the PVE-side identifier as the first field, a `default` impl so
+//! empty fields don't bloat the TOML, and a stable serialise order
+//! enforced at the export layer.
+
+use serde::{Deserialize, Serialize};
+
+/// Top-level cluster state — the union of every declared resource.
+///
+/// Every field is optional (defaults to empty / `None`) so partial
+/// exports are valid documents. `meta` is emitted on export but
+/// optional on import; a hand-written declared state can omit it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClusterState {
+    /// Provenance: where this state came from and when. Skipped on
+    /// serialisation when absent so hand-authored declared states
+    /// don't need it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<StateMeta>,
+
+    /// Pools — `GET /pools` + `GET /pools/{poolid}` for membership.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<PoolDecl>,
+}
+
+/// Metadata header emitted by the export layer. Captures *which*
+/// cluster the state was read from, *when*, and *with what proxxx
+/// version*. Useful for audit trail and forensic comparison; ignored
+/// by the apply layer (apply consults live state, not metadata).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StateMeta {
+    /// proxxx profile name the state was exported from.
+    pub profile: String,
+    /// RFC 3339 timestamp at export.
+    pub exported_at: String,
+    /// proxxx version that produced the export (from `CARGO_PKG_VERSION`).
+    pub exported_from_proxxx: String,
+    /// PVE API version reported by `GET /version` (e.g. `"9.1.9"`).
+    pub pve_version: String,
+}
+
+/// One pool declaration — poolid + comment + members.
+///
+/// Members are emitted as `kind/id` strings (`qemu/<vmid>`,
+/// `lxc/<vmid>`, `storage/<name>`) so the TOML is diff-readable: the
+/// PVE API returns a richer object per member, but only the kind + id
+/// is identity-bearing — every other field is recomputable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PoolDecl {
+    pub poolid: String,
+    /// Free-form description. Empty by default; suppressed in the
+    /// serialised TOML when empty so the file stays terse.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// Sorted, deduplicated list of member references. Serialised as
+    /// a TOML array of strings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_cluster_state_serializes_to_empty_toml() {
+        // Default ClusterState has no meta, no pools — every field is
+        // `skip_serializing_if` empty, so the resulting TOML is the
+        // empty string. Pinning this so an "all fields empty" export
+        // produces a stable, smallest possible file (useful for diffs
+        // against a freshly-provisioned cluster).
+        let s = ClusterState::default();
+        let toml_str = toml::to_string(&s).expect("serialize empty state");
+        assert!(toml_str.is_empty(), "expected empty, got {toml_str:?}");
+    }
+
+    #[test]
+    fn pool_decl_with_only_id_omits_comment_and_members() {
+        let p = PoolDecl {
+            poolid: "team-platform".to_string(),
+            comment: String::new(),
+            members: Vec::new(),
+        };
+        let s = ClusterState {
+            meta: None,
+            pools: vec![p],
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        // No "comment = " line, no "members = " line — only poolid.
+        assert!(toml_str.contains("poolid = \"team-platform\""));
+        assert!(!toml_str.contains("comment"));
+        assert!(!toml_str.contains("members"));
+    }
+
+    #[test]
+    fn pool_decl_with_members_emits_sorted_array() {
+        let p = PoolDecl {
+            poolid: "team-platform".to_string(),
+            comment: "platform engineering".to_string(),
+            members: vec![
+                "qemu/100".to_string(),
+                "qemu/101".to_string(),
+                "storage/ceph-rbd".to_string(),
+            ],
+        };
+        let toml_str = toml::to_string(&p).expect("serialize");
+        assert!(toml_str.contains("poolid = \"team-platform\""));
+        assert!(toml_str.contains("comment = \"platform engineering\""));
+        assert!(toml_str.contains("\"qemu/100\""));
+        assert!(toml_str.contains("\"storage/ceph-rbd\""));
+    }
+
+    #[test]
+    fn round_trip_preserves_pool_membership() {
+        // Build a state, serialize, deserialize, compare. Pins the
+        // serde contract: every field that round-trips through TOML
+        // survives unchanged. Catches accidental case-sensitivity
+        // issues, missing #[serde(default)], etc.
+        let s = ClusterState {
+            meta: Some(StateMeta {
+                profile: "prod".into(),
+                exported_at: "2026-05-19T22:00:00Z".into(),
+                exported_from_proxxx: "0.2.1".into(),
+                pve_version: "9.1.9".into(),
+            }),
+            pools: vec![
+                PoolDecl {
+                    poolid: "p1".into(),
+                    comment: "first".into(),
+                    members: vec!["qemu/100".into(), "lxc/200".into()],
+                },
+                PoolDecl {
+                    poolid: "p2".into(),
+                    comment: String::new(),
+                    members: vec![],
+                },
+            ],
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn partial_state_with_only_pools_deserializes() {
+        // Operators hand-authoring a declared state should not need
+        // a `[meta]` header. Pins the "partial document is valid"
+        // contract.
+        let toml_str = r#"
+[[pools]]
+poolid = "team-platform"
+comment = "engineering"
+members = ["qemu/100", "storage/ceph-rbd"]
+"#;
+        let s: ClusterState = toml::from_str(toml_str).expect("deserialize");
+        assert!(s.meta.is_none());
+        assert_eq!(s.pools.len(), 1);
+        assert_eq!(s.pools[0].poolid, "team-platform");
+        assert_eq!(s.pools[0].members.len(), 2);
+    }
+}

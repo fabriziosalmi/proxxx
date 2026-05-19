@@ -28,6 +28,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod pbs;
 pub mod ssh;
+pub mod state;
 pub mod tui;
 pub mod util;
 pub mod wsterm;
