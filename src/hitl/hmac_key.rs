@@ -101,7 +101,7 @@ pub fn load_or_generate_hmac_key() -> Result<Vec<u8>> {
         }
     }
     let mut key = [0u8; KEY_BYTES];
-    getrandom::getrandom(&mut key).context("getrandom failed seeding HMAC key")?;
+    getrandom::fill(&mut key).context("getrandom failed seeding HMAC key")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;

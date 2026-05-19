@@ -85,8 +85,11 @@ sha2 = "0.10"
 hmac = "0.12"
 # OS-native randomness for the HMAC-key bootstrap. Already in the
 # tree (transitive via rustls / tokio-rustls); promoting to a direct
-# dep so the call site is grep-able.
-getrandom = "0.2"
+# dep so the call site is grep-able. Bumped to 0.4 (was 0.2) — the
+# `getrandom::getrandom(buf)` function was renamed to `getrandom::
+# fill(buf)` in 0.3 and the 0.2 alias removed in 0.4. See call sites
+# in `src/audit/mod.rs` and `src/hitl/hmac_key.rs`.
+getrandom = "0.4"
 
 # PTY screen state for SSH guest sessions (feature 1a).
 # Using vt100-ctt (up-to-date fork of vt100) because vt100 0.16 pins
