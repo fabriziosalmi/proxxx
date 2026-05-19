@@ -94,7 +94,7 @@ onMounted(() => {
 
 <div class="status-row">
   <span><span class="ok">●</span> <strong>main</strong> · gate green</span>
-  <span><strong>v0.1.26</strong></span>
+  <span><strong>v0.2.0</strong></span>
   <span><strong>full mutation lifecycle</strong> · LXC + cluster + QEMU + QGA</span>
   <span><strong>0</strong> system deps · rustls only</span>
   <span><strong>MIT</strong></span>

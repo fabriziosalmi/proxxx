@@ -65,7 +65,7 @@ pub fn execute_verify() -> Result<(Value, i32)> {
     let logger = crate::audit::AuditLogger::open()?;
     let (ok, fail) = logger.verify()?;
     let status = if fail == 0 { "ok" } else { "tampered" };
-    let exit_code = if fail == 0 { 0 } else { 1 };
+    let exit_code = i32::from(fail != 0);
     Ok((
         serde_json::json!({"verified": ok, "failed": fail, "status": status}),
         exit_code,

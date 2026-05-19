@@ -82,7 +82,7 @@ Download + verify the full supply-chain trio:
 
 ```bash
 TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin
-VERSION=0.1.7                        # latest at time of writing
+VERSION=0.2.0                        # latest at time of writing
 
 gh release download v${VERSION} --repo fabriziosalmi/proxxx \
   --pattern "*-${TARGET}.tar.gz" \

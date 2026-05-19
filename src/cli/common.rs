@@ -36,13 +36,12 @@ pub async fn find_guest(
     }
     if node_errors.is_empty() {
         anyhow::bail!("Guest {vmid} not found on any node")
-    } else {
-        anyhow::bail!(
-            "Guest {vmid} not found; {} node(s) returned errors: {}",
-            node_errors.len(),
-            node_errors.join("; ")
-        )
     }
+    anyhow::bail!(
+        "Guest {vmid} not found; {} node(s) returned errors: {}",
+        node_errors.len(),
+        node_errors.join("; ")
+    )
 }
 
 /// Same scan as `find_guest`, but returns the full `Guest` so the
@@ -69,13 +68,12 @@ pub async fn find_guest_full(
     }
     if node_errors.is_empty() {
         anyhow::bail!("Guest {vmid} not found on any node")
-    } else {
-        anyhow::bail!(
-            "Guest {vmid} not found; {} node(s) returned errors: {}",
-            node_errors.len(),
-            node_errors.join("; ")
-        )
     }
+    anyhow::bail!(
+        "Guest {vmid} not found; {} node(s) returned errors: {}",
+        node_errors.len(),
+        node_errors.join("; ")
+    )
 }
 
 /// Poll a long-running PVE task to completion. Used by `--wait` on
@@ -306,7 +304,7 @@ impl BatchPolicy {
             } else if let Some(n) = rest.strip_prefix('=') {
                 n.parse::<u8>()
                     .ok()
-                    .filter(|&p| p >= 1 && p <= 100)
+                    .filter(|&p| (1..=100).contains(&p))
                     .ok_or_else(|| anyhow::anyhow!("canary percent must be 1–100, got {n}"))?
             } else {
                 anyhow::bail!("unrecognised policy: {s}")
@@ -341,8 +339,12 @@ pub async fn execute_batch_op(
 }
 
 /// Canary pilot slice size: ceil(N × percent / 100), clamped to [1, N].
+#[must_use]
 pub fn canary_pilot_count(n: usize, percent: u8) -> usize {
-    std::cmp::min(n, std::cmp::max(1, (n * usize::from(percent) + 99) / 100))
+    std::cmp::min(
+        n,
+        std::cmp::max(1, (n * usize::from(percent)).div_ceil(100)),
+    )
 }
 
 pub async fn execute_batch_op_with_policy(
@@ -464,7 +466,7 @@ trait IntoArray {
 }
 impl IntoArray for serde_json::Value {
     fn into_array(self) -> Option<Vec<serde_json::Value>> {
-        if let serde_json::Value::Array(v) = self {
+        if let Self::Array(v) = self {
             Some(v)
         } else {
             None

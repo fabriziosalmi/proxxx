@@ -5,28 +5,28 @@
 //! (text/plain; version=0.0.4) in-process — no external crate needed.
 //!
 //! Exposed metrics:
-//!   proxxx_node_cpu_usage_ratio{node}        — 0.0–1.0 CPU utilisation
-//!   proxxx_node_cpu_count{node}              — logical CPUs
-//!   proxxx_node_memory_used_bytes{node}
-//!   proxxx_node_memory_total_bytes{node}
-//!   proxxx_node_disk_used_bytes{node}
-//!   proxxx_node_disk_total_bytes{node}
-//!   proxxx_node_uptime_seconds{node}
-//!   proxxx_node_up{node}                     — 1=online 0=offline/unknown
+//!   `proxxx_node_cpu_usage_ratio{node}`        — 0.0–1.0 CPU utilisation
+//!   `proxxx_node_cpu_count{node}`              — logical CPUs
+//!   `proxxx_node_memory_used_bytes{node}`
+//!   `proxxx_node_memory_total_bytes{node}`
+//!   `proxxx_node_disk_used_bytes{node}`
+//!   `proxxx_node_disk_total_bytes{node}`
+//!   `proxxx_node_uptime_seconds{node}`
+//!   `proxxx_node_up{node}`                     — 1=online 0=offline/unknown
 //!
-//!   proxxx_guest_cpu_usage_ratio{vmid,name,type,node}
-//!   proxxx_guest_cpu_count{vmid,name,type,node}
-//!   proxxx_guest_memory_used_bytes{vmid,name,type,node}
-//!   proxxx_guest_memory_total_bytes{vmid,name,type,node}
-//!   proxxx_guest_disk_used_bytes{vmid,name,type,node}
-//!   proxxx_guest_disk_total_bytes{vmid,name,type,node}
-//!   proxxx_guest_uptime_seconds{vmid,name,type,node}
-//!   proxxx_guest_running{vmid,name,type,node} — 1=running 0=else
+//!   `proxxx_guest_cpu_usage_ratio{vmid,name,type,node}`
+//!   `proxxx_guest_cpu_count{vmid,name,type,node}`
+//!   `proxxx_guest_memory_used_bytes{vmid,name,type,node}`
+//!   `proxxx_guest_memory_total_bytes{vmid,name,type,node}`
+//!   `proxxx_guest_disk_used_bytes{vmid,name,type,node}`
+//!   `proxxx_guest_disk_total_bytes{vmid,name,type,node}`
+//!   `proxxx_guest_uptime_seconds{vmid,name,type,node}`
+//!   `proxxx_guest_running{vmid,name,type,node}` — 1=running 0=else
 //!
-//!   proxxx_storage_used_bytes{node,storage,type}
-//!   proxxx_storage_total_bytes{node,storage,type}
-//!   proxxx_storage_avail_bytes{node,storage,type}
-//!   proxxx_storage_active{node,storage,type}  — 1=active 0=inactive
+//!   `proxxx_storage_used_bytes{node,storage,type}`
+//!   `proxxx_storage_total_bytes{node,storage,type}`
+//!   `proxxx_storage_avail_bytes{node,storage,type}`
+//!   `proxxx_storage_active{node,storage,type}`  — 1=active 0=inactive
 
 use std::sync::Arc;
 

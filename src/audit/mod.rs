@@ -1,4 +1,4 @@
-//! Append-only audit log backed by SQLite.
+//! Append-only audit log backed by `SQLite`.
 //! Each entry is HMAC-SHA256 signed using a chained scheme:
 //! `chain_hmac = HMAC(key, prev_chain_hmac || ts || action || vmid_str || result)`
 //! The chain is verifiable offline via `proxxx audit verify`.
@@ -63,7 +63,7 @@ impl AuditLogger {
         params_json: Option<&str>,
         result: &str,
     ) -> Result<()> {
-        let prev_hmac = self.last_chain_hmac()?;
+        let prev_hmac = self.last_chain_hmac();
         let ts = chrono_now();
         let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
         let chain_hmac = compute_hmac(&self.key, &prev_hmac, &ts, action, &vmid_str, result);
@@ -74,7 +74,7 @@ impl AuditLogger {
                 ts,
                 action,
                 user,
-                vmid.map(|v| v as i64),
+                vmid.map(i64::from),
                 node,
                 params_json,
                 result,
@@ -136,13 +136,14 @@ impl AuditLogger {
         Ok((ok, fail))
     }
 
-    fn last_chain_hmac(&self) -> Result<String> {
-        let result: rusqlite::Result<String> = self.conn.query_row(
-            "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        );
-        Ok(result.unwrap_or_default())
+    fn last_chain_hmac(&self) -> String {
+        self.conn
+            .query_row(
+                "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
     }
 }
 
@@ -273,6 +274,6 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, mo, days + 1)
 }
 
-fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+const fn is_leap(y: u64) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }

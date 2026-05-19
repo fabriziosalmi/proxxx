@@ -41,7 +41,7 @@ struct McpState {
 }
 
 impl McpState {
-    fn new(client: Arc<PxClient>, config: ConfigHandle) -> Self {
+    const fn new(client: Arc<PxClient>, config: ConfigHandle) -> Self {
         Self { client, config }
     }
 

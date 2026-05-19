@@ -1764,8 +1764,8 @@ pub enum SideEffect {
     },
 
     /// Tear down the current TUI session and restart with `profile`.
-    /// The TUI run() loop returns `Ok(Some(profile))` to main.rs, which
-    /// re-enters run() with the new profile — zero binary restart.
+    /// The TUI `run()` loop returns `Ok(Some(profile))` to main.rs, which
+    /// re-enters `run()` with the new profile — zero binary restart.
     SwitchProfile(String),
 }
 

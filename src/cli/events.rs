@@ -252,7 +252,7 @@ fn fmt_ts(unix: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{mins:02}:{secs:02}Z")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+const fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     // Algorithm from Henry Warren "Hacker's Delight" §12-3, adjusted for u64.
     days += 719468; // shift epoch to 0000-03-01
     let era = days / 146097;
