@@ -46,6 +46,13 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      # Required for cosign keyless signing — the action exchanges
+      # this token for a short-lived Fulcio signing certificate
+      # scoped to this exact workflow path. Without it the cosign
+      # step fails at OIDC token retrieval ("expired_token").
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
