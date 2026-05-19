@@ -101,7 +101,7 @@ vt100 = { package = "vt100-ctt", version = "0.17", default-features = false }
 # WebSocket client for Proxmox termproxy serial console (feature 1b).
 # Uses rustls (matching reqwest's existing rustls-tls feature) so we don't
 # pull in native-tls / openssl-sys as a new system dep.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # HTTP server for MCP Streamable HTTP transport (2025-03-26 spec).
 # axum is already tokio-native; tower-http adds SSE + timeout middleware.

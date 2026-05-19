@@ -73,11 +73,15 @@ pub async fn connect(
     // ws.next() does not happen until the write returns, which fills
     // the kernel TCP recv buffer (~64 KB) and stalls the producer.
     use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-    let ws_config = WebSocketConfig {
-        max_frame_size: Some(1 << 20),
-        max_message_size: Some(4 << 20),
-        ..Default::default()
-    };
+    // tungstenite 0.29 marked WebSocketConfig as `#[non_exhaustive]` so
+    // we can no longer construct it with a struct literal. Build via
+    // Default then mutate the two fields we care about — the other
+    // defaults (write_buffer_size, accept_unmasked_frames, …) stay
+    // upstream-controlled, which is the right behaviour here: we only
+    // want to override the OOM-ceiling pair, not freeze every knob.
+    let mut ws_config = WebSocketConfig::default();
+    ws_config.max_frame_size = Some(1 << 20);
+    ws_config.max_message_size = Some(4 << 20);
 
     info!("termproxy WSS connect: {}", target.url);
     let (mut ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
@@ -91,7 +95,9 @@ pub async fn connect(
 
     // Auth frame — must be a binary frame containing `<user>:<ticket>\n`.
     use futures_util::SinkExt;
-    ws.send(Message::Binary(target.auth.as_bytes().to_vec()))
+    // tungstenite 0.29: Message::Binary now wraps `bytes::Bytes` (not
+    // `Vec<u8>`). `Vec<u8>` → `Bytes` is a zero-copy `From` impl.
+    ws.send(Message::Binary(target.auth.as_bytes().to_vec().into()))
         .await
         .context("sending termproxy auth frame")?;
 
@@ -116,7 +122,7 @@ where
 {
     use futures_util::SinkExt;
     let frame = format!("1:{cols}:{rows}:");
-    ws.send(Message::Binary(frame.into_bytes()))
+    ws.send(Message::Binary(frame.into_bytes().into()))
         .await
         .context("sending termproxy resize frame")?;
     Ok(())
@@ -139,7 +145,7 @@ where
     payload.extend_from_slice(bytes.len().to_string().as_bytes());
     payload.push(b':');
     payload.extend_from_slice(bytes);
-    ws.send(Message::Binary(payload))
+    ws.send(Message::Binary(payload.into()))
         .await
         .context("sending termproxy data frame")?;
     Ok(())
