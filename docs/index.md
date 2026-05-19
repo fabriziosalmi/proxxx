@@ -25,7 +25,7 @@ hero:
 
 features:
   - title: One binary, three callers
-    details: CLI, TUI, and MCP server in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 23-tool registry (stdio + Streamable HTTP transports) for LLM agents.
+    details: CLI, TUI, and MCP server in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 25-tool registry (stdio + Streamable HTTP transports) for LLM agents.
   - title: No agent on the cluster
     details: Direct REST against PVE (token or password) and PBS (token only), with typed error categories so callers match on the failure shape instead of grepping prose. SSH only for the paths PVE never exposed over REST — patch apply, full effective-permissions, per-guest interactive sessions.
   - title: Six-stage commit gate, no skip flags
@@ -111,7 +111,7 @@ onMounted(() => {
 | Binary                | 6–9 MB stripped depending on target · single static · no installer |
 | Supply chain          | `cargo audit --deny warnings` per push + nightly cron    |
 | System dependencies   | 0 — rustls only, no native-tls, no openssl               |
-| MCP tool registry     | 23 tools · stdio + HTTP · SHA-256 pinned · compile-time fixed |
+| MCP tool registry     | 25 tools · stdio + HTTP · SHA-256 pinned · compile-time fixed |
 
 ## A taste
 

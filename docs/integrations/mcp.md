@@ -15,7 +15,8 @@ HITL gate as human callers.
 
 ## The tool surface
 
-Closed enum, compile-time fixed:
+Closed enum, compile-time fixed — 25 tools as of v0.2.0. Regenerate this
+table from your binary with `proxxx mcp tools --json`:
 
 | Tool | Destructive | Budget | Description |
 | :--- | :---: | :---: | :--- |
@@ -26,9 +27,24 @@ Closed enum, compile-time fixed:
 | `stop_guest` | **yes** | 60 s | Graceful or hard stop |
 | `restart_guest` | **yes** | 60 s | Restart |
 | `delete_guest` | **yes** | 180 s | Permanent delete (cannot be undone) |
+| `suspend_guest` | no | 60 s | Pause a running guest |
+| `resume_guest` | no | 60 s | Resume a suspended guest |
+| `clone_guest` | **yes** | 180 s | Clone a VM/LXC to a new VMID |
+| `clone_with_cloudinit` | **yes** | 300 s | Clone QEMU template + apply cloud-init (user, sshkey, ipconfig0) in one call |
+| `migrate_guest` | **yes** | 300 s | Live-migrate to another node |
+| `create_guest` | **yes** | 120 s | Create new QEMU VM or LXC (node, type, name, memory, cores, disk, …) |
 | `create_snapshot` | no | 120 s | Create snapshot |
+| `list_snapshots` | no | 30 s | List snapshots for a guest |
 | `delete_snapshot` | **yes** | 120 s | Delete snapshot |
 | `get_storage_pools` | no | 30 s | Per-node storage list with usage |
+| `get_node_resources` | no | 30 s | Node CPU / memory / status detail |
+| `get_node_status` | no | 30 s | Node uptime, kernel, version |
+| `get_cluster_status` | no | 30 s | Cluster-wide quorum, nodes, services |
+| `list_tasks` | no | 30 s | Recent cluster tasks (running + completed) |
+| `get_task_log` | no | 30 s | Task log output by UPID |
+| `list_cluster_events` | no | 15 s | Recent task events with elapsed time |
+| `list_backup_jobs` | no | 30 s | Configured vzdump jobs |
+| `get_replication_status` | no | 30 s | Replication job status for a node |
 
 The full schema is exposed by `proxxx mcp tools --json`. Example
 entry:
@@ -82,7 +98,7 @@ Drop into `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The agent now sees the 10-tool surface.
+Restart Claude Desktop. The agent now sees the 25-tool surface.
 
 ## Audit the registry
 

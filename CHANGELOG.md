@@ -10,7 +10,19 @@ SemVer contract:
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
 
-## [Unreleased] — v0.1.28
+## [Unreleased]
+
+## [0.2.0] — 2026-05-19
+
+Headline: **broad LLM + IaC surface expansion**. New subcommands for
+guest creation, cloud-init at clone time, real-time events, and a
+self-diagnostic. MCP registry grew from 22 → 25 tools (append-only,
+SemVer-safe). Audit log, EU compliance positioning, SIGHUP hot-reload,
+shell completions. Statically-linked **aarch64-musl** Linux binary
+now in the release matrix — Pi 4/5, Ampere, Graviton, Oracle Free Tier.
+
+Minor bump (not patch) because the cumulative CLI / MCP surface
+added since 0.1.27 is well beyond a single-feature release.
 
 ### Added
 - **Shell completions** — `proxxx completions {bash|zsh|fish|powershell}` prints the shell
@@ -58,6 +70,10 @@ SemVer contract:
 - **MCP tool `clone_with_cloudinit`** (tool #25) — same flow callable by LLMs
   with inline params (no file). QEMU-only; LXC is rejected explicitly.
   Registry SHA-256 updated; counter 24→25.
+- **ARM64 Linux release artefact** — `aarch64-unknown-linux-musl` statically-
+  linked binary in the release matrix, built via `cross` (Docker-based
+  cross-compile sidesteps rusqlite/sha2/russh native-dep linker breakage).
+  Pi 4/5, Ampere, Graviton, Oracle Free Tier.
 
 ## [0.1.27] — 2026-05-14
 
