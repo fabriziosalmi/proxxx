@@ -37,9 +37,9 @@ Pick the row that matches you and jump straight to the right page.
 | **Platform / SRE** on 10-50 nodes with on-call | HITL Telegram gate, alert daemon, `--format json` for CI, `--profile` for multi-cluster | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [HITL](https://fabriziosalmi.github.io/proxxx/integrations/hitl) |
 | **DevOps** scripting Proxmox in pipelines | typed exit codes, deterministic JSON, pre-flight risk gate, batch ops with `--yes` | [CLI reference](https://fabriziosalmi.github.io/proxxx/reference/cli) · [Exit codes](https://fabriziosalmi.github.io/proxxx/reference/exit-codes) |
 | **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP server (stdio + Streamable HTTP), compile-time-fixed 25-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
-| **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [`SECURITY.md`](SECURITY.md) |
+| **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`SECURITY.md`](SECURITY.md) · [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) |
 | **EU-regulated ops** (NIS2 / ISO 27001 / GDPR) | append-only SQLite audit log with HMAC-SHA256 chain, `proxxx audit verify`, zero telemetry, fully self-hosted | [EU & compliance](#eu--compliance) |
-| **Contributor** sending a PR | 7-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
+| **Contributor** sending a PR | 8-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
 
 ---
 
@@ -280,9 +280,12 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
     [`02-error-handling.md`](pre-commit/02-error-handling.md) ·
     [`03-security-invariants.md`](pre-commit/03-security-invariants.md) ·
     [`04-resiliency-and-chaos.md`](pre-commit/04-resiliency-and-chaos.md)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — one-page module map + data flow + reducer/side-effect bus + process model.
+- [`THREAT_MODEL.md`](THREAT_MODEL.md) — attack surfaces, mitigations, accepted risks, verification ladder.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting policy + scope + hardening snapshot.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — onboarding, the gate, live-cluster verification format.
 - [`.cargo/audit.toml`](.cargo/audit.toml) — supply-chain advisory ignore policy.
+- [`deny.toml`](deny.toml) — cargo-deny policy: license whitelist + banned crates + source lock.
 
 ## Live cluster harness
 
