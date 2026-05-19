@@ -277,3 +277,224 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 const fn is_leap(y: u64) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
+
+#[cfg(test)]
+impl AuditLogger {
+    /// In-memory `AuditLogger` with a fixed test key. Used exclusively
+    /// by the proptest harness below to drive the full log → verify
+    /// cycle without touching the OS keychain / data dir / global
+    /// audit.db. The schema is identical to `open()`.
+    fn for_test() -> Self {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts         TEXT    NOT NULL,
+                action     TEXT    NOT NULL,
+                user       TEXT    NOT NULL DEFAULT '',
+                vmid       INTEGER,
+                node       TEXT,
+                params_json TEXT,
+                result     TEXT    NOT NULL DEFAULT '',
+                chain_hmac TEXT    NOT NULL
+            );",
+        )
+        .expect("create audit_log");
+        // Fixed 32-byte test key — deterministic regression repro.
+        let key = (0..32u8).collect::<Vec<u8>>();
+        Self { conn, key }
+    }
+}
+
+/// Property tests — invariants the HMAC chain MUST hold for ANY
+/// sequence of log calls and ANY single-byte mutation.
+///
+/// The chain is the load-bearing security primitive of the audit log:
+/// `proxxx audit verify` walks every entry and recomputes
+/// `chain_hmac = HMAC(key, prev_chain_hmac || ts || action || vmid || result)`.
+/// Any 1-byte mutation in any non-key column of any row MUST break the
+/// chain at that row (and cascade to every following row). Without
+/// this, a tamperer could swap a `delete` for a `start` and walk away
+/// clean.
+///
+/// `proptest` exercises 256 random sequences per property; failures
+/// shrink to the minimal mutation that breaks the contract.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    /// Generate a tuple of strings + optional fields shaped like a real
+    /// `log()` call. Action / user / result are short ASCII to keep
+    /// shrinking fast; vmid is bounded to PVE's actual range; node /
+    /// params are bounded-length or absent.
+    fn arb_entry() -> impl Strategy<
+        Value = (
+            String,
+            String,
+            Option<u32>,
+            Option<String>,
+            Option<String>,
+            String,
+        ),
+    > {
+        (
+            "[a-z_]{1,12}",                                // action
+            "[a-z][a-z0-9_]{1,10}",                        // user
+            proptest::option::of(100u32..10_000),          // vmid
+            proptest::option::of("[a-z0-9-]{3,12}"),       // node
+            proptest::option::of("[a-z0-9 \":,_-]{0,40}"), // params_json (loose — we don't parse it here)
+            "[a-z_]{1,12}",                                // result
+        )
+    }
+
+    proptest! {
+        /// Round-trip: log any sequence of valid entries, then verify
+        /// returns ok = N, fail = 0. No surprise: this is the "the
+        /// audit log works at all" sanity check.
+        #[test]
+        fn chain_round_trips(entries in vec(arb_entry(), 0..30)) {
+            let mut logger = AuditLogger::for_test();
+            for (action, user, vmid, node, params, result) in &entries {
+                logger
+                    .log(action, user, *vmid, node.as_deref(), params.as_deref(), result)
+                    .expect("log");
+            }
+            let (ok, fail) = logger.verify().expect("verify");
+            prop_assert_eq!(ok, entries.len());
+            prop_assert_eq!(fail, 0);
+        }
+
+        /// Mutation detection — the security claim. Log N entries,
+        /// then mutate any single column of any single row, then
+        /// verify must report at least one broken link. Pins the
+        /// non-repudiation contract: a tamperer cannot edit the log
+        /// without leaving a forensic trail.
+        ///
+        /// The four columns we test are exactly the ones folded into
+        /// the HMAC: ts, action, vmid (as i64), result, and the stored
+        /// chain_hmac itself. (`user`, `node`, `params_json` are stored
+        /// but intentionally NOT part of the chain — see compute_hmac.
+        /// Mutating those does NOT break the chain by design.)
+        #[test]
+        fn single_column_mutation_breaks_chain(
+            entries in vec(arb_entry(), 1..15),
+            target_idx in 0usize..15,
+            field_idx in 0usize..5,
+        ) {
+            let mut logger = AuditLogger::for_test();
+            for (action, user, vmid, node, params, result) in &entries {
+                logger
+                    .log(action, user, *vmid, node.as_deref(), params.as_deref(), result)
+                    .expect("log");
+            }
+            let n = entries.len();
+            let id = (target_idx % n) + 1; // sqlite ids start at 1
+
+            // Pick a column from the in-chain set. Each mutation is a
+            // straight UPDATE to a sentinel value that's syntactically
+            // valid SQL but byte-different from whatever was stored.
+            let column = ["ts", "action", "vmid", "result", "chain_hmac"][field_idx % 5];
+            let sql = if column == "vmid" {
+                "UPDATE audit_log SET vmid = COALESCE(vmid, 0) + 1 WHERE id = ?1".to_string()
+            } else {
+                format!("UPDATE audit_log SET {column} = 'TAMPERED-BY-PROPTEST' WHERE id = ?1")
+            };
+            logger.conn.execute(&sql, [id as i64]).expect("mutate");
+
+            let (_ok, fail) = logger.verify().expect("verify");
+            prop_assert!(
+                fail >= 1,
+                "mutating column {column} at id={id} should break ≥1 chain link, got fail=0"
+            );
+        }
+
+        /// Localised cascade — pins the exact blast radius of a
+        /// chain_hmac mutation. With the current `verify()` design,
+        /// `prev` is set from the STORED hmac, not the COMPUTED one,
+        /// so a single mutation at row K invalidates EXACTLY:
+        ///   * row K itself (its stored hmac no longer matches the
+        ///     recomputed value from row K-1's stored hmac), AND
+        ///   * row K+1 (if it exists — its recomputed value uses
+        ///     row K's stored TAMPERED hmac as prev, mismatching its
+        ///     own original stored hmac).
+        /// Row K+2 onwards re-converges, because row K+1's STORED
+        /// hmac is still the original chain link.
+        ///
+        /// This is a deliberate design trade-off: precise pinpointing
+        /// (which rows were touched) over full-cascade alarm. An
+        /// auditor sees "rows 5 and 6 are corrupt" instead of "rows
+        /// 5–N are corrupt"; the former is actionable, the latter is
+        /// noise.
+        ///
+        /// Pinning the exact fail count protects this design choice
+        /// from a future "optimisation" that switches to `prev =
+        /// computed` (which would cascade to the end of the log) or
+        /// changes the chain shape some other way.
+        #[test]
+        fn chain_hmac_mutation_breaks_self_and_next_only(
+            entries in vec(arb_entry(), 2..15),
+            target_idx in 0usize..15,
+        ) {
+            let mut logger = AuditLogger::for_test();
+            for (action, user, vmid, node, params, result) in &entries {
+                logger
+                    .log(action, user, *vmid, node.as_deref(), params.as_deref(), result)
+                    .expect("log");
+            }
+            let n = entries.len();
+            let id = (target_idx % n) + 1;
+            logger
+                .conn
+                .execute(
+                    "UPDATE audit_log SET chain_hmac = 'TAMPERED-BY-PROPTEST' WHERE id = ?1",
+                    [id as i64],
+                )
+                .expect("mutate");
+            let (_ok, fail) = logger.verify().expect("verify");
+            // Last row mutated → 1 failure (no next row to taint).
+            // Earlier rows → 2 failures (self + next).
+            let expected_fail = if id == n { 1 } else { 2 };
+            prop_assert_eq!(
+                fail, expected_fail,
+                "mutating chain_hmac at id={} of {} should produce {} failures, got {}",
+                id, n, expected_fail, fail
+            );
+        }
+
+        /// Out-of-chain columns (`user`, `node`, `params_json`) are
+        /// stored but NOT folded into the HMAC — that's intentional
+        /// per `compute_hmac` which only mixes in (ts, action, vmid,
+        /// result). Verify pins this DESIGN BOUNDARY: mutating
+        /// `user` / `node` / `params_json` MUST NOT break the chain.
+        ///
+        /// If this changes (and we extend chain coverage to those
+        /// columns), this property fails loudly and the doc-comment
+        /// at the top of the file needs updating in lockstep.
+        #[test]
+        fn user_node_params_mutation_does_not_break_chain(
+            entries in vec(arb_entry(), 1..10),
+            target_idx in 0usize..10,
+            col_idx in 0usize..3,
+        ) {
+            let mut logger = AuditLogger::for_test();
+            for (action, user, vmid, node, params, result) in &entries {
+                logger
+                    .log(action, user, *vmid, node.as_deref(), params.as_deref(), result)
+                    .expect("log");
+            }
+            let n = entries.len();
+            let id = (target_idx % n) + 1;
+            let col = ["user", "node", "params_json"][col_idx % 3];
+            let sql = format!("UPDATE audit_log SET {col} = 'TAMPERED' WHERE id = ?1");
+            logger.conn.execute(&sql, [id as i64]).expect("mutate");
+            let (ok, fail) = logger.verify().expect("verify");
+            prop_assert_eq!(
+                fail, 0,
+                "{} is not part of the chain — mutating it MUST NOT trigger fail, got fail={} ok={}",
+                col, fail, ok
+            );
+        }
+    }
+}

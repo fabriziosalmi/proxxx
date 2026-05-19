@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 48c73e771f5ba9c441904fb1ba11fbdb0cb37cb118101c7b762befcbe040b27f # shrinks to snaps = [Snapshot { name: "b", parent: "", description: "", snaptime: 0, vmstate: 0 }, Snapshot { name: "b", parent: "", description: "", snaptime: 0, vmstate: 0 }]

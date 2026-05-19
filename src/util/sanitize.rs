@@ -122,3 +122,107 @@ mod tests {
         assert_eq!(s, "");
     }
 }
+
+/// Property tests — invariants that hold for ANY input string.
+///
+/// The example tests above pin specific known-bad payloads (the
+/// ESC[2J repaint, the NL row-injection, BEL/BS/DEL). These property
+/// tests pin the broader contract: for any UTF-8 input — including
+/// adversarially constructed mixes the unit tests didn't think of —
+/// the output never contains a dangerous C0 byte, the length never
+/// grows, and the operation is idempotent.
+///
+/// `proptest` runs 256 cases per test by default; failures shrink to
+/// the minimal counterexample. Deterministic across CI runs via the
+/// `PROPTEST_CASES` env var if a regression needs reproduction.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// For ANY UTF-8 input, the sanitized output contains no
+        /// C0 control byte (except TAB) and no DEL — the full set of
+        /// bytes ratatui interprets as escape sequence prefixes.
+        ///
+        /// This is the security invariant: a hostile VM name like
+        /// `\x1b[2J\x1b[H<spoofed>` cannot reach the renderer.
+        #[test]
+        fn output_has_no_unsafe_bytes(s in any::<String>()) {
+            let out = sanitize_display(&s);
+            for ch in out.chars() {
+                let code = ch as u32;
+                if code < 0x80 {
+                    let b = code as u8;
+                    prop_assert!(
+                        b == b'\t' || (b >= 0x20 && b != 0x7F),
+                        "found unsafe byte 0x{b:02X} in output {out:?}"
+                    );
+                }
+            }
+        }
+
+        /// Idempotent: running sanitize on already-clean input is a
+        /// no-op. Prevents a regression where a future filter pass
+        /// might re-introduce a byte that the first pass missed.
+        #[test]
+        fn idempotent(s in any::<String>()) {
+            let once = sanitize_display(&s).into_owned();
+            let twice = sanitize_display(&once).into_owned();
+            prop_assert_eq!(once, twice);
+        }
+
+        /// Sanitize never adds bytes — it can only filter. A future
+        /// implementation that tries to "substitute" unsafe bytes
+        /// with placeholders (e.g. `\x1b` → `^[`) would break this
+        /// invariant and need an explicit policy decision.
+        #[test]
+        fn output_never_longer_than_input(s in any::<String>()) {
+            let out = sanitize_display(&s);
+            prop_assert!(out.len() <= s.len());
+        }
+
+        /// Hot-path performance contract: a string that is already
+        /// safe must round-trip as `Cow::Borrowed` (no allocation,
+        /// no copy). Tests the `bytes().all(is_safe_byte)` fast path
+        /// at line 32.
+        #[test]
+        fn clean_ascii_borrows(s in "[a-zA-Z0-9 \t._-]{0,200}") {
+            let out = sanitize_display(&s);
+            prop_assert!(
+                matches!(out, Cow::Borrowed(_)),
+                "expected Borrowed for clean input {s:?}, got {out:?}"
+            );
+        }
+
+        /// Specific high-risk bytes the threat model singles out
+        /// (ESC, BEL, BS, NL, CR, DEL) MUST NOT appear in any output.
+        /// Sub-invariant of `output_has_no_unsafe_bytes` but explicit
+        /// so a regression on any single one produces a focused
+        /// failure message.
+        #[test]
+        fn high_risk_bytes_never_survive(s in any::<String>()) {
+            let out = sanitize_display(&s);
+            for &b in &[0x1B, 0x07, 0x08, 0x0A, 0x0D, 0x7F] {
+                let ch = char::from(b);
+                prop_assert!(
+                    !out.contains(ch),
+                    "unsafe byte 0x{b:02X} survived in {out:?}"
+                );
+            }
+        }
+
+        /// Non-ASCII passthrough: every char with codepoint >= 0x80
+        /// in the input also appears in the output (in order). Pins
+        /// the design choice that the filter is ASCII-class only;
+        /// emoji, CJK, and accented Latin must NOT be stripped.
+        #[test]
+        fn non_ascii_chars_preserved(s in any::<String>()) {
+            let in_non_ascii: String = s.chars().filter(|c| (*c as u32) >= 0x80).collect();
+            let out = sanitize_display(&s);
+            let out_non_ascii: String =
+                out.chars().filter(|c| (*c as u32) >= 0x80).collect();
+            prop_assert_eq!(in_non_ascii, out_non_ascii);
+        }
+    }
+}
