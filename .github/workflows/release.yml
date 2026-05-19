@@ -346,7 +346,11 @@ jobs:
           # `draft: false` publishes immediately; flip to true if you
           # want to review before announcing.
           draft: false
-          # `prerelease: true` for `v0.x.y` and `vX.Y.Z-rc*` style.
-          # Strict-semver test: anything non-final-stable goes pre.
-          prerelease: ${{ contains(github.ref_name, '-') || startsWith(github.ref_name, 'v0.') }}
+          # `prerelease: true` only for `vX.Y.Z-rc*`, `-beta*`, `-alpha*`
+          # — i.e. tags with a hyphen suffix. `v0.x.y` tags are
+          # production releases (proxxx has been v0.x since v0.1.0,
+          # following SemVer pre-1.0 strictly), not pre-releases.
+          # The previous rule flipped every `v0.*` to prerelease,
+          # which hid the latest stable from the releases page.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
