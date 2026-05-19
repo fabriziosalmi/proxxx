@@ -50,6 +50,14 @@ SemVer contract:
   (`"Parameter 'guest_id': expected integer, got \"abc\""`) rather than
   silently misrouting the value.
 - **EU & compliance section** in README — NIS2/ISO 27001/GDPR alignment table.
+- **Cloud-init clone** — `proxxx clone <src> --cloud-init-user <file.toml>`
+  parses a TOML profile (ciuser, cipassword, sshkey/sshkey_file, ipconfig0,
+  searchdomain, nameserver), waits for the clone task to land, then applies
+  the cloud-init fields and regenerates the drive. Canonical IaC pattern in
+  one command — no more clone → set → regen dance.
+- **MCP tool `clone_with_cloudinit`** (tool #25) — same flow callable by LLMs
+  with inline params (no file). QEMU-only; LXC is rejected explicitly.
+  Registry SHA-256 updated; counter 24→25.
 
 ## [0.1.27] — 2026-05-14
 

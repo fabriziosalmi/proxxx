@@ -2,15 +2,116 @@
 //! lifecycle, snapshots, live disk move/resize (pre-flight gated), and
 //! QEMU Guest Agent file ops + network introspection.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
+use serde::Deserialize;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::common::{
     classify_pending, enforce_preflight, find_guest, find_guest_full, parse_kv_pairs,
     require_non_empty_params, wait_and_classify,
 };
+
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return format!("{}/{}", home.to_string_lossy(), rest);
+        }
+    }
+    path.to_owned()
+}
+
+/// TOML profile for cloud-init customization at clone time. Every
+/// field is optional — the user file pulls in just the keys they
+/// want to override. `sshkey_file` is a convenience: read a public
+/// key from disk so callers don't have to inline a multi-line key.
+#[derive(Debug, Default, Deserialize)]
+pub struct CloudInitProfile {
+    pub ciuser: Option<String>,
+    pub cipassword: Option<String>,
+    pub sshkey: Option<String>,
+    pub sshkey_file: Option<String>,
+    pub ipconfig0: Option<String>,
+    pub searchdomain: Option<String>,
+    pub nameserver: Option<String>,
+}
+
+impl CloudInitProfile {
+    pub fn from_toml_file(path: &Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("read cloud-init profile {}", path.display()))?;
+        let mut p: Self = toml::from_str(&raw)
+            .with_context(|| format!("parse cloud-init profile {}", path.display()))?;
+        if let Some(kf) = &p.sshkey_file {
+            let kp = expand_tilde(kf);
+            let key =
+                std::fs::read_to_string(&kp).with_context(|| format!("read sshkey_file {kp}"))?;
+            let key = key.trim().to_string();
+            if p.sshkey.is_some() {
+                anyhow::bail!("cloud-init profile: set either `sshkey` or `sshkey_file`, not both");
+            }
+            p.sshkey = Some(key);
+        }
+        Ok(p)
+    }
+
+    pub fn to_params(&self) -> Result<Vec<(String, String)>> {
+        let mut params: Vec<(String, String)> = Vec::new();
+        if let Some(v) = &self.ciuser {
+            params.push(("ciuser".into(), v.clone()));
+        }
+        if let Some(v) = &self.cipassword {
+            params.push(("cipassword".into(), v.clone()));
+        }
+        if let Some(v) = &self.sshkey {
+            params.push(("sshkeys".into(), v.clone()));
+        }
+        if let Some(v) = &self.ipconfig0 {
+            use std::str::FromStr;
+            let parsed = crate::api::types::Ipconfig::from_str(v)?;
+            params.push(("ipconfig0".into(), parsed.to_string()));
+        }
+        if let Some(v) = &self.searchdomain {
+            params.push(("searchdomain".into(), v.clone()));
+        }
+        if let Some(v) = &self.nameserver {
+            params.push(("nameserver".into(), v.clone()));
+        }
+        Ok(params)
+    }
+}
+
+/// Apply a CloudInitProfile to a QEMU guest and regenerate the
+/// cloud-init drive. No-op on empty profile (returns
+/// `applied=false`). LXC is rejected — cloud-init is QEMU-only.
+pub async fn apply_cloudinit_and_regen(
+    client: &crate::api::PxClient,
+    node: &str,
+    vmid: u32,
+    gt: crate::api::types::GuestType,
+    profile: &CloudInitProfile,
+) -> Result<Value> {
+    use crate::api::types::GuestType;
+    use crate::api::ProxmoxGateway;
+    if !matches!(gt, GuestType::Qemu) {
+        anyhow::bail!("cloud-init is QEMU-only — VMID {vmid} is an LXC container");
+    }
+    let params = profile.to_params()?;
+    if params.is_empty() {
+        return Ok(serde_json::json!({ "applied": false }));
+    }
+    let task_set = client.update_guest_config(node, vmid, gt, &params).await?;
+    let task_regen = client.regenerate_cloudinit(node, vmid).await?;
+    let keys: Vec<String> = params.iter().map(|(k, _)| k.clone()).collect();
+    Ok(serde_json::json!({
+        "applied": true,
+        "keys": keys,
+        "config_task": task_set,
+        "regen_task": task_regen,
+    }))
+}
 
 /// QEMU `vm` subcommand tree. Three branches:
 ///   - `set` — type-checked top-level config keys (cores, memory, …)

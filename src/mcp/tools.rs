@@ -44,6 +44,8 @@ pub enum ToolAction {
     CreateGuest,
     // ── Events ───────────────────────────────────────────
     ListClusterEvents,
+    // ── Cloud-init ───────────────────────────────────────
+    CloneWithCloudinit,
 }
 
 // ── Const Tool Definitions ──────────────────────────────
@@ -547,6 +549,70 @@ pub const TOOLS: &[ToolDef] = &[
         action: ToolAction::ListClusterEvents,
         destructive: false,
         timeout_secs: 15,
+    },
+    // Tool #25 — clone + apply cloud-init in one shot
+    ToolDef {
+        name: "clone_with_cloudinit",
+        description: "Clone a QEMU template into a new VMID and apply cloud-init customization (user, sshkey, ipconfig0, …) in one call. Waits for the clone task to finish before mutating cloud-init. QEMU-only.",
+        params: &[
+            ParamDef {
+                name: "guest_id",
+                description: "Source VMID (template) to clone",
+                param_type: ParamType::Int,
+                required: true,
+            },
+            ParamDef {
+                name: "newid",
+                description: "New VMID (0 = auto-assign next free)",
+                param_type: ParamType::Int,
+                required: false,
+            },
+            ParamDef {
+                name: "name",
+                description: "Display name for the new VM",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "full",
+                description: "Full clone (true) vs linked clone (false, default)",
+                param_type: ParamType::Bool,
+                required: false,
+            },
+            ParamDef {
+                name: "ciuser",
+                description: "Cloud-init default user account",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "sshkey",
+                description: "SSH public key (single line, ssh-ed25519/ssh-rsa form)",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "ipconfig0",
+                description: "First-NIC IP config, e.g. `ip=10.0.0.5/24,gw=10.0.0.1` or `ip=dhcp`",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "searchdomain",
+                description: "DNS search domain",
+                param_type: ParamType::Str,
+                required: false,
+            },
+            ParamDef {
+                name: "nameserver",
+                description: "DNS resolver IP",
+                param_type: ParamType::Str,
+                required: false,
+            },
+        ],
+        action: ToolAction::CloneWithCloudinit,
+        destructive: true,
+        timeout_secs: 300,
     },
 ];
 
