@@ -45,6 +45,14 @@ pub struct ClusterState {
     /// the value, not the identity (toggling it is an update).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acl: Vec<AclDecl>,
+
+    /// Cluster-wide storage definitions — `GET /storage`. Identity
+    /// is the `storage` field (operator-chosen storage id). Type-
+    /// specific fields (path, pool, server, export, datastore, …)
+    /// are emitted only when present, so a `dir` storage doesn't
+    /// pollute the TOML with empty `server=""`/`pool=""` lines.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub storage: Vec<StorageDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -125,6 +133,88 @@ const fn default_true() -> bool {
     true
 }
 
+/// Serde `skip_serializing_if` helper. The signature is fixed by serde
+/// (`fn(&T) -> bool`), so we must take `&bool` here even though clippy
+/// would prefer `bool` by value — passing by reference is the contract.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One cluster-wide storage definition — `GET /storage`. The
+/// `storage` field is the identity; everything else is value.
+///
+/// Type-specific fields (path / pool / server / export / datastore /
+/// fingerprint / username / vgname / thinpool) are all `#[serde(
+/// skip_serializing_if = "String::is_empty")]` so a `dir` storage's
+/// TOML doesn't carry empty `server=""`/`pool=""` lines. PVE's API
+/// returns the full union shape; we mirror that on disk but emit
+/// only the populated subset.
+///
+/// Deliberately NOT exported:
+/// * `digest` — PVE's stale-check identifier, not desired state.
+///   Including it would make the TOML churn on every API call even
+///   when nothing's changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageDecl {
+    /// Storage id (operator-chosen name, unique across the cluster).
+    pub storage: String,
+    /// Storage type: `dir` | `lvm` | `lvmthin` | `zfspool` | `nfs` |
+    /// `cifs` | `iscsi` | `glusterfs` | `cephfs` | `rbd` | `pbs` |
+    /// `btrfs` | `esxi`.
+    #[serde(rename = "type")]
+    pub storage_type: String,
+    /// CSV of allowed content kinds, e.g.
+    /// `"vztmpl,iso,backup,images,rootdir,snippets"`. PVE accepts
+    /// CSV on input and emits CSV on output; we keep it as a string
+    /// rather than parsing into an array, since the order PVE
+    /// preserves on read-back is not stable.
+    pub content: String,
+    /// CSV of nodes this storage is restricted to. Empty = all
+    /// nodes (the default).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nodes: String,
+    /// `true` = config kept but storage is administratively disabled.
+    #[serde(skip_serializing_if = "is_false")]
+    pub disable: bool,
+    /// `true` = visible to every node (NFS, PBS, `CephFS`, …). Local
+    /// storages (`dir`, `lvm`, `zfspool` against a node-local pool)
+    /// have this `false`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub shared: bool,
+    // ── Type-specific subset (skip when empty) ──
+    /// `dir` / `btrfs`: filesystem path on the host.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// `zfspool` / `rbd`: ZFS dataset / Ceph pool name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pool: String,
+    /// `nfs` / `cifs` / `pbs` / `iscsi`: server hostname / IP.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    /// `nfs`: export path on the server.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub export: String,
+    /// `pbs`: PBS datastore name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub datastore: String,
+    /// `pbs` / `cifs`: TLS fingerprint for verification (SHA-256
+    /// over the leaf cert).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
+    /// `cifs` / `pbs`: auth username. For PBS, this is
+    /// `user@realm!tokenname`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    /// `lvm` / `lvmthin`: volume group name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub vgname: String,
+    /// `lvmthin`: thin pool name within `vgname`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub thinpool: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +242,7 @@ mod tests {
             meta: None,
             pools: vec![p],
             acl: vec![],
+            storage: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         // No "comment = " line, no "members = " line — only poolid.
@@ -192,6 +283,7 @@ mod tests {
                 pve_version: "9.1.9".into(),
             }),
             acl: vec![],
+            storage: vec![],
             pools: vec![
                 PoolDecl {
                     poolid: "p1".into(),
@@ -241,6 +333,7 @@ roleid = "PVEVMAdmin"
             meta: None,
             pools: vec![],
             acl: vec![entry.clone()],
+            storage: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
@@ -264,6 +357,116 @@ propagate = false
         let s: ClusterState = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(s.acl.len(), 1);
         assert!(!s.acl[0].propagate);
+    }
+
+    #[test]
+    fn storage_decl_omits_type_specific_empty_fields() {
+        // A `dir` storage doesn't have a `server`, `pool`, `datastore`,
+        // etc. — its `StorageDecl` must serialise to TOML without any
+        // of those empty fields appearing. Pins the
+        // `skip_serializing_if = "String::is_empty"` discipline so a
+        // future "add a default" regression doesn't pollute the
+        // diff.
+        let s = StorageDecl {
+            storage: "local".into(),
+            storage_type: "dir".into(),
+            content: "iso,backup".into(),
+            path: "/var/lib/vz".into(),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        assert!(toml_str.contains("storage = \"local\""));
+        assert!(toml_str.contains("type = \"dir\""));
+        assert!(toml_str.contains("path = \"/var/lib/vz\""));
+        // None of the type-specific empties survive.
+        for k in &[
+            "server",
+            "pool",
+            "export",
+            "datastore",
+            "fingerprint",
+            "username",
+            "vgname",
+            "thinpool",
+        ] {
+            assert!(
+                !toml_str.contains(&format!("{k} =")),
+                "field '{k}' should be omitted (empty), got:\n{toml_str}"
+            );
+        }
+        // Defaulted bools (disable/shared) should also be omitted.
+        assert!(!toml_str.contains("disable"));
+        assert!(!toml_str.contains("shared"));
+    }
+
+    #[test]
+    fn storage_decl_emits_type_specific_fields_when_present() {
+        // A `pbs` storage has server + datastore + fingerprint +
+        // username; all four must survive serialisation. A `nfs`
+        // storage has server + export; pbs-only fields must NOT
+        // appear on it.
+        let pbs = StorageDecl {
+            storage: "backup-fra1".into(),
+            storage_type: "pbs".into(),
+            content: "backup".into(),
+            server: "pbs.example.com".into(),
+            datastore: "default".into(),
+            fingerprint: "AA:BB:CC".into(),
+            username: "backup@pbs!proxxx".into(),
+            shared: true,
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&pbs).expect("serialize");
+        assert!(toml_str.contains("server = \"pbs.example.com\""));
+        assert!(toml_str.contains("datastore = \"default\""));
+        assert!(toml_str.contains("fingerprint"));
+        assert!(toml_str.contains("username"));
+        assert!(toml_str.contains("shared = true"));
+        // No `pool`, `export`, `path` (those are for other types).
+        assert!(!toml_str.contains("pool"));
+        assert!(!toml_str.contains("export"));
+        assert!(!toml_str.contains("path"));
+    }
+
+    #[test]
+    fn storage_decl_round_trip_preserves_all_fields() {
+        let entries = vec![
+            StorageDecl {
+                storage: "local".into(),
+                storage_type: "dir".into(),
+                content: "iso,backup,vztmpl".into(),
+                path: "/var/lib/vz".into(),
+                disable: false,
+                shared: false,
+                ..Default::default()
+            },
+            StorageDecl {
+                storage: "ceph-rbd".into(),
+                storage_type: "rbd".into(),
+                content: "images,rootdir".into(),
+                pool: "rbd".into(),
+                shared: true,
+                ..Default::default()
+            },
+            StorageDecl {
+                storage: "shared-nfs".into(),
+                storage_type: "nfs".into(),
+                content: "backup".into(),
+                server: "10.0.0.5".into(),
+                export: "/exports/proxmox-backup".into(),
+                shared: true,
+                ..Default::default()
+            },
+        ];
+        let s = ClusterState {
+            meta: None,
+            pools: vec![],
+            acl: vec![],
+            storage: entries.clone(),
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed.storage, entries);
     }
 
     #[test]
