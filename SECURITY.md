@@ -37,6 +37,11 @@ Please include:
 
 ## Scope
 
+For the comprehensive attack-surface enumeration with per-surface
+mitigations and accepted risks, see [`THREAT_MODEL.md`](THREAT_MODEL.md).
+The summary below is the in-scope vulnerability classes for this
+disclosure policy.
+
 In scope:
 
 - Privilege escalation via crafted PVE / PBS API responses.
