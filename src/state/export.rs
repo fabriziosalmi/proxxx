@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::types::{AclEntry, ApiVersion, Pool, PoolDetails, PoolMember};
-use crate::state::model::{AclDecl, ClusterState, PoolDecl, StateMeta};
+use crate::api::types::{AclEntry, ApiVersion, Pool, PoolDetails, PoolMember, StorageDefinition};
+use crate::state::model::{AclDecl, ClusterState, PoolDecl, StateMeta, StorageDecl};
 
 /// Which resource families to export. Parsed from the CLI `--resource`
 /// argument. New variants are added per the ladder in epic #74.
@@ -27,6 +27,7 @@ use crate::state::model::{AclDecl, ClusterState, PoolDecl, StateMeta};
 pub enum Resource {
     Pools,
     Acl,
+    Storage,
 }
 
 impl Resource {
@@ -38,9 +39,10 @@ impl Resource {
         match s.trim().to_lowercase().as_str() {
             "pools" => Ok(vec![Self::Pools]),
             "acl" => Ok(vec![Self::Acl]),
-            "all" => Ok(vec![Self::Pools, Self::Acl]),
+            "storage" => Ok(vec![Self::Storage]),
+            "all" => Ok(vec![Self::Pools, Self::Acl, Self::Storage]),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | storage | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
             ),
         }
     }
@@ -51,6 +53,7 @@ impl Resource {
         match self {
             Self::Pools => "pools",
             Self::Acl => "acl",
+            Self::Storage => "storage",
         }
     }
 }
@@ -68,6 +71,7 @@ pub trait StateReadView: Send + Sync {
     async fn list_pools_view(&self) -> Result<Vec<Pool>>;
     async fn get_pool_view(&self, poolid: &str) -> Result<PoolDetails>;
     async fn list_acl_view(&self) -> Result<Vec<AclEntry>>;
+    async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -84,6 +88,9 @@ where
     }
     async fn list_acl_view(&self) -> Result<Vec<AclEntry>> {
         crate::api::ProxmoxGateway::list_acl(self).await
+    }
+    async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>> {
+        crate::api::ProxmoxGateway::list_cluster_storages(self).await
     }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
@@ -113,6 +120,7 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         }),
         pools: Vec::new(),
         acl: Vec::new(),
+        storage: Vec::new(),
     };
 
     for r in resources {
@@ -124,6 +132,11 @@ pub async fn export_state<C: StateReadView + ?Sized>(
             }
             Resource::Acl => {
                 state.acl = export_acl(client).await.with_context(|| "exporting acl")?;
+            }
+            Resource::Storage => {
+                state.storage = export_storage(client)
+                    .await
+                    .with_context(|| "exporting storage")?;
             }
         }
     }
@@ -191,6 +204,44 @@ async fn export_acl<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<AclDecl
             .then(a.roleid.cmp(&b.roleid))
     });
     Ok(out)
+}
+
+/// Read every cluster-wide storage definition and project to
+/// `Vec<StorageDecl>`. Sorted by `storage` (the operator-chosen id,
+/// unique across the cluster).
+///
+/// The `digest` field from PVE's response is dropped — it's a stale-
+/// check identifier returned to support `If-Match` headers on PUT,
+/// not desired state. Including it would make the TOML churn on
+/// every API call even when the storage's configuration hasn't
+/// actually changed.
+async fn export_storage<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<StorageDecl>> {
+    let mut storages = client
+        .list_cluster_storages_view()
+        .await
+        .context("listing cluster storages")?;
+    storages.sort_by(|a, b| a.storage.cmp(&b.storage));
+
+    Ok(storages
+        .into_iter()
+        .map(|s| StorageDecl {
+            storage: s.storage,
+            storage_type: s.storage_type,
+            content: s.content,
+            nodes: s.nodes,
+            disable: s.disable,
+            shared: s.shared,
+            path: s.path,
+            pool: s.pool,
+            server: s.server,
+            export: s.export,
+            datastore: s.datastore,
+            fingerprint: s.fingerprint,
+            username: s.username,
+            vgname: s.vgname,
+            thinpool: s.thinpool,
+        })
+        .collect())
 }
 
 /// Project one `PoolMember` to its identity string (`qemu/100`,
@@ -338,7 +389,7 @@ mod tests {
         // a `--resource all` export hits resources in a deterministic
         // sequence regardless of input ordering.
         let v = Resource::parse("all").unwrap();
-        assert_eq!(v, vec![Resource::Pools, Resource::Acl]);
+        assert_eq!(v, vec![Resource::Pools, Resource::Acl, Resource::Storage]);
     }
 
     #[test]
@@ -363,6 +414,7 @@ mod tests {
         pools: Vec<Pool>,
         details: std::collections::HashMap<String, PoolDetails>,
         acl: Vec<AclEntry>,
+        storage: Vec<StorageDefinition>,
     }
 
     #[async_trait]
@@ -378,6 +430,9 @@ mod tests {
         }
         async fn list_acl_view(&self) -> Result<Vec<AclEntry>> {
             Ok(self.acl.clone())
+        }
+        async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>> {
+            Ok(self.storage.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {
@@ -634,6 +689,71 @@ mod tests {
         assert!(
             pools_idx < acl_idx,
             "pools must come before acl in TOML, got pools_idx={pools_idx} acl_idx={acl_idx}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_storage_sorts_by_storage_id() {
+        // PVE returns storages in roughly creation order; the export
+        // must canonicalise to alphabetical by `storage` id so the
+        // TOML is byte-stable.
+        let mut fake = FakeStateView::default();
+        fake.storage = vec![
+            StorageDefinition {
+                storage: "zfs-fast".into(),
+                storage_type: "zfspool".into(),
+                pool: "rpool/data".into(),
+                content: "images,rootdir".into(),
+                shared: false,
+                ..Default::default()
+            },
+            StorageDefinition {
+                storage: "local".into(),
+                storage_type: "dir".into(),
+                path: "/var/lib/vz".into(),
+                content: "iso,backup,vztmpl".into(),
+                ..Default::default()
+            },
+            StorageDefinition {
+                storage: "ceph-rbd".into(),
+                storage_type: "rbd".into(),
+                pool: "rbd".into(),
+                content: "images".into(),
+                shared: true,
+                ..Default::default()
+            },
+        ];
+
+        let out = export_storage(&fake).await.expect("export");
+        let ids: Vec<&str> = out.iter().map(|s| s.storage.as_str()).collect();
+        assert_eq!(ids, vec!["ceph-rbd", "local", "zfs-fast"]);
+    }
+
+    #[tokio::test]
+    async fn export_storage_drops_digest_from_pve_response() {
+        // PVE's `GET /storage` includes a `digest` field for ETag-
+        // style stale-check. It's not desired state; including it in
+        // the export would make the TOML churn on every API call.
+        // The model has no `digest` field; the export must not
+        // synthesise one. (Confirms by checking the serialised TOML.)
+        let mut fake = FakeStateView::default();
+        fake.storage = vec![StorageDefinition {
+            storage: "local".into(),
+            storage_type: "dir".into(),
+            content: "iso".into(),
+            path: "/var/lib/vz".into(),
+            digest: "abc123".into(),
+            ..Default::default()
+        }];
+        let out = export_storage(&fake).await.expect("export");
+        let toml_str = toml::to_string(&out[0]).expect("serialize");
+        assert!(
+            !toml_str.contains("digest"),
+            "digest must not survive export, got:\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("abc123"),
+            "digest value must not survive export, got:\n{toml_str}"
         );
     }
 }
