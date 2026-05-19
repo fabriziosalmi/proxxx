@@ -500,6 +500,74 @@ pub async fn handle_tool_call(
                 "events": enriched,
             }))?
         }
+        ToolAction::CloneWithCloudinit => {
+            use crate::api::types::GuestType;
+            let vmid = args
+                .get("guest_id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let (node, gt) = find_node_and_type(client, vmid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+            if !matches!(gt, GuestType::Qemu) {
+                anyhow::bail!("clone_with_cloudinit: VMID {vmid} is LXC — cloud-init is QEMU-only");
+            }
+            let newid_arg = args
+                .get("newid")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let newid = if newid_arg == 0 {
+                client.next_free_vmid().await?
+            } else {
+                newid_arg
+            };
+            let name = args.get("name").and_then(|v| v.as_str());
+            let full = args
+                .get("full")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            let profile = crate::cli::vm::CloudInitProfile {
+                ciuser: args
+                    .get("ciuser")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                cipassword: None,
+                sshkey: args
+                    .get("sshkey")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                sshkey_file: None,
+                ipconfig0: args
+                    .get("ipconfig0")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                searchdomain: args
+                    .get("searchdomain")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                nameserver: args
+                    .get("nameserver")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+            };
+
+            let upid = client
+                .clone_guest(&node, vmid, gt, newid, name, None, None, full, None, None)
+                .await?;
+            // Block until clone lands — applying cloudinit before
+            // the disk image is ready races PVE's own locking.
+            let status = crate::cli::common::poll_task_until_done(client, &node, &upid, 0).await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "clone task did not succeed (status={:?}); cloud-init not applied",
+                    status.exitstatus
+                );
+            }
+            let ci = crate::cli::vm::apply_cloudinit_and_regen(client, &node, newid, gt, &profile)
+                .await?;
+            format!("Cloned guest {vmid} → {newid} (UPID: {upid}); cloud-init applied: {ci}")
+        }
     };
 
     Ok(json!({

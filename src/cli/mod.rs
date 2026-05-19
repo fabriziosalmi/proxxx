@@ -5,7 +5,7 @@ use serde_json::Value;
 mod access;
 mod audit_cmd;
 mod cluster;
-mod common;
+pub mod common;
 mod console;
 mod ct;
 mod doctor;
@@ -17,7 +17,7 @@ mod monitoring;
 mod node;
 mod patch;
 mod storage;
-mod vm;
+pub mod vm;
 
 pub use audit_cmd::AuditAction;
 
@@ -300,6 +300,13 @@ pub enum Command {
         /// Description for the new guest.
         #[arg(long)]
         description: Option<String>,
+        /// Cloud-init customization TOML file. Applied (and the
+        /// cloud-init drive regenerated) after the clone task
+        /// completes. QEMU-only. Supported keys: ciuser,
+        /// cipassword, sshkey, sshkey_file, ipconfig0,
+        /// searchdomain, nameserver.
+        #[arg(long, value_name = "FILE")]
+        cloud_init_user: Option<std::path::PathBuf>,
     },
     /// Manage snapshots
     Snapshot {
@@ -1229,6 +1236,7 @@ pub async fn execute(
             full,
             snapname,
             description,
+            cloud_init_user,
         } => {
             let (src_node, gt) = find_guest(&client, src_vmid).await?;
             // Auto-fetch newid only when the user didn't pin one — saves
@@ -1238,6 +1246,16 @@ pub async fn execute(
                 Some(n) => n,
                 None => client.next_free_vmid().await?,
             };
+            // Parse profile up-front so a malformed file fails before
+            // we burn the clone task.
+            let profile = match &cloud_init_user {
+                Some(p) => Some(vm::CloudInitProfile::from_toml_file(p)?),
+                None => None,
+            };
+            // The clone lands on the *target* node (or src node if not
+            // pinned). Cloud-init mutations must hit the post-clone
+            // location, not src.
+            let landing_node = target.clone().unwrap_or_else(|| src_node.clone());
             let upid = client
                 .clone_guest(
                     &src_node,
@@ -1252,6 +1270,25 @@ pub async fn execute(
                     description.as_deref(),
                 )
                 .await?;
+            let cloudinit_result = if let Some(profile) = profile {
+                // Block until the clone task finishes — applying
+                // cloudinit before the disk image lands races PVE's
+                // own locking and returns a generic 500.
+                let status =
+                    crate::cli::common::poll_task_until_done(&client, &src_node, &upid, 0).await?;
+                if !status.is_success() {
+                    anyhow::bail!(
+                        "clone task did not succeed (status={:?}); skipping cloud-init apply",
+                        status.exitstatus
+                    );
+                }
+                Some(
+                    vm::apply_cloudinit_and_regen(&client, &landing_node, target_id, gt, &profile)
+                        .await?,
+                )
+            } else {
+                None
+            };
             Ok((
                 serde_json::json!({
                     "src_vmid": src_vmid,
@@ -1263,6 +1300,7 @@ pub async fn execute(
                     "full": full,
                     "snapname": snapname,
                     "task": upid,
+                    "cloudinit": cloudinit_result,
                 }),
                 0,
             ))
