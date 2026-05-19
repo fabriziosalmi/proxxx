@@ -1025,3 +1025,89 @@ mod batch_policy_tests {
         assert_eq!(canary_pilot_count(7, 100), 7);
     }
 }
+
+/// Property tests on `BatchPolicy::parse` — the CLI flag parser is a
+/// trust boundary (the operator types the value, but a stale shell
+/// alias or a malformed CI variable can produce arbitrary input).
+///
+/// These proptests pin: parse never panics regardless of input,
+/// every Ok variant respects the documented bounds (1≤percent≤100,
+/// `wave_size≥1`), case-insensitivity of the prefix, and trim-
+/// neutrality of surrounding whitespace.
+#[cfg(test)]
+mod batch_policy_proptests {
+    use super::BatchPolicy;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Total function: ANY input must produce a Result, not a
+        /// panic, an abort, or an infinite loop. Pins the CLI's
+        /// "never crash on user input" contract.
+        #[test]
+        fn parse_never_panics(s in any::<String>()) {
+            let _ = BatchPolicy::parse(&s);
+        }
+
+        /// Canary variant always respects the 1..=100 percent bound.
+        /// A regression that let percent = 0 in (no pilot — degenerate)
+        /// or percent > 100 (more targets than exist) would silently
+        /// break the batch dispatcher; pinned here so the parser is
+        /// the choke-point.
+        #[test]
+        fn canary_percent_always_in_bounds(s in any::<String>()) {
+            if let Ok(BatchPolicy::Canary { percent }) = BatchPolicy::parse(&s) {
+                prop_assert!(
+                    (1..=100).contains(&percent),
+                    "canary percent {} out of bounds for input {:?}",
+                    percent, s
+                );
+            }
+        }
+
+        /// Rolling variant always respects wave_size ≥ 1. A zero
+        /// wave-size would loop forever in `execute_batch_op_with_
+        /// policy`'s rolling branch (waves of 0 items).
+        #[test]
+        fn rolling_wave_size_always_positive(s in any::<String>()) {
+            if let Ok(BatchPolicy::Rolling { wave_size }) = BatchPolicy::parse(&s) {
+                prop_assert!(
+                    wave_size >= 1,
+                    "rolling wave_size {} should be ≥ 1 for input {:?}",
+                    wave_size, s
+                );
+            }
+        }
+
+        /// Case-insensitive prefix: `full`/`Full`/`FULL`/`fULL` all
+        /// parse identically. Real ops scripts use mixed case
+        /// depending on the author; the parser shouldn't be
+        /// surprising.
+        #[test]
+        fn case_insensitive_full_keyword(suffix in "[a-zA-Z]{0,4}") {
+            let lower = format!("full{suffix}");
+            let upper = lower.to_uppercase();
+            let parsed_lower = BatchPolicy::parse(&lower);
+            let parsed_upper = BatchPolicy::parse(&upper);
+            // Both succeed or both fail — case alone never flips
+            // the outcome.
+            prop_assert_eq!(parsed_lower.is_ok(), parsed_upper.is_ok());
+        }
+
+        /// Whitespace-tolerant: leading/trailing whitespace doesn't
+        /// change the parse result. The wrapper passes argv values
+        /// directly and some CI systems (or shell pipelines) tack on
+        /// spaces; the parser must canonicalise.
+        #[test]
+        fn trim_neutral(
+            base in "(full|canary|rolling|canary=[0-9]{1,3}|rolling=[0-9]{1,3})",
+            pad in "[ \t]{0,5}",
+        ) {
+            let padded = format!("{pad}{base}{pad}");
+            let p1 = BatchPolicy::parse(&base);
+            let p2 = BatchPolicy::parse(&padded);
+            prop_assert_eq!(p1.is_ok(), p2.is_ok(),
+                "padded {:?} vs base {:?} disagreed on Ok/Err",
+                padded, base);
+        }
+    }
+}

@@ -539,6 +539,17 @@ pub async fn execute_perms(
 }
 
 fn shell_quote(s: &str) -> String {
+    // Empty input MUST quote as `''`. The bare path's `chars().all(…)`
+    // predicate is vacuously true on empty, but emitting bare empty
+    // means bash word-splitting silently drops the argument entirely
+    // — so e.g. `pveum user permissions -- {shell_quote("")}` ends up
+    // as `pveum user permissions --` with NO user argument, and
+    // pveum prints help instead of erroring out on a missing user.
+    // Pinned by the `shell_quote_round_trips_via_bash_dequote`
+    // proptest, which failed on the empty-string shrink.
+    if s.is_empty() {
+        return "''".to_string();
+    }
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '!' | '_' | '-' | '.'))
     {
@@ -599,5 +610,178 @@ mod shell_quote_tests {
         assert_eq!(q.matches("'\\''").count(), 2);
         // No raw shell-active sequence outside of quotes survives.
         assert!(!q.contains(";'") || q.contains("'\\''"));
+    }
+}
+
+/// Property tests on `shell_quote` — the function defends shell-out
+/// to `pveum` against a hostile userid (Audit phase 5.13). The unit
+/// tests above pin specific known-attack payloads. These proptests
+/// pin the structural contract for ANY UTF-8 input: the output must
+/// either be bare-safe or fully single-quoted with every internal
+/// `'` properly escape-sequenced, AND a faithful bash-style single-
+/// quote unquoter must round-trip the output back to the input.
+///
+/// Why this matters: a single regression that accidentally let the
+/// "bare-safe" branch accept a `;` or `$` character would open an
+/// injection hole that bypasses every existing example test (none
+/// of them check the universe of unsafe chars). proptest's 256
+/// random cases cover the universe.
+#[cfg(test)]
+mod shell_quote_proptests {
+    use super::shell_quote;
+    use proptest::prelude::*;
+
+    /// Parse a `shell_quote` OUTPUT back into the original input,
+    /// emulating the subset of bash word-splitting that
+    /// `shell_quote` is designed to be safe under. Supports two
+    /// shapes only:
+    ///   * bare-safe path: input == output, output is alphanumeric +
+    ///     @!_-.
+    ///   * single-quoted path: `'…'` with embedded `'\''` escapes.
+    ///
+    /// Returns `None` if the output doesn't match the expected shape
+    /// (which itself is a test failure — the safety contract is
+    /// "output IS one of these two shapes").
+    fn bash_dequote(out: &str) -> Option<String> {
+        if out.is_empty() {
+            return None;
+        }
+        // Bare path — no quotes anywhere.
+        if !out.contains('\'') {
+            let all_safe = out
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '!' | '_' | '-' | '.'));
+            return if all_safe {
+                Some(out.to_string())
+            } else {
+                None
+            };
+        }
+        // Quoted path — must start and end with `'`.
+        if !out.starts_with('\'') || !out.ends_with('\'') {
+            return None;
+        }
+        // Iterate the inner content, expanding `'\''` → `'`.
+        let bytes = out.as_bytes();
+        let mut decoded = String::new();
+        let mut i = 1;
+        let end = bytes.len() - 1; // exclude trailing `'`
+        while i < end {
+            if bytes[i] == b'\'' {
+                // Inside the outer `'…'` region, the only legal `'` is
+                // the start of a `'\''` close-escape-reopen sequence.
+                if i + 3 < bytes.len()
+                    && bytes[i + 1] == b'\\'
+                    && bytes[i + 2] == b'\''
+                    && bytes[i + 3] == b'\''
+                {
+                    decoded.push('\'');
+                    i += 4;
+                } else {
+                    // Bare `'` mid-string OR end-of-quoted-region — both
+                    // indicate the safety contract was broken.
+                    return None;
+                }
+            } else {
+                // Multi-byte UTF-8 safe: push the byte. We accumulate
+                // bytes then reinterpret as UTF-8 at the end below.
+                decoded.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        // Reconstruct any UTF-8 from raw bytes if the input had non-ASCII.
+        // `decoded` was built byte-by-byte via `bytes[i] as char` which
+        // is only valid for ASCII (< 0x80). For non-ASCII fast-path,
+        // re-extract from the original slice.
+        if decoded.chars().any(|c| (c as u32) >= 0x80) || decoded.contains('\u{00}') {
+            // Fall back to byte-slice → str conversion.
+            let inner = &out[1..out.len() - 1];
+            let mut s = String::new();
+            let mut rest = inner;
+            while let Some(idx) = rest.find("'\\''") {
+                s.push_str(&rest[..idx]);
+                s.push('\'');
+                rest = &rest[idx + 4..];
+            }
+            s.push_str(rest);
+            return Some(s);
+        }
+        Some(decoded)
+    }
+
+    proptest! {
+        /// Round-trip: ANY input that goes through `shell_quote` must
+        /// be recoverable by the bash dequoter. This is the security
+        /// contract: bash with `--` argument splitting receives
+        /// EXACTLY the input as a single argv element, no expansion.
+        #[test]
+        fn shell_quote_round_trips_via_bash_dequote(s in any::<String>()) {
+            let quoted = shell_quote(&s);
+            let recovered = bash_dequote(&quoted);
+            prop_assert_eq!(
+                recovered.as_deref(),
+                Some(s.as_str()),
+                "shell_quote({:?}) = {:?} did not round-trip via bash_dequote (got {:?})",
+                s, quoted, recovered
+            );
+        }
+
+        /// Bare path correctness: input is returned unchanged IF AND
+        /// ONLY IF it consists entirely of the safe-char set
+        /// alphanumeric + `@!_-.`. Any deviation must trigger the
+        /// quoted path.
+        #[test]
+        fn bare_path_used_iff_safe_chars(s in any::<String>()) {
+            let safe = !s.is_empty()
+                && s.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '@' | '!' | '_' | '-' | '.')
+                });
+            let q = shell_quote(&s);
+            if safe {
+                prop_assert_eq!(&q, &s, "safe input {:?} should pass through bare", s);
+            } else {
+                // For non-safe input (including empty), the function
+                // must produce a quoted form — i.e. start with `'`.
+                prop_assert!(
+                    q.starts_with('\''),
+                    "unsafe input {:?} produced bare output {:?}",
+                    s, q
+                );
+            }
+        }
+
+        /// Deterministic: same input always produces the same output.
+        /// Pins against any future refactor that introduces randomness
+        /// (e.g. variable-length padding) which would break shell
+        /// equivalence proofs that build on `shell_quote`'s output.
+        #[test]
+        fn deterministic(s in any::<String>()) {
+            prop_assert_eq!(shell_quote(&s), shell_quote(&s));
+        }
+
+        /// No raw shell metachar outside the protective quoting. The
+        /// dangerous bash metachars (`;`, `|`, `&`, `$`, `` ` ``, `(`,
+        /// `)`, `<`, `>`, newline) must NEVER appear in the bare
+        /// (unquoted) output — that's the entire point of the safe-
+        /// char allowlist. If any of them are in the input, the
+        /// output must use the quoted form.
+        #[test]
+        fn metachars_never_appear_bare(s in any::<String>()) {
+            let q = shell_quote(&s);
+            // If the output is the bare form (no leading quote), then
+            // it contains NO metachar — by construction of the allowlist.
+            if !q.starts_with('\'') {
+                for mc in &[';', '|', '&', '$', '`', '(', ')', '<', '>', '\n', '\r', ' ', '\t', '*', '?', '[', ']', '{', '}', '#', '~', '!', '\\', '"', '/'] {
+                    if matches!(*mc, '@' | '!' | '_' | '-' | '.') {
+                        continue; // these ARE in the allowlist
+                    }
+                    prop_assert!(
+                        !q.contains(*mc),
+                        "metachar {:?} survived bare in output {:?} for input {:?}",
+                        mc, q, s
+                    );
+                }
+            }
+        }
     }
 }
