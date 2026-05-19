@@ -38,6 +38,13 @@ pub struct ClusterState {
     /// Pools — `GET /pools` + `GET /pools/{poolid}` for membership.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pools: Vec<PoolDecl>,
+
+    /// ACL entries — `GET /access/acl`. Identity is the 4-tuple
+    /// `(path, kind, ugid, roleid)`; PVE's response is flat, one row
+    /// per (subject, role, path) combination. `propagate` is part of
+    /// the value, not the identity (toggling it is an update).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub acl: Vec<AclDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -77,6 +84,47 @@ pub struct PoolDecl {
     pub members: Vec<String>,
 }
 
+/// One ACL grant — the 4-tuple `(path, kind, ugid, roleid)` is the
+/// identity, plus the `propagate` bit as a value field.
+///
+/// PVE's `GET /access/acl` returns one row per (subject, role, path)
+/// combination — a single user can hold N roles on M paths and each
+/// shows up as a separate entry. We mirror that 1:1: the on-disk
+/// state is a flat array of `AclDecl`, identity-keyed at apply time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AclDecl {
+    /// ACL path — e.g. `/`, `/vms/100`, `/pool/team-platform`,
+    /// `/storage/ceph-rbd`.
+    pub path: String,
+    /// `"user"` | `"group"` | `"token"`. PVE's discriminator
+    /// between the three subject kinds; matters because the same
+    /// `ugid` string could in principle conflict across kinds (it
+    /// doesn't in practice, but PVE's API requires the explicit
+    /// type on every mutation).
+    pub kind: String,
+    /// Subject identifier. For `user`: `<user>@<realm>` (e.g.
+    /// `alice@pve`, `root@pam`). For `group`: just the group name.
+    /// For `token`: `<userid>!<tokenid>`.
+    pub ugid: String,
+    /// PVE role id — e.g. `Administrator`, `PVEAuditor`,
+    /// `PVEVMAdmin`, `PVEPoolUser`, or any custom role created with
+    /// `proxxx access user-create` / `pveum role add`.
+    pub roleid: String,
+    /// Whether the grant propagates to child paths. PVE's API
+    /// default is `true`; mirroring that here so a hand-written TOML
+    /// without an explicit `propagate` line behaves the same as one
+    /// with `propagate = true`. To pin "this role applies ONLY to
+    /// the path itself, not children", set `propagate = false`
+    /// explicitly.
+    #[serde(default = "default_true")]
+    pub propagate: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +151,7 @@ mod tests {
         let s = ClusterState {
             meta: None,
             pools: vec![p],
+            acl: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         // No "comment = " line, no "members = " line — only poolid.
@@ -142,6 +191,7 @@ mod tests {
                 exported_from_proxxx: "0.2.1".into(),
                 pve_version: "9.1.9".into(),
             }),
+            acl: vec![],
             pools: vec![
                 PoolDecl {
                     poolid: "p1".into(),
@@ -158,6 +208,62 @@ mod tests {
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn acl_decl_defaults_to_propagate_true() {
+        // PVE's API default for `propagate` is true; a hand-written
+        // TOML without an explicit `propagate` line should behave
+        // identically. Pins this so a future schema change can't
+        // silently flip the default.
+        let toml_str = r#"
+[[acl]]
+path = "/vms/100"
+kind = "user"
+ugid = "alice@pve"
+roleid = "PVEVMAdmin"
+"#;
+        let s: ClusterState = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(s.acl.len(), 1);
+        assert!(s.acl[0].propagate, "default should be true");
+    }
+
+    #[test]
+    fn acl_decl_round_trip_preserves_all_fields() {
+        let entry = AclDecl {
+            path: "/pool/team-platform".into(),
+            kind: "group".into(),
+            ugid: "platform-engineers".into(),
+            roleid: "PVEPoolUser".into(),
+            propagate: false,
+        };
+        let s = ClusterState {
+            meta: None,
+            pools: vec![],
+            acl: vec![entry.clone()],
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(s, parsed);
+        assert_eq!(parsed.acl[0], entry);
+    }
+
+    #[test]
+    fn acl_explicit_propagate_false_is_preserved() {
+        // The non-default value — propagate=false — must survive
+        // the round trip. Pins that we don't accidentally collapse
+        // it to the default.
+        let toml_str = r#"
+[[acl]]
+path = "/storage/local"
+kind = "user"
+ugid = "ops@pve"
+roleid = "PVEDatastoreUser"
+propagate = false
+"#;
+        let s: ClusterState = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(s.acl.len(), 1);
+        assert!(!s.acl[0].propagate);
     }
 
     #[test]

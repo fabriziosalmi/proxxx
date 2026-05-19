@@ -33,9 +33,9 @@ pub enum ExportFormat {
 pub enum StateCommand {
     /// Export the cluster's mutable state.
     ///
-    /// v1 supports `--resource pools` only. More resource families
-    /// (acl, storage, firewall-cluster, backup-jobs, notifications)
-    /// land per the ladder in epic #74.
+    /// Supported resources: `pools`, `acl`, `all` (every supported
+    /// family). More (storage, firewall-cluster, backup-jobs,
+    /// notifications) land per the ladder in epic #74.
     ///
     /// The resulting document is byte-stable across runs against an
     /// unchanged cluster — every collection is sorted by its identity
@@ -47,13 +47,13 @@ pub enum StateCommand {
     ///   proxxx state export > state.toml                    # capture to file
     ///   proxxx state export --output json | jq '.pools[0]'  # programmatic
     Export {
-        /// Resource family to export. Valid in v1: `pools`. More
-        /// coming — see issue #74.
+        /// Resource family to export. Valid: `pools`, `acl`, `all`.
+        /// More families coming — see issue #74.
         #[arg(long, default_value = "pools")]
         resource: String,
 
         /// Output format for the exported document. TOML (default)
-        /// is the canonical disk format for the GitOps workflow;
+        /// is the canonical disk format for the `GitOps` workflow;
         /// JSON is for piping into `jq` and other programmatic
         /// consumers. Distinct from the global `--format` flag,
         /// which controls how proxxx's normal table/json/plain
@@ -78,10 +78,10 @@ pub async fn execute_state(
 ) -> Result<(Value, i32)> {
     match action {
         StateCommand::Export { resource, output } => {
-            let r = state::export::Resource::parse(&resource)?;
+            let resources = state::export::Resource::parse(&resource)?;
             let profile_label = profile.unwrap_or("default");
             let exported =
-                state::export::export_state(client.as_ref(), &[r], profile_label).await?;
+                state::export::export_state(client.as_ref(), &resources, profile_label).await?;
 
             match output {
                 ExportFormat::Toml => {

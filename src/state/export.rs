@@ -1,11 +1,13 @@
 //! Read live cluster state into a `ClusterState`.
 //!
-//! Pure read: this layer never mutates. Pools-side calls go through a
-//! narrow [`PoolReadView`] trait that's a strict subset of the full
+//! Pure read: this layer never mutates. All read calls go through a
+//! narrow [`StateReadView`] trait that's a strict subset of the full
 //! [`ProxmoxGateway`](crate::api::ProxmoxGateway) — the blanket impl
 //! below means any production [`ProxmoxGateway`] auto-satisfies it,
 //! and unit tests implement the small trait directly without having
-//! to stub 200+ unrelated methods.
+//! to stub 200+ unrelated methods. As new resource families come
+//! online the trait grows by exactly the methods the new exporter
+//! needs.
 //!
 //! Diff-stability: every collection is sorted on the way out by its
 //! identity field. Two calls to `export_state` against an unchanged
@@ -16,27 +18,29 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::types::{ApiVersion, Pool, PoolDetails, PoolMember};
-use crate::state::model::{ClusterState, PoolDecl, StateMeta};
+use crate::api::types::{AclEntry, ApiVersion, Pool, PoolDetails, PoolMember};
+use crate::state::model::{AclDecl, ClusterState, PoolDecl, StateMeta};
 
 /// Which resource families to export. Parsed from the CLI `--resource`
-/// argument; v1 supports `pools` only. Future variants will be added
-/// as the per-PR ladder in epic #74 lands.
+/// argument. New variants are added per the ladder in epic #74.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resource {
     Pools,
+    Acl,
 }
 
 impl Resource {
-    /// Parse a `--resource` argument. Case-insensitive. Unknown values
-    /// produce an `Err` carrying the full set of currently-valid
-    /// options — operators see "what should I have typed" at the
-    /// point of failure.
-    pub fn parse(s: &str) -> Result<Self> {
+    /// Parse a `--resource` argument. Case-insensitive. Unknown
+    /// values produce an `Err` carrying the full set of currently-
+    /// valid options — operators see "what should I have typed" at
+    /// the point of failure. `all` selects every supported family.
+    pub fn parse(s: &str) -> Result<Vec<Self>> {
         match s.trim().to_lowercase().as_str() {
-            "pools" => Ok(Self::Pools),
+            "pools" => Ok(vec![Self::Pools]),
+            "acl" => Ok(vec![Self::Acl]),
+            "all" => Ok(vec![Self::Pools, Self::Acl]),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid in v1: pools — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
             ),
         }
     }
@@ -46,24 +50,29 @@ impl Resource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pools => "pools",
+            Self::Acl => "acl",
         }
     }
 }
 
-/// Minimal read-only surface the pools exporter needs from PVE. A
+/// Minimal read-only surface the state exporter needs from PVE. A
 /// blanket impl below means anything that implements
-/// `ProxmoxGateway` auto-satisfies `PoolReadView`; tests implement
+/// `ProxmoxGateway` auto-satisfies `StateReadView`; tests implement
 /// this small trait directly to avoid stubbing the 200+ methods of
-/// `ProxmoxGateway`.
+/// `ProxmoxGateway`. As new resource families ship, the trait grows
+/// by exactly the read methods the new exporter needs (e.g.
+/// `list_storage_view` for storage defs, `get_cluster_firewall_view`
+/// for firewall).
 #[async_trait]
-pub trait PoolReadView: Send + Sync {
+pub trait StateReadView: Send + Sync {
     async fn list_pools_view(&self) -> Result<Vec<Pool>>;
     async fn get_pool_view(&self, poolid: &str) -> Result<PoolDetails>;
+    async fn list_acl_view(&self) -> Result<Vec<AclEntry>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
 #[async_trait]
-impl<T> PoolReadView for T
+impl<T> StateReadView for T
 where
     T: crate::api::ProxmoxGateway + Send + Sync + ?Sized,
 {
@@ -73,6 +82,9 @@ where
     async fn get_pool_view(&self, poolid: &str) -> Result<PoolDetails> {
         crate::api::ProxmoxGateway::get_pool(self, poolid).await
     }
+    async fn list_acl_view(&self) -> Result<Vec<AclEntry>> {
+        crate::api::ProxmoxGateway::list_acl(self).await
+    }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
     }
@@ -81,7 +93,7 @@ where
 /// Top-level entry: read everything in `resources` from the live
 /// cluster and return a `ClusterState`. Always populates `meta` with
 /// the export provenance.
-pub async fn export_state<C: PoolReadView + ?Sized>(
+pub async fn export_state<C: StateReadView + ?Sized>(
     client: &C,
     resources: &[Resource],
     profile: &str,
@@ -100,6 +112,7 @@ pub async fn export_state<C: PoolReadView + ?Sized>(
             pve_version,
         }),
         pools: Vec::new(),
+        acl: Vec::new(),
     };
 
     for r in resources {
@@ -108,6 +121,9 @@ pub async fn export_state<C: PoolReadView + ?Sized>(
                 state.pools = export_pools(client)
                     .await
                     .with_context(|| "exporting pools")?;
+            }
+            Resource::Acl => {
+                state.acl = export_acl(client).await.with_context(|| "exporting acl")?;
             }
         }
     }
@@ -119,7 +135,7 @@ pub async fn export_state<C: PoolReadView + ?Sized>(
 /// Pools sorted by `poolid`; members within each pool sorted by their
 /// `kind/id` string. Two calls against an unchanged cluster produce
 /// the identical Vec.
-async fn export_pools<C: PoolReadView + ?Sized>(client: &C) -> Result<Vec<PoolDecl>> {
+async fn export_pools<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<PoolDecl>> {
     let mut pools = client.list_pools_view().await.context("listing pools")?;
     pools.sort_by(|a, b| a.poolid.cmp(&b.poolid));
 
@@ -148,6 +164,32 @@ async fn export_pools<C: PoolReadView + ?Sized>(client: &C) -> Result<Vec<PoolDe
             members,
         });
     }
+    Ok(out)
+}
+
+/// Read every ACL grant and project to `Vec<AclDecl>`. Sorted by
+/// the identity 4-tuple `(path, kind, ugid, roleid)` so the
+/// resulting TOML is diff-stable across runs against an unchanged
+/// cluster (PVE's `/access/acl` response order is not stable).
+async fn export_acl<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<AclDecl>> {
+    let entries = client.list_acl_view().await.context("listing ACL")?;
+    let mut out: Vec<AclDecl> = entries
+        .into_iter()
+        .map(|e| AclDecl {
+            path: e.path,
+            kind: e.kind,
+            ugid: e.ugid,
+            roleid: e.roleid,
+            propagate: e.propagate,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then(a.kind.cmp(&b.kind))
+            .then(a.ugid.cmp(&b.ugid))
+            .then(a.roleid.cmp(&b.roleid))
+    });
     Ok(out)
 }
 
@@ -276,10 +318,27 @@ mod tests {
 
     #[test]
     fn resource_parse_accepts_pools_case_insensitive() {
-        assert_eq!(Resource::parse("pools").unwrap(), Resource::Pools);
-        assert_eq!(Resource::parse("Pools").unwrap(), Resource::Pools);
-        assert_eq!(Resource::parse("POOLS").unwrap(), Resource::Pools);
-        assert_eq!(Resource::parse(" pools ").unwrap(), Resource::Pools);
+        assert_eq!(Resource::parse("pools").unwrap(), vec![Resource::Pools]);
+        assert_eq!(Resource::parse("Pools").unwrap(), vec![Resource::Pools]);
+        assert_eq!(Resource::parse("POOLS").unwrap(), vec![Resource::Pools]);
+        assert_eq!(Resource::parse(" pools ").unwrap(), vec![Resource::Pools]);
+    }
+
+    #[test]
+    fn resource_parse_accepts_acl_case_insensitive() {
+        assert_eq!(Resource::parse("acl").unwrap(), vec![Resource::Acl]);
+        assert_eq!(Resource::parse("ACL").unwrap(), vec![Resource::Acl]);
+    }
+
+    #[test]
+    fn resource_parse_all_returns_every_supported_family() {
+        // `--resource all` is the stable shortcut for "every family
+        // this proxxx binary supports". Order matters: pools first,
+        // then ACL (matching `export_state`'s iteration order) so
+        // a `--resource all` export hits resources in a deterministic
+        // sequence regardless of input ordering.
+        let v = Resource::parse("all").unwrap();
+        assert_eq!(v, vec![Resource::Pools, Resource::Acl]);
     }
 
     #[test]
@@ -287,26 +346,27 @@ mod tests {
         // The error message should tell the operator what they
         // SHOULD have typed — pinning so a future regression
         // doesn't collapse to a generic "invalid argument".
-        let err = Resource::parse("acl").unwrap_err();
+        let err = Resource::parse("bogus").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("unknown resource 'acl'"), "msg: {msg}");
+        assert!(msg.contains("unknown resource 'bogus'"), "msg: {msg}");
         assert!(
             msg.contains("pools"),
-            "should hint at valid value, msg: {msg}"
+            "should hint at valid values, msg: {msg}"
         );
     }
 
-    /// In-process implementation of the narrow `PoolReadView` trait
-    /// for unit testing `export_pools` / `export_state` without
-    /// stubbing the 200+ methods of `ProxmoxGateway`.
+    /// In-process implementation of the narrow `StateReadView` trait
+    /// for unit testing `export_pools` / `export_acl` / `export_state`
+    /// without stubbing the 200+ methods of `ProxmoxGateway`.
     #[derive(Default)]
-    struct FakePoolView {
+    struct FakeStateView {
         pools: Vec<Pool>,
         details: std::collections::HashMap<String, PoolDetails>,
+        acl: Vec<AclEntry>,
     }
 
     #[async_trait]
-    impl PoolReadView for FakePoolView {
+    impl StateReadView for FakeStateView {
         async fn list_pools_view(&self) -> Result<Vec<Pool>> {
             Ok(self.pools.clone())
         }
@@ -315,6 +375,9 @@ mod tests {
                 .get(poolid)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("pool '{poolid}' not in fake view"))
+        }
+        async fn list_acl_view(&self) -> Result<Vec<AclEntry>> {
+            Ok(self.acl.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {
@@ -329,7 +392,7 @@ mod tests {
     async fn export_pools_sorts_pools_by_poolid() {
         // Even if PVE returns pools in random order, the export must
         // be sorted by poolid so the TOML is diff-stable across runs.
-        let mut fake = FakePoolView::default();
+        let mut fake = FakeStateView::default();
         fake.pools = vec![
             Pool {
                 poolid: "z-platform".into(),
@@ -362,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn export_pools_sorts_members_within_each_pool() {
-        let mut fake = FakePoolView::default();
+        let mut fake = FakeStateView::default();
         fake.pools = vec![Pool {
             poolid: "p1".into(),
             comment: String::new(),
@@ -411,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn export_state_populates_meta_with_profile_and_pve_version() {
-        let fake = FakePoolView::default();
+        let fake = FakeStateView::default();
         let s = export_state(&fake, &[Resource::Pools], "test-profile")
             .await
             .expect("export");
@@ -440,7 +503,7 @@ mod tests {
         // identical input yield identical TOML modulo `exported_at`.
         // This is the load-bearing property for GitOps — without it,
         // every `git diff` post-re-export is noise.
-        let mut fake = FakePoolView::default();
+        let mut fake = FakeStateView::default();
         fake.pools = vec![
             Pool {
                 poolid: "alpha".into(),
@@ -474,5 +537,103 @@ mod tests {
             s
         };
         assert_eq!(strip_ts(s1), strip_ts(s2));
+    }
+
+    #[tokio::test]
+    async fn export_acl_sorts_by_identity_tuple() {
+        // PVE's `/access/acl` response order is not stable; the
+        // export must canonicalise by the identity 4-tuple `(path,
+        // kind, ugid, roleid)` so the resulting TOML is byte-stable.
+        let mut fake = FakeStateView::default();
+        fake.acl = vec![
+            AclEntry {
+                path: "/vms/200".into(),
+                kind: "user".into(),
+                ugid: "bob@pve".into(),
+                roleid: "PVEVMUser".into(),
+                propagate: true,
+            },
+            AclEntry {
+                path: "/vms/100".into(),
+                kind: "user".into(),
+                ugid: "alice@pve".into(),
+                roleid: "PVEVMAdmin".into(),
+                propagate: true,
+            },
+            AclEntry {
+                path: "/vms/100".into(),
+                kind: "group".into(),
+                ugid: "devops".into(),
+                roleid: "PVEVMAdmin".into(),
+                propagate: false,
+            },
+        ];
+
+        let out = export_acl(&fake).await.expect("export");
+        // Sort order: path then kind then ugid then roleid.
+        assert_eq!(out[0].path, "/vms/100");
+        assert_eq!(out[0].kind, "group");
+        assert_eq!(out[1].path, "/vms/100");
+        assert_eq!(out[1].kind, "user");
+        assert_eq!(out[2].path, "/vms/200");
+    }
+
+    #[tokio::test]
+    async fn export_acl_preserves_propagate_value() {
+        let mut fake = FakeStateView::default();
+        fake.acl = vec![AclEntry {
+            path: "/storage/local".into(),
+            kind: "user".into(),
+            ugid: "ops@pve".into(),
+            roleid: "PVEDatastoreUser".into(),
+            propagate: false,
+        }];
+        let out = export_acl(&fake).await.expect("export");
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].propagate);
+    }
+
+    #[tokio::test]
+    async fn export_state_all_runs_every_family_in_order() {
+        // `Resource::Pools` then `Resource::Acl` — the canonical
+        // `all` ordering. Pinning so a future refactor doesn't flip
+        // the iteration order under us (byte-stability would still
+        // hold, but the diff would be massive on the flip).
+        let mut fake = FakeStateView::default();
+        fake.pools = vec![Pool {
+            poolid: "p1".into(),
+            comment: "x".into(),
+        }];
+        fake.details.insert(
+            "p1".into(),
+            PoolDetails {
+                poolid: "p1".into(),
+                comment: "x".into(),
+                members: vec![],
+            },
+        );
+        fake.acl = vec![AclEntry {
+            path: "/".into(),
+            kind: "user".into(),
+            ugid: "root@pam".into(),
+            roleid: "Administrator".into(),
+            propagate: true,
+        }];
+
+        let s = export_state(&fake, &[Resource::Pools, Resource::Acl], "p")
+            .await
+            .unwrap();
+        assert_eq!(s.pools.len(), 1, "pools populated");
+        assert_eq!(s.acl.len(), 1, "acl populated");
+
+        // TOML serialisation must list `[[pools]]` before `[[acl]]`
+        // (matches struct field declaration order in `ClusterState`).
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let pools_idx = toml_str.find("[[pools]]").expect("[[pools]] present");
+        let acl_idx = toml_str.find("[[acl]]").expect("[[acl]] present");
+        assert!(
+            pools_idx < acl_idx,
+            "pools must come before acl in TOML, got pools_idx={pools_idx} acl_idx={acl_idx}"
+        );
     }
 }
