@@ -112,16 +112,26 @@ fn main() -> Result<()> {
                 cli.secure,
             )) {
                 Ok((result, exit_code)) => {
-                    // Ensure the output is a JSON array if Json format is requested
-                    let result_array = if matches!(cli.format, util::format::OutputFormat::Json)
-                        && !result.is_array()
-                    {
-                        serde_json::json!([result])
-                    } else {
-                        result
-                    };
+                    // `Value::Null` is the convention for commands
+                    // that have already printed their full output
+                    // directly to stdout (e.g. `state export` emits
+                    // raw TOML; re-serialising through the format
+                    // pipeline would either escape the newlines or
+                    // wrap the document in a JSON array). Skip the
+                    // print step entirely on Null and exit cleanly.
+                    if !result.is_null() {
+                        // Ensure the output is a JSON array if Json
+                        // format is requested.
+                        let result_array = if matches!(cli.format, util::format::OutputFormat::Json)
+                            && !result.is_array()
+                        {
+                            serde_json::json!([result])
+                        } else {
+                            result
+                        };
 
-                    let _ = util::format::print(&result_array, cli.format);
+                        let _ = util::format::print(&result_array, cli.format);
+                    }
                     if exit_code != 0 {
                         std::process::exit(exit_code);
                     }

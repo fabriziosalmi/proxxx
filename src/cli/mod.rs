@@ -16,6 +16,7 @@ mod init_wizard;
 mod monitoring;
 mod node;
 mod patch;
+mod state;
 mod storage;
 pub mod vm;
 
@@ -721,6 +722,16 @@ pub enum Command {
     Audit {
         #[command(subcommand)]
         action: AuditAction,
+    },
+    /// Cluster state export + reconcile — the path toward declaratively
+    /// versioned Proxmox clusters tracked in epic #74.
+    ///
+    /// v1 ships `state export` for the `pools` resource only. Future
+    /// PRs add `state diff` / `state apply` plus the acl, storage,
+    /// firewall-cluster, backup-jobs, and notifications families.
+    State {
+        #[command(subcommand)]
+        action: state::StateCommand,
     },
     /// QEMU VM hardware/options/cloud-init management. The typed
     /// subcommands (`set`, `cloudinit`) cover the well-trodden config
@@ -1639,6 +1650,7 @@ pub async fn execute(
         Command::Completions { .. } => Ok((serde_json::json!({}), 0)),
         Command::Doctor => Ok((serde_json::json!({}), 0)),
         Command::Audit { .. } => Ok((serde_json::json!({}), 0)),
+        Command::State { action } => state::execute_state(&client, profile, action).await,
         Command::Vm { action } => vm::execute_vm(&client, action).await,
         Command::Ct { action } => ct::execute(&client, action).await,
         Command::Firewall { scope } => firewall::execute_firewall(&client, scope).await,
