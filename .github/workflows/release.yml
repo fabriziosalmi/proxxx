@@ -88,11 +88,10 @@ jobs:
         # `cross` runs cargo inside a target-specific Docker container
         # with a working musl-aarch64 C toolchain — sidesteps the
         # rusqlite/sha2/russh native-dep cross-link breakage that the
-        # bare `gcc-aarch64-linux-gnu` approach hit at v0.1.0. Pinned
-        # to a release tag, not @main.
-        uses: taiki-e/install-action@a26e89cad88f81bf65fb24e69a90bb96fd2ad391  # v2.62.7
-        with:
-          tool: cross@0.2.5
+        # bare `gcc-aarch64-linux-gnu` approach hit at v0.1.0.
+        # `--locked` pins the dep graph at install time (the cross
+        # binary's own Cargo.lock); `--version` pins the cross release.
+        run: cargo install cross --locked --version 0.2.5
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
