@@ -90,6 +90,12 @@ fn main() -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
 
+    // `single_match_else` would suggest `if let Some(cmd) = cli.command
+    // { … } else { … }` which forces a 120-line dedent of the CLI arm
+    // for zero readability gain — the two branches are genuinely
+    // symmetrical ("either a CLI subcommand OR fall into the TUI
+    // run-loop"), which `match` expresses better than an `if let`.
+    #[allow(clippy::single_match_else)]
     match cli.command {
         // CLI mode: no ratatui, no crossterm, just stdout
         Some(cmd) => {

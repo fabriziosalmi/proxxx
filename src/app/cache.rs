@@ -193,16 +193,6 @@ fn get_db_path(profile_name: Option<&str>) -> PathBuf {
     path
 }
 
-fn ensure_cache_dir() -> anyhow::Result<()> {
-    let dir = get_db_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot create cache directory {}: {e} — check permissions",
-            dir.display()
-        )
-    })
-}
-
 fn init_db(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS snapshots (
@@ -975,7 +965,7 @@ mod concurrency_tests {
     /// a load on the other profile must return `Err("No cache found")`.
     ///
     /// This test closes the ❌ row in pre-commit/01-feature-coverage.md
-    /// under "RBAC & multi-persona · SQLite cache segregation per-profile".
+    /// under "RBAC & multi-persona · `SQLite` cache segregation per-profile".
     /// The invariant was previously blocked on multi-profile support
     /// arriving (Gap #4); `get_db_path` has always segregated by name.
     #[test]

@@ -83,7 +83,7 @@ impl CloudInitProfile {
     }
 }
 
-/// Apply a CloudInitProfile to a QEMU guest and regenerate the
+/// Apply a `CloudInitProfile` to a QEMU guest and regenerate the
 /// cloud-init drive. No-op on empty profile (returns
 /// `applied=false`). LXC is rejected — cloud-init is QEMU-only.
 pub async fn apply_cloudinit_and_regen(

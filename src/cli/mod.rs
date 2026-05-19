@@ -303,7 +303,7 @@ pub enum Command {
         /// Cloud-init customization TOML file. Applied (and the
         /// cloud-init drive regenerated) after the clone task
         /// completes. QEMU-only. Supported keys: ciuser,
-        /// cipassword, sshkey, sshkey_file, ipconfig0,
+        /// cipassword, sshkey, `sshkey_file`, ipconfig0,
         /// searchdomain, nameserver.
         #[arg(long, value_name = "FILE")]
         cloud_init_user: Option<std::path::PathBuf>,

@@ -18,7 +18,7 @@ enum CheckStatus {
 }
 
 impl CheckStatus {
-    fn symbol(&self) -> &'static str {
+    const fn symbol(&self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Warn => "warn",
@@ -250,7 +250,7 @@ pub async fn run() -> Result<(Value, i32)> {
         })
         .collect();
 
-    let exit_code = if overall_ok { 0 } else { 1 };
+    let exit_code = i32::from(!overall_ok);
     Ok((json!(result), exit_code))
 }
 
