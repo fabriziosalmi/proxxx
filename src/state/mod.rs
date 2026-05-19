@@ -33,5 +33,6 @@
 //! ergonomics — sparkline buffers, selection cursors — `state/`
 //! cares about wire-stable identity and TOML readability).
 
+pub mod diff;
 pub mod export;
 pub mod model;
