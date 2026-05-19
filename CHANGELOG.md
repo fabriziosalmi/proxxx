@@ -12,6 +12,104 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-19
+
+Headline: **hardening pass** — 27 PRs in one day across three sessions,
+zero real vulnerabilities discovered, two latent bugs fixed thanks to
+property-based testing. No CLI / `--format json` / MCP registry / config
+schema break; pure patch bump.
+
+### Fixed
+- **`app::snaptree::assemble` phantom synthetic node** (found by
+  proptest). Duplicate-name input caused `build_node` to be called
+  twice on the same name; the second call hit the `unwrap_or_else`
+  fallback whose comment said "should never happen". The renderer
+  would draw a ghost row with zeroed-out fields. Fix: deterministic
+  dedup at function entry (sort by total order over every field,
+  then `entry().or_insert()`). Pinned by
+  `proptest::assemble_preserves_every_unique_name` +
+  `assemble_order_independent`.
+- **`shell_quote("")` returned bare empty** (found by proptest). The
+  `chars().all(...)` predicate is vacuously true on an empty string,
+  so empty input slid through the safe-char branch and bash word-
+  splitting silently dropped the argument. `pveum user permissions
+  --` would be called with NO user argument. Fix: explicit early
+  return `"''"` for empty input. Pinned by
+  `shell_quote_round_trips_via_bash_dequote`.
+
+### Added
+- **Property-test harness (`proptest`, ~25 properties × 256 random
+  cases = ~6 400 invariant checks per `cargo test`)** across
+  `util::sanitize` (6 — ANSI-injection defence), `app::snaptree` (6 —
+  graph termination + dedup + order-independence + 1500-deep no
+  overflow), `audit` (4 — HMAC chain integrity + mutation blast
+  radius + design boundary), `cli::access::shell_quote` (4 — round-
+  trip via bash dequoter + bare-path correctness + determinism + no
+  metachars bare), `cli::common::BatchPolicy::parse` (5 — never
+  panics + bounds + case-insensitive + trim-neutral).
+- **`THREAT_MODEL.md`** — explicit attack-surface enumeration (8
+  numbered surfaces with per-surface mitigation tables, accepted-
+  risks section, verification-ladder table).
+- **`ARCHITECTURE.md`** — one-page module map: "three callers, one
+  core" diagram, per-`src/` directory responsibility, three end-to-
+  end data flows traced (CLI mutation / TUI keystroke / MCP tool
+  call), reducer + side-effect bus, process model.
+- **`deny.toml`** + cargo-deny CI job + gate stage 4 — license
+  whitelist (MIT/Apache-2.0/BSD/ISC/MPL-2.0 + r-efi LGPL exception),
+  banned crates (openssl / native-tls / openssl-sys — rustls-only
+  posture enforced at PR time), crates.io-only source lock,
+  wildcard-version ban, multiple-major-version drift warning.
+- **CodeQL Rust SAST workflow** — `security-and-quality` query set,
+  weekly cron + every PR, SHA-pinned actions.
+- **proptest-regressions seeds** checked in at
+  `proptest-regressions/` so every shrunk counterexample (incl. the
+  two bug-finding seeds above) replays deterministically on every
+  `cargo test`.
+
+### Changed
+- Local gate + CI now run **8 stages** instead of 7. Added stage 4
+  `cargo deny check`; subsequent stages renumbered (tests 4→5, live
+  probes 5→6, mutation lifecycle 6→7). End-to-end wall time with
+  live cluster: ~340–480 s.
+- Clippy now silent on `--all-targets --all-features` (down from 43
+  unique warnings). Deny tier: `unwrap_used / expect_used / panic /
+  todo / await_holding_lock`.
+- **Branch protection on `main`** enforced via GitHub: 5 required
+  status checks, strict mode, linear history, no force push, no
+  deletions, conversation resolution required.
+- **Secret scanning + push protection** enabled at the repo level.
+- README / CONTRIBUTING / docs/index reconciled: 7→8 stages, KLOC
+  ~44→~48, wall-time refresh, clippy deny list refresh, added
+  Property testing row to "By the numbers".
+
+### Dependencies (no breaking-to-user changes)
+- `tokio` 1.52.1 → 1.52.3 (mpsc bugfixes).
+- `tower-http` 0.6.8 → 0.6.10.
+- `russh` 0.60.2 → 0.60.3.
+- `tokio-tungstenite` 0.24 → 0.29 — internal: `Message::Binary` now
+  wraps `bytes::Bytes` instead of `Vec<u8>`, `WebSocketConfig` is
+  `#[non_exhaustive]`.
+- `crossterm` 0.28 → 0.29 (KeyModifiers Display impl change — we
+  only use `.contains()`, no user impact).
+- `hmac` 0.12 → 0.13 **coupled with** `sha2` 0.10 → 0.11. Internal:
+  `use hmac::KeyInit;` import + `hex::encode(digest)` instead of
+  `format!("{:x}")`.
+- `getrandom` 0.2 → 0.4 — internal: migrated
+  `getrandom::getrandom(buf)` → `getrandom::fill(buf)`.
+
+### Dependabot policy
+- New ignore rule for `keyring` major bumps — upstream v4 is
+  "sample only" per release notes; app users should migrate to
+  `keyring-core` v1 + a backend crate when ready.
+
+### GH-action major bumps (SHA-pinned)
+`actions/checkout` 4→6 (Node 24), `actions/setup-node` 4→6,
+`actions/upload-artifact` 4→7, `actions/download-artifact` 4→8,
+`actions/configure-pages` 5→6, `actions/deploy-pages` 4→5,
+`actions/upload-pages-artifact` 3→5, `github/codeql-action`
+3.35.3→4.35.5, `softprops/action-gh-release` 2→3,
+`sigstore/cosign-installer` 3.10→4.1.
+
 ## [0.2.0] — 2026-05-19
 
 Headline: **broad LLM + IaC surface expansion**. New subcommands for
