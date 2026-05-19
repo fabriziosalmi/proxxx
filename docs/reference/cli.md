@@ -212,8 +212,32 @@ within a major version.
 
 | Command | What it does |
 | :--- | :--- |
+| `proxxx doctor`                  | Self-diagnostic: config, cluster connectivity, auth, Telegram HITL, PBS, SSH key, audit log. Exits 0 if all critical checks pass |
 | `proxxx dev-panic [--message X]` | Flight-recorder smoke — trigger a controlled panic to test the flight-recorder hook |
 | `proxxx version --json`          | Test count, vector framework hash, audit ignores, build metadata |
+| `proxxx completions {bash\|zsh\|fish\|powershell}` | Print shell completion script to stdout — pipe to your shell's completions dir |
+
+## Audit log
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx audit log [--limit N] [--since T]`        | Show recent audit entries (SQLite, append-only) |
+| `proxxx audit export --format {json\|csv}`        | Dump entries for SIEM ingestion |
+| `proxxx audit verify`                             | Walk the full HMAC-SHA256 chain — NIS2/ISO 27001 evidence |
+
+## Guest lifecycle (additional)
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx vm create --node <n> [--vmid <id>] [--name <s>] [--memory <M>] [--cores <N>] [--disk <storage:sizeG>] [--iso <volid>] [--ostype <t>] [--bridge <br>] [--wait]` | Create new QEMU VM from scratch. VMID auto-assigned if omitted |
+| `proxxx ct create --node <n> --template <volid> [--vmid <id>] [--hostname <h>] [--memory <M>] [--cores <N>] [--rootfs <storage:sizeG>] [--bridge <br>] [--password <p>] [--wait]` | Create new LXC from template |
+| `proxxx clone <src_vmid> [--newid <id>] [--name <s>] [--cloud-init-user <file.toml>]` | Clone guest; with `--cloud-init-user`, parse TOML profile (ciuser, sshkey, ipconfig0, …) and apply after clone task lands + regen drive |
+
+## Events
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx events stream [--interval <s>] [--node <n>] [--type <t>] [--vmid <id>] [--no-existing] [--format {text\|json}]` | Tail real-time cluster task events (START/DONE/FAIL). NDJSON output with `--format json` |
 
 ## Configuration bootstrap
 

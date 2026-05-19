@@ -36,7 +36,7 @@ Pick the row that matches you and jump straight to the right page.
 | **Homelab solo** running 1-3 nodes | wizard, fast TUI, single binary, no daemons | [5-min homelab quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-homelab) |
 | **Platform / SRE** on 10-50 nodes with on-call | HITL Telegram gate, alert daemon, `--format json` for CI, `--profile` for multi-cluster | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [HITL](https://fabriziosalmi.github.io/proxxx/integrations/hitl) |
 | **DevOps** scripting Proxmox in pipelines | typed exit codes, deterministic JSON, pre-flight risk gate, batch ops with `--yes` | [CLI reference](https://fabriziosalmi.github.io/proxxx/reference/cli) · [Exit codes](https://fabriziosalmi.github.io/proxxx/reference/exit-codes) |
-| **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP server (stdio + Streamable HTTP), compile-time-fixed 23-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
+| **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP server (stdio + Streamable HTTP), compile-time-fixed 25-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
 | **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) · [`SECURITY.md`](SECURITY.md) |
 | **EU-regulated ops** (NIS2 / ISO 27001 / GDPR) | append-only SQLite audit log with HMAC-SHA256 chain, `proxxx audit verify`, zero telemetry, fully self-hosted | [EU & compliance](#eu--compliance) |
 | **Contributor** sending a PR | 7-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
@@ -76,7 +76,7 @@ proxxx is designed for operators who need auditability, data sovereignty, and su
 
 ## Install
 
-Pre-built binaries for **macOS Apple Silicon** and **Linux x86_64-musl** are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases). ARM64 Linux builds from source (cross-link toolchain bug; tracked).
+Pre-built binaries for **macOS Apple Silicon**, **Linux x86_64-musl**, and **Linux aarch64-musl** (Pi 4/5, Ampere, Graviton, Oracle Free Tier) are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases). All Linux artefacts are statically linked — no glibc, drops onto Alpine through RHEL.
 
 Download + verify the full supply-chain trio:
 
@@ -268,7 +268,7 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
 | [`src/app/cache.rs`](src/app/cache.rs) | SQLite-backed time-travel cache, drives `proxxx replay <timestamp>`. |
 | [`src/app/preflight.rs`](src/app/preflight.rs) | 11 risk variants with per-op weighting and `--allow-risk` override. |
 | [`src/hitl/`](src/hitl) | Real Telegram round-trip via `HitlCoordinator` + a single shared `getUpdates` poller. Deny on 120 s timeout, deny when Telegram unconfigured but a policy matched. |
-| [`src/mcp/`](src/mcp) | JSON-RPC server with stdio + Streamable HTTP transports. Compile-time-fixed tool registry (23 tools). Surface SHA-256 pinned via `proxxx mcp tools --checksum`. |
+| [`src/mcp/`](src/mcp) | JSON-RPC server with stdio + Streamable HTTP transports. Compile-time-fixed tool registry (25 tools). Surface SHA-256 pinned via `proxxx mcp tools --checksum`. |
 | [`src/util/`](src/util) | `panic_hook` (flight recorder), `terminal_guard` (RAII raw-mode), `shutdown` (SIGTERM / SIGINT for daemons). |
 
 ## Documentation

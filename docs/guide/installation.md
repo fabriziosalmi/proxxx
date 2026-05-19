@@ -50,15 +50,16 @@ proxxx --version
 
 Targets shipped today:
 
-| Target                      | Platform              |
-| :-------------------------- | :-------------------- |
-| `aarch64-apple-darwin`      | macOS Apple Silicon   |
-| `x86_64-unknown-linux-musl` | Linux x86_64 (static) |
+| Target                        | Platform                                       |
+| :---------------------------- | :--------------------------------------------- |
+| `aarch64-apple-darwin`        | macOS Apple Silicon                            |
+| `x86_64-unknown-linux-musl`   | Linux x86_64 (static, every distro)            |
+| `aarch64-unknown-linux-musl`  | Linux ARM64 (Pi 4/5, Ampere, Graviton, Oracle) |
 
-ARM64 Linux is **build from source** for now — the cross-link
-toolchain has a transitive C-dep bug (`rusqlite` / `russh` / `sha2`)
-that the matrix hasn't bridged cleanly yet. `cargo build --release`
-on the target host works fine.
+ARM64 Linux is now a first-class release artefact (since v0.2.0),
+built via `cross-rs/cross` against a containerized musl-aarch64
+toolchain. No glibc dependencies — drops straight onto Alpine,
+Raspberry Pi OS, Debian/Ubuntu, Amazon Linux on Graviton.
 
 ## From source
 
