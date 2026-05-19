@@ -501,7 +501,6 @@ pub async fn handle_tool_call(
             }))?
         }
         ToolAction::CloneWithCloudinit => {
-            use crate::api::types::GuestType;
             let vmid = args
                 .get("guest_id")
                 .and_then(serde_json::Value::as_u64)
@@ -509,7 +508,7 @@ pub async fn handle_tool_call(
             let (node, gt) = find_node_and_type(client, vmid)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            if !matches!(gt, GuestType::Qemu) {
+            if !matches!(gt, crate::api::types::GuestType::Qemu) {
                 anyhow::bail!("clone_with_cloudinit: VMID {vmid} is LXC — cloud-init is QEMU-only");
             }
             let newid_arg = args
