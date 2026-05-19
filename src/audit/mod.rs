@@ -196,7 +196,7 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
         return Ok(bytes);
     }
     let mut key = vec![0u8; 32];
-    getrandom::getrandom(&mut key).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

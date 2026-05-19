@@ -3081,7 +3081,7 @@ dependencies = [
  "directories",
  "dirs",
  "futures-util",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "governor",
  "hex",
  "hmac 0.13.0",
