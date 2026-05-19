@@ -28,8 +28,8 @@ features:
     details: CLI, TUI, and MCP server in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 25-tool registry (stdio + Streamable HTTP transports) for LLM agents.
   - title: No agent on the cluster
     details: Direct REST against PVE (token or password) and PBS (token only), with typed error categories so callers match on the failure shape instead of grepping prose. SSH only for the paths PVE never exposed over REST — patch apply, full effective-permissions, per-guest interactive sessions.
-  - title: Six-stage commit gate, no skip flags
-    details: cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, the full test suite, 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
+  - title: Eight-stage commit gate, no skip flags
+    details: secret-shape scan, cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, cargo deny check (license whitelist + banned crates + crates.io-only sources + wildcard ban), the full test suite (unit + integration + ~25 proptest properties at 256 random cases each, ~6 400 invariant checks total), 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
   - title: Pre-flight risk gate plus HITL
     details: 11 risk variants — running, long-uptime, locked, HA-managed, tagged prod, active net traffic, listening on service, many snapshots, backup age warning, no backup found, deep-check skipped — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy.
 ---
@@ -104,13 +104,14 @@ onMounted(() => {
 
 | Surface               | Today                                                    |
 | :-------------------- | :------------------------------------------------------- |
-| Source                | ~44 KLOC Rust · ~14 KLOC tests                           |
-| Quality gate          | 6 stages · ~80–260 s wall time                           |
-| Live cluster coverage | 87 read probes + full mutation lifecycle per gate run    |
+| Source                | ~48 KLOC Rust · ~14 KLOC tests                           |
+| Quality gate          | 8 stages · ~340–480 s wall time (live cluster path)      |
+| Live cluster coverage | 87 read probes + 47 mutation probes per gate run         |
+| Property testing      | ~25 proptest properties × 256 random cases = ~6 400 invariant checks per `cargo test` |
 | Mutation lifecycle    | LXC create→start→snapshot→stop→delete · cluster-level CRUD (pool / firewall-cluster / backup-jobs / notifications / storage-defs) · QEMU 9998 from alpine ISO · opt-in QGA round-trips |
 | Binary                | 6–9 MB stripped depending on target · single static · no installer |
-| Supply chain          | `cargo audit --deny warnings` per push + nightly cron    |
-| System dependencies   | 0 — rustls only, no native-tls, no openssl               |
+| Supply chain          | `cargo audit --deny warnings` + `cargo deny check` per push + nightly cron + CodeQL Rust SAST |
+| System dependencies   | 0 — rustls only, no native-tls, no openssl (banned in `deny.toml`) |
 | MCP tool registry     | 25 tools · stdio + HTTP · SHA-256 pinned · compile-time fixed |
 
 ## A taste
