@@ -4,7 +4,9 @@
 //! The chain is verifiable offline via `proxxx audit verify`.
 
 use anyhow::{Context, Result};
-use hmac::{Hmac, Mac};
+// hmac 0.13: `new_from_slice` lives on the `KeyInit` trait which is no
+// longer re-exported by `Mac` like it was in 0.12. Explicit import.
+use hmac::{Hmac, KeyInit, Mac};
 use rusqlite::{params, Connection};
 use sha2::Sha256;
 use std::path::PathBuf;

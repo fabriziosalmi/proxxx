@@ -76,13 +76,15 @@ russh = "0.60"
 # RUSTSEC-2023-0071) which the old russh-keys 0.46 → ssh-key 0.6
 # chain was pulling.
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 # Phase 17 audit fix: HMAC-SHA256 signing for HITL Telegram
 # callback_data. Defends against bot-token leak — an attacker who
 # steals the token can send messages as the bot but cannot forge
 # valid callback_data because the HMAC key is a separate secret
 # auto-bootstrapped at `<config_dir>/telegram_hmac.key` (0600).
-hmac = "0.12"
+# Bumped to 0.13 in lockstep with sha2 0.11 — hmac 0.13 requires
+# the new `Digest` trait shape that sha2 0.11 implements.
+hmac = "0.13"
 # OS-native randomness for the HMAC-key bootstrap. Already in the
 # tree (transitive via rustls / tokio-rustls); promoting to a direct
 # dep so the call site is grep-able. Bumped to 0.4 (was 0.2) — the

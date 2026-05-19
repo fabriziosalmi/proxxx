@@ -43,7 +43,10 @@
 //! time still resolve instead of dying with "invalid format".
 
 use anyhow::{Context, Result};
-use hmac::{Hmac, Mac};
+// hmac 0.13: `new_from_slice` lives on the `KeyInit` trait which is no
+// longer re-exported via the `Mac` trait like it was in 0.12. Explicit
+// import is required.
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::path::PathBuf;
 
