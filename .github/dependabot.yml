@@ -26,6 +26,19 @@ updates:
     commit-message:
       prefix: "deps(cargo)"
       include: "scope"
+    ignore:
+      # keyring 4.x — upstream maintainer explicitly says NOT to use
+      # this version for real apps (the v4 crate is "just a sample
+      # app" per the v4.0.0 release notes; app users should depend on
+      # `keyring-core` v1 instead, after picking a credential-store
+      # implementation crate). See
+      # https://github.com/open-source-cooperative/keyring-rs
+      # release notes for v4.0.0. We stay on keyring 3.x until either
+      # upstream walks back the deprecation OR we do the migration to
+      # `keyring-core` + a chosen backend. Closed PR #28 with this
+      # same rationale 2026-05-19.
+      - dependency-name: "keyring"
+        update-types: ["version-update:semver-major"]
     groups:
       patch-and-minor:
         update-types:
