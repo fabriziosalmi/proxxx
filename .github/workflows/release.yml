@@ -56,13 +56,18 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive_ext: tar.gz
-          # NOTE: aarch64-unknown-linux-musl was dropped from the v0.1.0
-          # matrix because the cross-link from `gcc-aarch64-linux-gnu` to
-          # the musl `core` crate fails on a transitive C dep (rusqlite /
-          # russh / sha2). The cross-build needs a proper musl-aarch64
-          # toolchain (e.g. `cross` or a containerized rustc) — out of
-          # scope for the 0.1.0 cut. ARM64 Linux users build from source
-          # for now (`cargo build --release` on the target host works).
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            # ARM64 Linux statically-linked binary. Built via
+            # `cross-rs/cross` which runs cargo inside a target-specific
+            # Docker image with the proper musl-aware aarch64 toolchain.
+            # This is the canonical solution for the C-dep cross-link
+            # issue (rusqlite, sha2, russh) the bare
+            # `gcc-aarch64-linux-gnu` approach hit. Runs on Pi 4/5,
+            # Ampere, Graviton, Oracle Free Tier — anywhere with arm64
+            # + Linux kernel ≥ 3.2.
+            use_cross: true
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -78,20 +83,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Install aarch64 cross-linker
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        # The Rust toolchain installs the std for aarch64-musl, but the
-        # linker has to come from the host's package set. `gcc-aarch64-
-        # linux-gnu` is the cross gcc; we point cargo at the matching
-        # musl-aware linker via env.
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-
-          [target.aarch64-unknown-linux-musl]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+      - name: Install cross (aarch64 musl)
+        if: matrix.use_cross == true
+        # `cross` runs cargo inside a target-specific Docker container
+        # with a working musl-aarch64 C toolchain — sidesteps the
+        # rusqlite/sha2/russh native-dep cross-link breakage that the
+        # bare `gcc-aarch64-linux-gnu` approach hit at v0.1.0. Pinned
+        # to a release tag, not @main.
+        uses: taiki-e/install-action@a26e89cad88f81bf65fb24e69a90bb96fd2ad391  # v2.62.7
+        with:
+          tool: cross@0.2.5
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
@@ -99,7 +100,12 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Verify Linux binary is statically linked
         if: contains(matrix.target, 'linux-musl')
@@ -116,6 +122,13 @@ jobs:
             exit 1
           fi
           echo "OK: $BIN is statically linked"
+
+      - name: Install aarch64 strip
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        # binutils only — gcc is not needed because `cross` did the
+        # linking inside its Docker image. We need only the `strip`
+        # tool here to debloat the artefact before packaging.
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
 
       - name: Strip binary
         # Release profile already strips on macOS via the cargo
