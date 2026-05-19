@@ -39,7 +39,7 @@ Pick the row that matches you and jump straight to the right page.
 | **LLM / agent integrator** wiring Claude/Cursor to a cluster | MCP server (stdio + Streamable HTTP), compile-time-fixed 25-tool registry, SHA-256 pinned for supply-chain audit | [LLM/MCP quickstart](https://fabriziosalmi.github.io/proxxx/guide/quickstart-llm-mcp) |
 | **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`SECURITY.md`](SECURITY.md) · [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) |
 | **EU-regulated ops** (NIS2 / ISO 27001 / GDPR) | append-only SQLite audit log with HMAC-SHA256 chain, `proxxx audit verify`, zero telemetry, fully self-hosted | [EU & compliance](#eu--compliance) |
-| **Contributor** sending a PR | 8-stage commit gate (live cluster + mutation lifecycle), no-skip-flags policy | [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
+| **Contributor** sending a PR | 8-stage commit gate (fmt + clippy + audit + cargo-deny + test+proptest + live cluster + mutation lifecycle), no-skip-flags policy | [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
 
 ---
 
@@ -216,21 +216,26 @@ Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → `token_secr
 
 ## Quality gate
 
-Six stages, run as both a pre-commit hook and the CI contract in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Eight stages, run as both a pre-commit hook and the CI contract in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 | Stage | What | Time |
 | :---: | :--- | :---: |
+| 0 | secret regression scan | <1 s |
 | 1 | `cargo fmt --all -- --check` | ~3 s |
 | 2 | `cargo clippy --release --all-targets` | 10–60 s |
 | 3 | `cargo audit --deny warnings` | 3–5 s |
-| 4 | `cargo test --release --all-targets` | 10–90 s |
-| 5 | `tests/live/test_run.sh` (87 read-only probes against the live cluster) | ~30 s |
-| 6 | `tests/live/test_mutation.sh` (LXC + cluster-level CRUD + QEMU; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>`) | ~60 s |
+| 4 | `cargo deny check` (license / banned crates / sources / wildcards) | 2–4 s |
+| 5 | `cargo test --release --all-targets` (unit + integration + ~25 proptest properties × 256 cases each) | 10–90 s |
+| 6 | `tests/live/test_run.sh` (87 read-only probes against the live cluster) | ~30 s |
+| 7 | `tests/live/test_mutation.sh` (LXC + cluster-level CRUD + QEMU; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>`) | ~60 s |
+
+End-to-end wall time against a reachable cluster: **~340–480 s**.
 
 ```bash
 git config core.hooksPath .githooks
 chmod +x scripts/gate.sh .githooks/pre-commit .githooks/pre-push
 cargo install cargo-audit --locked
+cargo install cargo-deny --locked
 ```
 
 The clippy `[lints.clippy]` block in [`Cargo.toml`](Cargo.toml) denies `unwrap_used`, `expect_used`, `panic`, `todo`, `await_holding_lock` in production code.

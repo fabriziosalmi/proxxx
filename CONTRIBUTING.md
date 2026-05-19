@@ -53,18 +53,22 @@ cd docs && npm install && npx vitepress dev
 
 ## The gate (commit acceptance criteria)
 
-Every commit on `main` passes a 7-stage local gate AND CI. Bypassing
+Every commit on `main` passes an 8-stage local gate AND CI. Bypassing
 either with `--no-verify` is owned by the bypasser. Stages:
 
 | # | Stage | What | Roughly |
 | - | --- | --- | --- |
 | 0 | secret regression scan | Looks for tokens / passwords accidentally committed | <1 s |
 | 1 | `cargo fmt --check` | Code style | ~3 s |
-| 2 | `cargo clippy --release --all-targets` | Lints, deny tier (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`) | 10–60 s |
+| 2 | `cargo clippy --release --all-targets` | Lints, deny tier (`unwrap_used`, `expect_used`, `panic`, `todo`, `await_holding_lock`) | 10–60 s |
 | 3 | `cargo audit --deny warnings` | Supply-chain CVEs from `Cargo.lock` | 3–5 s |
-| 4 | `cargo test --release --all-targets` | All unit + integration + wiremock tests | 10–90 s |
-| 5 | `tests/live/test_run.sh` | 88 read-only probes against a real PVE cluster | ~30 s |
-| 6 | `tests/live/test_mutation.sh` | LXC 9999 lifecycle + cluster-level CRUD + QEMU 9998; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>` | ~60 s |
+| 4 | `cargo deny check` | License whitelist + banned crates + crates.io-only sources + wildcard ban | 2–4 s |
+| 5 | `cargo test --release --all-targets` | All unit + integration + wiremock + proptest cases (~25 properties × 256 random cases) | 10–90 s |
+| 6 | `tests/live/test_run.sh` | 87 read-only probes against a real PVE cluster | ~30 s |
+| 7 | `tests/live/test_mutation.sh` | LXC 9999 lifecycle + cluster-level CRUD + QEMU 9998; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>` | ~60 s |
+
+End-to-end wall time against a reachable cluster: **~340–480 s** (a
+release build dominates; stages 6+7 themselves are ~100 s combined).
 
 Hook setup:
 
@@ -75,8 +79,8 @@ cp tests/live/env.local.example tests/live/env.local
 # fill in PROXXX_E2E_PVE_URL / TOKEN / NODE
 ```
 
-Stages 5 + 6 require a reachable PVE cluster. If you don't have one,
-**explicitly skip stages 5 + 6** in your PR description — a maintainer
+Stages 6 + 7 require a reachable PVE cluster. If you don't have one,
+**explicitly skip stages 6 + 7** in your PR description — a maintainer
 will run them. Don't silently bypass.
 
 ## Live-cluster verification
