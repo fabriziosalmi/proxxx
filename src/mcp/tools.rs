@@ -719,5 +719,9 @@ pub fn registry_checksum() -> String {
     use sha2::{Digest, Sha256};
     let json = registry_json().to_string();
     let digest = Sha256::digest(json.as_bytes());
-    format!("{digest:x}")
+    // sha2 0.11 returns `hybrid_array::Array` (replacing GenericArray)
+    // which doesn't impl LowerHex. `hex::encode` operates on
+    // `AsRef<[u8]>` which Array does implement, so it's the portable
+    // way to get a lowercase hex digest across sha2 0.10 and 0.11.
+    hex::encode(digest)
 }
