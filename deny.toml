@@ -1,0 +1,151 @@
+# cargo-deny configuration — supply-chain policy.
+#
+# Runs in CI (.github/workflows/ci.yml) on every push/PR and weekly
+# cron. Sits ALONGSIDE cargo-audit (.cargo/audit.toml): audit covers
+# CVE advisories; deny additionally enforces license whitelist,
+# duplicate-major-version banning, and source-registry locking.
+#
+# Every `ignore`, `skip`, or `exception` below MUST include:
+#   - The crate + version it pertains to
+#   - The dependency path that pulls it in
+#   - The reason we accept it (no upstream fix / out of code path / …)
+#   - The planned remediation
+#
+# An entry that lacks a documented remediation is debt, not policy.
+
+[graph]
+# Examine every target. Don't restrict; e.g. `r-efi` (LGPL-2.1-or-
+# later) only links under UEFI targets but appears in Cargo.lock for
+# all-target deps; we want the license check to fire regardless of
+# host so the exception below is intentional, not a happy accident
+# of OS-specific resolution.
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ─── Advisories ────────────────────────────────────────────────────
+#
+# Mirrors `.cargo/audit.toml` so the two tools never diverge. When
+# adding/removing an ignore here, mirror it there (and vice versa).
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+# Hard-fail on yanked. The `ignore` list is the only escape; each
+# entry must justify itself.
+yanked = "deny"
+ignore = [
+    # rsa 0.10.0-rc.16 — Marvin Attack timing sidechannel (CVSS 5.9 medium).
+    # Path (post russh 0.60 bump): russh 0.60 → internal-russh-forked-
+    # ssh-key 0.6.18 → rsa 0.10. The fork is upstream-tracked and
+    # pulls a release-candidate of `rsa` that STILL contains the
+    # advisory — the upstream `rsa` crate has had no fix since
+    # 2023-11. So russh 0.60 (despite the deduplication of -keys)
+    # did NOT close this advisory; we expected it to but it didn't.
+    # Why accepted: the Marvin Attack requires a network attacker
+    # who can issue many adaptive RSA decryption queries against a
+    # long-lived key under timing observation — not the proxxx
+    # threat model (we use SSH for one-shot console handoff against
+    # trusted Proxmox nodes, not as a network crypto service).
+    # Remediation: blocked on the upstream `rsa` crate landing a
+    # constant-time decryption path. Track:
+    # https://github.com/RustCrypto/RSA/issues/19
+    "RUSTSEC-2023-0071",
+]
+
+# ─── Licenses ──────────────────────────────────────────────────────
+#
+# Whitelist permissive + public-domain. Block GPL / AGPL / SSPL
+# outright. MPL-2.0 is allowed because it's weak file-level copyleft
+# and does NOT force the linking application's license (used for
+# nucleo fuzzy-search and option-ext).
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    # Permissive (the bulk of the Rust ecosystem):
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # Public-domain dedications:
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    # Corporate-permissive:
+    "BSL-1.0",             # Boost Software License (ryu)
+    "CDLA-Permissive-2.0", # Community Data License (webpki-roots)
+    # Weak file-level copyleft (linking under permissive is OK):
+    "MPL-2.0",             # nucleo / option-ext
+]
+
+exceptions = [
+    # r-efi 5.3.0 / 6.0.0 — LGPL-2.1-or-later. UEFI runtime bindings
+    # pulled transitively through the wasi target families. Not
+    # actually linked into our Linux / macOS / Windows artefacts
+    # (only x86_64-unknown-uefi and aarch64-unknown-uefi resolve
+    # it), but appears in Cargo.lock so cargo-deny scans it
+    # regardless of target. LGPL accepted as a one-crate exception
+    # rather than broadening the allow list to copyleft globally.
+    # Remediation: nothing to do — r-efi is the canonical UEFI
+    # bindings crate; if the wasi ecosystem ever switches to a
+    # permissive rewrite, drop the exception.
+    { crate = "r-efi", allow = ["LGPL-2.1-or-later"] },
+]
+
+[licenses.private]
+ignore = false
+
+# ─── Bans ──────────────────────────────────────────────────────────
+#
+# `multiple-versions` is "warn" not "deny": the Rust ecosystem
+# regularly has 2–3 major versions of foundational crates (rand,
+# hashbrown, getrandom) in flight via transitive deps and forcing
+# unification would mean pinning ancient deps everywhere. The signal
+# we want here is "a NEW dup appeared in a PR" so reviewers can ask
+# the proposer to consolidate — `warn` shows up in CI output as a
+# soft alert without blocking.
+#
+# Explicit denies below are crates we never want at any version:
+# native-tls / openssl families (we use rustls end-to-end on every
+# transport — REST, PBS, WebSocket, SSH).
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"          # no `version = "*"` in Cargo.toml
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+    # rustls-only TLS posture — block all native-tls / openssl paths
+    # so a transitive bump can't quietly re-introduce libssl.
+    { crate = "openssl", reason = "rustls-only TLS posture; native-tls path is intentionally absent" },
+    { crate = "openssl-sys", reason = "rustls-only TLS posture; native-tls path is intentionally absent" },
+    { crate = "native-tls", reason = "rustls-only TLS posture; reqwest / russh / PBS all on rustls" },
+]
+
+skip = []
+skip-tree = []
+
+# ─── Sources ───────────────────────────────────────────────────────
+#
+# Lock crate sources to crates.io. No git deps allowed — every crate
+# must come from the official registry so cargo-audit and the SBOM
+# can verify provenance. The `internal-russh-forked-ssh-key` crate
+# IS a fork BUT it's published to crates.io as a regular package
+# under that name, so it passes this check naturally.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

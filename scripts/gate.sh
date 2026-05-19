@@ -15,15 +15,18 @@
 #   2. cargo clippy --all-targets  (~10–60s, cache-dependent)
 #   3. cargo audit                 (~3–5s — supply-chain CVE scan against
 #                                   Cargo.lock; same tool CI runs)
-#   4. cargo test --all-targets    (~10–90s — lib + tests/*.rs integration;
+#   4. cargo deny check            (~2–4s — supply-chain policy: license
+#                                   whitelist, banned crates, source lock;
+#                                   config in deny.toml, same tool CI runs)
+#   5. cargo test --all-targets    (~10–90s — lib + tests/*.rs integration;
 #                                   --lib alone misses 200+ tests that CI
 #                                   would catch, leaving a false-pass.)
-#   5. tests/live/test_run.sh      (~10s — read-only cluster probes)
-#   6. tests/live/test_mutation.sh (~30s — LXC 9999 lifecycle)
+#   6. tests/live/test_run.sh      (~10s — read-only cluster probes)
+#   7. tests/live/test_mutation.sh (~30s — LXC 9999 lifecycle)
 #
 # Coverage matrix:
-#   pre-commit/01-feature-coverage.md   ← live-probe coverage (stages 4–5)
-#   pre-commit/02-error-handling.md     ← unit-test invariants (stage 3)
+#   pre-commit/01-feature-coverage.md   ← live-probe coverage (stages 6–7)
+#   pre-commit/02-error-handling.md     ← unit-test invariants (stage 5)
 #   pre-commit/03-security-invariants.md ← static + unit + RBAC E2E
 #   pre-commit/04-resiliency-and-chaos.md ← signal/chaos handling
 
@@ -130,20 +133,36 @@ if ! command -v cargo-audit >/dev/null 2>&1; then
 fi
 run audit cargo audit --deny warnings
 
-# ── Stage 4: unit + integration tests ──
+# ── Stage 4: supply-chain policy (cargo-deny) ──
+# Companion to stage 3 (cargo-audit). audit checks RustSec advisories
+# against Cargo.lock; deny additionally enforces license whitelist
+# (MIT/Apache-2.0/BSD/ISC/MPL-2.0 + curated exceptions), banned crates
+# (openssl/native-tls — rustls-only posture), source locking (crates.io
+# only, no git deps), and wildcard-version rejection. Config in
+# `deny.toml`; every ignore/exception documented with dep path +
+# why-accepted + remediation. Fail-fast like cargo-audit.
+stage 4 "cargo deny check"
+if ! command -v cargo-deny >/dev/null 2>&1; then
+    printf "${R}cargo-deny not installed.${N} install once with:\n"
+    printf "  cargo install cargo-deny --locked\n"
+    fail deny 127
+fi
+run deny cargo deny check
+
+# ── Stage 5: unit + integration tests ──
 # `--all-targets` covers src/**/*.rs unit tests AND tests/*.rs integration
 # tests. Running just `--lib` here would let regressions in tests/api_test.rs,
 # tests/e2e_*.rs, etc. slip past the gate (CI would catch them, but only
 # AFTER push — that's a false-pass on local commit).
-stage 4 "cargo test --release --all-targets"
+stage 5 "cargo test --release --all-targets"
 run tests cargo test --release --all-targets
 
-# ── Stage 5: read-only live probes ──
-stage 5 "tests/live/test_run.sh"
+# ── Stage 6: read-only live probes ──
+stage 6 "tests/live/test_run.sh"
 run test_run tests/live/test_run.sh
 
-# ── Stage 6: live mutation lifecycle ──
-stage 6 "tests/live/test_mutation.sh"
+# ── Stage 7: live mutation lifecycle ──
+stage 7 "tests/live/test_mutation.sh"
 run test_mutation tests/live/test_mutation.sh
 
 T1=$(date +%s)
