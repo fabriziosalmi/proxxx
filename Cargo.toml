@@ -86,7 +86,7 @@ hmac = "0.12"
 # OS-native randomness for the HMAC-key bootstrap. Already in the
 # tree (transitive via rustls / tokio-rustls); promoting to a direct
 # dep so the call site is grep-able.
-getrandom = "0.2"
+getrandom = "0.4"
 
 # PTY screen state for SSH guest sessions (feature 1a).
 # Using vt100-ctt (up-to-date fork of vt100) because vt100 0.16 pins
