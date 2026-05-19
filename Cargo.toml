@@ -153,6 +153,15 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # E2E test suite (Mission 2 will use this — declared here so adding
 # `#[serial]` tests later doesn't require a Cargo.toml churn).
 serial_test = "3"
+# Property-based testing for invariants that example tests can't pin.
+# `proptest` generates randomized inputs against `prop_assert!` predicates,
+# shrinks failures to a minimal counterexample, and runs deterministically
+# in CI via a fixed seed. We use it where invariants are stronger than
+# "this specific input → this specific output" — sanitize must strip
+# every C0 byte regardless of input shape; the snaptree builder must
+# terminate on any graph (incl. cycles); the audit HMAC chain must
+# detect a single-byte mutation anywhere in any sequence.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # ── Benchmark binaries ──────────────────────────────────
 # Each `[[bench]]` produces an isolated binary so failures or

@@ -85,10 +85,41 @@ fn find_in<'a>(node: &'a TreeNode, name: &str) -> Option<&'a TreeNode> {
 /// - `build_node` itself protects against re-entry via a visited set
 ///   (defence in depth even if the cycle classification missed a case)
 #[must_use]
-pub fn assemble(mut snaps: Vec<Snapshot>) -> Tree {
-    // Index by name for O(1) parent lookup.
-    let by_name: HashMap<String, Snapshot> =
-        snaps.iter().cloned().map(|s| (s.name.clone(), s)).collect();
+pub fn assemble(snaps: Vec<Snapshot>) -> Tree {
+    // Index by name for O(1) parent lookup. PVE never returns the same
+    // name twice in a real response, but if a corrupted snapshot table
+    // (or a future caller) hands us duplicates, we MUST not produce
+    // phantom synthetic tree nodes — `build_node` falls through to a
+    // zero-field `Snapshot` when its `root_name` was already visited
+    // (the "Should never happen" branch at the bottom of `build_node`),
+    // which the renderer would draw as a ghost row.
+    //
+    // Deterministic dedup: first sort the input by a total order over
+    // EVERY field, then keep the first occurrence of each name via
+    // `entry().or_insert()`. This makes dedup order-independent — if
+    // PVE returns `[a1, a2]` or `[a2, a1]` (same `name`, different
+    // bytes elsewhere), both inputs canonicalise to the same chosen
+    // representative. Pinned by:
+    //   * `proptest::assemble_preserves_every_unique_name` — without
+    //      dedup the property fails on `[b root, b root]` (synthesises
+    //      a phantom second root).
+    //   * `proptest::assemble_order_independent` — without the total-
+    //      order pre-sort, HashMap's non-deterministic insertion order
+    //      makes the chosen representative input-order-dependent.
+    let mut sorted = snaps;
+    sorted.sort_by(|a, b| {
+        a.snaptime
+            .cmp(&b.snaptime)
+            .then(a.name.cmp(&b.name))
+            .then(a.parent.cmp(&b.parent))
+            .then(a.vmstate.cmp(&b.vmstate))
+            .then(a.description.cmp(&b.description))
+    });
+    let mut by_name: HashMap<String, Snapshot> = HashMap::new();
+    for s in sorted {
+        by_name.entry(s.name.clone()).or_insert(s);
+    }
+    let mut snaps: Vec<Snapshot> = by_name.values().cloned().collect();
     snaps.sort_by(|a, b| a.snaptime.cmp(&b.snaptime).then(a.name.cmp(&b.name)));
 
     // Group children by parent name.
@@ -537,5 +568,170 @@ mod tests {
         let t = assemble(snaps);
         assert_eq!(t.roots.len(), 1);
         assert_eq!(t.total_count(), 1000);
+    }
+}
+
+/// Property tests — invariants that hold for ANY input graph.
+///
+/// The example tests above pin specific shapes (linear chain, branch,
+/// orphan, 2-node self-cycle, 3-node cycle, 1000-deep no-overflow).
+/// These property tests pin the broader contract: for any sequence of
+/// `Snapshot` records — including adversarially constructed parent
+/// graphs the unit tests didn't think of — `assemble()` terminates,
+/// preserves every unique-name input exactly once across roots+orphans,
+/// and is order-independent (PVE response ordering is unspecified, so
+/// we MUST be stable to permutations).
+///
+/// `proptest` runs 256 cases per test by default. Inputs are bounded
+/// at 80 snapshots to keep wall-clock under 1s for the full module.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    /// Generate a `Snapshot`. Name and parent are drawn from a small
+    /// alphabet so generated graphs frequently exhibit parent links
+    /// (otherwise nearly every snap would be a root with a unique
+    /// random name — not an interesting test surface).
+    fn arb_snapshot() -> impl Strategy<Value = Snapshot> {
+        (
+            "[a-f0-9]{1,4}", // name — small alphabet → frequent collisions
+            "[a-f0-9]{0,4}", // parent — same alphabet, sometimes empty
+            any::<u64>(),    // snaptime
+            any::<u32>(),    // vmstate
+        )
+            .prop_map(|(name, parent, snaptime, vmstate)| Snapshot {
+                name,
+                parent,
+                description: String::new(),
+                snaptime,
+                vmstate,
+            })
+    }
+
+    /// Count unique names — the `assemble` function indexes by name,
+    /// so duplicate-name inputs are effectively deduped.
+    fn unique_name_count(snaps: &[Snapshot]) -> usize {
+        let mut names: Vec<&str> = snaps.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names.len()
+    }
+
+    proptest! {
+        /// `assemble` terminates on any input. No panic, no stack
+        /// overflow, no infinite loop — even when the parent graph
+        /// contains cycles, self-references, or 1000-element chains.
+        ///
+        /// This is the "doesn't crash the TUI on bad PVE data"
+        /// invariant. A corrupted snapshot table on a misbehaving
+        /// PVE node must NEVER take down the cockpit.
+        #[test]
+        fn assemble_terminates(snaps in vec(arb_snapshot(), 0..80)) {
+            let _ = assemble(snaps);
+        }
+
+        /// Every unique-name input appears exactly once across the
+        /// tree (roots+descendants) and orphans. No silent drops, no
+        /// duplications.
+        ///
+        /// `assemble` indexes by name so duplicate-name inputs are
+        /// deduped — we compare against the unique-name count.
+        #[test]
+        fn assemble_preserves_every_unique_name(snaps in vec(arb_snapshot(), 0..50)) {
+            let want = unique_name_count(&snaps);
+            let tree = assemble(snaps);
+            prop_assert_eq!(tree.total_count(), want);
+        }
+
+        /// Deterministic under input permutation. PVE does not commit
+        /// to any specific ordering in `GET /snapshot` responses, so
+        /// a re-order between two API calls must NOT change the
+        /// rendered tree — otherwise the user sees the tree
+        /// "rearranging itself" between refreshes.
+        #[test]
+        fn assemble_order_independent(snaps in vec(arb_snapshot(), 0..30)) {
+            let mut reversed = snaps.clone();
+            reversed.reverse();
+            let t1 = assemble(snaps);
+            let t2 = assemble(reversed);
+            prop_assert_eq!(t1, t2);
+        }
+
+        /// Self-cycle (`A.parent == A`) is classified as orphan, never
+        /// a root and never a tree node. Pins the contract from the
+        /// existing `self_cycle_surfaced_as_orphan` example test.
+        #[test]
+        fn self_cycles_always_surface_as_orphans(
+            snap_count in 1..20usize,
+            cycle_pos in 0..20usize,
+        ) {
+            // Build N-snapshot input where snap at `cycle_pos % N`
+            // self-references. All others are roots.
+            let n = snap_count;
+            let cyc = cycle_pos % n;
+            let snaps: Vec<Snapshot> = (0..n)
+                .map(|i| Snapshot {
+                    name: format!("s{i}"),
+                    parent: if i == cyc { format!("s{i}") } else { String::new() },
+                    description: String::new(),
+                    snaptime: i as u64,
+                    vmstate: 0,
+                })
+                .collect();
+            let tree = assemble(snaps);
+            let orphan_names: Vec<_> = tree.orphans.iter().map(|s| s.name.clone()).collect();
+            prop_assert!(
+                orphan_names.contains(&format!("s{cyc}")),
+                "self-cycle s{cyc} should be in orphans, got {orphan_names:?}"
+            );
+        }
+
+        /// Deep linear chain (parent → parent → … N deep) builds
+        /// without stack overflow at any depth ≤ 1500. The `assemble`
+        /// function was rewritten to be iterative precisely because
+        /// a 1000-deep recursive build crashed the lab cluster TUI;
+        /// this property pins that regression class.
+        #[test]
+        fn linear_chain_no_overflow(depth in 1..1500usize) {
+            let snaps: Vec<Snapshot> = (0..depth)
+                .map(|i| Snapshot {
+                    name: format!("s{i}"),
+                    parent: if i == 0 { String::new() } else { format!("s{}", i - 1) },
+                    description: String::new(),
+                    snaptime: i as u64,
+                    vmstate: 0,
+                })
+                .collect();
+            let tree = assemble(snaps);
+            prop_assert_eq!(tree.total_count(), depth);
+        }
+
+        /// `find` is consistent with `total_count`: every snapshot
+        /// that ends up in `roots` (or descendants) is findable by
+        /// name. Pins the `find` contract — the rollback impact
+        /// preview UX depends on it.
+        #[test]
+        fn find_locates_every_tree_member(snaps in vec(arb_snapshot(), 0..30)) {
+            let tree = assemble(snaps);
+            // Walk the tree, collecting every name in roots+descendants.
+            fn collect(node: &TreeNode, out: &mut Vec<String>) {
+                out.push(node.snap.name.clone());
+                for c in &node.children {
+                    collect(c, out);
+                }
+            }
+            let mut tree_names = Vec::new();
+            for r in &tree.roots {
+                collect(r, &mut tree_names);
+            }
+            for name in &tree_names {
+                prop_assert!(
+                    tree.find(name).is_some(),
+                    "find({name:?}) returned None but {name:?} is in the tree"
+                );
+            }
+        }
     }
 }
