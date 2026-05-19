@@ -3084,7 +3084,7 @@ dependencies = [
  "getrandom 0.2.17",
  "governor",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "insta",
  "keyring",
  "nucleo",

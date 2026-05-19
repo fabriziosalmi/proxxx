@@ -82,7 +82,7 @@ sha2 = "0.10"
 # steals the token can send messages as the bot but cannot forge
 # valid callback_data because the HMAC key is a separate secret
 # auto-bootstrapped at `<config_dir>/telegram_hmac.key` (0600).
-hmac = "0.12"
+hmac = "0.13"
 # OS-native randomness for the HMAC-key bootstrap. Already in the
 # tree (transitive via rustls / tokio-rustls); promoting to a direct
 # dep so the call site is grep-able.
