@@ -85,7 +85,7 @@ jobs:
           shared-key: codeql
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
         with:
           languages: ${{ matrix.language }}
           # `security-and-quality` adds quality queries on top of
@@ -99,9 +99,9 @@ jobs:
         # full compilation graph. If it ever stops working for our
         # build shape, replace with an explicit `cargo build
         # --all-targets` step — same net effect.
-        uses: github/codeql-action/autobuild@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        uses: github/codeql-action/autobuild@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        uses: github/codeql-action/analyze@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
         with:
           category: "/language:${{ matrix.language }}"
