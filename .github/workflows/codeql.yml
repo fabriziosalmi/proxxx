@@ -1,0 +1,107 @@
+# CodeQL — semantic static analysis for Rust.
+#
+# Runs GitHub's CodeQL engine against the codebase to surface high-
+# confidence bug patterns that cargo-clippy + cargo-audit + cargo-deny
+# don't catch: taint flow (untrusted input reaching unsafe sinks),
+# path-traversal, command-injection candidates, use-after-free shapes,
+# and the broader CWE coverage CodeQL has accumulated.
+#
+# Sits alongside the existing pipeline:
+#
+#   - ci.yml:build-test            — fmt + clippy(deny) + test + build
+#   - ci.yml:audit                 — cargo-audit (RustSec CVEs)
+#   - ci.yml:deny                  — cargo-deny (license/source/banned)
+#   - ci.yml:musl-static           — portable static binary build
+#   - scorecard.yml                — OpenSSF posture score + SARIF
+#   - codeql.yml (this file)       — CodeQL Rust SAST + SARIF
+#
+# Findings land under Security → Code scanning with per-finding
+# remediation guidance. The weekly cron catches regressions when the
+# CodeQL query database itself is updated upstream (queries added
+# AFTER the last commit-time scan).
+#
+# All third-party actions are pinned to a 40-char commit SHA — same
+# policy as ci.yml and scorecard.yml. Dependabot github-actions
+# ecosystem keeps these in sync.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Wednesdays 04:23 UTC — offset from ci.yml (04:17 daily) and
+    # scorecard.yml (04:31 Mondays) so the three security scans don't
+    # all hit Actions runners at once.
+    - cron: "23 4 * * 3"
+
+# Minimal top-level permissions — satisfy OpenSSF Scorecard
+# TokenPermissions. The `analyze` job below opts in to the specific
+# writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyse (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to upload SARIF results to Code-Scanning.
+      security-events: write
+      # Required for private repos so CodeQL can read internal package
+      # metadata; harmless on public.
+      packages: read
+      # Required for CodeQL action to clone and analyse.
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single-language matrix today (Rust), but the matrix shape
+        # is the GitHub-recommended form so adding e.g. JavaScript for
+        # docs/.vitepress later is a one-line change.
+        language: [rust]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install Rust toolchain (stable)
+        # CodeQL's autobuild for Rust invokes `cargo build`. Providing
+        # the toolchain explicitly (same version as ci.yml) means the
+        # build inside CodeQL exactly matches the one CI verifies, so
+        # any divergence between "what CodeQL sees" and "what we ship"
+        # cannot come from a toolchain mismatch.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          # Distinct cache key — CodeQL's build produces extra artefacts
+          # (database/) that we don't want polluting other jobs' caches.
+          shared-key: codeql
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        with:
+          languages: ${{ matrix.language }}
+          # `security-and-quality` adds quality queries on top of
+          # security-focused defaults. The extra signal is worth the
+          # ~10 % runtime increase given how strict the existing
+          # clippy/audit/deny stack already is.
+          queries: security-and-quality
+
+      - name: Autobuild
+        # CodeQL's Rust autobuild runs `cargo build` to observe the
+        # full compilation graph. If it ever stops working for our
+        # build shape, replace with an explicit `cargo build
+        # --all-targets` step — same net effect.
+        uses: github/codeql-action/autobuild@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        with:
+          category: "/language:${{ matrix.language }}"
