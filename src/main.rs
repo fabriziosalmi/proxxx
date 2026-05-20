@@ -176,6 +176,14 @@ fn main() -> Result<()> {
                         {
                             return Some(proxxx::config::ConfigError::EXIT_CODE);
                         }
+                        // Incident lockdown — exit 8 maps to the
+                        // "fleet is frozen, refused mutation" case.
+                        if cause
+                            .downcast_ref::<proxxx::incident::FreezeRefusal>()
+                            .is_some()
+                        {
+                            return Some(proxxx::incident::FreezeRefusal::EXIT_CODE);
+                        }
                         None
                     });
                     if matches!(cli.format, util::format::OutputFormat::Json) {
