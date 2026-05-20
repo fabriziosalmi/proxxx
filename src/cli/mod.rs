@@ -10,6 +10,7 @@ mod console;
 mod ct;
 mod doctor;
 mod events;
+pub mod explain;
 mod firewall;
 mod init;
 mod init_wizard;
@@ -218,6 +219,11 @@ pub enum Command {
         #[command(subcommand)]
         action: logs::LogsCommand,
     },
+    /// Bundled error knowledge base — look up any typed error proxxx
+    /// can emit and get cause / fixes / diagnostic commands /
+    /// references. Ships with the binary; no network needed.
+    /// Run `proxxx explain` (no args) for the catalog.
+    Explain(explain::ExplainArgs),
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
     TaskStop {
@@ -1214,6 +1220,7 @@ pub async fn execute(
             };
             logs::execute_logs(&config, &client, action, render).await
         }
+        Command::Explain(args) => explain::execute_explain(args),
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
