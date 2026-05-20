@@ -8,6 +8,7 @@ mod cluster;
 pub mod common;
 mod console;
 mod ct;
+mod describe;
 mod doctor;
 mod events;
 pub mod explain;
@@ -252,6 +253,14 @@ pub enum Command {
         #[command(subcommand)]
         action: incident::IncidentCommand,
     },
+
+    /// Structured cluster digest — one command, four formats. The
+    /// `--output llm-context` variant is designed to paste at the
+    /// top of an LLM chat: token-compact, prose+key:value mix, no
+    /// markdown tables. Secrets are NEVER emitted regardless of
+    /// flag.
+    Describe(describe::DescribeArgs),
+
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
     TaskStop {
@@ -1278,6 +1287,7 @@ pub async fn execute(
         }
         Command::Explain(args) => explain::execute_explain(args),
         Command::Incident { action } => incident::execute_incident(action),
+        Command::Describe(args) => describe::execute_describe(&client, args).await,
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
