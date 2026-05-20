@@ -1,10 +1,13 @@
-//! `proxxx state {export}` — read live cluster state into TOML (or
-//! JSON).
+//! `proxxx state {export,diff,apply}` — read live cluster state into
+//! TOML / JSON, diff a declared file against live, and converge live
+//! toward declared.
 //!
-//! v1 ships export only, pools only. Subsequent commands (`diff`,
-//! `apply`) and resource families (acl, storage, firewall-cluster,
-//! backup-jobs, notifications) land in follow-up PRs tracked by epic
-//! [#74](https://github.com/fabriziosalmi/proxxx/issues/74).
+//! Resource families covered today: pools, ACL grants, cluster
+//! storage definitions. Cluster firewall, backup jobs, notifications,
+//! and HA groups land in follow-up PRs tracked by epic
+//! [#74](https://github.com/fabriziosalmi/proxxx/issues/74). Pre-flight
+//! risk gates + HITL approval per destructive change are tracked
+//! separately and will wrap the apply dispatch without changing it.
 
 use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
@@ -87,6 +90,81 @@ pub enum StateCommand {
         #[arg(long, value_enum, default_value_t = DiffFormat::Text)]
         output: DiffFormat,
     },
+
+    /// Converge live cluster state toward the declared state file.
+    ///
+    /// Reads the declared TOML, computes the diff against live, then
+    /// dispatches each change to PVE. Returns one outcome row per
+    /// change: `applied`, `skipped` (with reason), or `failed`.
+    ///
+    /// Safety model:
+    ///   --dry-run             — never mutates; every change reports
+    ///                           as `skipped (dry_run)`. Always safe.
+    ///   (no --prune)          — `delete` changes report as `skipped
+    ///                           (prune_policy)`. Default behaviour.
+    ///   --prune               — actually delete resources absent from
+    ///                           the declared file.
+    ///   (default)             — fail-fast: first failure halts the
+    ///                           apply; remainder reports as `skipped
+    ///                           (aborted_by_prior)`.
+    ///   --continue-on-error   — keep going past failures.
+    ///
+    /// Exit code:
+    ///   0 — all changes applied or skipped without failure
+    ///   2 — at least one change failed
+    ///   1 — error (file unreadable, PVE unreachable, etc.)
+    ///
+    /// Pre-flight risk gates + HITL approval per destructive change
+    /// are tracked separately in epic #74; this command issues PVE
+    /// calls directly. Always run `--dry-run` first, then `--prune`
+    /// only when you've reviewed the diff.
+    ///
+    /// Examples:
+    ///   proxxx state apply state.toml --dry-run     # preview
+    ///   proxxx state apply state.toml               # apply, no deletes
+    ///   proxxx state apply state.toml --prune       # apply + delete drift
+    Apply {
+        /// Path to the declared state TOML file.
+        declared: PathBuf,
+
+        /// Preview only — never mutates. Every change reports as
+        /// `skipped (dry_run)`. Recommended for the first run on any
+        /// declared state file.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Required to execute `delete` changes. Without this, deletes
+        /// report as `skipped (prune_policy)`. Treat as a safety
+        /// interlock — opt in deliberately.
+        #[arg(long)]
+        prune: bool,
+
+        /// Don't halt on the first failure. Each change is attempted
+        /// in order regardless of prior failures. Useful for
+        /// "best-effort" cluster sweeps; risky if changes have
+        /// ordering dependencies.
+        #[arg(long)]
+        continue_on_error: bool,
+
+        /// Output format. Default: human-readable per-change line.
+        #[arg(long, value_enum, default_value_t = ApplyOutputFormat::Text)]
+        output: ApplyOutputFormat,
+    },
+}
+
+/// Local output-format choice for `state apply`. Same rationale as
+/// `ExportFormat`/`DiffFormat` — TOML is not a meaningful apply
+/// output (the apply IS a sequence of outcomes, not a TOML
+/// document).
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum ApplyOutputFormat {
+    /// Human-readable: one `<sigil> <resource>: <identity> — <status>`
+    /// line per outcome.
+    #[default]
+    Text,
+    /// JSON array of `ApplyOutcome` objects with full change + result.
+    /// For pipeline consumption / audit.
+    Json,
 }
 
 /// Local output-format choice for `state diff`. Like `ExportFormat`,
@@ -192,5 +270,91 @@ pub async fn execute_state(
             let exit = i32::from(!changes.is_empty()) * 2;
             Ok((Value::Null, exit))
         }
+
+        StateCommand::Apply {
+            declared,
+            dry_run,
+            prune,
+            continue_on_error,
+            output,
+        } => {
+            let toml_str = std::fs::read_to_string(&declared)
+                .with_context(|| format!("reading declared state from {}", declared.display()))?;
+            let declared_state: state::model::ClusterState = toml::from_str(&toml_str)
+                .with_context(|| {
+                    format!(
+                        "parsing TOML at {} — is it the output of `proxxx state export`?",
+                        declared.display()
+                    )
+                })?;
+
+            let profile_label = profile.unwrap_or("default");
+            let live_state = state::export::export_state(
+                client.as_ref(),
+                &[
+                    state::export::Resource::Pools,
+                    state::export::Resource::Acl,
+                    state::export::Resource::Storage,
+                ],
+                profile_label,
+            )
+            .await?;
+
+            let changes = state::diff::diff(&declared_state, &live_state);
+            let opts = state::apply::ApplyOptions {
+                dry_run,
+                prune,
+                continue_on_error,
+            };
+            let outcomes = state::apply::apply(client.as_ref(), changes, opts).await;
+
+            match output {
+                ApplyOutputFormat::Text => {
+                    if outcomes.is_empty() {
+                        println!("(no changes — live state matches declared)");
+                    } else {
+                        for o in &outcomes {
+                            println!("{}", apply_summary_line(o));
+                        }
+                    }
+                }
+                ApplyOutputFormat::Json => {
+                    let json = serde_json::to_string_pretty(&outcomes)?;
+                    println!("{json}");
+                }
+            }
+
+            // Exit code: 2 if any outcome failed, else 0. 1 is
+            // reserved for hard errors (file unreadable, PVE
+            // unreachable) — those flow through `?` above.
+            let any_failed = outcomes
+                .iter()
+                .any(|o| matches!(o.result, state::apply::ApplyResult::Failed { .. }));
+            let exit = i32::from(any_failed) * 2;
+            Ok((Value::Null, exit))
+        }
+    }
+}
+
+/// Render one apply outcome as a single human-readable line.
+///
+/// Format: `<sigil> <resource>: <identity> — <status>`, with sigils
+/// matching `state::diff::summary_line` so the eye can correlate a
+/// diff line with the apply line that acted on it. The trailing
+/// status word is the discriminant of [`state::apply::ApplyResult`]
+/// — `applied` / `skipped (<reason>)` / `failed: <error>`.
+fn apply_summary_line(o: &state::apply::ApplyOutcome) -> String {
+    let diff_line = state::diff::summary_line(&o.change);
+    match &o.result {
+        state::apply::ApplyResult::Applied => format!("{diff_line} — applied"),
+        state::apply::ApplyResult::Skipped { reason } => {
+            let r = match reason {
+                state::apply::SkipReason::DryRun => "dry_run",
+                state::apply::SkipReason::PrunePolicy => "prune_policy",
+                state::apply::SkipReason::AbortedByPrior => "aborted_by_prior",
+            };
+            format!("{diff_line} — skipped ({r})")
+        }
+        state::apply::ApplyResult::Failed { error } => format!("{diff_line} — failed: {error}"),
     }
 }

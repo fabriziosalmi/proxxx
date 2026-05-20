@@ -4,9 +4,12 @@
 //! — the path toward declaratively-versioned Proxmox clusters tracked
 //! in epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74).
 //!
-//! v1 (this PR) ships **export only**, **pools only**. Subsequent PRs
-//! add ACL, storage definitions, cluster firewall, backup jobs,
-//! notifications, then the diff + apply layers.
+//! Today this module covers **pools, ACL, and storage definitions**
+//! across the full export → diff → apply loop. Cluster firewall,
+//! backup jobs, notifications, and HA groups land in follow-up PRs
+//! tracked by the epic. Pre-flight risk gates + HITL approval per
+//! destructive apply change are tracked separately and will wrap
+//! the dispatch layer without changing it.
 //!
 //! ## Layered design
 //!
@@ -17,11 +20,14 @@
 //!   the output is diff-stable byte-for-byte across runs.
 //! * [`export`] — read live state through `api::ProxmoxGateway`. Pure
 //!   read; no mutation. Mockable for unit tests.
-//! * `diff` (future) — structural diff between two
-//!   `ClusterState` values; produces `Vec<Change>` (Create / Update /
-//!   Delete).
-//! * `apply` (future) — execute each `Change` via the api client;
-//!   pre-flight gate + audit log per change; HITL on destructive ops.
+//! * [`diff`] — structural diff between two `ClusterState` values;
+//!   produces a `Vec<Change>` (Create / Update / Delete) ordered as
+//!   Delete → Update → Create per family. Pure function; no I/O.
+//! * [`apply`] — execute each `Change` via a narrow write-side trait
+//!   ([`apply::StateWriteView`]) with blanket impl over
+//!   `ProxmoxGateway`. Returns one [`apply::ApplyOutcome`] per change
+//!   so callers can render or audit. Dry-run / prune / continue-on-
+//!   error semantics live here.
 //!
 //! ## Why a separate module
 //!
@@ -33,6 +39,7 @@
 //! ergonomics — sparkline buffers, selection cursors — `state/`
 //! cares about wire-stable identity and TOML readability).
 
+pub mod apply;
 pub mod diff;
 pub mod export;
 pub mod model;
