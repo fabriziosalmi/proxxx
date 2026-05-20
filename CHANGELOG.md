@@ -12,13 +12,17 @@ SemVer contract:
 
 ## [Unreleased]
 
-Headline: **GitOps for Proxmox + 17 new top-level commands**. 24 PRs
-landed on 2026-05-20 closing the entire strategic-gap backlog (#57-#73)
-and the cluster-state epic (#74). 429 → 533 lib tests. Pre-flight
-risk gates + interactive HITL on state apply. Unified daemon (alerts +
-HITL + schedule under one SIGTERM). MCP stdio + HTTP/SSE notifications
-at parity. RRD time-window accounting integrated into per-pool/node/tag
-chargeback.
+Headline: **GitOps for Proxmox + 17 new top-level commands + honest invariant attestation**.
+24 feature PRs landed on 2026-05-20 morning closing the entire strategic-gap backlog
+(#57-#73) and the cluster-state epic (#74). The evening shipped three test-only sweeps
+(PR #101 / #102 / #103) that took honest end-to-end-verified invariant coverage from
+~15% → ~37% (24 → 73 ✅ rows across `pre-commit/*.md`), and surfaced **three real latent
+gaps** in the API client's typed-error path that ship-fixed alongside the test sweep.
+
+Numbers: **429 → 536 lib tests** (+107) plus **+49 new integration tests** across the
+sweep suites. Pre-flight risk gates + interactive HITL on state apply. Unified daemon
+(alerts + HITL + schedule under one SIGTERM). MCP stdio + HTTP/SSE notifications at
+parity. RRD time-window accounting integrated into per-pool/node/tag chargeback.
 
 Minor-bump-worthy on the cumulative surface; new exit code (`8` —
 incident lockdown). Detailed audit in [`docs/AUDIT-2026-05-20.md`](docs/AUDIT-2026-05-20.md).
@@ -95,6 +99,38 @@ incident lockdown). Detailed audit in [`docs/AUDIT-2026-05-20.md`](docs/AUDIT-20
 
 - **`8` — Incident lockdown active.** Fired by every `PxClient::{post,put,delete}`
   when the freeze lock is in effect. See [`docs/reference/exit-codes.md`](docs/reference/exit-codes.md).
+
+### Fixed — typed-error gaps in `src/api/client.rs` (PR #101)
+
+Three error paths flowed through plain `anyhow::Error::context` and so
+`main.rs`'s exit-code dispatch couldn't route them and observability
+layers couldn't `.downcast_ref::<ApiError>()`. All three now produce
+the typed variant:
+
+- DNS NXDOMAIN / TCP-handshake errors at the request layer →
+  `ApiError::Transport`.
+- Body-stream errors (mid-stream TCP close, decompression failures) at
+  `read_bounded_body` → `ApiError::Transport`.
+- JSON parse failures (HTML on 200 from CDN intercept; schema drift) at
+  `parse_json_maybe_blocking` → `ApiError::Parse { path, source }`.
+
+Each is regression-pinned by a wiremock-driven test in
+`tests/error_handling_e2e.rs`.
+
+### Added — invariant attestation sweep (PRs #101 / #102 / #103)
+
+Three test-only PRs that promote every row in `pre-commit/02-error-handling.md`
+and `pre-commit/04-resilience-and-chaos.md` from ❌ to ✅ with a named
+attesting test, plus 6 opt-in live Rust tests against PVE 9.1.1 for
+the `01-feature-coverage.md` typed-deser surfaces. Honest end-to-end-
+verified row count across `pre-commit/*.md`: **24 → 73** (~15% → ~37%).
+
+| Suite | Tests | What it pins |
+| :--- | ---: | :--- |
+| `tests/error_handling_e2e.rs` | 24 | HTTP status mapping, transport errors, sqlite resilience, CLI contract, TUI sanitation, SSH FFI, PBS FFI |
+| `src/mcp/server.rs` inline | 3 | Stdin oversize DoS guard, non-UTF-8 byte delivery, JSON-RPC parse-error envelope shape |
+| `tests/resilience_chaos_e2e.rs` | 20 | SIGTERM/SIGHUP raise + receive, semaphore caps, Instant monotonicity, `pop_view` shrink, WS frame cap, Proxmox quirks (HA-managed, pvestatd freeze, QGA timeout) |
+| `tests/feature_coverage_live.rs` | 6 (`#[ignore]`-gated) | Typed deserializer round-trip vs live PVE 9.1.1 for `get_nodes` / `get_guests` / `get_guest_config` / `get_storage_pools` / `get_cluster_tasks` / `list_snapshots` |
 
 ### Architecture notes
 

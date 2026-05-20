@@ -29,7 +29,7 @@ features:
   - title: No agent on the cluster
     details: Direct REST against PVE (token or password) and PBS (token only), with typed error categories so callers match on the failure shape instead of grepping prose. SSH only for the paths PVE never exposed over REST — patch apply, full effective-permissions, per-guest interactive sessions, per-node journalctl tailing, GPU/IOMMU readiness probing.
   - title: Eight-stage commit gate, no skip flags
-    details: secret-shape scan, cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, cargo deny check (license whitelist + banned crates + crates.io-only sources + wildcard ban), the full test suite (533 lib tests including ~25 proptest properties at 256 random cases each, ~6 400 invariant checks total), 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
+    details: secret-shape scan, cargo fmt, cargo clippy --all-targets at deny tier, cargo audit against a pinned advisory policy, cargo deny check (license whitelist + banned crates + crates.io-only sources + wildcard ban), the full test suite (536 lib tests + 49 new integration tests (error-handling + resilience-chaos sweeps) including ~25 proptest properties at 256 random cases each, ~6 400 invariant checks total), 87 read-only probes against a live cluster, and a full mutation lifecycle covering LXC, cluster-level CRUD, QEMU, and opt-in QGA agent-required round-trips. Every commit on main passes locally and in CI.
   - title: Pre-flight risk gate plus HITL
     details: 11 risk variants — running, long-uptime, locked, HA-managed, tagged prod, active net traffic, listening on service, many snapshots, backup age warning, no backup found, deep-check skipped — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy. The same gate fires on `state apply` for non-empty pool deletes, root-role ACL deletes, shared-storage removal, and batches ≥ 50.
   - title: GitOps loop for Proxmox
@@ -108,7 +108,7 @@ onMounted(() => {
 
 | Surface               | Today                                                    |
 | :-------------------- | :------------------------------------------------------- |
-| Source                | ~60 KLOC Rust · ~14 KLOC tests · 533 lib tests           |
+| Source                | ~60 KLOC Rust · ~14 KLOC tests · 536 lib tests + 49 new integration tests (error-handling + resilience-chaos sweeps)           |
 | Quality gate          | 8 stages · ~340–480 s wall time (live cluster path)      |
 | Live cluster coverage | 87 read probes + 47 mutation probes per gate run         |
 | Property testing      | ~25 proptest properties × 256 random cases = ~6 400 invariant checks per `cargo test` |
