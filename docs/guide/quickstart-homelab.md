@@ -88,7 +88,14 @@ Bottom row footer shows the relevant binds for the current view.
 | :--- | :--- |
 | Snapshot before risky changes | `proxxx snapshot create <vmid> --name pre-upgrade` |
 | Migrate a VM between nodes | `proxxx migrate <vmid> <target> --yes` |
+| Watch migration progress live | `proxxx migrate <vmid> <target> --stream` |
 | Move a disk to NFS | `proxxx disk move <vmid> --disk scsi0 --storage <nfs> --yes` |
+| Snapshot the whole cluster's pools / ACLs / storage definitions | `proxxx state export > cluster.toml` |
+| Check what's drifted before a change | `proxxx state diff cluster.toml` |
+| Get the cluster's most-recent backup status at a glance | `proxxx backup-verify --max-age-days 7` |
+| See per-pool / per-node resource usage | `proxxx accounting --group-by pool` |
+| Find anomalies across the cluster | `proxxx anomaly` |
+| Spin up an Ubuntu/Debian cloud-init VM | `proxxx cloud-img list && proxxx cloud-img download ubuntu/24.04` |
 | Browse PBS backups | [PBS integration](/integrations/pbs) |
 | Hook Claude / Cursor in | [MCP server](/integrations/mcp) (5-min setup) |
 | Get Telegram approvals | [HITL](/integrations/hitl) (more involved) |

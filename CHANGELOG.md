@@ -12,6 +12,101 @@ SemVer contract:
 
 ## [Unreleased]
 
+Headline: **GitOps for Proxmox + 17 new top-level commands**. 24 PRs
+landed on 2026-05-20 closing the entire strategic-gap backlog (#57-#73)
+and the cluster-state epic (#74). 429 → 533 lib tests. Pre-flight
+risk gates + interactive HITL on state apply. Unified daemon (alerts +
+HITL + schedule under one SIGTERM). MCP stdio + HTTP/SSE notifications
+at parity. RRD time-window accounting integrated into per-pool/node/tag
+chargeback.
+
+Minor-bump-worthy on the cumulative surface; new exit code (`8` —
+incident lockdown). Detailed audit in [`docs/AUDIT-2026-05-20.md`](docs/AUDIT-2026-05-20.md).
+
+### Added — cluster-state GitOps (epic #74)
+
+- **`proxxx state export`** — byte-stable TOML snapshot of pools, ACL grants, cluster
+  storage definitions. Diff-stable across runs against an unchanged cluster.
+- **`proxxx state diff <declared.toml>`** — structural diff of declared vs live; exit 2
+  on drift. CI-gateable.
+- **`proxxx state apply <declared.toml> [--dry-run] [--prune] [--continue-on-error]
+  [--allow-risk] [--interactive]`** — converge live toward declared. Pre-flight risk
+  gate refuses Severe changes (non-empty pool delete, root-role ACL delete, shared-
+  storage delete, batch ≥ 50) unless `--allow-risk`; `--interactive` adds per-Severe
+  `[y/N]` stdin prompts. Exit code 6 on refusal.
+
+### Added — new top-level commands
+
+- **`proxxx migrate --stream`** — live per-disk progress bars (TTY) or NDJSON for migrations.
+- **`proxxx logs tail [--node N] [--service U] [--since "1h ago"] [--grep PAT] [--no-follow]`**
+  — cross-node journalctl fanout via SSH; client-side merge + filter. Graceful per-node failure.
+- **`proxxx explain <error-id> [--output text|md|json]`** — bundled knowledge base for every
+  typed error (13 entries). Cause / numbered fixes / diagnostic commands / references.
+- **`proxxx incident {freeze,thaw,status}`** — cluster-wide write kill-switch with TTL +
+  audit log. Halts `POST`/`PUT`/`DELETE`. Reads keep working. Exit code 8 on refused mutation.
+- **`proxxx ls --all-profiles`** / **`proxxx find <vmid>`** — cross-cluster fanout for
+  read-only queries. Per-cluster failures surface as error rows; rest of the fleet keeps
+  answering. Writes deliberately not plumbed through fanout.
+- **`proxxx describe [--output text|md|json|llm-context] [--include events|rbac|all]`** —
+  structured cluster digest. The `llm-context` format is token-compact, designed to paste
+  at the top of an LLM chat.
+- **`proxxx serial --record [PATH]`** + **`proxxx play-cast <PATH>`** — asciinema cast v2
+  recording and replay for serial sessions (compliance / training).
+- **`proxxx cloud-img {list,download}`** — bundled SHA-256-pinned cloud-image registry
+  (Ubuntu / Debian / Alpine / Fedora). Server-side verified download via PVE's `download-url`.
+- **`proxxx schedule {add,list,remove,pause,resume,run-due}`** — interval-based scheduler
+  for recurring proxxx operations. TOML-backed persistence at `<data_dir>/schedules.toml`.
+- **`proxxx upgrade-check --target 9.x [--output text|json]`** — PVE major-upgrade
+  pre-flight scanner. Bundled rule set with severity (info/warn/block). Exit 1 on any
+  block-severity finding. CI-gateable.
+- **`proxxx accounting --group-by pool|node|tag [--timeframe none|hour|day|week|month|year]
+  [--include-unassigned]`** — per-pool / per-node / per-tag resource accounting. Time-window
+  variants integrate per-guest RRD into CPU-hours, GiB·h, network GiB, disk-read/write GiB.
+- **`proxxx heatmap [--output text|json]`** — per-node API RTT bucketed green/yellow/red.
+- **`proxxx anomaly [--threshold 3.0] [--output text|json]`** — z-score outlier detection
+  on cluster-wide CPU + mem% snapshot. Exit 1 on any anomaly.
+- **`proxxx backup-verify [--max-age-days 7] [--output text|json]`** — metadata-level
+  probe of each guest's most-recent backup (pass / stale / missing / error). Exit 1 on
+  any missing or error.
+- **`proxxx import <file> [--format raw|qcow2|vmdk|vdi|vhdx|vhd] [--output PATH] [--dry-run]`** —
+  qemu-img convert wrapper. OVA/OVF parsing + libvirt-XML / VMware-direct chains deferred.
+- **`proxxx gpu-inspect --node <node>`** — SSH-probe a node for IOMMU + vfio readiness +
+  per-device lspci. The bind step (write configs + reboot) deferred behind explicit
+  operator confirmation flow.
+- **`proxxx daemon serve [--no-alerts] [--no-hitl] [--no-schedule]`** — unified
+  background-task graph: alerts watcher + HITL Telegram listener + schedule run-due tick
+  under one process with one SIGTERM handler. Per-component opt-out for systemd-unit
+  flexibility.
+
+### Added — MCP server-sent notifications (#71)
+
+- **Both transports at parity**: HTTP `GET /mcp` SSE channel emits
+  `event: notifications/cluster-event` per broker event; stdio interleaves
+  JSON-RPC 2.0 `notifications/cluster-event` lines with the request/response
+  stream. Lagged consumers see `notifications/lagged { missed: N }` (HTTP)
+  or the equivalent JSON-RPC line (stdio).
+- **Tracked event kinds**: `task_state_change` (started / completed / failed)
+  and `incident` (frozen / thawed).
+- New `notifications/subscribe` + `notifications/unsubscribe` RPC handlers
+  (informational acks; actual delivery flows over the SSE/stdout channel
+  automatically).
+
+### Added — exit code 8
+
+- **`8` — Incident lockdown active.** Fired by every `PxClient::{post,put,delete}`
+  when the freeze lock is in effect. See [`docs/reference/exit-codes.md`](docs/reference/exit-codes.md).
+
+### Architecture notes
+
+- Stdin-reader background task pattern in `mcp::server` because `read_until`
+  is NOT cancel-safe under `tokio::select!`. The mpsc-mediated channel makes
+  the outer `select!` arm cancel-safe.
+- Narrow-trait + blanket-impl pattern (`state::apply::StateWriteView`,
+  `migrate_progress::TaskLogView`) lets unit tests stub a handful of
+  methods instead of the full 200+-method gateway.
+- Explicit-path `_at(path, …)` test variants (`incident::*_at`,
+  `schedule::*_at`) avoid env-var contention under parallel test execution.
+
 ## [0.2.1] — 2026-05-19
 
 Headline: **hardening pass** — 27 PRs in one day across three sessions,
