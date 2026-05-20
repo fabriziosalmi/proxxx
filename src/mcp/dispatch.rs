@@ -643,7 +643,7 @@ pub async fn dispatch_rpc(
                 "available_kinds": ["task_state_change", "incident"],
                 "transport_note":
                     "Server-sent notifications stream on the SSE channel (HTTP transport) or \
-                     stdout JSON-RPC lines (stdio transport — deferred to a follow-up).",
+                     interleaved with the request/response stream on stdout (stdio transport).",
             }),
         ),
         "notifications/unsubscribe" => ok_result(id, &json!({"accepted": true})),
