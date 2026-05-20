@@ -110,6 +110,7 @@ fn main() -> Result<()> {
                 cli.profile.as_deref(),
                 cli.token_secret.as_deref(),
                 cli.secure,
+                cli.format,
             )) {
                 Ok((result, exit_code)) => {
                     // `Value::Null` is the convention for commands
