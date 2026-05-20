@@ -3087,6 +3087,7 @@ dependencies = [
  "hmac 0.13.0",
  "insta",
  "keyring",
+ "libc",
  "nucleo",
  "nucleo-matcher",
  "proptest",
