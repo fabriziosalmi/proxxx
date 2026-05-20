@@ -4,6 +4,7 @@ use serde_json::Value;
 
 mod access;
 mod audit_cmd;
+mod cloudimg;
 mod cluster;
 pub mod common;
 mod console;
@@ -260,6 +261,16 @@ pub enum Command {
     /// markdown tables. Secrets are NEVER emitted regardless of
     /// flag.
     Describe(describe::DescribeArgs),
+
+    /// Cloud-image provisioner — bundled SHA-256-pinned registry of
+    /// cloud images, downloaded via PVE's `download-url` (server-side
+    /// verified). Named `cloud-img` rather than `template` because
+    /// the existing `proxxx template <vmid>` already covers marking a
+    /// guest as a template (a different operation).
+    CloudImg {
+        #[command(subcommand)]
+        action: cloudimg::CloudImgCommand,
+    },
 
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
@@ -1311,6 +1322,7 @@ pub async fn execute(
         Command::Explain(args) => explain::execute_explain(args),
         Command::Incident { action } => incident::execute_incident(action),
         Command::Describe(args) => describe::execute_describe(&client, args).await,
+        Command::CloudImg { action } => cloudimg::execute_cloudimg(&client, action).await,
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
