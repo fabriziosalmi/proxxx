@@ -260,6 +260,23 @@ pub const ENTRIES: &[ExplainEntry] = &[
         references: &["https://toml.io/en/"],
     },
     ExplainEntry {
+        id: "freeze-refusal",
+        title: "Incident lockdown active — mutations refused",
+        cause: "proxxx's freeze lock is active. Every POST/PUT/DELETE refuses immediately, exits 8, and tells the operator why. Reads still work — investigators need observation.",
+        fixes: &[
+            "If the freeze is intentional (live incident), wait for the TTL to expire or coordinate with the operator who froze.",
+            "If the freeze is stale (forgotten, no TTL, false alarm), thaw it: `proxxx incident thaw --reason '<text>'`.",
+            "Always pair `freeze` with `--ttl <duration>` — a forgotten freeze with no TTL is the operational nightmare we're trying to avoid.",
+            "Check the audit log for who froze and why: every freeze/thaw is recorded under the `incident.*` action prefix.",
+        ],
+        commands: &[
+            "proxxx incident status",
+            "proxxx incident thaw --reason '<text>'",
+            "proxxx audit export --limit 20 | grep incident",
+        ],
+        references: &["docs/reference/exit-codes.md"],
+    },
+    ExplainEntry {
         id: "preflight-refusal",
         title: "Pre-flight refused: SEVERE risk without --allow-risk",
         cause: "proxxx's pre-flight risk checks rated the requested operation `Severe` (e.g. deleting a guest with active TCP listeners, migrating with local disks while heavily loaded). The default policy is to refuse rather than execute — exit code 6.",
@@ -514,6 +531,8 @@ mod tests {
             "config-toml",
             // Preflight refusal (src/app/preflight.rs):
             "preflight-refusal",
+            // Incident lockdown (src/incident/mod.rs):
+            "freeze-refusal",
         ];
         for id in expected {
             assert!(

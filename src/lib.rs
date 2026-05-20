@@ -24,6 +24,7 @@ pub mod cli;
 pub mod config;
 pub mod handoff;
 pub mod hitl;
+pub mod incident;
 pub mod mcp;
 pub mod metrics;
 pub mod pbs;

@@ -12,6 +12,7 @@ mod doctor;
 mod events;
 pub mod explain;
 mod firewall;
+mod incident;
 mod init;
 mod init_wizard;
 mod logs;
@@ -224,6 +225,14 @@ pub enum Command {
     /// references. Ships with the binary; no network needed.
     /// Run `proxxx explain` (no args) for the catalog.
     Explain(explain::ExplainArgs),
+
+    /// Incident-response primitives — cluster-wide write kill-switch.
+    /// `freeze` halts every mutation entry point; `thaw` lifts it;
+    /// `status` reports current state. Reads keep working.
+    Incident {
+        #[command(subcommand)]
+        action: incident::IncidentCommand,
+    },
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
     TaskStop {
@@ -1221,6 +1230,7 @@ pub async fn execute(
             logs::execute_logs(&config, &client, action, render).await
         }
         Command::Explain(args) => explain::execute_explain(args),
+        Command::Incident { action } => incident::execute_incident(action),
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
