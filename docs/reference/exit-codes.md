@@ -7,12 +7,13 @@ instead of grepping stderr.
 | :--- | :--- | :--- |
 | `0` | Success | Operation completed |
 | `1` | Generic failure | Catch-all; check stderr for the message |
-| `2` | Usage error | clap rejected the arguments |
+| `2` | Usage error / diff present | clap rejected the arguments **OR** `proxxx state diff` found drift |
 | `3` | Configuration error | TOML invalid, required field missing, profile not found |
 | `4` | Authentication / authorization | `Unauthorized` (401) or `Forbidden` (403) — see [errors](/reference/errors) |
-| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc. |
-| `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed |
+| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc. Also `proxxx find <vmid>` when no profile owns the VMID. |
+| `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from both per-guest pre-flight (running guest, etc.) and state-apply pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
+| `8` | Incident lockdown active | A mutation was attempted while `proxxx incident freeze` is in effect. Run `proxxx incident thaw` first (with operator review), or wait for the TTL to expire. |
 
 ## Handling in shell
 

@@ -45,14 +45,21 @@ Pick the row that matches you and jump straight to the right page.
 
 ## What you get
 
-- **One binary** — `proxxx`. CLI, TUI, MCP server, alert daemon, HITL daemon all in the same executable.
-- **Cluster-wide read in a second** — `proxxx ls nodes`, `proxxx ls guests`, fuzzy search across the whole cluster from `/`.
-- **Pipeline writes** — start, stop, migrate, snapshot, clone, backup, patch, disk-move, with `--format json` for jq.
-- **Pre-flight risk gate** — 11 risk variants (`Locked`, `Running`, `LongUptime`, `TaggedProd`, `ActiveNetTraffic`, `HaManaged`, …) refuse destructive ops on running guests without `--allow-risk`.
+- **One binary** — `proxxx`. CLI, TUI, MCP server, unified daemon (alerts + HITL + schedule) all in the same executable.
+- **Cluster-wide read in a second** — `proxxx ls nodes`, `proxxx ls guests`, fuzzy search across the whole cluster from `/`. `--all-profiles` fans the read across every configured cluster in parallel.
+- **GitOps for Proxmox** — `proxxx state {export,diff,apply}` produces a byte-stable TOML of pools/ACL/storage, diffs against live, converges via dispatched API calls. Pre-flight risk gates refuse Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete) unless `--allow-risk`; `--interactive` adds per-Severe `[y/N]` stdin prompts.
+- **Pipeline writes** — start, stop, migrate, snapshot, clone, backup, patch, disk-move, with `--format json` for jq. `migrate --stream` shows live per-disk progress.
+- **Pre-flight risk gate** — both per-guest (Locked/Running/LongUptime/TaggedProd/ActiveNetTraffic/HaManaged) and state-change (PoolDeleteNonEmpty/AclDeleteRootRole/StorageDeleteShared/BulkChangeCount) — refuses destructive ops without explicit override.
 - **HITL** — Telegram-mediated human approval gate, deny-on-timeout (120 s), policy-driven by tag / vmid / wildcard.
-- **Console handoff** — SSH (system `ssh` + QGA / lxc-interfaces auto-discovery), serial (termproxy WebSocket), SPICE (`.vv` 0600), noVNC (system browser) — all from `proxxx <verb> <vmid>`.
-- **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision.
-- **MCP server** — stdio JSON-RPC for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned.
+- **Incident lockdown** — `proxxx incident freeze --reason X --ttl 4h` halts every mutation cluster-wide (`POST`/`PUT`/`DELETE` refuse with exit 8); `thaw` lifts it. Reads keep working for investigators.
+- **Console handoff + recording** — SSH/serial/SPICE/noVNC, all from `proxxx <verb> <vmid>`. `proxxx serial --record` writes asciinema cast v2; `proxxx play-cast` replays.
+- **Cross-cluster** — `proxxx find <vmid>` answers "which cluster owns this guest?" without manual profile-switching.
+- **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision. `proxxx backup-verify` does metadata-level integrity probing.
+- **Observability** — `proxxx logs tail` (cross-node journalctl fanout via SSH), `proxxx heatmap` (per-node API RTT), `proxxx anomaly` (z-score outliers), `proxxx accounting --timeframe month` (CPU-hours/GiB·h/net-GiB from per-guest RRD).
+- **Upgrade pre-flight** — `proxxx upgrade-check --target 9.x` scans cluster + config against bundled rules; exit code 1 on any block-severity finding (CI-gateable).
+- **Bundled error knowledge base** — `proxxx explain <error-id>` for every typed error proxxx can emit (13 entries; ships with the binary, no network needed).
+- **Cluster digest for LLMs** — `proxxx describe --output llm-context` emits a token-compact prose+key:value paste-pronto for AI chats.
+- **MCP server** — stdio JSON-RPC + HTTP/SSE for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned. Server-sent `notifications/cluster-event` on both transports (task lifecycle + freeze/thaw events).
 - **Verifiable releases** — every tarball ships with three layers: SHA-256 sidecar, sigstore keyless cosign signature pinned to this exact workflow path (offline-verifiable; transparency-log inclusion proof embedded), and a CycloneDX SBOM generated from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`.
 
 ## EU & compliance
@@ -185,14 +192,58 @@ proxxx novnc  100 --node pve1                   # opens browser to web UI's noVN
 ```
 
 ```bash
-# Long-running daemons
-proxxx alerts watch --interval 30               # rule-driven alert daemon
-proxxx hitl   serve                             # Telegram approval daemon
-proxxx mcp    serve                             # stdio JSON-RPC for LLM agents
-proxxx mcp    tools --checksum                  # registry SHA-256 for audit pinning
+# GitOps loop — export, diff, apply with safety on top
+proxxx state export > state.toml                  # snapshot cluster state
+git add state.toml && git commit -m snapshot      # version it
+$EDITOR state.toml                                # declare intent
+proxxx state diff state.toml                      # preview drift, exit 2 if any
+proxxx state apply state.toml --dry-run           # rehearse, never mutates
+proxxx state apply state.toml --prune             # pre-flight refuses Severe (exit 6)
+proxxx state apply state.toml --prune --interactive  # per-Severe [y/N] prompt
 ```
 
-Exit codes are stable contract: `0` success, `1` runtime error, `2` argument / config error, `3` HITL denied, `4` precondition refused (running guest, missing config, etc.).
+```bash
+# Cross-cluster fanout + cluster digest
+proxxx find 100                                   # which profile owns VMID 100?
+proxxx ls guests --all-profiles                   # every guest across every cluster
+proxxx describe --output llm-context              # paste at top of an LLM chat
+proxxx accounting --group-by pool --timeframe month  # CPU-hours / GiB·h / net-GiB
+proxxx heatmap                                    # per-node API RTT, color-bucketed
+proxxx anomaly --threshold 3                      # z-score outliers on CPU + mem%
+proxxx logs tail --service pveproxy --since "1 hour ago"  # cross-node journalctl
+```
+
+```bash
+# Incident lockdown + upgrade pre-flight
+proxxx incident freeze --reason "rotating token" --ttl 4h   # halt every mutation cluster-wide
+proxxx incident status --output json
+proxxx incident thaw --reason "rotation complete"
+proxxx upgrade-check --target 9.x                 # exits 1 on any block-severity finding
+proxxx explain freeze-refusal                     # bundled error knowledge base
+```
+
+```bash
+# Console handoff + session recording
+proxxx ssh    100                                 # interactive ssh into guest (auto-discovery)
+proxxx serial 100 --node pve1 --record            # raw termproxy WebSocket + asciinema cast
+proxxx play-cast ~/.../sessions/<ts>-100-serial.cast --speed 2
+proxxx spice  100 --node pve1                     # writes 0600 .vv, launches remote-viewer
+proxxx novnc  100 --node pve1                     # opens browser to web UI's noVNC
+```
+
+```bash
+# Long-running daemon — alerts + HITL + schedule under ONE process
+proxxx daemon serve                               # all three with one SIGTERM
+proxxx daemon serve --no-hitl                     # alerts + schedule only
+proxxx schedule add --name nightly-snap --every 1d --cmd "vm snapshot 100 --yes"
+
+# MCP for AI agents (stdio JSON-RPC, HTTP/SSE for streaming)
+proxxx mcp serve                                  # stdio + interleaved server-sent notifications
+proxxx mcp serve-http --bind 0.0.0.0:8080         # HTTP/SSE transport
+proxxx mcp tools --checksum                       # registry SHA-256 for audit pinning
+```
+
+Exit codes are stable contract — see [`docs/reference/exit-codes.md`](docs/reference/exit-codes.md) for the full table.
 
 ## Configuration
 

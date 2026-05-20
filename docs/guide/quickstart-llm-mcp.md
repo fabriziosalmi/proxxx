@@ -9,9 +9,10 @@ This page gets you to a working `proxxx mcp serve` in ~5 min.
 
 ::: tip
 The MCP surface is **compile-time fixed** — the agent sees
-exactly 10 tools, no more, no less. Adding a tool requires a
+exactly 25 tools, no more, no less. Adding a tool requires a
 proxxx PR and a release. This is intentional: prompt-injection
-attacks can't extend the tool registry at runtime.
+attacks can't extend the tool registry at runtime. The registry
+is **append-only** across SemVer releases.
 :::
 
 ## 1. Configure proxxx itself
@@ -27,11 +28,17 @@ that returns a table, you're ready.
 proxxx mcp tools
 ```
 
-Returns the full registry as JSON: 10 tools (`list_nodes`,
-`list_guests`, `get_guest_status`, `start_guest`, `stop_guest`,
-`restart_guest`, `delete_guest`, `create_snapshot`,
-`delete_snapshot`, `get_storage_pools`), each with parameters,
-descriptions, destructive flag, and per-tool execution timeout.
+Returns the full registry as JSON: 25 tools across five clusters —
+inventory (`list_nodes`, `list_guests`, `get_guest_status`,
+`get_storage_pools`, `get_node_resources`, `list_snapshots`,
+`get_task_log`), lifecycle (`start_guest`, `stop_guest`,
+`restart_guest`, `suspend_guest`, `resume_guest`, `delete_guest`),
+snapshots (`create_snapshot`, `delete_snapshot`,
+`rollback_snapshot`), provisioning (`clone_guest`, `create_guest`,
+`mark_template`), backup (`backup_guest`, `restore_guest`),
+storage / migration (`move_disk`, `migrate_guest`,
+`resize_disk`, `attach_iso`). Each with parameters, descriptions,
+destructive flag, and per-tool execution timeout.
 
 For supply-chain pinning:
 
@@ -95,11 +102,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_gue
 }
 ```
 
-Restart Claude Desktop. The agent now sees the 10-tool surface
+Restart Claude Desktop. The agent now sees the 25-tool surface
 in any conversation. Prompt: *"List the running VMs on my
 cluster and stop the one tagged 'staging'."* — Claude calls
 `list_guests`, filters, calls `stop_guest`, the HITL gate fires
-on Telegram, you approve, op executes.
+on Telegram, you approve, op executes. Long-running operations
+(migration, restore) stream `notifications/cluster-event` so the
+agent sees `started` and `completed` without polling.
 
 ## 5. Wire up Cursor or another IDE
 
@@ -116,12 +125,22 @@ docs for the exact location.
   `-32001`; the JSON-RPC loop continues — one slow tool can't
   brick subsequent calls.
 
-- **Stdio transport only** — proxxx does NOT speak SSE / HTTP
-  / Web-MCP. The agent runs `proxxx mcp serve` as a subprocess
-  and pipes JSON-RPC over its stdin/stdout. This means: no
-  server to attack remotely, no port to expose, no TLS to
-  configure for the MCP layer (PVE TLS still applies for the
-  underlying API calls).
+- **Two transports at parity** — `proxxx mcp serve` (stdio
+  JSON-RPC, agent runs as subprocess, no port) or
+  `proxxx mcp serve-http --bind 127.0.0.1:8765` (Streamable
+  HTTP/SSE per MCP 2025-03-26). Same tool registry, same HITL,
+  same audit. HTTP is for hosted agents that can't spawn
+  subprocesses; stdio for local agents (Claude Desktop, Cursor).
+  Pick one per deployment.
+
+- **Server-sent notifications** — both transports stream
+  `notifications/cluster-event` for `task_state_change`
+  (started / completed / failed) and `incident` (frozen / thawed).
+  Over stdio, these are JSON-RPC 2.0 notification lines interleaved
+  with the request/response stream; over HTTP they arrive as SSE
+  events on `GET /mcp`. Subscribe via `notifications/subscribe`
+  (informational ack only — delivery flows automatically on the
+  same channel).
 
 - **Audit trail** — every tool invocation logs to the proxxx
   audit log (same path as CLI / TUI). HITL callbacks log

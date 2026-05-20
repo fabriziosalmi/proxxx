@@ -174,15 +174,81 @@ within a major version.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx mcp serve`                  | Stdio JSON-RPC MCP server for LLM agents |
+| `proxxx daemon serve [--no-alerts] [--no-hitl] [--no-schedule] [--schedule-interval-secs N] [--alerts-interval-secs N]` | Unified background-task graph — alerts watcher + HITL Telegram listener + schedule run-due tick under one process with one SIGTERM. Each opt-out individually. |
+| `proxxx mcp serve`                  | Stdio JSON-RPC MCP server for LLM agents — interleaves server-sent `notifications/cluster-event` with the request/response stream. |
+| `proxxx mcp serve-http --bind 0.0.0.0:PORT` | Streamable HTTP MCP transport (spec 2025-03-26). SSE channel at `GET /mcp` emits the same notifications. |
 | `proxxx mcp tools [--checksum]`     | Introspect the tool registry; `--checksum` prints SHA-256 |
-| `proxxx hitl serve`                 | Long-poll Telegram for HITL approval callbacks |
-| `proxxx alerts watch [--interval N]`| Rule-driven alerting daemon |
+| `proxxx hitl serve`                 | Long-poll Telegram for HITL approval callbacks (also available under `proxxx daemon serve`). |
+| `proxxx alerts watch [--interval N]`| Rule-driven alerting daemon (also available under `proxxx daemon serve`). |
 | `proxxx alerts eval`                | One-shot rule evaluation |
 | `proxxx alerts test --route R`      | Send a synthetic event end-to-end |
+| `proxxx schedule {add,list,remove,pause,resume,run-due}` | Interval-based scheduler for recurring proxxx ops. TOML-backed at `<data_dir>/schedules.toml`. |
 | `proxxx watch --since 1h`           | Diff cluster state vs N ago |
 | `proxxx watch <target> --until X`   | Wait for a condition; optionally `--notify telegram` |
 | `proxxx replay <timestamp>`         | Show cached cluster state at a point in time |
+
+## Cluster-state GitOps loop
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx state export [--resource pools\|acl\|storage\|all] [--output toml\|json]` | Byte-stable snapshot of cluster state. Default emits TOML; `--output json` for piping. Diff-stable across runs against an unchanged cluster. |
+| `proxxx state diff <declared.toml> [--output text\|json]` | Structural diff of declared vs live. Exit 2 on drift. |
+| `proxxx state apply <declared.toml> [--dry-run] [--prune] [--continue-on-error] [--allow-risk] [--interactive] [--output text\|json]` | Converge live toward declared. Pre-flight risk gate refuses Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50) without `--allow-risk`. `--interactive` adds per-Severe `[y/N]` stdin prompts. Exit code 6 on refusal. |
+
+## Incident response
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx incident freeze --reason "..." [--ttl 4h]` | Halt every mutation cluster-wide (every `POST`/`PUT`/`DELETE` refuses with exit 8). Reads keep working. Audit-logged. |
+| `proxxx incident thaw --reason "..."` | Lift the freeze. Idempotent. |
+| `proxxx incident status [--output text\|json]` | Report current freeze state. |
+
+## Multi-cluster fanout
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx ls <kind> --all-profiles` / `-A` | Fan a read-only `ls` (nodes/guests/storage) across every named profile in `config.toml`. Per-cluster failures surface as `error` rows. |
+| `proxxx find <vmid>` (alias `where`) | Find a VMID across every cluster. Exit 5 if no profile owns it. |
+| `proxxx describe [--output text\|md\|json\|llm-context] [--include events\|rbac\|all]` | Structured cluster digest. `llm-context` format is token-compact for paste-into-LLM. |
+
+## Observability + chargeback
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx logs tail [--node N] [--service U] [--since "1h ago"] [--grep PAT] [--no-follow]` | Cross-node `journalctl --follow` via SSH; client-side merge + filter. Graceful per-node failure. |
+| `proxxx heatmap [--output text\|json]` | Per-node API RTT bucketed green/yellow/red. |
+| `proxxx anomaly [--threshold 3.0] [--output text\|json]` | Z-score outlier detection on cluster CPU + mem%. Exit 1 on any anomaly. |
+| `proxxx accounting --group-by pool\|node\|tag [--timeframe none\|hour\|day\|week\|month\|year] [--include-unassigned] [--output text\|json]` | Per-group resource accounting. With `--timeframe` set, integrates per-guest RRD into CPU-hours / GiB·h / net GiB / disk GiB. |
+| `proxxx backup-verify [--max-age-days 7] [--output text\|json]` | Metadata-level integrity probe of each guest's most-recent backup. Exit 1 on any missing/error. |
+| `proxxx upgrade-check --target 9.x [--output text\|json]` | PVE major-upgrade pre-flight scanner. Exit 1 on any block-severity finding. |
+| `proxxx migrate <vmid> <target> --yes --stream` | Live per-disk progress (TTY bars) or NDJSON; works with `--format json` for pipelines. |
+| `proxxx serial <vmid> --node N --record [PATH]` | Open the serial console AND record it as asciinema cast v2. |
+| `proxxx play-cast <PATH> [--speed N]` | Replay a recorded cast file (input events skipped — operator view only). |
+
+## Cloud-image provisioner
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx cloud-img list [--output text\|json]` | Bundled SHA-256-pinned registry (Ubuntu / Debian / Alpine / Fedora). |
+| `proxxx cloud-img download <id> --node N --storage S` | Download via PVE's `download-url` with server-side SHA-256 verification. |
+
+## GPU / PCI passthrough
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx gpu-inspect --node <node> [--output text\|json]` | SSH-probe a node for IOMMU readiness + vfio module load + lspci device map. The bind step (write configs + reboot) is deferred to a follow-up issue. |
+
+## VM image import
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx import <file> [--format raw\|qcow2\|vmdk\|vdi\|vhdx\|vhd] [--output PATH] [--dry-run] [--print text\|json]` | `qemu-img convert` wrapper. OVA/OVF parsing + libvirt-XML / VMware-direct chains deferred. |
+
+## Error knowledge base
+
+| Command | What it does |
+| :--- | :--- |
+| `proxxx explain [<error-id>] [--output text\|md\|json]` | Bundled knowledge base for every typed error. Run with no args for the catalog. |
 
 ## Operations orchestrators
 
