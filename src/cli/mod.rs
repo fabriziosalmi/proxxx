@@ -12,6 +12,7 @@ mod cluster;
 pub mod common;
 mod console;
 mod ct;
+mod daemon;
 mod describe;
 mod doctor;
 mod events;
@@ -288,6 +289,15 @@ pub enum Command {
     Schedule {
         #[command(subcommand)]
         action: schedule::ScheduleCommand,
+    },
+
+    /// Unified background-task daemon — runs the alerts watcher,
+    /// HITL Telegram listener, and schedule run-due tick under one
+    /// process with a single SIGTERM handler. Each component can
+    /// be opted out individually.
+    Daemon {
+        #[command(subcommand)]
+        action: daemon::DaemonCommand,
     },
 
     /// Pre-flight scanner for PVE major-version upgrades (e.g.
@@ -1374,6 +1384,14 @@ pub async fn execute(
         Command::Describe(args) => describe::execute_describe(&client, args).await,
         Command::CloudImg { action } => cloudimg::execute_cloudimg(&client, action).await,
         Command::Schedule { action } => schedule::execute_schedule(action),
+        Command::Daemon { action } => {
+            let handle = crate::config::watcher::new_handle(config.clone());
+            crate::config::watcher::spawn_reload_on_sighup(
+                std::sync::Arc::clone(&handle),
+                profile.map(str::to_owned),
+            );
+            daemon::execute_daemon(&client, handle, config.clone(), profile, action).await
+        }
         Command::UpgradeCheck(args) => {
             upgrade_check::execute_upgrade_check(&client, &config, args).await
         }
@@ -2126,7 +2144,7 @@ async fn execute_delete(
     Ok((serde_json::Value::Array(results), exit))
 }
 
-async fn hitl_serve(
+pub(crate) async fn hitl_serve(
     client: std::sync::Arc<crate::api::PxClient>,
     config: crate::config::ProfileConfig,
 ) -> Result<()> {

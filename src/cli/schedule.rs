@@ -370,7 +370,12 @@ fn fmt_interval(secs: u64) -> String {
 /// `last_run` + `next_run`, persist.
 ///
 /// Failures don't halt the loop — each schedule independent.
-fn run_due(proxxx_binary: Option<&std::path::Path>) -> Result<(Value, i32)> {
+///
+/// Public so the unified daemon (`cli::daemon::execute_daemon`)
+/// can tick it directly without going through the CLI dispatch.
+/// The `schedule` module itself is private; this is reachable
+/// only from sibling modules in `cli/`.
+pub fn run_due(proxxx_binary: Option<&std::path::Path>) -> Result<(Value, i32)> {
     use std::process::Command;
 
     let mut store = load_store()?;
