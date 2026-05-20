@@ -627,6 +627,26 @@ pub async fn dispatch_rpc(
         // receive a response. Returning Value::Null signals callers to skip
         // the write step. "ping" is a request (has id) → respond normally.
         "notifications/initialized" => Value::Null,
+        // Per MCP spec 2025-03-26, server-sent notifications flow
+        // automatically over the SSE channel — there's no formal
+        // `notifications/subscribe` request in the protocol. We
+        // accept it anyway as an informational ack so clients that
+        // explicitly subscribe (per #71's spec text) get a clear
+        // "yes, you'll receive these kinds" response. The actual
+        // delivery is via the SSE `GET /mcp` channel; stdio
+        // delivery is deferred to a follow-up (see notifications.rs
+        // module rustdoc).
+        "notifications/subscribe" => ok_result(
+            id,
+            &json!({
+                "accepted": true,
+                "available_kinds": ["task_state_change", "incident"],
+                "transport_note":
+                    "Server-sent notifications stream on the SSE channel (HTTP transport) or \
+                     stdout JSON-RPC lines (stdio transport — deferred to a follow-up).",
+            }),
+        ),
+        "notifications/unsubscribe" => ok_result(id, &json!({"accepted": true})),
         "ping" => ok_result(id, &json!({})),
         "tools/list" => {
             let tools = crate::mcp::tools::tools_list_schema();
