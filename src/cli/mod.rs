@@ -11,6 +11,7 @@ mod ct;
 mod doctor;
 mod events;
 pub mod explain;
+mod fanout;
 mod firewall;
 mod incident;
 mod init;
@@ -39,6 +40,24 @@ pub enum Command {
     Ls {
         /// Resource type: nodes, guests, storage
         resource: String,
+        /// Fan out the query across every named profile in
+        /// `config.toml` concurrently. Each output row gets a
+        /// `profile` field. Per-profile failures (401 / unreachable)
+        /// surface as `error` rows; the rest of the cluster keeps
+        /// answering. Read-only — writes still require explicit
+        /// `--profile <name>`.
+        #[arg(long, short = 'A')]
+        all_profiles: bool,
+    },
+
+    /// Find a guest by VMID across every cluster. Like `ls guests
+    /// --all-profiles` but filtered to one VMID. Returns one row per
+    /// profile that owns the VMID (typically 0 or 1). Useful for
+    /// "which cluster owns VMID 100?" without manual profile-switching.
+    #[command(alias = "where")]
+    Find {
+        /// VMID to find.
+        vmid: u32,
     },
     /// Start a guest
     Start {
@@ -917,6 +936,31 @@ pub async fn execute(
         }
     }
 
+    // `--all-profiles` short-circuits BEFORE load_config(profile) — the
+    // fanout creates its own per-profile PxClient internally; a single
+    // top-level profile selection would be ignored. Equally, `find`
+    // is always cross-profile (no `--profile` makes sense for it).
+    if let Command::Ls {
+        resource,
+        all_profiles: true,
+    } = &cmd
+    {
+        let kind = fanout::FanoutKind::from_resource(resource).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--all-profiles is supported on `ls nodes|guests|storage` (got `{resource}`)"
+            )
+        })?;
+        let rows = fanout::fanout_ls(kind, cli_secret).await?;
+        return Ok((serde_json::to_value(rows)?, 0));
+    }
+    if let Command::Find { vmid } = &cmd {
+        let rows = fanout::fanout_find_vmid(*vmid, cli_secret).await?;
+        // Exit 5 (NotFound) if no profile owns the vmid — matches the
+        // existing `ls`+grep contract.
+        let exit = if rows.is_empty() { 5 } else { 0 };
+        return Ok((serde_json::to_value(rows)?, exit));
+    }
+
     if matches!(cmd, Command::Doctor) {
         return doctor::run().await;
     }
@@ -939,7 +983,10 @@ pub async fn execute(
     use crate::api::ProxmoxGateway;
 
     match cmd {
-        Command::Ls { resource } => match resource.as_str() {
+        Command::Ls {
+            resource,
+            all_profiles: _, // already handled in the short-circuit above when true
+        } => match resource.as_str() {
             "nodes" => {
                 let nodes = client.get_nodes().await?;
                 Ok((serde_json::to_value(nodes)?, 0))
@@ -1762,6 +1809,12 @@ pub async fn execute(
             Ok((serde_json::to_value(interfaces)?, 0))
         }
         Command::Storage { action } => storage::execute_storage(&client, action).await,
+        // `Find` is always cross-profile — short-circuited before
+        // load_config. This arm is unreachable but the match must
+        // be exhaustive.
+        Command::Find { .. } => {
+            unreachable!("Command::Find handled by --all-profiles short-circuit above")
+        }
     }
 }
 
