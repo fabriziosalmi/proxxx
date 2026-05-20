@@ -167,6 +167,11 @@ serial_test = "3"
 # terminate on any graph (incl. cycles); the audit HMAC chain must
 # detect a single-byte mutation anywhere in any sequence.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Used by tests/resilience_chaos_e2e.rs to raise SIGTERM/SIGHUP at
+# the current pid so the signal-handler invariants can be verified
+# in-process. `libc` is already pulled in transitively by tokio +
+# rustls — declaring it as a dev-dep doesn't add to the build graph.
+libc = "0.2"
 
 # ── Benchmark binaries ──────────────────────────────────
 # Each `[[bench]]` produces an isolated binary so failures or
