@@ -22,11 +22,24 @@
 //! matches the issue's honesty-about-delivery requirement — the
 //! API doesn't promise anything that the broker doesn't deliver.
 //!
+//! ## Transport coverage
+//!
+//! Both stdio and HTTP/SSE emit broker events:
+//!
+//! * **HTTP `GET /mcp`** — SSE stream subscribes to the broker
+//!   for the lifetime of the connection. `event:
+//!   notifications/cluster-event` per notification; lagged
+//!   consumers see a single `notifications/lagged` advisory.
+//! * **stdio** — `mcp::server::run_server` `select!`s on the
+//!   stdin-reader channel + a broker receiver. Notifications
+//!   write one JSON-RPC 2.0 envelope per line on stdout,
+//!   interleaved with the request/response stream. The
+//!   stdin-reader runs as a separate task because `read_until`
+//!   is NOT cancel-safe — see the comment at the top of
+//!   `server.rs`.
+//!
 //! ## Scope deferred per #71
 //!
-//! - stdio notifications — needs the read loop in `server.rs` to
-//!   `select!` on both stdin and a broker receiver. Tracked as a
-//!   follow-up; the broker shape is ready for it.
 //! - Per-subscription filters — v1 fan-outs every event to every
 //!   subscriber. Filtering happens client-side. A future API
 //!   `notifications/subscribe { filter: { types: [...] } }` can
