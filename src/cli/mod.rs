@@ -680,6 +680,29 @@ pub enum Command {
         /// Guest type. Auto-detected from cluster if omitted.
         #[arg(long, value_enum)]
         kind: Option<console::SerialKind>,
+        /// Record the session in asciinema cast v2 format. Pass a
+        /// path to write there, or use `--record` alone to write to
+        /// the default `<data_dir>/sessions/<ts>-<vmid>-serial.cast`.
+        /// Operator keystrokes are recorded as `i` events; guest
+        /// output as `o` events. Replay with `proxxx replay <path>`
+        /// or any asciinema-compatible player.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        record: Option<String>,
+    },
+
+    /// Console session recording — replay an asciinema cast v2
+    /// file produced by `proxxx serial --record …`. Renders the
+    /// recorded output with original timing; input events are
+    /// skipped (only the operator's view is played back, not their
+    /// keystrokes — same as `asciinema play`).
+    PlayCast {
+        /// Path to a `.cast` file.
+        path: std::path::PathBuf,
+        /// Playback speed multiplier. `1.0` is real-time; `2.0` is
+        /// 2× faster; `0.5` is half speed. Negative / zero falls
+        /// back to `1.0`.
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
     },
     /// Open an interactive SSH session into a guest (NOT into the PVE
     /// node — for that, just `ssh root@<node>` directly). Per-guest
@@ -1758,11 +1781,28 @@ pub async fn execute(
         Command::Perms { userid, path, node } => {
             access::execute_perms(&config, &userid, path.as_deref(), &node).await
         }
-        Command::Serial { vmid, node, kind } => {
-            console::execute_serial(&client, &config, vmid, &node, kind).await
+        Command::Serial {
+            vmid,
+            node,
+            kind,
+            record,
+        } => {
+            // `--record` without a path → auto path under data dir.
+            let record_path = record.map(|p| {
+                if p.is_empty() {
+                    crate::console_record::default_recording_path(vmid, "serial")
+                } else {
+                    std::path::PathBuf::from(p)
+                }
+            });
+            console::execute_serial(&client, &config, vmid, &node, kind, record_path).await
         }
         Command::Ssh { vmid, cmd } => {
             console::execute_ssh(&client, &config, vmid, cmd.as_deref()).await
+        }
+        Command::PlayCast { path, speed } => {
+            crate::console_record::replay_cast(&path, speed).await?;
+            Ok((Value::Null, 0))
         }
         Command::Spice {
             vmid,

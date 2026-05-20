@@ -131,6 +131,7 @@ pub async fn execute_serial(
     vmid: u32,
     node: &str,
     kind_override: Option<SerialKind>,
+    record_path: Option<std::path::PathBuf>,
 ) -> Result<(Value, i32)> {
     use crate::api::ProxmoxGateway;
 
@@ -183,11 +184,42 @@ pub async fn execute_serial(
     let _ = stdout().flush();
 
     // Initial size sync.
-    if let Ok((cols, rows)) = terminal::size() {
-        let _ = crate::wsterm::send_resize(&mut ws, cols, rows).await;
-    }
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let _ = crate::wsterm::send_resize(&mut ws, cols, rows).await;
 
-    let exit_code = serial_loop(&mut ws).await;
+    // Open the cast recorder upfront so failures are visible before
+    // the session starts (rather than half-way through). A failed
+    // open prints the error + continues without recording — the
+    // session itself is the important thing.
+    let mut recorder = if let Some(p) = &record_path {
+        match crate::console_record::CastWriter::create(
+            p,
+            cols,
+            rows,
+            &format!("proxxx serial vmid={vmid} node={node}"),
+        ) {
+            Ok(w) => {
+                eprintln!("recording → {}", p.display());
+                Some(w)
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not open recording at {}: {e:#}",
+                    p.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let exit_code = serial_loop(&mut ws, recorder.as_mut()).await;
+    // Final flush before we drop — guarantees the last events made
+    // it to disk even if the process is killed before drop fires.
+    if let Some(r) = recorder.as_mut() {
+        r.flush();
+    }
 
     // Cleanup — best-effort. The panic hook is the safety net for the
     // unhappy path.
@@ -483,7 +515,10 @@ fn is_routable_ipv4(s: &str) -> bool {
 }
 
 /// Inner loop: keystrokes → WS, WS frames → stdout. Returns exit code.
-async fn serial_loop<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> i32
+async fn serial_loop<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    mut recorder: Option<&mut crate::console_record::CastWriter>,
+) -> i32
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -520,8 +555,11 @@ where
                             // Not the exit chord — forward Ctrl+] then this key.
                             let _ = crate::wsterm::send_input(ws, &[0x1D]).await;
                         }
-                        // Encode + forward.
+                        // Encode + forward + record (if active).
                         if let Some(bytes) = crate::ssh::pty::encode_key(&key) {
+                            if let Some(r) = recorder.as_deref_mut() {
+                                r.record_input(&bytes);
+                            }
                             if crate::wsterm::send_input(ws, &bytes).await.is_err() {
                                 return 1;
                             }
@@ -539,11 +577,17 @@ where
                 match msg {
                     Ok(Message::Binary(payload)) => {
                         if let Some(bytes) = crate::wsterm::decode_data_frame(&payload) {
+                            if let Some(r) = recorder.as_deref_mut() {
+                                r.record_output(bytes);
+                            }
                             let _ = stdout().write_all(bytes);
                             let _ = stdout().flush();
                         }
                     }
                     Ok(Message::Text(t)) => {
+                        if let Some(r) = recorder.as_deref_mut() {
+                            r.record_output(t.as_bytes());
+                        }
                         let _ = stdout().write_all(t.as_bytes());
                         let _ = stdout().flush();
                     }

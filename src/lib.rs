@@ -22,6 +22,7 @@ pub mod app;
 pub mod audit;
 pub mod cli;
 pub mod config;
+pub mod console_record;
 pub mod handoff;
 pub mod hitl;
 pub mod incident;
