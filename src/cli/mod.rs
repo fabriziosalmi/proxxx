@@ -23,6 +23,7 @@ mod migrate_progress;
 mod monitoring;
 mod node;
 mod patch;
+mod schedule;
 mod state;
 mod storage;
 pub mod vm;
@@ -270,6 +271,16 @@ pub enum Command {
     CloudImg {
         #[command(subcommand)]
         action: cloudimg::CloudImgCommand,
+    },
+
+    /// Native scheduler for recurring proxxx operations. Each
+    /// scheduled run flows through proxxx's existing dispatch path —
+    /// audit log, pre-flight, HITL gate all apply. v1 uses
+    /// interval-based scheduling (`--every 1d`); cron-syntax is
+    /// tracked as a follow-up.
+    Schedule {
+        #[command(subcommand)]
+        action: schedule::ScheduleCommand,
     },
 
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
@@ -1323,6 +1334,7 @@ pub async fn execute(
         Command::Incident { action } => incident::execute_incident(action),
         Command::Describe(args) => describe::execute_describe(&client, args).await,
         Command::CloudImg { action } => cloudimg::execute_cloudimg(&client, action).await,
+        Command::Schedule { action } => schedule::execute_schedule(action),
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
