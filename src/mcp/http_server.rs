@@ -38,11 +38,23 @@ use crate::mcp::dispatch;
 struct McpState {
     client: Arc<PxClient>,
     config: ConfigHandle,
+    /// Server-sent notification broker. Cheap to clone (it holds
+    /// only the broadcast sender). Cloned per `GET /mcp` SSE
+    /// connection to derive a fresh receiver.
+    notifications: crate::mcp::notifications::Broker,
 }
 
 impl McpState {
-    const fn new(client: Arc<PxClient>, config: ConfigHandle) -> Self {
-        Self { client, config }
+    const fn new(
+        client: Arc<PxClient>,
+        config: ConfigHandle,
+        notifications: crate::mcp::notifications::Broker,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            notifications,
+        }
     }
 
     /// Returns `true` if the request carries a valid bearer token (or if no
@@ -141,10 +153,20 @@ async fn handle_single(state: &McpState, req: &Value) -> Value {
 
 /// `GET /mcp` — SSE notifications channel.
 ///
-/// Sends a periodic ping every 30 s so the connection stays alive through
-/// proxies and load balancers. Actual server-initiated notifications (e.g.
-/// task completion events) will be added in a future release.
+/// Each connection gets a fresh broker receiver and a `BroadcastStream`
+/// adapter that yields one `Event` per [`McpNotification`]. The stream
+/// emits `event: notifications/cluster-event` with the JSON-RPC 2.0
+/// envelope from [`crate::mcp::notifications::rpc_envelope`] in the
+/// SSE `data:` field — same shape the future stdio writer will emit.
+///
+/// Slow consumers experience the broadcast channel's lossy semantics:
+/// `RecvError::Lagged(n)` collapses to a single advisory event so
+/// the client knows it missed `n` events. `RecvError::Closed` ends
+/// the stream — the broker outlives the server, so this only fires
+/// when the server itself is shutting down.
 async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Response {
+    use tokio_stream::wrappers::BroadcastStream;
+
     if !state.auth_ok(&headers).await {
         return (
             StatusCode::UNAUTHORIZED,
@@ -154,15 +176,23 @@ async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Respo
             .into_response();
     }
 
-    let stream =
-        tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(30)))
-            .map(|_| {
-                Ok::<Event, Infallible>(
-                    Event::default()
-                        .event("ping")
-                        .data(json!({"type": "ping"}).to_string()),
-                )
-            });
+    let rx = state.notifications.subscribe();
+    let stream = BroadcastStream::new(rx).map(|res| {
+        Ok::<Event, Infallible>(match res {
+            Ok(n) => {
+                let envelope = crate::mcp::notifications::rpc_envelope(&n);
+                Event::default()
+                    .event("notifications/cluster-event")
+                    .data(envelope.to_string())
+            }
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                // Don't pretend nothing happened — tell the client.
+                Event::default()
+                    .event("notifications/lagged")
+                    .data(json!({"missed": n}).to_string())
+            }
+        })
+    });
 
     Sse::new(stream)
         .keep_alive(
@@ -193,7 +223,18 @@ pub async fn run_http_server(
     bind: &str,
     port: u16,
 ) -> Result<()> {
-    let state = McpState::new(client, config);
+    // Spin up the notification broker + pollers BEFORE the HTTP
+    // server starts. The pollers run for the process lifetime;
+    // when no SSE clients are connected the broker drops messages
+    // silently, so the cost of the pollers is just two periodic
+    // PVE polls (2 s tasks, 5 s incident).
+    let notifications = crate::mcp::notifications::Broker::new();
+    let _task_poller =
+        crate::mcp::notifications::spawn_task_poller(Arc::clone(&client), notifications.clone());
+    let _incident_watcher =
+        crate::mcp::notifications::spawn_incident_watcher(notifications.clone());
+
+    let state = McpState::new(client, config, notifications);
     let addr = format!("{bind}:{port}");
 
     let app = Router::new()
