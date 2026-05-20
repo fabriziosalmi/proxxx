@@ -26,6 +26,7 @@ mod patch;
 mod schedule;
 mod state;
 mod storage;
+mod upgrade_check;
 pub mod vm;
 
 pub use audit_cmd::AuditAction;
@@ -282,6 +283,12 @@ pub enum Command {
         #[command(subcommand)]
         action: schedule::ScheduleCommand,
     },
+
+    /// Pre-flight scanner for PVE major-version upgrades (e.g.
+    /// `--target 9.x`). Cluster + config scan; structured findings
+    /// with severity (info/warn/block) for CI gating. Exit 0 on
+    /// info+warn only, 1 on any block.
+    UpgradeCheck(upgrade_check::UpgradeCheckArgs),
 
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
@@ -1335,6 +1342,9 @@ pub async fn execute(
         Command::Describe(args) => describe::execute_describe(&client, args).await,
         Command::CloudImg { action } => cloudimg::execute_cloudimg(&client, action).await,
         Command::Schedule { action } => schedule::execute_schedule(action),
+        Command::UpgradeCheck(args) => {
+            upgrade_check::execute_upgrade_check(&client, &config, args).await
+        }
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
