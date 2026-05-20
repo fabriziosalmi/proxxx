@@ -13,6 +13,7 @@ mod events;
 mod firewall;
 mod init;
 mod init_wizard;
+mod logs;
 mod migrate_progress;
 mod monitoring;
 mod node;
@@ -206,6 +207,16 @@ pub enum Command {
     Events {
         #[command(subcommand)]
         action: events::EventsCommand,
+    },
+    /// Cross-node `journalctl` tail with grep + time-range + unit
+    /// filters. Fans `journalctl --follow` over every selected node
+    /// via SSH; merges the streams locally and tags each line with
+    /// its source node. Saves the daily "ssh to N nodes, run
+    /// journalctl, eyeball-correlate" loop. Requires SSH configured
+    /// in the profile.
+    Logs {
+        #[command(subcommand)]
+        action: logs::LogsCommand,
     },
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
@@ -1195,6 +1206,14 @@ pub async fn execute(
             Ok((serde_json::to_value(cfg)?, 0))
         }
         Command::Events { action } => events::execute_events(&client, action).await,
+        Command::Logs { action } => {
+            let render = if matches!(format, util::format::OutputFormat::Json) {
+                logs::LogsRenderMode::Json
+            } else {
+                logs::LogsRenderMode::Text
+            };
+            logs::execute_logs(&config, &client, action, render).await
+        }
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
