@@ -184,7 +184,7 @@ pub fn parse_inspect_output(stdout: &str, report: &mut GpuInspectReport) {
         // tab/space). `trimmed` is the convenience form used for
         // content matching everywhere else.
         let trimmed = line.trim();
-        let is_continuation = line.starts_with(|c: char| c == '\t' || c == ' ');
+        let is_continuation = line.starts_with(['\t', ' ']);
         if trimmed.starts_with("== ") && trimmed.ends_with(" ==") {
             section = trimmed.trim_start_matches("== ").trim_end_matches(" ==");
             continue;
