@@ -12,6 +12,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+_no entries yet — next release will be v0.3.1 (patch) or v0.4.0 (minor)._
+
+## [0.3.0] — 2026-05-20
+
 Headline: **GitOps for Proxmox + 17 new top-level commands + honest invariant attestation**.
 24 feature PRs landed on 2026-05-20 morning closing the entire strategic-gap backlog
 (#57-#73) and the cluster-state epic (#74). The evening shipped three test-only sweeps
