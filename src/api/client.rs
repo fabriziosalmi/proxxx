@@ -103,14 +103,23 @@ where
     T: DeserializeOwned + Send + 'static,
 {
     if bytes.len() < PARSE_BLOCKING_THRESHOLD {
-        return serde_json::from_slice::<T>(&bytes)
-            .with_context(|| format!("Failed to parse response from {path}"));
+        return serde_json::from_slice::<T>(&bytes).map_err(|source| {
+            anyhow::Error::from(super::ApiError::Parse {
+                path: path.to_string(),
+                source,
+            })
+        });
     }
     let path_owned = path.to_string();
     tokio::task::spawn_blocking(move || serde_json::from_slice::<T>(&bytes))
         .await
         .map_err(|e| anyhow::anyhow!("parse spawn_blocking join error: {e}"))?
-        .with_context(|| format!("Failed to parse response from {path_owned}"))
+        .map_err(|source| {
+            anyhow::Error::from(super::ApiError::Parse {
+                path: path_owned,
+                source,
+            })
+        })
 }
 
 /// Stream the response body into a bounded buffer, refusing to grow
@@ -131,7 +140,15 @@ async fn read_bounded_body(resp: Response, path: &str) -> Result<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.with_context(|| format!("reading response chunk from {path}"))?;
+        let chunk = chunk.map_err(|e| {
+            // Body-stream errors (mid-stream TCP close, decompression
+            // failures, premature EOF) are transport-level — surface
+            // as the typed `ApiError::Transport` so the exit-code
+            // dispatch routes them rather than dropping into generic 1.
+            anyhow::Error::from(super::ApiError::Transport(format!(
+                "reading response chunk from {path}: {e}"
+            )))
+        })?;
         if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             anyhow::bail!("response from {path} exceeded {MAX_RESPONSE_BYTES} bytes mid-stream");
         }
@@ -469,8 +486,15 @@ impl PxClient {
                     // loop naturally.
                 }
                 Err(e) => {
-                    return Err(anyhow::Error::from(e))
-                        .with_context(|| format!("request to {path} failed"));
+                    // Surface transport-level failures (DNS NXDOMAIN, TCP
+                    // close mid-handshake, TLS errors, connect timeouts)
+                    // as the typed `ApiError::Transport` so the exit-code
+                    // dispatch in `main.rs` can route them and so
+                    // observability layers can `.downcast_ref::<ApiError>()`
+                    // instead of grepping the anyhow chain.
+                    return Err(anyhow::Error::from(super::ApiError::Transport(format!(
+                        "request to {path} failed: {e}"
+                    ))));
                 }
             }
         }
