@@ -3,7 +3,10 @@ use clap::Subcommand;
 use serde_json::Value;
 
 mod access;
+mod accounting;
+mod anomaly;
 mod audit_cmd;
+mod backup_verify;
 mod cloudimg;
 mod cluster;
 pub mod common;
@@ -15,6 +18,9 @@ mod events;
 pub mod explain;
 mod fanout;
 mod firewall;
+mod gpu_passthrough;
+mod heatmap;
+mod import_vm;
 mod incident;
 mod init;
 mod init_wizard;
@@ -289,6 +295,32 @@ pub enum Command {
     /// with severity (info/warn/block) for CI gating. Exit 0 on
     /// info+warn only, 1 on any block.
     UpgradeCheck(upgrade_check::UpgradeCheckArgs),
+
+    /// Per-pool / per-node / per-tag resource accounting. Current
+    /// state only — time-window aggregation deferred to a follow-up.
+    Accounting(accounting::AccountingReportArgs),
+
+    /// Per-node API latency probe. Colored table by RTT bucket
+    /// (green/yellow/red), JSON for tooling.
+    Heatmap(heatmap::HeatmapArgs),
+
+    /// Rolling-baseline z-score anomaly detection across nodes for
+    /// CPU + memory. Exit 0 = clean, 1 = anomalies found.
+    Anomaly(anomaly::AnomalyArgs),
+
+    /// Cross-cluster backup verification — metadata-level probe of
+    /// each guest's most-recent backup. Exit 1 on any missing or
+    /// corrupt manifest.
+    BackupVerify(backup_verify::VerifyArgs),
+
+    /// Unified VM image import — `qemu-img convert` wrapper for
+    /// raw/qcow2/vmdk/vdi/vhdx/vhd → qcow2. Use `--dry-run` for
+    /// inspect-only.
+    Import(import_vm::ImportArgs),
+
+    /// GPU / PCI passthrough inspection — IOMMU state, vfio
+    /// readiness, lspci device map. Requires SSH configured.
+    GpuInspect(gpu_passthrough::GpuInspectArgs),
 
     /// Cancel a running task. PVE first signals cleanly, then SIGKILLs
     /// after a grace period. Use when a vzdump/migration is wedged.
@@ -1345,6 +1377,12 @@ pub async fn execute(
         Command::UpgradeCheck(args) => {
             upgrade_check::execute_upgrade_check(&client, &config, args).await
         }
+        Command::Accounting(args) => accounting::execute_accounting(&client, args).await,
+        Command::Heatmap(args) => heatmap::execute_heatmap(&client, args).await,
+        Command::Anomaly(args) => anomaly::execute_anomaly(&client, args).await,
+        Command::BackupVerify(args) => backup_verify::execute_verify(&client, args).await,
+        Command::Import(args) => import_vm::execute_import(&args),
+        Command::GpuInspect(args) => gpu_passthrough::execute_gpu_inspect(&config, args).await,
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
