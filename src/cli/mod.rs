@@ -13,6 +13,7 @@ mod events;
 mod firewall;
 mod init;
 mod init_wizard;
+mod migrate_progress;
 mod monitoring;
 mod node;
 mod patch;
@@ -22,6 +23,7 @@ pub mod vm;
 
 pub use audit_cmd::AuditAction;
 
+use crate::util;
 use common::{
     enforce_preflight, execute_batch_op_with_policy, find_guest, find_guest_full,
     wait_and_classify, BatchOp,
@@ -150,6 +152,22 @@ pub enum Command {
         /// else. Required for shell pipelines that chain ops.
         #[arg(long)]
         wait: bool,
+        /// Stream per-disk transfer progress + RAM events live as
+        /// PVE writes them to the migration task log. Implies `--wait`
+        /// — streaming makes no sense without blocking on completion.
+        ///
+        /// Rendering picks itself based on `--format`:
+        ///   * default / `--format table` → in-place ANSI progress bars
+        ///     (one per disk) with a scrolling log above them.
+        ///   * `--format json` → NDJSON, one JSON object per event,
+        ///     terminated by `{"kind":"complete",…}`. Matches the
+        ///     shape of `events stream --format json` so the same `jq`
+        ///     filters work.
+        ///
+        /// On task completion proxxx emits a summary line + the final
+        /// task status, then exits with the same code as `--wait`.
+        #[arg(long)]
+        stream: bool,
     },
     /// Run a command inside a guest via the QEMU Guest Agent.
     /// **QEMU only** — PVE 9 does not expose a REST exec endpoint for
@@ -812,6 +830,7 @@ pub async fn execute(
     profile: Option<&str>,
     cli_secret: Option<&str>,
     _secure: bool,
+    format: crate::util::format::OutputFormat,
 ) -> Result<(Value, i32)> {
     // MCP introspection commands don't need a Proxmox connection
     if let Command::Mcp {
@@ -1042,6 +1061,7 @@ pub async fn execute(
             with_local_disks,
             allow_risk,
             wait,
+            stream,
         } => {
             if !yes {
                 anyhow::bail!("`proxxx migrate` is potentially disruptive — re-run with --yes");
@@ -1087,7 +1107,54 @@ pub async fn execute(
                 "with_local_disks": with_local_disks,
                 "task": upid,
             });
-            if wait {
+            if stream {
+                // `--stream` implies `--wait` — print a request
+                // header so the user sees what we're about to do
+                // (the streamer's output otherwise starts directly
+                // with the first log line and feels disconnected
+                // from the invocation).
+                let json_mode = matches!(format, util::format::OutputFormat::Json);
+                if !json_mode {
+                    eprintln!(
+                        "migrating vmid={vmid} {from} → {to} (task {upid})",
+                        from = g.node,
+                        to = target,
+                    );
+                }
+                let status = if json_mode {
+                    let mut renderer = migrate_progress::NdjsonRenderer {
+                        writer: std::io::stdout(),
+                    };
+                    migrate_progress::stream_migration(
+                        client.as_ref(),
+                        &g.node,
+                        &upid,
+                        &mut renderer,
+                        1500,
+                        0,
+                    )
+                    .await?
+                } else {
+                    let mut renderer = migrate_progress::TtyRenderer::new();
+                    migrate_progress::stream_migration(
+                        client.as_ref(),
+                        &g.node,
+                        &upid,
+                        &mut renderer,
+                        1500,
+                        0,
+                    )
+                    .await?
+                };
+                let exit = i32::from(!status.is_success());
+                Ok((
+                    serde_json::json!({
+                        "request": envelope,
+                        "task_status": serde_json::to_value(status)?,
+                    }),
+                    exit,
+                ))
+            } else if wait {
                 let (status_json, exit) = wait_and_classify(&client, &g.node, &upid).await?;
                 Ok((
                     serde_json::json!({
