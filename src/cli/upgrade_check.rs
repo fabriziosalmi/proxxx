@@ -221,9 +221,7 @@ pub async fn execute_upgrade_check(
     // Config-side rules.
     for (rule_id, rule) in applicable.iter().enumerate() {
         match rule.component {
-            "config"
-                if rule.description.contains("verify_tls = false") && !config.verify_tls =>
-            {
+            "config" if rule.description.contains("verify_tls = false") && !config.verify_tls => {
                 findings.push(Finding {
                     rule_id,
                     severity: rule.severity,
