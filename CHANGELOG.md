@@ -12,7 +12,34 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet — next release will be v0.3.1 (patch) or v0.4.0 (minor)._
+Next release will be **v0.4.0** (minor) — the post-v0.3.0 debug pass
+fixed remote-crash panics + several robustness gaps, and `cloud-img`
+becomes actually usable (behaviour change + a `--format json` field
+rename on a previously non-functional surface).
+
+### Fixed
+- **`cloud-img download` now works.** The v0.3.0 registry shipped with
+  all-zero placeholder SHAs (every download refused) AND two latent
+  bugs the placeholders masked: the Alpine entry named a non-existent
+  `nocloud_` artifact, and all three `.qcow2` entries used
+  `content=iso` — which PVE rejects with "wrong file extension"
+  (`.qcow2` requires `content=import`, PVE 8.2+). All four entries are
+  now pinned to **dated immutable build dirs** with **real checksums**
+  fetched from each distro's official sidecar, verified end-to-end
+  against PVE 9.1.1 (live Alpine download → checksum OK).
+- **Char-boundary-safe truncation** (#106) — 4 UTF-8 byte-slice panic
+  vectors on PVE-supplied / operator text.
+- **PBS client typed errors** (#107) — 401/403 now exit 4 (was 1).
+- **Connect timeouts** (#107) — termproxy WSS + SSH handshake no longer
+  hang indefinitely on a black-holed node (20 s each).
+
+### Changed
+- **`CloudImg` checksum model**: the `sha256` field is renamed
+  `checksum` and joined by `checksum_algorithm` (`sha256`/`sha512`),
+  because Debian + Alpine publish only SHA-512. Affects
+  `cloud-img list --output json` (field rename) and `cloud-img download`
+  JSON (`sha256` → `checksum` + `checksum_algorithm`). Justified as a
+  data-model fix on a surface that never produced a working download.
 
 ## [0.3.0] — 2026-05-20
 
