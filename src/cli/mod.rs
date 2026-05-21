@@ -915,10 +915,11 @@ pub enum Command {
         #[command(subcommand)]
         action: ct::CtCommand,
     },
-    /// Firewall rules — read-only inspection. PVE has three rule
-    /// scopes (datacenter, node, guest); pick one. Write operations
-    /// (add/remove rules, manage aliases/IPSets/groups) are not yet
-    /// implemented.
+    /// Firewall management. PVE has three rule scopes (datacenter,
+    /// node, guest); pick one. Read inspection plus full CRUD for
+    /// aliases, IP sets, and security groups (cluster + guest scope).
+    /// Individual allow/deny rule add/remove is not yet implemented —
+    /// edit those via the PVE web UI or `pvesh` for now.
     Firewall {
         #[command(subcommand)]
         scope: firewall::FirewallScope,

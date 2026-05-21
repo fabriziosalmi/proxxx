@@ -22,6 +22,7 @@ use tracing::{debug, info};
 
 use super::types::{ArchiveInfo, DatastoreInfo, PbsVersion, SnapshotInfo};
 use crate::api::types::ApiResponse;
+use crate::api::ApiError;
 use crate::config::PbsConfig;
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -89,24 +90,32 @@ impl PbsClient {
             .header("Authorization", &self.auth_header)
             .send()
             .await
-            .with_context(|| format!("GET {path}"))?;
+            // reqwest send failures (DNS, connect, TLS, timeout) are
+            // transport-level — surface the typed variant so the
+            // exit-code dispatch routes them like the PVE client does.
+            .map_err(|e| ApiError::Transport(format!("PBS GET {path}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                anyhow::bail!(
-                    "PBS authentication failed (401). Check token_id / token_secret for user '{}'. \
-                     Token format in config: user = \"user@pbs\", token_id = \"tokenid\".",
-                    self.base_url,
-                );
-            }
-            if status == reqwest::StatusCode::FORBIDDEN {
-                anyhow::bail!(
-                    "PBS returned 403 Forbidden for {path}. \
-                     The token may lack 'Datastore.Audit' privilege on the target datastore.",
-                );
-            }
-            anyhow::bail!("PBS GET {path} returned {status}: {body}");
+            // Route through the typed `ApiError` so PBS auth failures
+            // exit 4 (not generic 1), 404 → 5, transient 5xx → 7 — same
+            // contract as the PVE client. 401/403 carry PBS-specific
+            // guidance in the message (token colon-vs-equals, the
+            // Datastore.Audit privilege) since those are the two an
+            // operator most often trips on.
+            let err = match status {
+                reqwest::StatusCode::UNAUTHORIZED => ApiError::Unauthorized(format!(
+                    "PBS {path}: authentication failed (401) — check token_id / token_secret. \
+                     PBS token format uses a COLON: `PBSAPIToken=user@pbs!tokenid:secret` \
+                     (PVE uses `=` in the same spot; the two are not interchangeable). {body}"
+                )),
+                reqwest::StatusCode::FORBIDDEN => ApiError::Forbidden(format!(
+                    "PBS {path}: 403 Forbidden — the token may lack 'Datastore.Audit' on the \
+                     target datastore. {body}"
+                )),
+                _ => ApiError::from_status(status, path, body),
+            };
+            return Err(err.into());
         }
         // same bounded-body read as the PVE client. A
         // misbehaving PBS could otherwise OOM proxxx with a giant
@@ -123,7 +132,9 @@ impl PbsClient {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.with_context(|| format!("reading PBS response chunk from {path}"))?;
+            let chunk = chunk.map_err(|e| {
+                ApiError::Transport(format!("reading PBS response chunk from {path}: {e}"))
+            })?;
             if buf.len().saturating_add(chunk.len()) > MAX_PBS_RESPONSE_BYTES {
                 anyhow::bail!(
                     "PBS response from {path} exceeded {MAX_PBS_RESPONSE_BYTES} bytes mid-stream"
@@ -131,8 +142,13 @@ impl PbsClient {
             }
             buf.extend_from_slice(&chunk);
         }
-        serde_json::from_slice::<T>(&buf)
-            .with_context(|| format!("parsing PBS response from {path}"))
+        serde_json::from_slice::<T>(&buf).map_err(|source| {
+            ApiError::Parse {
+                path: path.to_string(),
+                source,
+            }
+            .into()
+        })
     }
 }
 

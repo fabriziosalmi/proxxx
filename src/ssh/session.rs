@@ -194,9 +194,21 @@ impl SshSession {
         };
 
         info!("ssh connecting to {user}@{host}:{port}");
-        let mut handle = client::connect(config, (host.as_str(), port), handler)
-            .await
-            .with_context(|| format!("ssh connect {host}:{port}"))?;
+        // Bound the TCP + SSH handshake. `Config.inactivity_timeout`
+        // governs an *established idle* session, not the initial
+        // connect — so without this a SYN to a black-holed host hangs
+        // until the OS TCP timeout (minutes). Affects the TUI PTY view
+        // and the `proxxx logs` cross-node fanout.
+        const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+        let mut handle = tokio::time::timeout(
+            SSH_CONNECT_TIMEOUT,
+            client::connect(config, (host.as_str(), port), handler),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("ssh connect {host}:{port} timed out after {SSH_CONNECT_TIMEOUT:?}")
+        })?
+        .with_context(|| format!("ssh connect {host}:{port}"))?;
 
         // russh 0.60: `authenticate_publickey` now takes a
         // `PrivateKeyWithHashAlg` (the hash-alg pin lets the client
