@@ -1513,7 +1513,17 @@ async fn dispatch_side_effect(
                                         .resize_disk(&node, vmid, g_type, &disk, &size)
                                         .await
                                 }
-                                _ => Err(anyhow::anyhow!("Unsupported in queue yet")),
+                                app::Action::DeleteGuest { .. } => {
+                                    // The `d` key in GuestList enqueues delete via
+                                    // EnqueueBatchOperation; without this arm those
+                                    // queued deletes failed with "Unsupported in
+                                    // queue yet". The queue's pre-flight gate above
+                                    // already guards the destructive op.
+                                    client_cloned.delete_guest(&node, vmid, g_type).await
+                                }
+                                _ => Err(anyhow::anyhow!(
+                                    "action not dispatchable from the operation queue"
+                                )),
                             };
 
                             match res {
