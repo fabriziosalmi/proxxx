@@ -157,5 +157,62 @@ mod tests {
             err.to_string().contains("503"),
             "error mentions status: {err}"
         );
+        // 503 is transient → typed RateLimited → exit code 7.
+        let api = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<proxxx::api::ApiError>())
+            .expect("503 must surface a typed ApiError");
+        assert_eq!(api.exit_code(), 7, "503 → exit 7 (cluster transient)");
+    }
+
+    /// Regression: PBS 401 must surface `ApiError::Unauthorized` → exit
+    /// code 4, not a plain anyhow error → generic exit 1. The whole PBS
+    /// `get()` helper used to bypass the typed-error layer.
+    #[tokio::test]
+    async fn pbs_401_surfaces_typed_unauthorized_exit_4() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/admin/datastore"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("authentication failure"))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .await
+            .list_datastores()
+            .await
+            .expect_err("must error on 401");
+        let api = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<proxxx::api::ApiError>())
+            .expect("401 must surface a typed ApiError");
+        assert!(matches!(api, proxxx::api::ApiError::Unauthorized(_)));
+        assert_eq!(api.exit_code(), 4, "PBS 401 → exit 4 (auth), not generic 1");
+        // The PBS-specific colon-vs-equals guidance must survive.
+        assert!(
+            format!("{api}").contains("COLON") || format!("{api}").contains("token"),
+            "401 message should carry PBS token guidance: {api}"
+        );
+    }
+
+    /// Regression: PBS 403 → `ApiError::Forbidden` → exit code 4.
+    #[tokio::test]
+    async fn pbs_403_surfaces_typed_forbidden_exit_4() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/admin/datastore"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("permission denied"))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .await
+            .list_datastores()
+            .await
+            .expect_err("must error on 403");
+        let api = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<proxxx::api::ApiError>())
+            .expect("403 must surface a typed ApiError");
+        assert!(matches!(api, proxxx::api::ApiError::Forbidden(_)));
+        assert_eq!(api.exit_code(), 4);
     }
 }

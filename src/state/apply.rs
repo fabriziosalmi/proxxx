@@ -16,11 +16,13 @@
 //!   apply (the remaining changes report as `Skipped { reason:
 //!   AbortedByPrior }`). `--continue-on-error` reverses this.
 //!
-//! Pre-flight + HITL gating per change is **out of scope for this
-//! PR** and tracked separately — the apply layer dispatches via the
-//! raw `StateWriteView` trait, and an outer wrapper can be added
-//! later to interpose those gates without touching the dispatch
-//! code.
+//! Pre-flight + HITL gating per change is layered ON TOP of this
+//! dispatch (shipped v0.3.0): the apply layer dispatches via the raw
+//! `StateWriteView` trait, and `state::preflight` interposes the risk
+//! gate (refusing Severe changes without `--allow-risk`, with optional
+//! `--interactive` per-Severe stdin prompts) before the dispatch runs.
+//! Keeping the gate in an outer layer is why this module stays a clean
+//! pure-dispatch unit.
 //!
 //! ## What apply supports today (per epic #74 PR 5)
 //!

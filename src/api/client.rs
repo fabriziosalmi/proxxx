@@ -3206,24 +3206,27 @@ impl ProxmoxGateway for PxClient {
             self.base_url
         );
         let auth = self.auth.read().await;
+        let path = format!("/nodes/{node}/{kind}/{vmid}/resize");
         let resp = auth
             .apply(self.http.put(&url))
             .form(&params)
             .send()
             .await
-            .with_context(|| format!("PUT resize {vmid} failed"))?;
+            // Transport-typed so a dead node on the resize path routes
+            // like every other request (it predated the typed-error pass).
+            .map_err(|e| super::ApiError::Transport(format!("PUT {path}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            // Phase 7 — typed error on the disk-resize PUT (it was
-            // written before the typed-error pass).
-            let path = format!("/nodes/{node}/{kind}/{vmid}/resize");
             return Err(super::ApiError::from_status(status, &path, body).into());
         }
-        let parsed: ApiResponse<Option<String>> = resp
-            .json()
-            .await
-            .with_context(|| format!("parse resize {vmid} response"))?;
+        // Route through the shared bounded-read + typed-parse helpers so
+        // the resize PUT is no longer the one REST read with an unbounded
+        // body and an untyped (`anyhow`) parse error. A hostile node can
+        // no longer OOM proxxx on this path, and a non-JSON body now
+        // yields `ApiError::Parse`.
+        let bytes = read_bounded_body(resp, &path).await?;
+        let parsed: ApiResponse<Option<String>> = parse_json_maybe_blocking(bytes, &path).await?;
         // Proxmox returns null UPID for synchronous resizes (e.g. a
         // small grow that completes inline). Surface a synthetic marker
         // so callers don't have to special-case Option.

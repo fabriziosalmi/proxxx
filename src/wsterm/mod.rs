@@ -84,13 +84,30 @@ pub async fn connect(
     ws_config.max_message_size = Some(4 << 20);
 
     info!("termproxy WSS connect: {}", target.url);
-    let (mut ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
-        request,
-        Some(ws_config),
-        false,
-        connector,
+    // Bound the connect (TCP + TLS + WS handshake). Without this an
+    // unreachable / black-holed node leaves the call hanging until the
+    // OS TCP timeout (minutes) — and the terminal is already half
+    // set up, so the operator sees a frozen screen with no error.
+    // 20 s is generous for a real PVE node on a LAN/VPN yet fails fast
+    // on a dead one. Unlike the reqwest-based PVE/PBS clients (30 s
+    // request timeout that covers connect), tungstenite has none.
+    const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    let (mut ws, _resp) = tokio::time::timeout(
+        WS_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(ws_config),
+            false,
+            connector,
+        ),
     )
     .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "WS connect to {} timed out after {WS_CONNECT_TIMEOUT:?} — node unreachable?",
+            target.url
+        )
+    })?
     .with_context(|| format!("WS connect to {}", target.url))?;
 
     // Auth frame — must be a binary frame containing `<user>:<ticket>\n`.

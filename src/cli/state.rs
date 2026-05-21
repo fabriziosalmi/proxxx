@@ -6,8 +6,9 @@
 //! storage definitions. Cluster firewall, backup jobs, notifications,
 //! and HA groups land in follow-up PRs tracked by epic
 //! [#74](https://github.com/fabriziosalmi/proxxx/issues/74). Pre-flight
-//! risk gates + HITL approval per destructive change are tracked
-//! separately and will wrap the apply dispatch without changing it.
+//! risk gates + HITL approval per destructive change are wired (shipped
+//! v0.3.0): `state::preflight` refuses Severe changes unless
+//! `--allow-risk`, and `--interactive` adds per-Severe `[y/N]` prompts.
 
 use anyhow::{Context, Result};
 use clap::{Subcommand, ValueEnum};
