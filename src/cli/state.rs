@@ -3,8 +3,8 @@
 //! toward declared.
 //!
 //! Resource families covered today: pools, ACL grants, cluster
-//! storage definitions. Cluster firewall, backup jobs, notifications,
-//! and HA groups land in follow-up PRs tracked by epic
+//! storage definitions, scheduled backup jobs. Cluster firewall,
+//! notifications, and HA groups land in follow-up PRs tracked by epic
 //! [#74](https://github.com/fabriziosalmi/proxxx/issues/74). Pre-flight
 //! risk gates + HITL approval per destructive change are wired (shipped
 //! v0.3.0): `state::preflight` refuses Severe changes unless
@@ -38,9 +38,9 @@ pub enum ExportFormat {
 pub enum StateCommand {
     /// Export the cluster's mutable state.
     ///
-    /// Supported resources: `pools`, `acl`, `all` (every supported
-    /// family). More (storage, firewall-cluster, backup-jobs,
-    /// notifications) land per the ladder in epic #74.
+    /// Supported resources: `pools`, `acl`, `storage`, `backup-jobs`,
+    /// `all` (every supported family). More (firewall-cluster,
+    /// notifications, HA groups) land per the ladder in epic #74.
     ///
     /// The resulting document is byte-stable across runs against an
     /// unchanged cluster — every collection is sorted by its identity
@@ -52,8 +52,8 @@ pub enum StateCommand {
     ///   proxxx state export > state.toml                    # capture to file
     ///   proxxx state export --output json | jq '.pools[0]'  # programmatic
     Export {
-        /// Resource family to export. Valid: `pools`, `acl`, `all`.
-        /// More families coming — see issue #74.
+        /// Resource family to export. Valid: `pools`, `acl`, `storage`,
+        /// `backup-jobs`, `all`. More families coming — see issue #74.
         #[arg(long, default_value = "pools")]
         resource: String,
 
@@ -260,15 +260,14 @@ pub async fn execute_state(
 
             // Export live across every supported family — diff
             // ignores anything that's not in BOTH declared and live,
-            // so over-fetching is cheap and correct.
+            // so over-fetching is cheap and correct. `Resource::all()`
+            // is the single source of truth so a newly-added family is
+            // never silently omitted here (which would make its
+            // declared entries diff as perpetual creates).
             let profile_label = profile.unwrap_or("default");
             let live_state = state::export::export_state(
                 client.as_ref(),
-                &[
-                    state::export::Resource::Pools,
-                    state::export::Resource::Acl,
-                    state::export::Resource::Storage,
-                ],
+                &state::export::Resource::all(),
                 profile_label,
             )
             .await?;
@@ -321,11 +320,7 @@ pub async fn execute_state(
             let profile_label = profile.unwrap_or("default");
             let live_state = state::export::export_state(
                 client.as_ref(),
-                &[
-                    state::export::Resource::Pools,
-                    state::export::Resource::Acl,
-                    state::export::Resource::Storage,
-                ],
+                &state::export::Resource::all(),
                 profile_label,
             )
             .await?;

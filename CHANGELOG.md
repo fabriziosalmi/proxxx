@@ -12,7 +12,16 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet._
+### Added
+- **`state` now manages scheduled backup jobs** (epic #74). A new
+  `backup-jobs` resource family is wired through the full GitOps loop:
+  `state export --resource backup-jobs` snapshots every recurring
+  vzdump job (`/cluster/backup`) sorted by `id`, `state diff` detects
+  drift, and `state apply` converges (create / update / delete). The
+  scheduler-derived `next-run` and the deprecated `mailnotification`
+  field are dropped on export so the TOML stays diff-stable. Deleting a
+  backup job is flagged as a **Warning** by the pre-flight gate (silent
+  loss of data protection). `--resource all` now includes backup jobs.
 
 ## [0.4.0] — 2026-05-21
 
