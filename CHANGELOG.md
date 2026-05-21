@@ -22,6 +22,20 @@ SemVer contract:
   field are dropped on export so the TOML stays diff-stable. Deleting a
   backup job is flagged as a **Warning** by the pre-flight gate (silent
   loss of data protection). `--resource all` now includes backup jobs.
+- **`state` now manages the cluster firewall** (epic #74). A new
+  `firewall-cluster` resource family covers the whole writable surface
+  in one selector: the **options** singleton (enable / default policy /
+  ebtables / log-ratelimit), **aliases**, **IP sets** (with nested CIDR
+  membership), and **security groups**. Export is diff-stable (sets +
+  CIDRs sorted; derived `ipversion`/`digest` dropped). Apply handles the
+  awkward PVE semantics: an IP-set comment change has no update endpoint
+  so it's a lossless delete+recreate, while CIDR membership is an
+  incremental add/remove delta; security groups are create/delete only
+  (no PVE update, and their rules are read-only, so a recreate would
+  drop them). Pre-flight gates the dangerous moves: disabling the
+  firewall or deleting a security group are **Severe**; loosening a
+  default policy to ACCEPT and deleting aliases / IP sets are
+  **Warnings**. `--resource all` now includes the firewall.
 
 ## [0.4.0] — 2026-05-21
 

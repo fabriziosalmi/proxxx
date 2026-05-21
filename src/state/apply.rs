@@ -32,6 +32,10 @@
 //! | ACL | ✓ | ✓ (delete + recreate with new propagate) | ✓ |
 //! | Storage | ✓ | ✓ (mutable fields only) | ✓ |
 //! | Backup job | ✓ | ✓ (all mutable fields) | ✓ |
+//! | Firewall options | — | ✓ (singleton, update-only) | — |
+//! | Firewall alias | ✓ | ✓ (cidr + comment) | ✓ |
+//! | Firewall ipset | ✓ | ✓ (comment → recreate; CIDR delta) | ✓ |
+//! | Firewall group | ✓ | — (no PVE update; rules read-only) | ✓ |
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -39,7 +43,10 @@ use serde::Serialize;
 
 use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
-use crate::state::model::{AclDecl, BackupJobDecl, PoolDecl, StorageDecl};
+use crate::state::model::{
+    AclDecl, BackupJobDecl, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetCidrDecl,
+    FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StorageDecl,
+};
 
 /// Options controlling apply behaviour.
 #[derive(Debug, Clone, Copy, Default)]
@@ -134,6 +141,26 @@ pub trait StateWriteView: Send + Sync {
     async fn create_backup_job_view(&self, params: &[(&str, &str)]) -> Result<()>;
     async fn update_backup_job_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()>;
     async fn delete_backup_job_view(&self, id: &str) -> Result<()>;
+
+    // ── Cluster-firewall surface ──────────────────────────
+    async fn update_cluster_firewall_options_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn create_cluster_firewall_alias_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_cluster_firewall_alias_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()>;
+    async fn delete_cluster_firewall_alias_view(&self, name: &str) -> Result<()>;
+    async fn create_cluster_firewall_ipset_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_cluster_firewall_ipset_view(&self, name: &str) -> Result<()>;
+    async fn add_cluster_firewall_ipset_cidr_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()>;
+    async fn remove_cluster_firewall_ipset_cidr_view(&self, name: &str, cidr: &str) -> Result<()>;
+    async fn create_cluster_firewall_group_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -195,6 +222,45 @@ where
 
     async fn delete_cluster_storage_view(&self, storage: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_cluster_storage(self, storage).await
+    }
+
+    async fn update_cluster_firewall_options_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_cluster_firewall_options(self, params).await
+    }
+    async fn create_cluster_firewall_alias_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_cluster_firewall_alias(self, params).await
+    }
+    async fn update_cluster_firewall_alias_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()> {
+        crate::api::ProxmoxGateway::update_cluster_firewall_alias(self, name, params).await
+    }
+    async fn delete_cluster_firewall_alias_view(&self, name: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_cluster_firewall_alias(self, name).await
+    }
+    async fn create_cluster_firewall_ipset_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_cluster_firewall_ipset(self, params).await
+    }
+    async fn delete_cluster_firewall_ipset_view(&self, name: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_cluster_firewall_ipset(self, name).await
+    }
+    async fn add_cluster_firewall_ipset_cidr_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()> {
+        crate::api::ProxmoxGateway::add_cluster_firewall_ipset_cidr(self, name, params).await
+    }
+    async fn remove_cluster_firewall_ipset_cidr_view(&self, name: &str, cidr: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::remove_cluster_firewall_ipset_cidr(self, name, cidr).await
+    }
+    async fn create_cluster_firewall_group_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_cluster_firewall_group(self, params).await
+    }
+    async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_cluster_firewall_group(self, group).await
     }
 }
 
@@ -265,6 +331,15 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("backup_job", ChangeKind::Create) => apply_backupjob_create(client, change).await,
         ("backup_job", ChangeKind::Update) => apply_backupjob_update(client, change).await,
         ("backup_job", ChangeKind::Delete) => apply_backupjob_delete(client, change).await,
+        ("firewall_options", ChangeKind::Update) => apply_fw_options_update(client, change).await,
+        ("firewall_alias", ChangeKind::Create) => apply_fw_alias_create(client, change).await,
+        ("firewall_alias", ChangeKind::Update) => apply_fw_alias_update(client, change).await,
+        ("firewall_alias", ChangeKind::Delete) => apply_fw_alias_delete(client, change).await,
+        ("firewall_ipset", ChangeKind::Create) => apply_fw_ipset_create(client, change).await,
+        ("firewall_ipset", ChangeKind::Update) => apply_fw_ipset_update(client, change).await,
+        ("firewall_ipset", ChangeKind::Delete) => apply_fw_ipset_delete(client, change).await,
+        ("firewall_group", ChangeKind::Create) => apply_fw_group_create(client, change).await,
+        ("firewall_group", ChangeKind::Delete) => apply_fw_group_delete(client, change).await,
         (resource, kind) => Err(anyhow::anyhow!(
             "unhandled change shape: resource={resource} kind={kind:?}"
         )),
@@ -680,6 +755,223 @@ async fn apply_backupjob_delete<C: StateWriteView + ?Sized>(
     client.delete_backup_job_view(&decl.id).await
 }
 
+// ── Cluster firewall ─────────────────────────────────────────
+
+fn decode<T: serde::de::DeserializeOwned>(v: Option<&serde_json::Value>, what: &str) -> Result<T> {
+    let val = v
+        .cloned()
+        .with_context(|| format!("{what}: missing value"))?;
+    serde_json::from_value(val).with_context(|| format!("decoding {what}"))
+}
+
+fn borrow(params: &[(String, String)]) -> Vec<(&str, &str)> {
+    params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// Update the firewall options singleton. `enable` and `ebtables` are
+/// always sent (0/1) — the declared block is authoritative, so an
+/// omitted bool means "off". Policy / ratelimit strings are sent only
+/// when non-empty (empty = leave PVE's current value).
+async fn apply_fw_options_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: FirewallOptionsDecl = decode(change.after.as_ref(), "firewall options")?;
+    let mut params: Vec<(String, String)> = Vec::new();
+    params.push((
+        "enable".to_string(),
+        if after.enable { "1" } else { "0" }.to_string(),
+    ));
+    params.push((
+        "ebtables".to_string(),
+        if after.ebtables { "1" } else { "0" }.to_string(),
+    ));
+    push_optional(&mut params, "policy_in", &after.policy_in);
+    push_optional(&mut params, "policy_out", &after.policy_out);
+    push_optional(&mut params, "log_ratelimit", &after.log_ratelimit);
+    client
+        .update_cluster_firewall_options_view(&borrow(&params))
+        .await
+}
+
+fn fw_alias_params(decl: &FirewallAliasDecl, include_name: bool) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    if include_name {
+        params.push(("name".to_string(), decl.name.clone()));
+    }
+    params.push(("cidr".to_string(), decl.cidr.clone()));
+    push_optional(&mut params, "comment", &decl.comment);
+    params
+}
+
+async fn apply_fw_alias_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallAliasDecl = decode(change.after.as_ref(), "firewall alias")?;
+    let params = fw_alias_params(&decl, true);
+    client
+        .create_cluster_firewall_alias_view(&borrow(&params))
+        .await
+}
+
+async fn apply_fw_alias_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: FirewallAliasDecl = decode(change.after.as_ref(), "firewall alias")?;
+    let params = fw_alias_params(&after, false);
+    client
+        .update_cluster_firewall_alias_view(&after.name, &borrow(&params))
+        .await
+}
+
+async fn apply_fw_alias_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallAliasDecl = decode(change.before.as_ref(), "firewall alias")?;
+    client.delete_cluster_firewall_alias_view(&decl.name).await
+}
+
+fn fw_cidr_params(c: &FirewallIpsetCidrDecl) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = vec![("cidr".to_string(), c.cidr.clone())];
+    push_optional(&mut params, "comment", &c.comment);
+    if c.nomatch {
+        params.push(("nomatch".to_string(), "1".to_string()));
+    }
+    params
+}
+
+/// Create an IP set, then add every declared CIDR. Order: the set must
+/// exist before its members can be attached.
+async fn apply_fw_ipset_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallIpsetDecl = decode(change.after.as_ref(), "firewall ipset")?;
+    let mut set_params: Vec<(String, String)> = vec![("name".to_string(), decl.name.clone())];
+    push_optional(&mut set_params, "comment", &decl.comment);
+    client
+        .create_cluster_firewall_ipset_view(&borrow(&set_params))
+        .await?;
+    for c in &decl.cidrs {
+        let p = fw_cidr_params(c);
+        client
+            .add_cluster_firewall_ipset_cidr_view(&decl.name, &borrow(&p))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete an IP set. Members are removed first (some PVE versions
+/// refuse to delete a non-empty set), then the set itself.
+async fn apply_fw_ipset_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallIpsetDecl = decode(change.before.as_ref(), "firewall ipset")?;
+    for c in &decl.cidrs {
+        client
+            .remove_cluster_firewall_ipset_cidr_view(&decl.name, &c.cidr)
+            .await?;
+    }
+    client.delete_cluster_firewall_ipset_view(&decl.name).await
+}
+
+/// Reconcile an IP set update. A `comment` change forces delete+
+/// recreate (PVE has no set-update endpoint) — the declared CIDRs are
+/// re-added afterwards, so it's lossless. When only the membership
+/// changed, apply the minimal CIDR delta (a changed entry = remove +
+/// re-add, since CIDR entries have no in-place update either).
+async fn apply_fw_ipset_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    use std::collections::HashMap;
+    let before: FirewallIpsetDecl = decode(change.before.as_ref(), "firewall ipset")?;
+    let after: FirewallIpsetDecl = decode(change.after.as_ref(), "firewall ipset")?;
+
+    if before.comment != after.comment {
+        // No set-update endpoint: delete (members first) then recreate
+        // with the new comment and re-add every declared CIDR.
+        for c in &before.cidrs {
+            client
+                .remove_cluster_firewall_ipset_cidr_view(&before.name, &c.cidr)
+                .await?;
+        }
+        client
+            .delete_cluster_firewall_ipset_view(&before.name)
+            .await?;
+        let mut set_params: Vec<(String, String)> = vec![("name".to_string(), after.name.clone())];
+        push_optional(&mut set_params, "comment", &after.comment);
+        client
+            .create_cluster_firewall_ipset_view(&borrow(&set_params))
+            .await?;
+        for c in &after.cidrs {
+            let p = fw_cidr_params(c);
+            client
+                .add_cluster_firewall_ipset_cidr_view(&after.name, &borrow(&p))
+                .await?;
+        }
+        return Ok(());
+    }
+
+    // Comment unchanged: incremental CIDR delta keyed on the cidr string.
+    let before_by: HashMap<&str, &FirewallIpsetCidrDecl> =
+        before.cidrs.iter().map(|c| (c.cidr.as_str(), c)).collect();
+    let after_by: HashMap<&str, &FirewallIpsetCidrDecl> =
+        after.cidrs.iter().map(|c| (c.cidr.as_str(), c)).collect();
+
+    // Remove entries that vanished or whose attributes changed.
+    for bc in &before.cidrs {
+        match after_by.get(bc.cidr.as_str()) {
+            Some(ac) if *ac == bc => {}
+            _ => {
+                client
+                    .remove_cluster_firewall_ipset_cidr_view(&before.name, &bc.cidr)
+                    .await?;
+            }
+        }
+    }
+    // Add entries that are new or whose attributes changed (re-added).
+    for ac in &after.cidrs {
+        match before_by.get(ac.cidr.as_str()) {
+            Some(bc) if *bc == ac => {}
+            _ => {
+                let p = fw_cidr_params(ac);
+                client
+                    .add_cluster_firewall_ipset_cidr_view(&after.name, &borrow(&p))
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn apply_fw_group_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallGroupDecl = decode(change.after.as_ref(), "firewall group")?;
+    let mut params: Vec<(String, String)> = vec![("group".to_string(), decl.group.clone())];
+    push_optional(&mut params, "comment", &decl.comment);
+    client
+        .create_cluster_firewall_group_view(&borrow(&params))
+        .await
+}
+
+async fn apply_fw_group_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: FirewallGroupDecl = decode(change.before.as_ref(), "firewall group")?;
+    client.delete_cluster_firewall_group_view(&decl.group).await
+}
+
 fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
     if !value.is_empty() {
         params.push((key.to_string(), value.to_string()));
@@ -801,6 +1093,52 @@ mod tests {
         }
         async fn delete_backup_job_view(&self, id: &str) -> Result<()> {
             self.record(format!("delete_backup_job({id})")).await
+        }
+        async fn update_cluster_firewall_options_view(
+            &self,
+            params: &[(&str, &str)],
+        ) -> Result<()> {
+            self.record(format!("update_fw_options {params:?}")).await
+        }
+        async fn create_cluster_firewall_alias_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_fw_alias {params:?}")).await
+        }
+        async fn update_cluster_firewall_alias_view(
+            &self,
+            name: &str,
+            params: &[(&str, &str)],
+        ) -> Result<()> {
+            self.record(format!("update_fw_alias({name}) {params:?}"))
+                .await
+        }
+        async fn delete_cluster_firewall_alias_view(&self, name: &str) -> Result<()> {
+            self.record(format!("delete_fw_alias({name})")).await
+        }
+        async fn create_cluster_firewall_ipset_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_fw_ipset {params:?}")).await
+        }
+        async fn delete_cluster_firewall_ipset_view(&self, name: &str) -> Result<()> {
+            self.record(format!("delete_fw_ipset({name})")).await
+        }
+        async fn add_cluster_firewall_ipset_cidr_view(
+            &self,
+            name: &str,
+            params: &[(&str, &str)],
+        ) -> Result<()> {
+            self.record(format!("add_fw_cidr({name}) {params:?}")).await
+        }
+        async fn remove_cluster_firewall_ipset_cidr_view(
+            &self,
+            name: &str,
+            cidr: &str,
+        ) -> Result<()> {
+            self.record(format!("remove_fw_cidr({name}, {cidr})")).await
+        }
+        async fn create_cluster_firewall_group_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_fw_group {params:?}")).await
+        }
+        async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()> {
+            self.record(format!("delete_fw_group({group})")).await
         }
     }
 
@@ -1101,5 +1439,283 @@ mod tests {
         .await;
         assert!(matches!(out2[0].result, ApplyResult::Applied));
         assert_eq!(c2.lines().await, vec!["delete_backup_job(old)".to_string()]);
+    }
+
+    // ── Cluster firewall ─────────────────────────────────
+
+    fn fw_change(
+        kind: ChangeKind,
+        resource: &'static str,
+        identity: &str,
+        before: Option<serde_json::Value>,
+        after: Option<serde_json::Value>,
+    ) -> Change {
+        Change {
+            kind,
+            resource,
+            identity: identity.to_string(),
+            before,
+            after,
+        }
+    }
+
+    #[tokio::test]
+    async fn fw_options_update_always_sends_enable_and_ebtables() {
+        let after = FirewallOptionsDecl {
+            enable: true,
+            policy_in: "DROP".into(),
+            ebtables: false,
+            ..FirewallOptionsDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Update,
+            "firewall_options",
+            "cluster",
+            Some(serde_json::json!({"enable": false})),
+            Some(serde_json::to_value(&after).unwrap()),
+        );
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("update_fw_options"));
+        assert!(line.contains("\"enable\", \"1\""));
+        assert!(line.contains("\"ebtables\", \"0\""), "ebtables always sent");
+        assert!(line.contains("\"policy_in\", \"DROP\""));
+    }
+
+    #[tokio::test]
+    async fn fw_alias_create_and_delete_dispatch() {
+        let decl = FirewallAliasDecl {
+            name: "web".into(),
+            cidr: "10.0.0.0/8".into(),
+            comment: "web tier".into(),
+        };
+        let c = RecordingClient::default();
+        let create = fw_change(
+            ChangeKind::Create,
+            "firewall_alias",
+            "web",
+            None,
+            Some(serde_json::to_value(&decl).unwrap()),
+        );
+        let out = apply(&c, vec![create], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("create_fw_alias"));
+        assert!(line.contains("\"name\", \"web\"") && line.contains("\"cidr\", \"10.0.0.0/8\""));
+
+        // delete requires prune
+        let c2 = RecordingClient::default();
+        let delete = fw_change(
+            ChangeKind::Delete,
+            "firewall_alias",
+            "web",
+            Some(serde_json::to_value(&decl).unwrap()),
+            None,
+        );
+        let out2 = apply(
+            &c2,
+            vec![delete],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out2[0].result, ApplyResult::Applied));
+        assert_eq!(c2.lines().await, vec!["delete_fw_alias(web)".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn fw_ipset_create_fires_create_then_add_per_cidr() {
+        let decl = FirewallIpsetDecl {
+            name: "blocklist".into(),
+            comment: "bad".into(),
+            cidrs: vec![
+                FirewallIpsetCidrDecl {
+                    cidr: "1.2.3.0/24".into(),
+                    ..Default::default()
+                },
+                FirewallIpsetCidrDecl {
+                    cidr: "5.6.7.8".into(),
+                    nomatch: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Create,
+            "firewall_ipset",
+            "blocklist",
+            None,
+            Some(serde_json::to_value(&decl).unwrap()),
+        );
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let lines = c.lines().await;
+        assert_eq!(lines.len(), 3, "create + 2 add_cidr");
+        assert!(lines[0].starts_with("create_fw_ipset"));
+        assert!(lines[1].starts_with("add_fw_cidr(blocklist)") && lines[1].contains("1.2.3.0/24"));
+        assert!(lines[2].contains("5.6.7.8") && lines[2].contains("\"nomatch\", \"1\""));
+    }
+
+    #[tokio::test]
+    async fn fw_ipset_delete_removes_cidrs_then_deletes() {
+        let decl = FirewallIpsetDecl {
+            name: "blocklist".into(),
+            comment: String::new(),
+            cidrs: vec![FirewallIpsetCidrDecl {
+                cidr: "1.2.3.0/24".into(),
+                ..Default::default()
+            }],
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Delete,
+            "firewall_ipset",
+            "blocklist",
+            Some(serde_json::to_value(&decl).unwrap()),
+            None,
+        );
+        let out = apply(
+            &c,
+            vec![change],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        assert_eq!(
+            c.lines().await,
+            vec![
+                "remove_fw_cidr(blocklist, 1.2.3.0/24)".to_string(),
+                "delete_fw_ipset(blocklist)".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fw_ipset_update_comment_change_recreates_with_cidrs() {
+        // A comment change has no PVE update endpoint → delete (members
+        // first) + recreate + re-add all declared CIDRs.
+        let cidr = FirewallIpsetCidrDecl {
+            cidr: "1.2.3.0/24".into(),
+            ..Default::default()
+        };
+        let before = FirewallIpsetDecl {
+            name: "s".into(),
+            comment: "old".into(),
+            cidrs: vec![cidr.clone()],
+        };
+        let after = FirewallIpsetDecl {
+            name: "s".into(),
+            comment: "new".into(),
+            cidrs: vec![cidr],
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Update,
+            "firewall_ipset",
+            "s",
+            Some(serde_json::to_value(&before).unwrap()),
+            Some(serde_json::to_value(&after).unwrap()),
+        );
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let lines = c.lines().await;
+        assert_eq!(
+            lines,
+            vec![
+                "remove_fw_cidr(s, 1.2.3.0/24)".to_string(),
+                "delete_fw_ipset(s)".to_string(),
+                "create_fw_ipset [(\"name\", \"s\"), (\"comment\", \"new\")]".to_string(),
+                "add_fw_cidr(s) [(\"cidr\", \"1.2.3.0/24\")]".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fw_ipset_update_cidr_delta_is_minimal() {
+        // Comment unchanged → only the CIDR delta is applied: add the
+        // new one, remove the gone one, leave the unchanged one alone.
+        let mk = |c: &str| FirewallIpsetCidrDecl {
+            cidr: c.into(),
+            ..Default::default()
+        };
+        let before = FirewallIpsetDecl {
+            name: "s".into(),
+            comment: "same".into(),
+            cidrs: vec![mk("1.1.1.0/24"), mk("2.2.2.0/24")],
+        };
+        let after = FirewallIpsetDecl {
+            name: "s".into(),
+            comment: "same".into(),
+            cidrs: vec![mk("1.1.1.0/24"), mk("3.3.3.0/24")],
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Update,
+            "firewall_ipset",
+            "s",
+            Some(serde_json::to_value(&before).unwrap()),
+            Some(serde_json::to_value(&after).unwrap()),
+        );
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let lines = c.lines().await;
+        // No delete_fw_ipset / create_fw_ipset — set stays put.
+        assert!(!lines.iter().any(|l| l.contains("delete_fw_ipset")));
+        assert!(lines.iter().any(|l| l == "remove_fw_cidr(s, 2.2.2.0/24)"));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("add_fw_cidr(s)") && l.contains("3.3.3.0/24")));
+        // 1.1.1.0/24 was unchanged → neither added nor removed.
+        assert!(!lines.iter().any(|l| l.contains("1.1.1.0/24")));
+    }
+
+    #[tokio::test]
+    async fn fw_group_create_and_delete_dispatch() {
+        let decl = FirewallGroupDecl {
+            group: "web-tier".into(),
+            comment: "frontend".into(),
+        };
+        let c = RecordingClient::default();
+        let create = fw_change(
+            ChangeKind::Create,
+            "firewall_group",
+            "web-tier",
+            None,
+            Some(serde_json::to_value(&decl).unwrap()),
+        );
+        let out = apply(&c, vec![create], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        assert!(c.lines().await[0].starts_with("create_fw_group"));
+
+        let c2 = RecordingClient::default();
+        let delete = fw_change(
+            ChangeKind::Delete,
+            "firewall_group",
+            "web-tier",
+            Some(serde_json::to_value(&decl).unwrap()),
+            None,
+        );
+        let out2 = apply(
+            &c2,
+            vec![delete],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out2[0].result, ApplyResult::Applied));
+        assert_eq!(
+            c2.lines().await,
+            vec!["delete_fw_group(web-tier)".to_string()]
+        );
     }
 }

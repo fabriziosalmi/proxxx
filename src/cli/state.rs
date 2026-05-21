@@ -3,8 +3,9 @@
 //! toward declared.
 //!
 //! Resource families covered today: pools, ACL grants, cluster
-//! storage definitions, scheduled backup jobs. Cluster firewall,
-//! notifications, and HA groups land in follow-up PRs tracked by epic
+//! storage definitions, scheduled backup jobs, and the cluster
+//! firewall (options + aliases + IP sets + security groups).
+//! Notifications and HA groups land in follow-up PRs tracked by epic
 //! [#74](https://github.com/fabriziosalmi/proxxx/issues/74). Pre-flight
 //! risk gates + HITL approval per destructive change are wired (shipped
 //! v0.3.0): `state::preflight` refuses Severe changes unless
@@ -39,8 +40,8 @@ pub enum StateCommand {
     /// Export the cluster's mutable state.
     ///
     /// Supported resources: `pools`, `acl`, `storage`, `backup-jobs`,
-    /// `all` (every supported family). More (firewall-cluster,
-    /// notifications, HA groups) land per the ladder in epic #74.
+    /// `firewall-cluster`, `all` (every supported family). More
+    /// (notifications, HA groups) land per the ladder in epic #74.
     ///
     /// The resulting document is byte-stable across runs against an
     /// unchanged cluster — every collection is sorted by its identity
@@ -53,7 +54,8 @@ pub enum StateCommand {
     ///   proxxx state export --output json | jq '.pools[0]'  # programmatic
     Export {
         /// Resource family to export. Valid: `pools`, `acl`, `storage`,
-        /// `backup-jobs`, `all`. More families coming — see issue #74.
+        /// `backup-jobs`, `firewall-cluster`, `all`. More families
+        /// coming — see issue #74.
         #[arg(long, default_value = "pools")]
         resource: String,
 

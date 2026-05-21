@@ -33,7 +33,10 @@
 
 use serde::Serialize;
 
-use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StorageDecl};
+use crate::state::model::{
+    AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetDecl,
+    FirewallOptionsDecl, PoolDecl, StorageDecl,
+};
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
 /// self-evident; `Update` is "identity matches, value differs".
@@ -76,10 +79,12 @@ pub struct Change {
 /// to enforce `--prune` semantics.
 ///
 /// The output order is stable: changes for `pool` first, then `acl`,
-/// then `storage`, then `backup_job`, each family sorted by identity.
-/// Within a family the order is `Delete` (so apply-with-prune teardown
-/// runs before create), then `Update`, then `Create` — but the apply
-/// layer re-orders by dependency where needed.
+/// then `storage`, then `backup_job`, then the firewall families
+/// (`firewall_options`, `firewall_alias`, `firewall_ipset`,
+/// `firewall_group`), each sorted by identity. Within a family the
+/// order is `Delete` (so apply-with-prune teardown runs before create),
+/// then `Update`, then `Create` — but the apply layer re-orders by
+/// dependency where needed.
 #[must_use]
 pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     let mut out = Vec::new();
@@ -87,6 +92,14 @@ pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     diff_acl(&declared.acl, &live.acl, &mut out);
     diff_storage(&declared.storage, &live.storage, &mut out);
     diff_backup_jobs(&declared.backup_jobs, &live.backup_jobs, &mut out);
+    diff_firewall_options(
+        declared.firewall_options.as_ref(),
+        live.firewall_options.as_ref(),
+        &mut out,
+    );
+    diff_firewall_aliases(&declared.firewall_aliases, &live.firewall_aliases, &mut out);
+    diff_firewall_ipsets(&declared.firewall_ipsets, &live.firewall_ipsets, &mut out);
+    diff_firewall_groups(&declared.firewall_groups, &live.firewall_groups, &mut out);
     out
 }
 
@@ -325,6 +338,196 @@ fn diff_backup_jobs(declared: &[BackupJobDecl], live: &[BackupJobDecl], out: &mu
     }
 }
 
+/// Diff the firewall options singleton. Unlike the list families this
+/// has no create/delete — the firewall always has exactly one options
+/// object. A `None` declared value means "don't manage" (no change). A
+/// `Some` declared value that differs from live yields one `Update`
+/// (identity `"cluster"`).
+fn diff_firewall_options(
+    declared: Option<&FirewallOptionsDecl>,
+    live: Option<&FirewallOptionsDecl>,
+    out: &mut Vec<Change>,
+) {
+    let Some(decl) = declared else {
+        return;
+    };
+    if live == Some(decl) {
+        return;
+    }
+    out.push(Change {
+        kind: ChangeKind::Update,
+        resource: "firewall_options",
+        identity: "cluster".to_string(),
+        before: live.and_then(|l| serde_json::to_value(l).ok()),
+        after: serde_json::to_value(decl).ok(),
+    });
+}
+
+fn diff_firewall_aliases(
+    declared: &[FirewallAliasDecl],
+    live: &[FirewallAliasDecl],
+    out: &mut Vec<Change>,
+) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &FirewallAliasDecl> =
+        live.iter().map(|a| (a.name.as_str(), a)).collect();
+    let decl_by: HashMap<&str, &FirewallAliasDecl> =
+        declared.iter().map(|a| (a.name.as_str(), a)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "firewall_alias",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "firewall_alias",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "firewall_alias",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
+/// Diff IP sets by `name`. An `Update` carries the full before/after
+/// ipset (comment + CIDR membership); the apply layer decodes both to
+/// compute the minimal API calls (comment change → delete+recreate;
+/// CIDR delta → incremental add/remove).
+fn diff_firewall_ipsets(
+    declared: &[FirewallIpsetDecl],
+    live: &[FirewallIpsetDecl],
+    out: &mut Vec<Change>,
+) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &FirewallIpsetDecl> =
+        live.iter().map(|s| (s.name.as_str(), s)).collect();
+    let decl_by: HashMap<&str, &FirewallIpsetDecl> =
+        declared.iter().map(|s| (s.name.as_str(), s)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "firewall_ipset",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "firewall_ipset",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "firewall_ipset",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
+/// Diff security groups by `group`. **Create + Delete only** — PVE has
+/// no group-update endpoint and the group's rules are read-only here,
+/// so a comment-only drift on an existing group is deliberately NOT
+/// emitted (applying it would mean delete+recreate, silently dropping
+/// the group's rules). See [`ClusterState::firewall_groups`].
+fn diff_firewall_groups(
+    declared: &[FirewallGroupDecl],
+    live: &[FirewallGroupDecl],
+    out: &mut Vec<Change>,
+) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &FirewallGroupDecl> =
+        live.iter().map(|g| (g.group.as_str(), g)).collect();
+    let decl_by: HashMap<&str, &FirewallGroupDecl> =
+        declared.iter().map(|g| (g.group.as_str(), g)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "firewall_group",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "firewall_group",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
 /// Human-readable single-line summary of one change. Used by the
 /// CLI's default output mode. Keep it grep-friendly:
 /// `<sigil> <resource>: <identity>`.
@@ -345,7 +548,10 @@ pub fn summary_line(c: &Change) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StorageDecl};
+    use crate::state::model::{
+        AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
+        FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StorageDecl,
+    };
 
     fn empty() -> ClusterState {
         ClusterState::default()
@@ -713,6 +919,172 @@ mod tests {
         };
         let d = diff(&s, &s);
         assert!(d.is_empty());
+    }
+
+    // ── Firewall options (singleton) ──────────────────────
+
+    #[test]
+    fn diff_firewall_options_none_declared_is_no_change() {
+        // A declared state without a [firewall_options] block must not
+        // touch the live firewall, even if live has one.
+        let live = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: true,
+                policy_in: "DROP".into(),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        let d = diff(&empty(), &live);
+        assert!(d.is_empty(), "None declared = unmanaged, got {d:?}");
+    }
+
+    #[test]
+    fn diff_firewall_options_differing_is_single_update() {
+        let declared = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: true,
+                policy_in: "DROP".into(),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: false,
+                policy_in: "ACCEPT".into(),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        assert_eq!(d[0].resource, "firewall_options");
+        assert_eq!(d[0].identity, "cluster");
+    }
+
+    #[test]
+    fn diff_firewall_options_equal_is_no_change() {
+        let o = FirewallOptionsDecl {
+            enable: true,
+            policy_in: "DROP".into(),
+            policy_out: "ACCEPT".into(),
+            ..FirewallOptionsDecl::default()
+        };
+        let s = ClusterState {
+            firewall_options: Some(o),
+            ..ClusterState::default()
+        };
+        assert!(diff(&s, &s).is_empty());
+    }
+
+    // ── Firewall aliases (full CRUD) ──────────────────────
+
+    #[test]
+    fn diff_firewall_alias_create_update_delete() {
+        let mk = |cidr: &str| FirewallAliasDecl {
+            name: "web".into(),
+            cidr: cidr.into(),
+            comment: String::new(),
+        };
+        // create
+        let declared = ClusterState {
+            firewall_aliases: vec![mk("10.0.0.0/8")],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &empty());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].resource, "firewall_alias");
+        assert_eq!(d[0].identity, "web");
+        // delete
+        let d = diff(&empty(), &declared);
+        assert_eq!(d[0].kind, ChangeKind::Delete);
+        // update (cidr change)
+        let live = ClusterState {
+            firewall_aliases: vec![mk("192.168.0.0/16")],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+    }
+
+    // ── Firewall IP sets (CRUD; update carries full value) ──
+
+    #[test]
+    fn diff_firewall_ipset_update_on_cidr_membership() {
+        let with = |cidrs: Vec<&str>| FirewallIpsetDecl {
+            name: "blocklist".into(),
+            comment: "bad actors".into(),
+            cidrs: cidrs
+                .into_iter()
+                .map(|c| FirewallIpsetCidrDecl {
+                    cidr: c.into(),
+                    ..FirewallIpsetCidrDecl::default()
+                })
+                .collect(),
+        };
+        let declared = ClusterState {
+            firewall_ipsets: vec![with(vec!["1.2.3.0/24", "5.6.7.0/24"])],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            firewall_ipsets: vec![with(vec!["1.2.3.0/24"])],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        assert_eq!(d[0].resource, "firewall_ipset");
+        // before + after both carry the full ipset (apply computes the delta).
+        assert!(d[0].before.is_some() && d[0].after.is_some());
+    }
+
+    // ── Firewall groups (create/delete only — no update) ──
+
+    #[test]
+    fn diff_firewall_group_comment_drift_is_not_an_update() {
+        // PVE has no group-update endpoint and rules are read-only, so
+        // a comment-only change must NOT produce a (destructive) change.
+        let declared = ClusterState {
+            firewall_groups: vec![FirewallGroupDecl {
+                group: "web-tier".into(),
+                comment: "new comment".into(),
+            }],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            firewall_groups: vec![FirewallGroupDecl {
+                group: "web-tier".into(),
+                comment: "old comment".into(),
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert!(
+            d.is_empty(),
+            "group comment drift must not emit a change, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn diff_firewall_group_create_and_delete() {
+        let declared = ClusterState {
+            firewall_groups: vec![FirewallGroupDecl {
+                group: "web-tier".into(),
+                comment: String::new(),
+            }],
+            ..ClusterState::default()
+        };
+        let create = diff(&declared, &empty());
+        assert_eq!(create.len(), 1);
+        assert_eq!(create[0].kind, ChangeKind::Create);
+        assert_eq!(create[0].resource, "firewall_group");
+        let delete = diff(&empty(), &declared);
+        assert_eq!(delete.len(), 1);
+        assert_eq!(delete[0].kind, ChangeKind::Delete);
     }
 
     #[test]
