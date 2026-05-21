@@ -161,6 +161,7 @@ fn render_current_view(state: &AppState) {
             View::GuestList => views::guests::draw(f, f.area(), state),
             View::StorageList => views::storage::draw(f, f.area(), state),
             View::Heatmap => views::heatmap::draw(f, f.area(), state),
+            View::OperationQueue => views::queue::draw(f, f.area(), state),
             other => panic!(
                 "test seeded a sequence touching view {other:?} but the \
                  render dispatch in tui_keymap_e2e.rs has no arm for it; \
@@ -347,4 +348,44 @@ fn back_pops_view_stack_and_only_quits_when_empty() {
         matches!(effect, Some(SideEffect::Quit)),
         "expected Quit on empty nav_stack, got {effect:?}"
     );
+}
+
+/// Regression: pressing `d` on a guest enqueues a delete that the
+/// operation-queue executor must be able to dispatch. Before the fix,
+/// `Action::DeleteGuest` had no arm in the queue dispatcher and every
+/// queued delete failed at execution with "Unsupported in queue yet".
+///
+/// This pins the user-facing trigger: `d` on the guest list → a single
+/// `DeleteGuest` op lands on `op_queue`, and the view flips to the
+/// operation queue (which must render without panicking). The
+/// executor arm itself is a direct `delete_guest` gateway call,
+/// compile-checked + exercised by the live mutation gate.
+#[test]
+fn d_key_enqueues_a_dispatchable_delete() {
+    let mut state = AppState::new();
+    seed(&mut state);
+
+    // Navigate to the guest list and delete the highlighted guest.
+    step(&mut state, key_char('3'));
+    assert_eq!(*state.current_view(), View::GuestList);
+    let target = state
+        .visible_guests()
+        .first()
+        .map(|g| g.vmid)
+        .expect("seed has guests");
+
+    step(&mut state, key_char('d'));
+
+    // Exactly one op enqueued, and it's a DeleteGuest for the
+    // highlighted guest — NOT silently dropped, NOT a different action.
+    assert_eq!(state.op_queue.len(), 1, "d must enqueue exactly one op");
+    match &*state.op_queue[0].action {
+        app::Action::DeleteGuest { vmid } => {
+            assert_eq!(*vmid, target, "queued delete targets the highlighted guest");
+        }
+        other => panic!("expected a queued DeleteGuest, got {other:?}"),
+    }
+    // The reducer flips to the operation-queue view; rendering it in
+    // `step` above already asserted it doesn't panic.
+    assert_eq!(*state.current_view(), View::OperationQueue);
 }
