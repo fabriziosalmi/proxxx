@@ -36,10 +36,21 @@
 //!
 //! ## Updating the registry
 //!
-//! 1. Find the official upstream download URL + SHA-256.
+//! **Bumping an existing entry to a new point release is automated** —
+//! `scripts/repin-cloudimg.py` (run weekly by
+//! `.github/workflows/cloudimg-repin.yml`) fetches each distro's latest
+//! dated build + official checksum and opens a PR. You don't hand-edit
+//! `url` / `checksum` / `checksum_algorithm` / `version`.
+//!
+//! Adding a NEW distro (a new `id`, which is append-only) is still
+//! manual:
+//! 1. Find the official upstream **dated/immutable** URL (never a
+//!    `current`/`latest` symlink) + its checksum from the distro's
+//!    SHA256SUMS / SHA512SUMS / CHECKSUM sidecar.
 //! 2. Append a new [`CloudImg`] to [`REGISTRY`] below.
 //! 3. Update [`registry_has_entry_per_supported_distro`] in the
-//!    test module if you're tracking distro coverage explicitly.
+//!    test module, and add a discovery fn + `DISCOVERERS` entry in
+//!    `scripts/repin-cloudimg.py` so the new id stays fresh too.
 
 use anyhow::{Context, Result};
 use clap::Subcommand;

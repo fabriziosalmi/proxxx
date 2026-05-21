@@ -81,6 +81,26 @@ NOT legitimate:
 - "Clippy is annoying" → fix the lint or change the policy in Cargo.toml.
 - "The cluster is flaky" → fix the flake; flakiness is a real signal.
 
+## `repin-cloudimg.py` — cloud-image registry freshness
+
+Separate from the gate. `cloud-img download` pins each entry to a
+checksum, which forces a dated/immutable upstream URL — so the registry
+in `src/cli/cloudimg.rs` goes stale when a distro ships a point release.
+
+`scripts/repin-cloudimg.py` re-derives each distro's latest dated build
++ official checksum (Ubuntu/Fedora SHA-256, Debian/Alpine SHA-512) and
+patches the registry. Stdlib-only (urllib); no pip install.
+
+```sh
+scripts/repin-cloudimg.py --dry-run   # report drift, write nothing
+scripts/repin-cloudimg.py             # patch src/cli/cloudimg.rs in place
+```
+
+`.github/workflows/cloudimg-repin.yml` runs it weekly (Mon 05:11 UTC),
+validates the patch with `cargo test --lib cloudimg`, and opens a bump
+PR on drift. It never auto-merges — re-pinning a SHA is supply-chain-
+sensitive, so a human reviews the diff.
+
 ## Disabling
 
 Permanent (rare; e.g. CI runs the gate instead):
