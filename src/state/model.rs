@@ -53,6 +53,16 @@ pub struct ClusterState {
     /// pollute the TOML with empty `server=""`/`pool=""` lines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub storage: Vec<StorageDecl>,
+
+    /// Cluster backup (vzdump) jobs — `GET /cluster/backup`. Identity
+    /// is the `id` field. PVE autogenerates an id when none is given
+    /// on create, but it ALSO accepts a caller-supplied id — so a
+    /// declared state pins a stable `id` (e.g. `nightly-all`) and
+    /// re-apply is idempotent. The volatile `next-run` field is
+    /// deliberately NOT modelled (like storage's `digest`): it's
+    /// scheduler-computed, not desired state, and would churn the TOML.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub backup_jobs: Vec<BackupJobDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -139,6 +149,72 @@ const fn default_true() -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Companion to [`is_false`] — skip-serialize a bool that defaults to
+/// `true`, so the common case (an *enabled* backup job) omits the line.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// One cluster backup (vzdump) job — `GET /cluster/backup`. The `id`
+/// is the identity; everything else is value.
+///
+/// Modelled fields are the ones an operator manages declaratively.
+/// Deliberately NOT exported:
+/// * `next-run` — scheduler-computed (Unix epoch of the next fire),
+///   the backup-job analogue of storage's `digest`. Including it would
+///   churn the TOML on every export even when the job is unchanged.
+///
+/// Selector semantics: a job targets either ALL guests (`all = true`)
+/// or an explicit `vmid` CSV. The two are mutually exclusive in PVE;
+/// the apply layer sends whichever is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupJobDecl {
+    /// Job id — the identity. Stable across re-apply. Operators pick a
+    /// readable one (`nightly-all`, `weekly-prod`); PVE accepts it on
+    /// create instead of autogenerating.
+    pub id: String,
+    /// systemd-time schedule expression, e.g. `mon..fri 02:00`,
+    /// `*-*-* 03:30`.
+    pub schedule: String,
+    /// Target storage id (e.g. `local`, `pbs-prod`).
+    pub storage: String,
+    /// `snapshot` (default) | `stop` | `suspend`. Omitted from the
+    /// TOML when empty; the apply layer lets PVE default it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// Whether the job runs. Defaults to `true` (PVE's default on
+    /// create), so an enabled job omits the line; a disabled job
+    /// emits `enabled = false`.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// `true` = back up every guest. Mutually exclusive with `vmid`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub all: bool,
+    /// CSV of VMIDs when `all` is false.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub vmid: String,
+    /// Restrict to a single node by name. Empty = cluster-wide.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    /// Notify destination — single email address. Empty = no mail.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mailto: String,
+    /// `none` | `lzo` | `gzip` | `zstd`. Empty = PVE default (`zstd`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub compress: String,
+    /// Free-text job comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// vzdump notes template (`{{guestname}}`, `{{cluster}}`, …).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub notes_template: String,
+    /// Retention DSL: `keep-last=3,keep-daily=7,keep-monthly=12`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prune_backups: String,
 }
 
 /// One cluster-wide storage definition — `GET /storage`. The
@@ -243,6 +319,7 @@ mod tests {
             pools: vec![p],
             acl: vec![],
             storage: vec![],
+            backup_jobs: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         // No "comment = " line, no "members = " line — only poolid.
@@ -284,6 +361,7 @@ mod tests {
             }),
             acl: vec![],
             storage: vec![],
+            backup_jobs: vec![],
             pools: vec![
                 PoolDecl {
                     poolid: "p1".into(),
@@ -334,6 +412,7 @@ roleid = "PVEVMAdmin"
             pools: vec![],
             acl: vec![entry.clone()],
             storage: vec![],
+            backup_jobs: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
@@ -463,6 +542,7 @@ propagate = false
             pools: vec![],
             acl: vec![],
             storage: entries.clone(),
+            backup_jobs: vec![],
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");

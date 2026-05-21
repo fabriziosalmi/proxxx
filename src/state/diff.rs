@@ -23,6 +23,7 @@
 //! * ACL — `(path, kind, ugid, roleid)` 4-tuple, rendered as
 //!   `"<path>:<kind>/<ugid>/<roleid>"` for display
 //! * Storage — `storage` (the operator-chosen id)
+//! * Backup job — `id` (the job id, operator- or PVE-assigned)
 //!
 //! Update detection compares the full `*Decl` value with `PartialEq`
 //! — every non-identity field is part of the value. Touching any
@@ -32,7 +33,7 @@
 
 use serde::Serialize;
 
-use crate::state::model::{AclDecl, ClusterState, PoolDecl, StorageDecl};
+use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StorageDecl};
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
 /// self-evident; `Update` is "identity matches, value differs".
@@ -75,16 +76,17 @@ pub struct Change {
 /// to enforce `--prune` semantics.
 ///
 /// The output order is stable: changes for `pool` first, then `acl`,
-/// then `storage`, each family sorted by identity. Within a family
-/// the order is `Delete` (so apply-with-prune teardown runs before
-/// create), then `Update`, then `Create` — but the apply layer
-/// re-orders by dependency where needed.
+/// then `storage`, then `backup_job`, each family sorted by identity.
+/// Within a family the order is `Delete` (so apply-with-prune teardown
+/// runs before create), then `Update`, then `Create` — but the apply
+/// layer re-orders by dependency where needed.
 #[must_use]
 pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     let mut out = Vec::new();
     diff_pools(&declared.pools, &live.pools, &mut out);
     diff_acl(&declared.acl, &live.acl, &mut out);
     diff_storage(&declared.storage, &live.storage, &mut out);
+    diff_backup_jobs(&declared.backup_jobs, &live.backup_jobs, &mut out);
     out
 }
 
@@ -271,6 +273,58 @@ fn diff_storage(declared: &[StorageDecl], live: &[StorageDecl], out: &mut Vec<Ch
     }
 }
 
+fn diff_backup_jobs(declared: &[BackupJobDecl], live: &[BackupJobDecl], out: &mut Vec<Change>) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &BackupJobDecl> = live.iter().map(|j| (j.id.as_str(), j)).collect();
+    let decl_by: HashMap<&str, &BackupJobDecl> =
+        declared.iter().map(|j| (j.id.as_str(), j)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "backup_job",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|live_j| *live_j != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "backup_job",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "backup_job",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
 /// Human-readable single-line summary of one change. Used by the
 /// CLI's default output mode. Keep it grep-friendly:
 /// `<sigil> <resource>: <identity>`.
@@ -291,7 +345,7 @@ pub fn summary_line(c: &Change) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::model::{AclDecl, ClusterState, PoolDecl, StorageDecl};
+    use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StorageDecl};
 
     fn empty() -> ClusterState {
         ClusterState::default()
@@ -501,9 +555,10 @@ mod tests {
 
     #[test]
     fn diff_multi_family_emits_in_order() {
-        // Spread changes across pool, acl, storage; pinning the
-        // emit order: pool → acl → storage (matches `ClusterState`
-        // field order, matches the iteration order in `diff()`).
+        // Spread changes across pool, acl, storage, backup_job;
+        // pinning the emit order: pool → acl → storage → backup_job
+        // (matches `ClusterState` field order, matches the iteration
+        // order in `diff()`).
         let declared = ClusterState {
             pools: vec![PoolDecl {
                 poolid: "new-pool".into(),
@@ -523,13 +578,141 @@ mod tests {
                 path: "/srv/iso".into(),
                 ..StorageDecl::default()
             }],
+            backup_jobs: vec![BackupJobDecl {
+                id: "new-job".into(),
+                schedule: "daily".into(),
+                storage: "local".into(),
+                ..BackupJobDecl::default()
+            }],
             ..ClusterState::default()
         };
         let d = diff(&declared, &empty());
-        assert_eq!(d.len(), 3);
+        assert_eq!(d.len(), 4);
         assert_eq!(d[0].resource, "pool");
         assert_eq!(d[1].resource, "acl");
         assert_eq!(d[2].resource, "storage");
+        assert_eq!(d[3].resource, "backup_job");
+    }
+
+    #[test]
+    fn diff_backup_job_create() {
+        let declared = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "nightly".into(),
+                schedule: "*-*-* 02:00".into(),
+                storage: "pbs".into(),
+                all: true,
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &empty());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].resource, "backup_job");
+        assert_eq!(d[0].identity, "nightly");
+        assert!(d[0].before.is_none());
+        assert!(d[0].after.is_some());
+    }
+
+    #[test]
+    fn diff_backup_job_delete() {
+        let live = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "orphan".into(),
+                schedule: "daily".into(),
+                storage: "local".into(),
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&empty(), &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Delete);
+        assert_eq!(d[0].resource, "backup_job");
+        assert_eq!(d[0].identity, "orphan");
+        assert!(d[0].before.is_some());
+        assert!(d[0].after.is_none());
+    }
+
+    #[test]
+    fn diff_backup_job_update_on_schedule_change() {
+        // Same id, different schedule → exactly one Update with the
+        // live value in `before` and declared in `after`.
+        let declared = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "j1".into(),
+                schedule: "*-*-* 04:00".into(),
+                storage: "local".into(),
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "j1".into(),
+                schedule: "*-*-* 02:00".into(),
+                storage: "local".into(),
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        assert_eq!(d[0].identity, "j1");
+        let before = d[0].before.as_ref().unwrap();
+        let after = d[0].after.as_ref().unwrap();
+        assert_eq!(before.get("schedule").unwrap(), "*-*-* 02:00");
+        assert_eq!(after.get("schedule").unwrap(), "*-*-* 04:00");
+    }
+
+    #[test]
+    fn diff_backup_job_update_on_enabled_flag() {
+        // Flipping `enabled` is the most common drift (operator pauses
+        // a job in the UI); pin that it's detected as an Update.
+        let declared = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "j1".into(),
+                schedule: "daily".into(),
+                storage: "local".into(),
+                enabled: false,
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            backup_jobs: vec![BackupJobDecl {
+                id: "j1".into(),
+                schedule: "daily".into(),
+                storage: "local".into(),
+                enabled: true,
+                ..BackupJobDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        assert_eq!(d[0].resource, "backup_job");
+    }
+
+    #[test]
+    fn diff_identical_backup_jobs_produces_no_change() {
+        let j = BackupJobDecl {
+            id: "j1".into(),
+            schedule: "*-*-* 03:00".into(),
+            storage: "pbs".into(),
+            all: true,
+            prune_backups: "keep-last=7".into(),
+            ..BackupJobDecl::default()
+        };
+        let s = ClusterState {
+            backup_jobs: vec![j],
+            ..ClusterState::default()
+        };
+        let d = diff(&s, &s);
+        assert!(d.is_empty());
     }
 
     #[test]

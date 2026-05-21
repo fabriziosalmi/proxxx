@@ -18,8 +18,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::types::{AclEntry, ApiVersion, Pool, PoolDetails, PoolMember, StorageDefinition};
-use crate::state::model::{AclDecl, ClusterState, PoolDecl, StateMeta, StorageDecl};
+use crate::api::types::{
+    AclEntry, ApiVersion, BackupJob, Pool, PoolDetails, PoolMember, StorageDefinition,
+};
+use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StateMeta, StorageDecl};
 
 /// Which resource families to export. Parsed from the CLI `--resource`
 /// argument. New variants are added per the ladder in epic #74.
@@ -28,6 +30,7 @@ pub enum Resource {
     Pools,
     Acl,
     Storage,
+    BackupJobs,
 }
 
 impl Resource {
@@ -40,11 +43,24 @@ impl Resource {
             "pools" => Ok(vec![Self::Pools]),
             "acl" => Ok(vec![Self::Acl]),
             "storage" => Ok(vec![Self::Storage]),
-            "all" => Ok(vec![Self::Pools, Self::Acl, Self::Storage]),
+            "backup-jobs" => Ok(vec![Self::BackupJobs]),
+            "all" => Ok(Self::all()),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | storage | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
             ),
         }
+    }
+
+    /// Every supported resource family, in canonical (struct-field)
+    /// order. The single source of truth for "all families" — used by
+    /// `--resource all` AND by `state diff` / `state apply` to build
+    /// the live snapshot they compare against. Adding a family here
+    /// wires it into the full `GitOps` loop in one place, so the diff/
+    /// apply live-fetch can never silently omit a family (which would
+    /// make that family's declared entries diff as perpetual creates).
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        vec![Self::Pools, Self::Acl, Self::Storage, Self::BackupJobs]
     }
 
     /// Human-readable name for logs / error messages.
@@ -54,6 +70,7 @@ impl Resource {
             Self::Pools => "pools",
             Self::Acl => "acl",
             Self::Storage => "storage",
+            Self::BackupJobs => "backup-jobs",
         }
     }
 }
@@ -72,6 +89,7 @@ pub trait StateReadView: Send + Sync {
     async fn get_pool_view(&self, poolid: &str) -> Result<PoolDetails>;
     async fn list_acl_view(&self) -> Result<Vec<AclEntry>>;
     async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>>;
+    async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -91,6 +109,9 @@ where
     }
     async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>> {
         crate::api::ProxmoxGateway::list_cluster_storages(self).await
+    }
+    async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>> {
+        crate::api::ProxmoxGateway::list_backup_jobs(self).await
     }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
@@ -121,6 +142,7 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         pools: Vec::new(),
         acl: Vec::new(),
         storage: Vec::new(),
+        backup_jobs: Vec::new(),
     };
 
     for r in resources {
@@ -137,6 +159,11 @@ pub async fn export_state<C: StateReadView + ?Sized>(
                 state.storage = export_storage(client)
                     .await
                     .with_context(|| "exporting storage")?;
+            }
+            Resource::BackupJobs => {
+                state.backup_jobs = export_backup_jobs(client)
+                    .await
+                    .with_context(|| "exporting backup-jobs")?;
             }
         }
     }
@@ -246,6 +273,46 @@ async fn export_storage<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<Sto
             username: s.username,
             vgname: s.vgname,
             thinpool: s.thinpool,
+        })
+        .collect())
+}
+
+/// Read every scheduled (recurring) backup job and project to
+/// `Vec<BackupJobDecl>`. Sorted by `id` (the operator/PVE-assigned
+/// job id, unique cluster-wide) for diff-stability.
+///
+/// Two PVE response fields are deliberately dropped:
+/// * `next-run` — scheduler-computed epoch of the next fire. The
+///   backup-job analogue of storage's `digest`: pure derived state
+///   that would churn the TOML on every export even when the job
+///   hasn't changed.
+/// * `mailnotification` — deprecated in PVE 8+ in favour of the
+///   notification-target system; not a field operators manage
+///   declaratively here, so it stays unmanaged rather than being
+///   round-tripped (and possibly rejected) on apply.
+async fn export_backup_jobs<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<BackupJobDecl>> {
+    let mut jobs = client
+        .list_backup_jobs_view()
+        .await
+        .context("listing backup jobs")?;
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    Ok(jobs
+        .into_iter()
+        .map(|j| BackupJobDecl {
+            id: j.id,
+            schedule: j.schedule,
+            storage: j.storage,
+            mode: j.mode,
+            enabled: j.enabled,
+            all: j.all,
+            vmid: j.vmid,
+            node: j.node,
+            mailto: j.mailto,
+            compress: j.compress,
+            comment: j.comment,
+            notes_template: j.notes_template,
+            prune_backups: j.prune_backups,
         })
         .collect())
 }
@@ -408,7 +475,53 @@ mod tests {
         // a `--resource all` export hits resources in a deterministic
         // sequence regardless of input ordering.
         let v = Resource::parse("all").unwrap();
-        assert_eq!(v, vec![Resource::Pools, Resource::Acl, Resource::Storage]);
+        assert_eq!(
+            v,
+            vec![
+                Resource::Pools,
+                Resource::Acl,
+                Resource::Storage,
+                Resource::BackupJobs
+            ]
+        );
+        // `parse("all")` and `Resource::all()` must stay in lockstep —
+        // the latter is what `state diff` / `state apply` use to build
+        // the live snapshot. If they diverge, a family could be diffed
+        // but never fetched (perpetual-create bug).
+        assert_eq!(v, Resource::all());
+    }
+
+    #[test]
+    fn resource_all_includes_every_variant() {
+        // Guards the diff/apply live-fetch set: every family the
+        // exporter knows must be in `all()`, or its declared entries
+        // would diff as perpetual creates (they'd never appear in the
+        // live snapshot diff/apply compares against).
+        let all = Resource::all();
+        for r in [
+            Resource::Pools,
+            Resource::Acl,
+            Resource::Storage,
+            Resource::BackupJobs,
+        ] {
+            assert!(all.contains(&r), "Resource::all() is missing {r:?}");
+        }
+    }
+
+    #[test]
+    fn resource_parse_accepts_backup_jobs_hyphenated() {
+        // The CLI value is hyphenated (`backup-jobs`), matching the
+        // `as_str()` round-trip and PVE's own `/cluster/backup`
+        // resource. Case-insensitive like the others.
+        assert_eq!(
+            Resource::parse("backup-jobs").unwrap(),
+            vec![Resource::BackupJobs]
+        );
+        assert_eq!(
+            Resource::parse("Backup-Jobs").unwrap(),
+            vec![Resource::BackupJobs]
+        );
+        assert_eq!(Resource::BackupJobs.as_str(), "backup-jobs");
     }
 
     #[test]
@@ -434,6 +547,7 @@ mod tests {
         details: std::collections::HashMap<String, PoolDetails>,
         acl: Vec<AclEntry>,
         storage: Vec<StorageDefinition>,
+        backup_jobs: Vec<BackupJob>,
     }
 
     #[async_trait]
@@ -452,6 +566,9 @@ mod tests {
         }
         async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>> {
             Ok(self.storage.clone())
+        }
+        async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>> {
+            Ok(self.backup_jobs.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {
@@ -774,5 +891,81 @@ mod tests {
             !toml_str.contains("abc123"),
             "digest value must not survive export, got:\n{toml_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn export_backup_jobs_sorts_by_id() {
+        // PVE's `/cluster/backup` order is creation order; the export
+        // must canonicalise to alphabetical by `id` so the TOML is
+        // byte-stable across runs.
+        let mut fake = FakeStateView::default();
+        fake.backup_jobs = vec![
+            BackupJob {
+                id: "weekly-prod".into(),
+                schedule: "sun 01:00".into(),
+                storage: "pbs".into(),
+                ..Default::default()
+            },
+            BackupJob {
+                id: "daily-all".into(),
+                schedule: "*-*-* 02:00".into(),
+                storage: "local".into(),
+                ..Default::default()
+            },
+            BackupJob {
+                id: "hourly-db".into(),
+                schedule: "*-*-* *:00".into(),
+                storage: "pbs".into(),
+                ..Default::default()
+            },
+        ];
+        let out = export_backup_jobs(&fake).await.expect("export");
+        let ids: Vec<&str> = out.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, vec!["daily-all", "hourly-db", "weekly-prod"]);
+    }
+
+    #[tokio::test]
+    async fn export_backup_jobs_drops_next_run_and_mailnotification() {
+        // `next-run` is scheduler-derived (would churn the TOML) and
+        // `mailnotification` is deprecated/unmanaged — neither is a
+        // `BackupJobDecl` field, so neither may survive the export.
+        let mut fake = FakeStateView::default();
+        fake.backup_jobs = vec![BackupJob {
+            id: "nightly".into(),
+            schedule: "*-*-* 03:00".into(),
+            storage: "local".into(),
+            mailnotification: "always".into(),
+            next_run: 1_900_000_000,
+            ..Default::default()
+        }];
+        let out = export_backup_jobs(&fake).await.expect("export");
+        assert_eq!(out.len(), 1);
+        let toml_str = toml::to_string(&out[0]).expect("serialize");
+        assert!(
+            !toml_str.contains("next") && !toml_str.contains("1900000000"),
+            "next-run must not survive export, got:\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("mailnotification") && !toml_str.contains("always"),
+            "mailnotification must not survive export, got:\n{toml_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_backup_jobs_preserves_enabled_and_all_selectors() {
+        // The two booleans carry real intent: a disabled job and the
+        // `all`-guests selector. Pin that both survive the projection.
+        let mut fake = FakeStateView::default();
+        fake.backup_jobs = vec![BackupJob {
+            id: "j".into(),
+            schedule: "daily".into(),
+            storage: "local".into(),
+            enabled: false,
+            all: true,
+            ..Default::default()
+        }];
+        let out = export_backup_jobs(&fake).await.expect("export");
+        assert!(!out[0].enabled, "disabled flag must survive");
+        assert!(out[0].all, "all-guests selector must survive");
     }
 }

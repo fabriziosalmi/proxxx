@@ -19,6 +19,7 @@
 //! | [`StateRisk::StorageDeleteShared`] | Severe — shared storages typically host live guest disks. |
 //! | [`StateRisk::StoragePropertyChange { what }`] | Warning — content-list or path changes can break running guests. |
 //! | [`StateRisk::AclPropagateFlip`]   | Warning — `propagate` change cascades to every descendant path. |
+//! | [`StateRisk::BackupJobDelete`]    | Warning — guests silently stop being backed up; nothing breaks now, the safety net just disappears. |
 //! | [`StateRisk::BulkChangeCount { n }`] | Notice → Warning if `n ≥ 10`, Severe if `n ≥ 50` (very large batches = high attention cost). |
 //!
 //! ## Decision contract
@@ -82,6 +83,11 @@ pub enum StateRisk {
         new_value: bool,
     },
 
+    /// Delete of a scheduled backup job. The guests it covered stop
+    /// being backed up — a silent loss of data protection (no error,
+    /// no immediate breakage, just an absent safety net).
+    BackupJobDelete { id: String },
+
     /// Very-large-batch warning. Increases attention cost
     /// proportionally; defer with `--allow-risk` if intentional.
     BulkChangeCount { n: usize },
@@ -97,7 +103,8 @@ impl StateRisk {
             | Self::StorageDeleteShared { .. } => RiskLevel::Severe,
             Self::StoragePropertyChange { .. }
             | Self::AclPropagateFlip { .. }
-            | Self::AclDeleteAuditor { .. } => RiskLevel::Warning,
+            | Self::AclDeleteAuditor { .. }
+            | Self::BackupJobDelete { .. } => RiskLevel::Warning,
             Self::BulkChangeCount { n } => {
                 if *n >= 50 {
                     RiskLevel::Severe
@@ -144,6 +151,10 @@ impl StateRisk {
             } => format!(
                 "ACL grant on `{path}` for `{ugid}`: propagate → {new_value} — \
                  cascades to every descendant path"
+            ),
+            Self::BackupJobDelete { id } => format!(
+                "delete backup job `{id}` — the guests it covered will \
+                 silently stop being backed up"
             ),
             Self::BulkChangeCount { n } => {
                 format!("{n} changes in one apply — attention cost proportional")
@@ -273,6 +284,14 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
                 }
             }
         }
+        (ChangeKind::Delete, "backup_job") => {
+            // Deleting a backup job is silent data-protection loss:
+            // no error, nothing breaks now, the covered guests just
+            // stop being backed up. Always warn (identity is the id).
+            out.push(StateRisk::BackupJobDelete {
+                id: change.identity.clone(),
+            });
+        }
         _ => {}
     }
     out
@@ -394,6 +413,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            backup_jobs: vec![],
         }
     }
 
@@ -488,6 +508,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn backup_job_delete_is_warning() {
+        // Deleting a backup job is silent data-protection loss — it
+        // must surface as a Warning even though the live lookup finds
+        // nothing operationally "broken".
+        let live = sample_live();
+        let changes = vec![delete_change("backup_job", "nightly-all")];
+        let risks = assess(&changes, &live);
+        assert_eq!(risks.len(), 1);
+        assert_eq!(risks[0].level(), RiskLevel::Warning);
+        assert!(matches!(&risks[0], StateRisk::BackupJobDelete { id } if id == "nightly-all"));
+    }
+
+    #[test]
+    fn backup_job_create_and_update_are_clean() {
+        // Adding or editing a job is not a risk at this layer — only
+        // deletion (the safety-net removal) is flagged.
+        let live = sample_live();
+        let create = Change {
+            kind: ChangeKind::Create,
+            resource: "backup_job",
+            identity: "new".to_string(),
+            before: None,
+            after: Some(serde_json::json!({"id": "new"})),
+        };
+        let update = Change {
+            kind: ChangeKind::Update,
+            resource: "backup_job",
+            identity: "new".to_string(),
+            before: Some(serde_json::json!({"schedule": "daily"})),
+            after: Some(serde_json::json!({"schedule": "weekly"})),
+        };
+        assert!(assess(&[create], &live).is_empty());
+        assert!(assess(&[update], &live).is_empty());
     }
 
     #[test]

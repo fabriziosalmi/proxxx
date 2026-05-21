@@ -24,13 +24,14 @@
 //! Keeping the gate in an outer layer is why this module stays a clean
 //! pure-dispatch unit.
 //!
-//! ## What apply supports today (per epic #74 PR 5)
+//! ## What apply supports today (per epic #74)
 //!
 //! | Resource | Create | Update | Delete |
 //! | :--- | :---: | :---: | :---: |
 //! | Pool | ✓ | ✓ (comment + membership diff) | ✓ |
 //! | ACL | ✓ | ✓ (delete + recreate with new propagate) | ✓ |
 //! | Storage | ✓ | ✓ (mutable fields only) | ✓ |
+//! | Backup job | ✓ | ✓ (all mutable fields) | ✓ |
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -38,7 +39,7 @@ use serde::Serialize;
 
 use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
-use crate::state::model::{AclDecl, PoolDecl, StorageDecl};
+use crate::state::model::{AclDecl, BackupJobDecl, PoolDecl, StorageDecl};
 
 /// Options controlling apply behaviour.
 #[derive(Debug, Clone, Copy, Default)]
@@ -128,6 +129,11 @@ pub trait StateWriteView: Send + Sync {
         params: &[(&str, &str)],
     ) -> Result<()>;
     async fn delete_cluster_storage_view(&self, storage: &str) -> Result<()>;
+
+    // ── Backup-job surface ────────────────────────────────
+    async fn create_backup_job_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_backup_job_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_backup_job_view(&self, id: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -177,6 +183,16 @@ where
     ) -> Result<()> {
         crate::api::ProxmoxGateway::update_cluster_storage(self, storage, params).await
     }
+    async fn create_backup_job_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_backup_job(self, params).await
+    }
+    async fn update_backup_job_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_backup_job(self, id, params).await
+    }
+    async fn delete_backup_job_view(&self, id: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_backup_job(self, id).await
+    }
+
     async fn delete_cluster_storage_view(&self, storage: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_cluster_storage(self, storage).await
     }
@@ -246,6 +262,9 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("storage", ChangeKind::Create) => apply_storage_create(client, change).await,
         ("storage", ChangeKind::Update) => apply_storage_update(client, change).await,
         ("storage", ChangeKind::Delete) => apply_storage_delete(client, change).await,
+        ("backup_job", ChangeKind::Create) => apply_backupjob_create(client, change).await,
+        ("backup_job", ChangeKind::Update) => apply_backupjob_update(client, change).await,
+        ("backup_job", ChangeKind::Delete) => apply_backupjob_delete(client, change).await,
         (resource, kind) => Err(anyhow::anyhow!(
             "unhandled change shape: resource={resource} kind={kind:?}"
         )),
@@ -573,6 +592,94 @@ async fn apply_storage_delete<C: StateWriteView + ?Sized>(
     client.delete_cluster_storage_view(&decl.storage).await
 }
 
+// ── Backup job ───────────────────────────────────────────────
+
+/// Build the `POST`/`PUT /cluster/backup` param set from a decl.
+/// `include_id` is true for create (PVE accepts a caller id) and
+/// false for update (the id is the URL segment, not a body param).
+fn backup_job_params(decl: &BackupJobDecl, include_id: bool) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    if include_id {
+        params.push(("id".to_string(), decl.id.clone()));
+    }
+    push_optional(&mut params, "schedule", &decl.schedule);
+    push_optional(&mut params, "storage", &decl.storage);
+    push_optional(&mut params, "mode", &decl.mode);
+    // `enabled` is always sent (0/1) so an Update that flips it to
+    // false actually disables the job rather than leaving it enabled.
+    params.push((
+        "enabled".to_string(),
+        if decl.enabled { "1" } else { "0" }.to_string(),
+    ));
+    // `all` and `vmid` are mutually exclusive in PVE — send whichever
+    // the decl set. `all = true` wins; otherwise the explicit vmid CSV.
+    if decl.all {
+        params.push(("all".to_string(), "1".to_string()));
+    } else {
+        push_optional(&mut params, "vmid", &decl.vmid);
+    }
+    push_optional(&mut params, "node", &decl.node);
+    push_optional(&mut params, "mailto", &decl.mailto);
+    push_optional(&mut params, "compress", &decl.compress);
+    push_optional(&mut params, "comment", &decl.comment);
+    // PVE serialises these two with hyphens.
+    push_optional(&mut params, "notes-template", &decl.notes_template);
+    push_optional(&mut params, "prune-backups", &decl.prune_backups);
+    params
+}
+
+async fn apply_backupjob_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: BackupJobDecl = serde_json::from_value(
+        change
+            .after
+            .clone()
+            .context("backup_job create change missing `after` value")?,
+    )
+    .context("decoding BackupJobDecl from change.after")?;
+    let params = backup_job_params(&decl, true);
+    let borrowed: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    client.create_backup_job_view(&borrowed).await
+}
+
+async fn apply_backupjob_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: BackupJobDecl = serde_json::from_value(
+        change
+            .after
+            .clone()
+            .context("backup_job update change missing `after` value")?,
+    )
+    .context("decoding BackupJobDecl from change.after")?;
+    let params = backup_job_params(&after, false);
+    let borrowed: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    client.update_backup_job_view(&after.id, &borrowed).await
+}
+
+async fn apply_backupjob_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: BackupJobDecl = serde_json::from_value(
+        change
+            .before
+            .clone()
+            .context("backup_job delete change missing `before` value")?,
+    )
+    .context("decoding BackupJobDecl from change.before")?;
+    client.delete_backup_job_view(&decl.id).await
+}
+
 fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
     if !value.is_empty() {
         params.push((key.to_string(), value.to_string()));
@@ -684,6 +791,16 @@ mod tests {
         }
         async fn delete_cluster_storage_view(&self, storage: &str) -> Result<()> {
             self.record(format!("delete_storage({storage})")).await
+        }
+        async fn create_backup_job_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_backup_job {params:?}")).await
+        }
+        async fn update_backup_job_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("update_backup_job({id}) {params:?}"))
+                .await
+        }
+        async fn delete_backup_job_view(&self, id: &str) -> Result<()> {
+            self.record(format!("delete_backup_job({id})")).await
         }
     }
 
@@ -839,5 +956,150 @@ mod tests {
         assert!(matches!(out[0].result, ApplyResult::Applied));
         assert!(matches!(out[1].result, ApplyResult::Failed { .. }));
         assert!(matches!(out[2].result, ApplyResult::Applied));
+    }
+
+    fn backup_job_change(kind: ChangeKind, decl: &BackupJobDecl) -> Change {
+        let v = serde_json::to_value(decl).ok();
+        Change {
+            kind,
+            resource: "backup_job",
+            identity: decl.id.clone(),
+            before: if kind == ChangeKind::Delete {
+                v.clone()
+            } else {
+                None
+            },
+            after: if kind == ChangeKind::Delete { None } else { v },
+        }
+    }
+
+    #[test]
+    fn backup_job_params_create_includes_id_update_omits_it() {
+        let decl = BackupJobDecl {
+            id: "nightly".into(),
+            schedule: "*-*-* 02:00".into(),
+            storage: "pbs".into(),
+            ..BackupJobDecl::default()
+        };
+        let create = backup_job_params(&decl, true);
+        assert!(create.iter().any(|(k, v)| k == "id" && v == "nightly"));
+        let update = backup_job_params(&decl, false);
+        assert!(
+            !update.iter().any(|(k, _)| k == "id"),
+            "id is the URL segment on update, never a body param"
+        );
+    }
+
+    #[test]
+    fn backup_job_params_always_sends_enabled_and_hyphenates_keys() {
+        // `enabled` must always be present (0/1) so an Update that
+        // disables a job actually takes effect. notes-template /
+        // prune-backups must be hyphenated to match PVE's param names.
+        let decl = BackupJobDecl {
+            id: "j".into(),
+            schedule: "daily".into(),
+            storage: "local".into(),
+            enabled: false,
+            notes_template: "{{guestname}}".into(),
+            prune_backups: "keep-last=3".into(),
+            ..BackupJobDecl::default()
+        };
+        let p = backup_job_params(&decl, true);
+        assert!(p.iter().any(|(k, v)| k == "enabled" && v == "0"));
+        assert!(p
+            .iter()
+            .any(|(k, v)| k == "notes-template" && v == "{{guestname}}"));
+        assert!(p
+            .iter()
+            .any(|(k, v)| k == "prune-backups" && v == "keep-last=3"));
+        assert!(!p.iter().any(|(k, _)| k == "notes_template"));
+    }
+
+    #[test]
+    fn backup_job_params_all_and_vmid_are_mutually_exclusive() {
+        // `all = true` sends `all=1` and suppresses any vmid CSV.
+        let all = BackupJobDecl {
+            id: "j".into(),
+            all: true,
+            vmid: "100,200".into(),
+            ..BackupJobDecl::default()
+        };
+        let p = backup_job_params(&all, true);
+        assert!(p.iter().any(|(k, v)| k == "all" && v == "1"));
+        assert!(
+            !p.iter().any(|(k, _)| k == "vmid"),
+            "vmid must be suppressed when all=true"
+        );
+
+        // all = false sends the explicit vmid list, no `all` key.
+        let list = BackupJobDecl {
+            id: "j".into(),
+            all: false,
+            vmid: "100,200".into(),
+            ..BackupJobDecl::default()
+        };
+        let p2 = backup_job_params(&list, true);
+        assert!(p2.iter().any(|(k, v)| k == "vmid" && v == "100,200"));
+        assert!(!p2.iter().any(|(k, _)| k == "all"));
+    }
+
+    #[tokio::test]
+    async fn backup_job_create_dispatches_to_create_view() {
+        let c = RecordingClient::default();
+        let decl = BackupJobDecl {
+            id: "nightly".into(),
+            schedule: "*-*-* 02:00".into(),
+            storage: "pbs".into(),
+            all: true,
+            ..BackupJobDecl::default()
+        };
+        let out = apply(
+            &c,
+            vec![backup_job_change(ChangeKind::Create, &decl)],
+            ApplyOptions::default(),
+        )
+        .await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let lines = c.lines().await;
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("create_backup_job"));
+        assert!(lines[0].contains("\"id\", \"nightly\""));
+    }
+
+    #[tokio::test]
+    async fn backup_job_delete_dispatches_only_with_prune() {
+        let decl = BackupJobDecl {
+            id: "old".into(),
+            ..BackupJobDecl::default()
+        };
+        // Without prune: skipped.
+        let c = RecordingClient::default();
+        let out = apply(
+            &c,
+            vec![backup_job_change(ChangeKind::Delete, &decl)],
+            ApplyOptions::default(),
+        )
+        .await;
+        assert!(matches!(
+            out[0].result,
+            ApplyResult::Skipped {
+                reason: SkipReason::PrunePolicy
+            }
+        ));
+        assert!(c.lines().await.is_empty());
+
+        // With prune: fires delete_backup_job(old).
+        let c2 = RecordingClient::default();
+        let out2 = apply(
+            &c2,
+            vec![backup_job_change(ChangeKind::Delete, &decl)],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out2[0].result, ApplyResult::Applied));
+        assert_eq!(c2.lines().await, vec!["delete_backup_job(old)".to_string()]);
     }
 }
