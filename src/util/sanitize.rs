@@ -52,6 +52,33 @@ const fn is_safe_char(c: char) -> bool {
     }
 }
 
+/// Truncate `s` to at most `max_chars` characters, appending `…` when
+/// truncation actually occurred.
+///
+/// Operates on `char` boundaries, so it never panics on multi-byte
+/// UTF-8 — unlike the naive `&s[..n]` byte-slice, which panics when
+/// byte `n` lands inside a multi-byte character. That naive form was a
+/// real crash vector: PVE-supplied snapshot descriptions and execution-
+/// error text in any non-ASCII locale (CJK, Cyrillic, emoji) routinely
+/// straddle an arbitrary byte offset.
+///
+/// Note: counts Unicode scalar values, not display columns. A string of
+/// wide CJK glyphs may render wider than `max_chars` cells; that's an
+/// acceptable approximation for the log/label call sites — the contract
+/// here is "bounded length, never panic", and ratatui clips the visual
+/// overflow at the widget boundary anyway.
+#[must_use]
+pub fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    // If the iterator still yields, we dropped at least one char.
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +147,52 @@ mod tests {
         let s = sanitize_display("");
         assert!(matches!(s, Cow::Borrowed(_)));
         assert_eq!(s, "");
+    }
+
+    // ── truncate_ellipsis ──────────────────────────────────────
+
+    #[test]
+    fn truncate_shorter_than_max_is_unchanged() {
+        assert_eq!(truncate_ellipsis("vm-01", 40), "vm-01");
+    }
+
+    #[test]
+    fn truncate_exactly_max_has_no_ellipsis() {
+        assert_eq!(truncate_ellipsis("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_longer_gets_ellipsis() {
+        assert_eq!(truncate_ellipsis("abcdef", 5), "abcde…");
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_multibyte_boundary() {
+        // Regression: the naive `&s[..n]` byte slice panicked when byte
+        // `n` split a multi-byte char. Here every char is 2 bytes (µ) or
+        // 3 (CJK) or 4 (emoji); truncating at a char count that would
+        // land mid-byte under the old code must not panic.
+        let cyrillic = "Тестовый снимок производства"; // 2-byte chars
+        let _ = truncate_ellipsis(cyrillic, 10);
+        let cjk = "本番環境のスナップショットの説明"; // 3-byte chars
+        assert_eq!(truncate_ellipsis(cjk, 3), "本番環…");
+        let emoji = "🚀🔥💾🐧🦀"; // 4-byte chars
+        assert_eq!(truncate_ellipsis(emoji, 2), "🚀🔥…");
+        // The original crash repro: a 200-char budget against a string
+        // whose 200th *byte* is mid-char.
+        let mixed = "x".repeat(199) + "µ" + &"y".repeat(50);
+        let _ = truncate_ellipsis(&mixed, 200); // must not panic
+    }
+
+    #[test]
+    fn truncate_empty_is_empty() {
+        assert_eq!(truncate_ellipsis("", 10), "");
+        assert_eq!(truncate_ellipsis("", 0), "");
+    }
+
+    #[test]
+    fn truncate_zero_max() {
+        assert_eq!(truncate_ellipsis("abc", 0), "…");
     }
 }
 
@@ -223,6 +296,40 @@ mod proptests {
             let out_non_ascii: String =
                 out.chars().filter(|c| (*c as u32) >= 0x80).collect();
             prop_assert_eq!(in_non_ascii, out_non_ascii);
+        }
+
+        /// `truncate_ellipsis` NEVER panics for any (string, max) pair.
+        /// This is the core regression contract — the naive `&s[..n]`
+        /// byte slice it replaces panicked whenever `n` split a
+        /// multi-byte char. The result is always valid UTF-8 (guaranteed
+        /// by the `String` return type) and holds at most `max + 1`
+        /// chars (the body plus the ellipsis).
+        #[test]
+        fn truncate_never_panics_and_bounds_length(
+            s in any::<String>(),
+            max in 0usize..512,
+        ) {
+            let out = truncate_ellipsis(&s, max);
+            let out_chars = out.chars().count();
+            // Either we kept everything (no ellipsis, ≤ max chars)…
+            let kept_all = !out.ends_with('…') && out_chars <= max;
+            // …or we truncated (ellipsis present, body is exactly `max`
+            // chars so total is max + 1).
+            let truncated = out.ends_with('…') && out_chars == max + 1;
+            // Edge: max == 0 always yields just "…" (1 char).
+            let zero_case = max == 0 && out == "…" && s.chars().next().is_some();
+            prop_assert!(
+                kept_all || truncated || zero_case,
+                "unexpected truncate output {out:?} for max={max} input len {}",
+                s.chars().count()
+            );
+        }
+
+        /// Truncating a string already within budget is the identity.
+        #[test]
+        fn truncate_within_budget_is_identity(s in "\\PC{0,64}", pad in 0usize..64) {
+            let max = s.chars().count() + pad;
+            prop_assert_eq!(truncate_ellipsis(&s, max), s);
         }
     }
 }

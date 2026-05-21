@@ -338,9 +338,8 @@ fn format_duration(secs: u64) -> String {
 }
 
 fn trim_to(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
-    }
+    // Char-boundary safe — snapshot descriptions are PVE-supplied and
+    // frequently non-ASCII; a naive `&s[..max]` byte slice panics when
+    // byte `max` splits a multi-byte char, crashing the whole TUI.
+    crate::util::sanitize::truncate_ellipsis(s, max)
 }

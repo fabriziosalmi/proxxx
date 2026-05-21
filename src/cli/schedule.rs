@@ -156,13 +156,17 @@ pub fn parse_interval(s: &str) -> Result<u64> {
     if s.is_empty() {
         anyhow::bail!("empty interval");
     }
-    let (num_str, suffix) = s.split_at(s.len() - 1);
-    let (n_str, mult): (&str, u64) = match suffix {
-        "s" => (num_str, 1),
-        "m" => (num_str, 60),
-        "h" => (num_str, 3600),
-        "d" => (num_str, 86400),
-        "w" => (num_str, 86400 * 7),
+    // Match on the trailing CHAR, not a byte split. `split_at(len-1)`
+    // panics when the last char is multi-byte (e.g. `5µ`); the suffix
+    // units are all ASCII, so byte-slicing `len-1` is only safe inside
+    // the matched branches where the last char is provably 1 byte.
+    let last = s.chars().next_back().unwrap_or('\0');
+    let (n_str, mult): (&str, u64) = match last {
+        's' => (&s[..s.len() - 1], 1),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86400),
+        'w' => (&s[..s.len() - 1], 86400 * 7),
         _ => (s, 1),
     };
     let n: u64 = n_str.parse().map_err(|_| {
@@ -449,6 +453,16 @@ mod tests {
         assert!(parse_interval("").is_err());
         assert!(parse_interval("forever").is_err());
         assert!(parse_interval("abc-def").is_err());
+    }
+
+    #[test]
+    fn parse_interval_does_not_panic_on_multibyte_suffix() {
+        // Regression: `split_at(len-1)` panicked when the trailing char
+        // was multi-byte. These must return Err cleanly, never panic.
+        assert!(parse_interval("5µ").is_err());
+        assert!(parse_interval("10€").is_err());
+        assert!(parse_interval("3🔥").is_err());
+        assert!(parse_interval("неделя").is_err());
     }
 
     #[test]
