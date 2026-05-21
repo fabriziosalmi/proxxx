@@ -317,12 +317,11 @@ pub async fn handle_callback_update(
                 .answer_callback(&cb.id, &format!("❌ Failed: {err_str}"))
                 .await;
             // Truncate long error strings in the message body —
-            // Telegram's 4096-char limit + readability.
-            let err_short = if err_str.len() > 200 {
-                format!("{}…", &err_str[..200])
-            } else {
-                err_str.clone()
-            };
+            // Telegram's 4096-char limit + readability. Char-boundary
+            // safe: PVE error text is frequently non-ASCII, and a naive
+            // `&err_str[..200]` byte slice panics when byte 200 splits a
+            // multi-byte char.
+            let err_short = crate::util::sanitize::truncate_ellipsis(&err_str, 200);
             edit_status(
                 &format!("❌ Failed: {err_short}"),
                 cb.from.username.as_deref().unwrap_or(&cb.from.first_name),

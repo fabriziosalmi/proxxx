@@ -139,14 +139,17 @@ fn parse_duration_secs(s: &str) -> Result<u64> {
     if s.is_empty() {
         anyhow::bail!("empty duration");
     }
-    let (num_str, suffix) = s.split_at(s.len() - 1);
-    // If the last char wasn't a recognised suffix, treat the whole
-    // thing as bare seconds.
-    let (n_str, mult): (&str, u64) = match suffix {
-        "s" => (num_str, 1),
-        "m" => (num_str, 60),
-        "h" => (num_str, 3600),
-        "d" => (num_str, 86400),
+    // Match on the trailing CHAR, not a byte split. `split_at(len-1)`
+    // panics when the last char is multi-byte (e.g. `5µ`); the suffix
+    // units are all ASCII, so byte-slicing `len-1` is only safe inside
+    // the matched branches. If the last char wasn't a recognised
+    // suffix, treat the whole thing as bare seconds.
+    let last = s.chars().next_back().unwrap_or('\0');
+    let (n_str, mult): (&str, u64) = match last {
+        's' => (&s[..s.len() - 1], 1),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86400),
         _ => (s, 1),
     };
     let n: u64 = n_str
@@ -174,5 +177,15 @@ mod tests {
         assert!(parse_duration_secs("").is_err());
         assert!(parse_duration_secs("forever").is_err());
         assert!(parse_duration_secs("foo-bar").is_err());
+    }
+
+    #[test]
+    fn parse_duration_does_not_panic_on_multibyte_suffix() {
+        // Regression: `split_at(len-1)` panicked when the trailing char
+        // was multi-byte. These must return Err cleanly, never panic.
+        assert!(parse_duration_secs("5µ").is_err());
+        assert!(parse_duration_secs("10€").is_err());
+        assert!(parse_duration_secs("3🔥").is_err());
+        assert!(parse_duration_secs("ч").is_err());
     }
 }
