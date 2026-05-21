@@ -12,14 +12,21 @@ SemVer contract:
 
 ## [Unreleased]
 
-Next release will be **v0.4.0** (minor) — the post-v0.3.0 debug pass
-fixed remote-crash panics + several robustness gaps, and `cloud-img`
-becomes actually usable (behaviour change + a `--format json` field
-rename on a previously non-functional surface).
+_no entries yet._
+
+## [0.4.0] — 2026-05-21
+
+Headline: **post-v0.3.0 debug pass** — a code-wide hunt fixed
+remote-triggerable crash panics and several robustness gaps, and made
+`cloud-img download` actually work (it never could before). Five
+bug-fix PRs (#106-#109) on top of v0.3.0, every one regression-tested;
+one fix verified end-to-end against the live PVE 9.1.1 cluster. Minor
+bump: `cloud-img` goes non-functional → working, plus a `--format json`
+field rename on that (previously dead) surface.
 
 ### Fixed
-- **`cloud-img download` now works.** The v0.3.0 registry shipped with
-  all-zero placeholder SHAs (every download refused) AND two latent
+- **`cloud-img download` now works** (#108). The v0.3.0 registry shipped
+  with all-zero placeholder SHAs (every download refused) AND two latent
   bugs the placeholders masked: the Alpine entry named a non-existent
   `nocloud_` artifact, and all three `.qcow2` entries used
   `content=iso` — which PVE rejects with "wrong file extension"
@@ -28,10 +35,19 @@ rename on a previously non-functional surface).
   fetched from each distro's official sidecar, verified end-to-end
   against PVE 9.1.1 (live Alpine download → checksum OK).
 - **Char-boundary-safe truncation** (#106) — 4 UTF-8 byte-slice panic
-  vectors on PVE-supplied / operator text.
-- **PBS client typed errors** (#107) — 401/403 now exit 4 (was 1).
+  vectors (`&s[..n]` / `split_at(len-1)`) that crashed the TUI / HITL
+  daemon / CLI on PVE-supplied or operator text containing multi-byte
+  characters (CJK / Cyrillic / emoji / `µ`).
+- **PBS client typed errors** (#107) — PBS 401/403 now exit 4 (was a
+  generic 1); the whole PBS `get()` helper routes through `ApiError`.
 - **Connect timeouts** (#107) — termproxy WSS + SSH handshake no longer
   hang indefinitely on a black-holed node (20 s each).
+- **Bounded resize body** (#107) — the disk-resize PUT was the last REST
+  read with an unbounded body + untyped parse; now capped + `ApiError::Parse`.
+- **TUI queued delete** (#109) — the `d` key enqueued a `DeleteGuest`
+  the operation-queue executor couldn't dispatch ("Unsupported in queue
+  yet"); now wired to `delete_guest`. Start/Stop/Restart were already
+  handled; delete was the dead one.
 
 ### Changed
 - **`CloudImg` checksum model**: the `sha256` field is renamed
@@ -40,6 +56,9 @@ rename on a previously non-functional surface).
   `cloud-img list --output json` (field rename) and `cloud-img download`
   JSON (`sha256` → `checksum` + `checksum_algorithm`). Justified as a
   data-model fix on a surface that never produced a working download.
+- Stale rustdoc corrected (#107): `state apply` pre-flight/HITL is
+  shipped (not "out of scope"); firewall alias/IP-set/group CRUD is
+  implemented (only individual rule add/remove remains).
 
 ## [0.3.0] — 2026-05-20
 
