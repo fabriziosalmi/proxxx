@@ -12,6 +12,22 @@ SemVer contract:
 
 ## [Unreleased]
 
+_no entries yet._
+
+## [0.5.0] — 2026-05-22
+
+Headline: **GitOps state expansion + cloud-init templates.** Three new
+declaratively-managed resource families — scheduled backup jobs, the
+cluster firewall (options + aliases + IP sets + security groups), and
+notification matchers — carry epic #74 to 5 of 6 writable families
+(HA groups deferred: PVE 9's node-affinity `/cluster/ha/rules` has no
+write gateway yet). Plus one-command cloud-init **template** provisioning
+(`cloud-img provision`), PBS single-file restore (`pbs restore
+--pattern`), an interactive TUI SSH-key passphrase prompt, and a
+correctness fix turning `patch`'s silent serial downgrade into a loud
+error. Seven PRs (#112–#118); every state family and `cloud-img
+provision` verified end-to-end against the live PVE 9.1.1 cluster.
+
 ### Added
 - **TUI prompts for an SSH key passphrase interactively.** When a guest
   SSH session uses an encrypted OpenSSH key and no passphrase is set

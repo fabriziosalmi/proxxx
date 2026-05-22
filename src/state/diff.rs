@@ -24,6 +24,11 @@
 //!   `"<path>:<kind>/<ugid>/<roleid>"` for display
 //! * Storage — `storage` (the operator-chosen id)
 //! * Backup job — `id` (the job id, operator- or PVE-assigned)
+//! * Firewall options — singleton (rendered identity `"cluster"`);
+//!   only ever an Update, never create/delete
+//! * Firewall alias / IP set — `name`
+//! * Firewall security group — `group` (create/delete only)
+//! * Notification matcher — `name`
 //!
 //! Update detection compares the full `*Decl` value with `PartialEq`
 //! — every non-identity field is part of the value. Touching any

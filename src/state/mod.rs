@@ -4,12 +4,14 @@
 //! — the path toward declaratively-versioned Proxmox clusters tracked
 //! in epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74).
 //!
-//! Today this module covers **pools, ACL, and storage definitions**
-//! across the full export → diff → apply loop. Cluster firewall,
-//! backup jobs, notifications, and HA groups land in follow-up PRs
-//! tracked by the epic. Pre-flight risk gates + HITL approval per
-//! destructive apply change are tracked separately and will wrap
-//! the dispatch layer without changing it.
+//! Today this module covers **pools, ACL grants, storage definitions,
+//! scheduled backup jobs, the cluster firewall (options + aliases + IP
+//! sets + security groups), and notification matchers** across the full
+//! export → diff → apply loop. HA groups are the one remaining family
+//! from the epic, deferred while PVE 9's node-affinity `/cluster/ha/rules`
+//! lacks a write gateway. Pre-flight risk gates + HITL approval per
+//! destructive apply change (shipped v0.3.0) wrap the dispatch layer in
+//! [`preflight`] without changing it.
 //!
 //! ## Layered design
 //!
