@@ -682,26 +682,25 @@ impl ProxmoxGateway for PxClient {
             }
         );
 
-        let mut guests = Vec::new();
+        // Propagate a failed sub-fetch instead of silently returning a PARTIAL
+        // list. A truncated guest list looks exactly like guests vanishing —
+        // when `/qemu` transiently failed, the old `if let Ok` dropped every VM
+        // yet still returned `Ok`, so proxima's 5s poller flickered a stopped VM
+        // in and out. Polling callers can retry / keep last-known on the error.
+        let qemu = qemu_result.context("listing QEMU guests")?;
+        let lxc = lxc_result.context("listing LXC guests")?;
 
-        // QEMU VMs
-        if let Ok(resp) = qemu_result {
-            for mut g in resp.data {
-                g.node = node.to_string();
-                g.guest_type = GuestType::Qemu;
-                guests.push(g);
-            }
+        let mut guests = Vec::with_capacity(qemu.data.len() + lxc.data.len());
+        for mut g in qemu.data {
+            g.node = node.to_string();
+            g.guest_type = GuestType::Qemu;
+            guests.push(g);
         }
-
-        // LXC containers
-        if let Ok(resp) = lxc_result {
-            for mut g in resp.data {
-                g.node = node.to_string();
-                g.guest_type = GuestType::Lxc;
-                guests.push(g);
-            }
+        for mut g in lxc.data {
+            g.node = node.to_string();
+            g.guest_type = GuestType::Lxc;
+            guests.push(g);
         }
-
         Ok(guests)
     }
 

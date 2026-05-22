@@ -662,6 +662,31 @@ async fn operator_get_guests_filtered_to_owned_vms_only() {
     );
 }
 
+/// Regression: a failed `/qemu` (or `/lxc`) sub-fetch must surface as an ERROR,
+/// not a silently-truncated list. The old code `if let Ok`-skipped a failed
+/// sub-call and still returned `Ok`, so a transient `/qemu` failure dropped
+/// every VM — which made a stopped VM flicker in/out of proxima's 5s poller.
+#[tokio::test]
+async fn get_guests_errors_on_partial_sub_fetch_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/qemu"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes/pve1/lxc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = persona_client(&server, "operator@pve").await;
+    assert!(
+        c.get_guests("pve1").await.is_err(),
+        "a failed sub-fetch must error, never a silent partial list"
+    );
+}
+
 /// Per-VM `status/current` is a path-scoped endpoint — for a VMID the
 /// operator does NOT own, PVE returns 403 (no VM.Audit on /vms/100).
 /// `get_guest_status` tries QEMU first then falls back to LXC, so both
