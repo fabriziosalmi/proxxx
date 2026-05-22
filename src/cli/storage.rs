@@ -390,8 +390,11 @@ pub enum PbsCommand {
         #[arg(long = "time")]
         backup_time: u64,
     },
-    /// Restore a full archive to a local target directory.
-    /// Single-file extraction is NOT supported in this MVP — declared cut.
+    /// Restore an archive to a local target directory. By default the
+    /// whole archive is extracted; pass one or more `--pattern` globs to
+    /// restore only matching files/subdirs (single-file restore), e.g.
+    /// `--pattern etc/network/interfaces`. Matched files land under
+    /// `--target` preserving their in-archive path.
     Restore {
         #[arg(long)]
         store: String,
@@ -404,6 +407,12 @@ pub enum PbsCommand {
         /// Local directory to restore into.
         #[arg(long)]
         target: std::path::PathBuf,
+        /// Restore only files matching this glob within the archive
+        /// (`proxmox-backup-client restore --pattern`). Repeatable —
+        /// pass `--pattern` multiple times to select several files.
+        /// Omit to restore the entire archive.
+        #[arg(long = "pattern")]
+        pattern: Vec<String>,
         /// Required: confirms this writes to the local filesystem.
         #[arg(long)]
         yes: bool,
@@ -1089,6 +1098,7 @@ pub async fn execute_pbs(
             snapshot,
             archive,
             target,
+            pattern,
             yes,
         } => {
             if !yes {
@@ -1109,6 +1119,7 @@ pub async fn execute_pbs(
                 archive: archive.clone(),
                 target: target.clone(),
                 store: store.clone(),
+                patterns: pattern.clone(),
             };
             let mut tail: Vec<String> = Vec::new();
             let result = crate::pbs::run_restore(&pbs_cfg, cli_secret, req, |line| {
@@ -1126,6 +1137,7 @@ pub async fn execute_pbs(
                     "snapshot": snapshot,
                     "archive": archive,
                     "target": target,
+                    "patterns": pattern,
                     "exit_code": result.exit_code,
                     "last_lines": result.last_lines,
                     "status": if exit == 0 { "ok" } else { "error" },
