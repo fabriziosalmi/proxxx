@@ -20,6 +20,10 @@
 //! | [`StateRisk::StoragePropertyChange { what }`] | Warning — content-list or path changes can break running guests. |
 //! | [`StateRisk::AclPropagateFlip`]   | Warning — `propagate` change cascades to every descendant path. |
 //! | [`StateRisk::BackupJobDelete`]    | Warning — guests silently stop being backed up; nothing breaks now, the safety net just disappears. |
+//! | [`StateRisk::FirewallDisabled`]   | Severe — flips the cluster firewall master switch off; all enforcement stops at once. |
+//! | [`StateRisk::FirewallPolicyLoosened`] | Warning — a default policy goes to ACCEPT; every unmatched packet in that direction now passes. |
+//! | [`StateRisk::FirewallAliasDelete`] / [`StateRisk::FirewallIpsetDelete`] | Warning — rules referencing `+name` break. |
+//! | [`StateRisk::FirewallGroupDelete`] | Severe — drops the group's rules (not modelled, so unrecoverable) and breaks group-direction rules. |
 //! | [`StateRisk::BulkChangeCount { n }`] | Notice → Warning if `n ≥ 10`, Severe if `n ≥ 50` (very large batches = high attention cost). |
 //!
 //! ## Decision contract
@@ -88,6 +92,26 @@ pub enum StateRisk {
     /// no immediate breakage, just an absent safety net).
     BackupJobDelete { id: String },
 
+    /// The cluster firewall master switch is being turned off
+    /// (`enable` true→false). Disables ALL enforcement at once.
+    FirewallDisabled,
+
+    /// A default firewall policy is being loosened to `ACCEPT` (from
+    /// `REJECT`/`DROP`). Every unmatched packet in that direction
+    /// now passes.
+    FirewallPolicyLoosened { direction: &'static str },
+
+    /// Delete of a firewall alias. Any rule referencing `+name` breaks.
+    FirewallAliasDelete { name: String },
+
+    /// Delete of a firewall IP set. Any rule referencing `+name` breaks.
+    FirewallIpsetDelete { name: String },
+
+    /// Delete of a security group. Drops the group's rules (not
+    /// modelled here, so unrecoverable via apply) and breaks any
+    /// group-direction rule that references it.
+    FirewallGroupDelete { group: String },
+
     /// Very-large-batch warning. Increases attention cost
     /// proportionally; defer with `--allow-risk` if intentional.
     BulkChangeCount { n: usize },
@@ -100,11 +124,16 @@ impl StateRisk {
         match self {
             Self::PoolDeleteNonEmpty { .. }
             | Self::AclDeleteRootRole { .. }
-            | Self::StorageDeleteShared { .. } => RiskLevel::Severe,
+            | Self::StorageDeleteShared { .. }
+            | Self::FirewallDisabled
+            | Self::FirewallGroupDelete { .. } => RiskLevel::Severe,
             Self::StoragePropertyChange { .. }
             | Self::AclPropagateFlip { .. }
             | Self::AclDeleteAuditor { .. }
-            | Self::BackupJobDelete { .. } => RiskLevel::Warning,
+            | Self::BackupJobDelete { .. }
+            | Self::FirewallPolicyLoosened { .. }
+            | Self::FirewallAliasDelete { .. }
+            | Self::FirewallIpsetDelete { .. } => RiskLevel::Warning,
             Self::BulkChangeCount { n } => {
                 if *n >= 50 {
                     RiskLevel::Severe
@@ -155,6 +184,25 @@ impl StateRisk {
             Self::BackupJobDelete { id } => format!(
                 "delete backup job `{id}` — the guests it covered will \
                  silently stop being backed up"
+            ),
+            Self::FirewallDisabled => "disable the cluster firewall (enable → false) — ALL \
+                 enforcement stops cluster-wide"
+                .to_string(),
+            Self::FirewallPolicyLoosened { direction } => format!(
+                "loosen firewall {direction} default policy to ACCEPT — \
+                 every unmatched packet in that direction now passes"
+            ),
+            Self::FirewallAliasDelete { name } => format!(
+                "delete firewall alias `{name}` — rules referencing \
+                 `+{name}` will break"
+            ),
+            Self::FirewallIpsetDelete { name } => format!(
+                "delete firewall IP set `{name}` — rules referencing \
+                 `+{name}` will break"
+            ),
+            Self::FirewallGroupDelete { group } => format!(
+                "delete security group `{group}` — drops its rules \
+                 (unrecoverable here) and breaks rules that reference it"
             ),
             Self::BulkChangeCount { n } => {
                 format!("{n} changes in one apply — attention cost proportional")
@@ -292,6 +340,40 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
                 id: change.identity.clone(),
             });
         }
+        (ChangeKind::Update, "firewall_options") => {
+            // Two distinct dangers hide in an options update: flipping
+            // the master switch off, and loosening a default policy to
+            // ACCEPT. Detect each by diffing before/after JSON.
+            if let (Some(before), Some(after)) = (change.before.as_ref(), change.after.as_ref()) {
+                let was_on = before.get("enable").and_then(serde_json::Value::as_bool);
+                let now_off = after.get("enable").and_then(serde_json::Value::as_bool);
+                if was_on == Some(true) && now_off == Some(false) {
+                    out.push(StateRisk::FirewallDisabled);
+                }
+                for direction in ["policy_in", "policy_out"] {
+                    let before_v = before.get(direction).and_then(serde_json::Value::as_str);
+                    let after_v = after.get(direction).and_then(serde_json::Value::as_str);
+                    if after_v == Some("ACCEPT") && before_v != Some("ACCEPT") {
+                        out.push(StateRisk::FirewallPolicyLoosened { direction });
+                    }
+                }
+            }
+        }
+        (ChangeKind::Delete, "firewall_alias") => {
+            out.push(StateRisk::FirewallAliasDelete {
+                name: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Delete, "firewall_ipset") => {
+            out.push(StateRisk::FirewallIpsetDelete {
+                name: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Delete, "firewall_group") => {
+            out.push(StateRisk::FirewallGroupDelete {
+                group: change.identity.clone(),
+            });
+        }
         _ => {}
     }
     out
@@ -413,7 +495,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            backup_jobs: vec![],
+            ..Default::default()
         }
     }
 
@@ -616,5 +698,82 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["kind"], "pool_delete_non_empty");
+    }
+
+    // ── Firewall ──────────────────────────────────────────
+
+    fn fw_options_update(before: serde_json::Value, after: serde_json::Value) -> Change {
+        Change {
+            kind: ChangeKind::Update,
+            resource: "firewall_options",
+            identity: "cluster".to_string(),
+            before: Some(before),
+            after: Some(after),
+        }
+    }
+
+    #[test]
+    fn firewall_disable_is_severe() {
+        let live = sample_live();
+        let change = fw_options_update(
+            serde_json::json!({"enable": true}),
+            serde_json::json!({"enable": false}),
+        );
+        let risks = assess(&[change], &live);
+        assert!(risks
+            .iter()
+            .any(|r| matches!(r, StateRisk::FirewallDisabled)));
+        assert_eq!(
+            risks
+                .iter()
+                .find(|r| matches!(r, StateRisk::FirewallDisabled))
+                .unwrap()
+                .level(),
+            RiskLevel::Severe
+        );
+    }
+
+    #[test]
+    fn firewall_policy_loosened_to_accept_is_warning() {
+        let live = sample_live();
+        let change = fw_options_update(
+            serde_json::json!({"enable": true, "policy_in": "DROP"}),
+            serde_json::json!({"enable": true, "policy_in": "ACCEPT"}),
+        );
+        let risks = assess(&[change], &live);
+        let r = risks
+            .iter()
+            .find(|r| matches!(r, StateRisk::FirewallPolicyLoosened { .. }))
+            .expect("expected policy-loosened risk");
+        assert_eq!(r.level(), RiskLevel::Warning);
+        // Tightening (ACCEPT → DROP) must NOT flag.
+        let tighten = fw_options_update(
+            serde_json::json!({"enable": true, "policy_in": "ACCEPT"}),
+            serde_json::json!({"enable": true, "policy_in": "DROP"}),
+        );
+        assert!(assess(&[tighten], &live).is_empty());
+    }
+
+    #[test]
+    fn firewall_alias_and_ipset_delete_are_warnings() {
+        let live = sample_live();
+        let a = assess(&[delete_change("firewall_alias", "web")], &live);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].level(), RiskLevel::Warning);
+        assert!(matches!(&a[0], StateRisk::FirewallAliasDelete { name } if name == "web"));
+
+        let i = assess(&[delete_change("firewall_ipset", "blocklist")], &live);
+        assert_eq!(i[0].level(), RiskLevel::Warning);
+        assert!(matches!(&i[0], StateRisk::FirewallIpsetDelete { .. }));
+    }
+
+    #[test]
+    fn firewall_group_delete_is_severe() {
+        // Deleting a group drops its (unmodelled, unrecoverable) rules.
+        let live = sample_live();
+        let g = assess(&[delete_change("firewall_group", "web-tier")], &live);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].level(), RiskLevel::Severe);
+        assert!(matches!(&g[0], StateRisk::FirewallGroupDelete { group } if group == "web-tier"));
     }
 }

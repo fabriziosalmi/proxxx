@@ -63,6 +63,40 @@ pub struct ClusterState {
     /// scheduler-computed, not desired state, and would churn the TOML.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backup_jobs: Vec<BackupJobDecl>,
+
+    /// Cluster-wide firewall options — `GET /cluster/firewall/options`.
+    /// A singleton (the firewall always has exactly one options object),
+    /// so this is an `Option`, not a `Vec`: `None` means "don't manage
+    /// the firewall switch / default policy" and apply leaves it
+    /// untouched. `Some` means converge live options toward it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firewall_options: Option<FirewallOptionsDecl>,
+
+    /// Cluster firewall CIDR aliases — `GET /cluster/firewall/aliases`.
+    /// Identity is `name`. Aliases are reusable named CIDRs referenced
+    /// from rules as `+name`. Full CRUD (PVE exposes create/update/
+    /// delete). The derived `ipversion` and `digest` fields are not
+    /// modelled — `ipversion` is inferred from the CIDR, `digest` is a
+    /// stale-check token.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_aliases: Vec<FirewallAliasDecl>,
+
+    /// Cluster firewall IP sets — `GET /cluster/firewall/ipset` plus the
+    /// per-set CIDR membership. Identity is `name`. PVE has no update
+    /// endpoint for the set itself, so a `comment` change forces a
+    /// delete+recreate (the modelled CIDRs are re-added, so it's
+    /// lossless); CIDR membership changes are applied as incremental
+    /// add/remove.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_ipsets: Vec<FirewallIpsetDecl>,
+
+    /// Cluster firewall security groups — `GET /cluster/firewall/groups`.
+    /// Identity is `group`. Only create/delete are modelled: PVE has no
+    /// group-update endpoint and the group's *rules* are read-only here,
+    /// so a delete+recreate would silently drop them. Comment drift on
+    /// an existing group is therefore NOT applied (documented limitation).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_groups: Vec<FirewallGroupDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -217,6 +251,93 @@ pub struct BackupJobDecl {
     pub prune_backups: String,
 }
 
+/// Cluster firewall options — the global switch + default policy.
+/// `GET|PUT /cluster/firewall/options`. A singleton; the `digest`
+/// stale-check token from PVE's response is not modelled (it would
+/// churn the TOML). Bools are always serialised (the on/off state is
+/// the whole point); the policy / ratelimit strings are skipped when
+/// empty so a minimal block can set just `enable`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallOptionsDecl {
+    /// Master switch. `false` disables the entire cluster firewall.
+    pub enable: bool,
+    /// Default inbound action with no matching rule: `ACCEPT` |
+    /// `REJECT` | `DROP`. Empty = leave PVE's current value.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_in: String,
+    /// Default outbound action. Empty = leave current.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_out: String,
+    /// Whether ebtables (L2) hooks are wired alongside iptables.
+    #[serde(skip_serializing_if = "is_false")]
+    pub ebtables: bool,
+    /// Encoded ratelimit sub-spec, e.g. `enable=1,burst=5,rate=1/second`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub log_ratelimit: String,
+}
+
+/// One cluster firewall CIDR alias. `name` is the identity; `cidr` +
+/// `comment` are the value. PVE infers `ipversion` from the CIDR, so
+/// it's not modelled (a derived field would round-trip-drift).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallAliasDecl {
+    /// Alias name — referenced from rules as `+name`. The identity.
+    pub name: String,
+    /// The CIDR this alias resolves to (e.g. `10.0.0.0/8`, `1.2.3.4`).
+    pub cidr: String,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+}
+
+/// One cluster firewall IP set: a named collection of CIDRs.
+/// `name` is the identity; `comment` + the `cidrs` membership are the
+/// value. CIDRs are sorted by `cidr` on export for diff-stability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallIpsetDecl {
+    /// IP set name — referenced from rules as `+name`. The identity.
+    pub name: String,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// Member CIDRs. Empty is valid (an empty set).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cidrs: Vec<FirewallIpsetCidrDecl>,
+}
+
+/// One CIDR entry within an IP set. `cidr` is the identity within the
+/// set; `comment` + `nomatch` are the value. `nomatch` inverts
+/// membership for this entry (carve an exception out of a range).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallIpsetCidrDecl {
+    /// The CIDR or address (e.g. `10.0.0.0/24`, `1.2.3.4`).
+    pub cidr: String,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// Invert membership for this entry.
+    #[serde(skip_serializing_if = "is_false")]
+    pub nomatch: bool,
+}
+
+/// One cluster firewall security group. `group` is the identity;
+/// `comment` is the value. The group's rules are NOT modelled (the
+/// rules endpoint is read-only here), so only create/delete are
+/// applied — see [`ClusterState::firewall_groups`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallGroupDecl {
+    /// Group name — referenced from `group`-direction rules. Identity.
+    pub group: String,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+}
+
 /// One cluster-wide storage definition — `GET /storage`. The
 /// `storage` field is the identity; everything else is value.
 ///
@@ -317,9 +438,7 @@ mod tests {
         let s = ClusterState {
             meta: None,
             pools: vec![p],
-            acl: vec![],
-            storage: vec![],
-            backup_jobs: vec![],
+            ..Default::default()
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         // No "comment = " line, no "members = " line — only poolid.
@@ -359,9 +478,6 @@ mod tests {
                 exported_from_proxxx: "0.2.1".into(),
                 pve_version: "9.1.9".into(),
             }),
-            acl: vec![],
-            storage: vec![],
-            backup_jobs: vec![],
             pools: vec![
                 PoolDecl {
                     poolid: "p1".into(),
@@ -374,6 +490,7 @@ mod tests {
                     members: vec![],
                 },
             ],
+            ..Default::default()
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
@@ -409,10 +526,8 @@ roleid = "PVEVMAdmin"
         };
         let s = ClusterState {
             meta: None,
-            pools: vec![],
             acl: vec![entry.clone()],
-            storage: vec![],
-            backup_jobs: vec![],
+            ..Default::default()
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
@@ -539,10 +654,8 @@ propagate = false
         ];
         let s = ClusterState {
             meta: None,
-            pools: vec![],
-            acl: vec![],
             storage: entries.clone(),
-            backup_jobs: vec![],
+            ..Default::default()
         };
         let toml_str = toml::to_string(&s).expect("serialize");
         let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
@@ -565,5 +678,67 @@ members = ["qemu/100", "storage/ceph-rbd"]
         assert_eq!(s.pools.len(), 1);
         assert_eq!(s.pools[0].poolid, "team-platform");
         assert_eq!(s.pools[0].members.len(), 2);
+    }
+
+    #[test]
+    fn firewall_families_round_trip_through_toml() {
+        // The firewall families (singleton options + nested-CIDR ipsets)
+        // are the trickiest serde shapes in the model. Pin a full
+        // round-trip: serialize → deserialize → equal.
+        let s = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: true,
+                policy_in: "DROP".into(),
+                policy_out: "ACCEPT".into(),
+                ebtables: true,
+                log_ratelimit: "enable=1,rate=1/second".into(),
+            }),
+            firewall_aliases: vec![FirewallAliasDecl {
+                name: "web".into(),
+                cidr: "10.0.0.0/8".into(),
+                comment: "web tier".into(),
+            }],
+            firewall_ipsets: vec![FirewallIpsetDecl {
+                name: "blocklist".into(),
+                comment: "bad actors".into(),
+                cidrs: vec![
+                    FirewallIpsetCidrDecl {
+                        cidr: "1.2.3.0/24".into(),
+                        comment: "spam".into(),
+                        nomatch: false,
+                    },
+                    FirewallIpsetCidrDecl {
+                        cidr: "1.2.3.4".into(),
+                        comment: String::new(),
+                        nomatch: true,
+                    },
+                ],
+            }],
+            firewall_groups: vec![FirewallGroupDecl {
+                group: "web-tier".into(),
+                comment: "frontend".into(),
+            }],
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn firewall_ipset_cidr_skips_empty_comment_and_false_nomatch() {
+        // A minimal CIDR entry must serialise to just `cidr = "…"`.
+        let decl = FirewallIpsetDecl {
+            name: "s".into(),
+            comment: String::new(),
+            cidrs: vec![FirewallIpsetCidrDecl {
+                cidr: "1.2.3.0/24".into(),
+                comment: String::new(),
+                nomatch: false,
+            }],
+        };
+        let toml_str = toml::to_string(&decl).expect("serialize");
+        assert!(!toml_str.contains("comment"), "empty comment skipped");
+        assert!(!toml_str.contains("nomatch"), "false nomatch skipped");
     }
 }

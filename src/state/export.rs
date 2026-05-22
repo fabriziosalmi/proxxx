@@ -19,9 +19,14 @@ use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::types::{
-    AclEntry, ApiVersion, BackupJob, Pool, PoolDetails, PoolMember, StorageDefinition,
+    AclEntry, ApiVersion, BackupJob, FirewallAlias, FirewallIpset, FirewallIpsetCidr,
+    FirewallOptions, FirewallSecurityGroup, Pool, PoolDetails, PoolMember, StorageDefinition,
 };
-use crate::state::model::{AclDecl, BackupJobDecl, ClusterState, PoolDecl, StateMeta, StorageDecl};
+use crate::state::model::{
+    AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
+    FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StateMeta,
+    StorageDecl,
+};
 
 /// Which resource families to export. Parsed from the CLI `--resource`
 /// argument. New variants are added per the ladder in epic #74.
@@ -31,6 +36,12 @@ pub enum Resource {
     Acl,
     Storage,
     BackupJobs,
+    /// The whole cluster-firewall surface in one selector: options
+    /// (singleton) + aliases + IP sets + security groups. Exporting
+    /// them together keeps the `--resource firewall-cluster` UX simple
+    /// (operators don't juggle four sub-selectors) and matches how the
+    /// pieces are reasoned about as a unit.
+    FirewallCluster,
 }
 
 impl Resource {
@@ -44,9 +55,10 @@ impl Resource {
             "acl" => Ok(vec![Self::Acl]),
             "storage" => Ok(vec![Self::Storage]),
             "backup-jobs" => Ok(vec![Self::BackupJobs]),
+            "firewall-cluster" => Ok(vec![Self::FirewallCluster]),
             "all" => Ok(Self::all()),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
             ),
         }
     }
@@ -60,7 +72,13 @@ impl Resource {
     /// make that family's declared entries diff as perpetual creates).
     #[must_use]
     pub fn all() -> Vec<Self> {
-        vec![Self::Pools, Self::Acl, Self::Storage, Self::BackupJobs]
+        vec![
+            Self::Pools,
+            Self::Acl,
+            Self::Storage,
+            Self::BackupJobs,
+            Self::FirewallCluster,
+        ]
     }
 
     /// Human-readable name for logs / error messages.
@@ -71,6 +89,7 @@ impl Resource {
             Self::Acl => "acl",
             Self::Storage => "storage",
             Self::BackupJobs => "backup-jobs",
+            Self::FirewallCluster => "firewall-cluster",
         }
     }
 }
@@ -90,6 +109,14 @@ pub trait StateReadView: Send + Sync {
     async fn list_acl_view(&self) -> Result<Vec<AclEntry>>;
     async fn list_cluster_storages_view(&self) -> Result<Vec<StorageDefinition>>;
     async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>>;
+    async fn get_cluster_firewall_options_view(&self) -> Result<FirewallOptions>;
+    async fn list_cluster_firewall_aliases_view(&self) -> Result<Vec<FirewallAlias>>;
+    async fn list_cluster_firewall_ipsets_view(&self) -> Result<Vec<FirewallIpset>>;
+    async fn list_cluster_firewall_ipset_cidrs_view(
+        &self,
+        name: &str,
+    ) -> Result<Vec<FirewallIpsetCidr>>;
+    async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -112,6 +139,24 @@ where
     }
     async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>> {
         crate::api::ProxmoxGateway::list_backup_jobs(self).await
+    }
+    async fn get_cluster_firewall_options_view(&self) -> Result<FirewallOptions> {
+        crate::api::ProxmoxGateway::get_cluster_firewall_options(self).await
+    }
+    async fn list_cluster_firewall_aliases_view(&self) -> Result<Vec<FirewallAlias>> {
+        crate::api::ProxmoxGateway::list_cluster_firewall_aliases(self).await
+    }
+    async fn list_cluster_firewall_ipsets_view(&self) -> Result<Vec<FirewallIpset>> {
+        crate::api::ProxmoxGateway::list_cluster_firewall_ipsets(self).await
+    }
+    async fn list_cluster_firewall_ipset_cidrs_view(
+        &self,
+        name: &str,
+    ) -> Result<Vec<FirewallIpsetCidr>> {
+        crate::api::ProxmoxGateway::list_cluster_firewall_ipset_cidrs(self, name).await
+    }
+    async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>> {
+        crate::api::ProxmoxGateway::list_cluster_firewall_groups(self).await
     }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
@@ -143,6 +188,10 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         acl: Vec::new(),
         storage: Vec::new(),
         backup_jobs: Vec::new(),
+        firewall_options: None,
+        firewall_aliases: Vec::new(),
+        firewall_ipsets: Vec::new(),
+        firewall_groups: Vec::new(),
     };
 
     for r in resources {
@@ -164,6 +213,22 @@ pub async fn export_state<C: StateReadView + ?Sized>(
                 state.backup_jobs = export_backup_jobs(client)
                     .await
                     .with_context(|| "exporting backup-jobs")?;
+            }
+            Resource::FirewallCluster => {
+                state.firewall_options = Some(
+                    export_firewall_options(client)
+                        .await
+                        .with_context(|| "exporting firewall options")?,
+                );
+                state.firewall_aliases = export_firewall_aliases(client)
+                    .await
+                    .with_context(|| "exporting firewall aliases")?;
+                state.firewall_ipsets = export_firewall_ipsets(client)
+                    .await
+                    .with_context(|| "exporting firewall ipsets")?;
+                state.firewall_groups = export_firewall_groups(client)
+                    .await
+                    .with_context(|| "exporting firewall groups")?;
             }
         }
     }
@@ -313,6 +378,103 @@ async fn export_backup_jobs<C: StateReadView + ?Sized>(client: &C) -> Result<Vec
             comment: j.comment,
             notes_template: j.notes_template,
             prune_backups: j.prune_backups,
+        })
+        .collect())
+}
+
+/// Read the cluster firewall options singleton and project to
+/// `FirewallOptionsDecl`. The `digest` stale-check token is dropped
+/// (it would churn the TOML on every export).
+async fn export_firewall_options<C: StateReadView + ?Sized>(
+    client: &C,
+) -> Result<FirewallOptionsDecl> {
+    let o = client
+        .get_cluster_firewall_options_view()
+        .await
+        .context("reading firewall options")?;
+    Ok(FirewallOptionsDecl {
+        enable: o.enable,
+        policy_in: o.policy_in,
+        policy_out: o.policy_out,
+        ebtables: o.ebtables,
+        log_ratelimit: o.log_ratelimit,
+    })
+}
+
+/// Read every cluster firewall alias and project to
+/// `Vec<FirewallAliasDecl>`, sorted by `name`. The derived `ipversion`
+/// (inferred from the CIDR) and the `digest` token are dropped.
+async fn export_firewall_aliases<C: StateReadView + ?Sized>(
+    client: &C,
+) -> Result<Vec<FirewallAliasDecl>> {
+    let mut aliases = client
+        .list_cluster_firewall_aliases_view()
+        .await
+        .context("listing firewall aliases")?;
+    aliases.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(aliases
+        .into_iter()
+        .map(|a| FirewallAliasDecl {
+            name: a.name,
+            cidr: a.cidr,
+            comment: a.comment,
+        })
+        .collect())
+}
+
+/// Read every cluster firewall IP set + its CIDR membership and
+/// project to `Vec<FirewallIpsetDecl>`. IP sets sorted by `name`,
+/// CIDRs within each set sorted by `cidr`, both for diff-stability.
+/// The per-set and per-CIDR `digest` tokens are dropped.
+async fn export_firewall_ipsets<C: StateReadView + ?Sized>(
+    client: &C,
+) -> Result<Vec<FirewallIpsetDecl>> {
+    let mut ipsets = client
+        .list_cluster_firewall_ipsets_view()
+        .await
+        .context("listing firewall ipsets")?;
+    ipsets.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut out = Vec::with_capacity(ipsets.len());
+    for s in ipsets {
+        let mut cidrs = client
+            .list_cluster_firewall_ipset_cidrs_view(&s.name)
+            .await
+            .with_context(|| format!("listing CIDRs of ipset '{}'", s.name))?;
+        cidrs.sort_by(|a, b| a.cidr.cmp(&b.cidr));
+        out.push(FirewallIpsetDecl {
+            name: s.name,
+            comment: s.comment,
+            cidrs: cidrs
+                .into_iter()
+                .map(|c| FirewallIpsetCidrDecl {
+                    cidr: c.cidr,
+                    comment: c.comment,
+                    nomatch: c.nomatch,
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read every cluster firewall security group and project to
+/// `Vec<FirewallGroupDecl>`, sorted by `group`. The group's *rules*
+/// are not read here (they're read-only in the state model); only the
+/// group's existence + comment is captured. The `digest` is dropped.
+async fn export_firewall_groups<C: StateReadView + ?Sized>(
+    client: &C,
+) -> Result<Vec<FirewallGroupDecl>> {
+    let mut groups = client
+        .list_cluster_firewall_groups_view()
+        .await
+        .context("listing firewall groups")?;
+    groups.sort_by(|a, b| a.group.cmp(&b.group));
+    Ok(groups
+        .into_iter()
+        .map(|g| FirewallGroupDecl {
+            group: g.group,
+            comment: g.comment,
         })
         .collect())
 }
@@ -481,7 +643,8 @@ mod tests {
                 Resource::Pools,
                 Resource::Acl,
                 Resource::Storage,
-                Resource::BackupJobs
+                Resource::BackupJobs,
+                Resource::FirewallCluster,
             ]
         );
         // `parse("all")` and `Resource::all()` must stay in lockstep —
@@ -503,6 +666,7 @@ mod tests {
             Resource::Acl,
             Resource::Storage,
             Resource::BackupJobs,
+            Resource::FirewallCluster,
         ] {
             assert!(all.contains(&r), "Resource::all() is missing {r:?}");
         }
@@ -548,6 +712,11 @@ mod tests {
         acl: Vec<AclEntry>,
         storage: Vec<StorageDefinition>,
         backup_jobs: Vec<BackupJob>,
+        fw_options: FirewallOptions,
+        fw_aliases: Vec<FirewallAlias>,
+        fw_ipsets: Vec<FirewallIpset>,
+        fw_ipset_cidrs: std::collections::HashMap<String, Vec<FirewallIpsetCidr>>,
+        fw_groups: Vec<FirewallSecurityGroup>,
     }
 
     #[async_trait]
@@ -569,6 +738,24 @@ mod tests {
         }
         async fn list_backup_jobs_view(&self) -> Result<Vec<BackupJob>> {
             Ok(self.backup_jobs.clone())
+        }
+        async fn get_cluster_firewall_options_view(&self) -> Result<FirewallOptions> {
+            Ok(self.fw_options.clone())
+        }
+        async fn list_cluster_firewall_aliases_view(&self) -> Result<Vec<FirewallAlias>> {
+            Ok(self.fw_aliases.clone())
+        }
+        async fn list_cluster_firewall_ipsets_view(&self) -> Result<Vec<FirewallIpset>> {
+            Ok(self.fw_ipsets.clone())
+        }
+        async fn list_cluster_firewall_ipset_cidrs_view(
+            &self,
+            name: &str,
+        ) -> Result<Vec<FirewallIpsetCidr>> {
+            Ok(self.fw_ipset_cidrs.get(name).cloned().unwrap_or_default())
+        }
+        async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>> {
+            Ok(self.fw_groups.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {
@@ -967,5 +1154,136 @@ mod tests {
         let out = export_backup_jobs(&fake).await.expect("export");
         assert!(!out[0].enabled, "disabled flag must survive");
         assert!(out[0].all, "all-guests selector must survive");
+    }
+
+    // ── Firewall ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn export_firewall_options_drops_digest() {
+        let mut fake = FakeStateView::default();
+        fake.fw_options = FirewallOptions {
+            enable: true,
+            policy_in: "DROP".into(),
+            policy_out: "ACCEPT".into(),
+            ebtables: true,
+            log_ratelimit: "enable=1".into(),
+            digest: "abc123".into(),
+        };
+        let o = export_firewall_options(&fake).await.expect("export");
+        assert!(o.enable && o.ebtables);
+        assert_eq!(o.policy_in, "DROP");
+        let toml_str = toml::to_string(&o).expect("serialize");
+        assert!(!toml_str.contains("digest") && !toml_str.contains("abc123"));
+    }
+
+    #[tokio::test]
+    async fn export_firewall_aliases_sorts_and_drops_derived_fields() {
+        let mut fake = FakeStateView::default();
+        fake.fw_aliases = vec![
+            FirewallAlias {
+                name: "z-net".into(),
+                cidr: "10.0.0.0/8".into(),
+                ipversion: 4,
+                digest: "d1".into(),
+                ..Default::default()
+            },
+            FirewallAlias {
+                name: "a-net".into(),
+                cidr: "192.168.0.0/16".into(),
+                ipversion: 4,
+                digest: "d2".into(),
+                ..Default::default()
+            },
+        ];
+        let out = export_firewall_aliases(&fake).await.expect("export");
+        let names: Vec<&str> = out.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["a-net", "z-net"]);
+        let toml_str = toml::to_string(&out[0]).expect("serialize");
+        assert!(!toml_str.contains("ipversion"), "derived ipversion dropped");
+        assert!(!toml_str.contains("digest"));
+    }
+
+    #[tokio::test]
+    async fn export_firewall_ipsets_sorts_sets_and_cidrs() {
+        let mut fake = FakeStateView::default();
+        fake.fw_ipsets = vec![
+            FirewallIpset {
+                name: "z-set".into(),
+                comment: "z".into(),
+                digest: "d".into(),
+            },
+            FirewallIpset {
+                name: "a-set".into(),
+                comment: "a".into(),
+                digest: "d".into(),
+            },
+        ];
+        fake.fw_ipset_cidrs.insert(
+            "a-set".into(),
+            vec![
+                FirewallIpsetCidr {
+                    cidr: "9.9.9.0/24".into(),
+                    ..Default::default()
+                },
+                FirewallIpsetCidr {
+                    cidr: "1.1.1.0/24".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        let out = export_firewall_ipsets(&fake).await.expect("export");
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a-set", "z-set"], "sets sorted by name");
+        let cidrs: Vec<&str> = out[0].cidrs.iter().map(|c| c.cidr.as_str()).collect();
+        assert_eq!(cidrs, vec!["1.1.1.0/24", "9.9.9.0/24"], "cidrs sorted");
+    }
+
+    #[tokio::test]
+    async fn export_firewall_groups_sorts_by_group() {
+        let mut fake = FakeStateView::default();
+        fake.fw_groups = vec![
+            FirewallSecurityGroup {
+                group: "web".into(),
+                comment: String::new(),
+                digest: "d".into(),
+            },
+            FirewallSecurityGroup {
+                group: "db".into(),
+                comment: String::new(),
+                digest: "d".into(),
+            },
+        ];
+        let out = export_firewall_groups(&fake).await.expect("export");
+        let names: Vec<&str> = out.iter().map(|g| g.group.as_str()).collect();
+        assert_eq!(names, vec!["db", "web"]);
+    }
+
+    #[tokio::test]
+    async fn export_state_firewall_cluster_populates_all_four() {
+        let mut fake = FakeStateView::default();
+        fake.fw_options = FirewallOptions {
+            enable: true,
+            ..Default::default()
+        };
+        fake.fw_aliases = vec![FirewallAlias {
+            name: "a".into(),
+            cidr: "1.2.3.0/24".into(),
+            ..Default::default()
+        }];
+        fake.fw_ipsets = vec![FirewallIpset {
+            name: "s".into(),
+            ..Default::default()
+        }];
+        fake.fw_groups = vec![FirewallSecurityGroup {
+            group: "g".into(),
+            ..Default::default()
+        }];
+        let s = export_state(&fake, &[Resource::FirewallCluster], "p")
+            .await
+            .expect("export");
+        assert!(s.firewall_options.is_some());
+        assert_eq!(s.firewall_aliases.len(), 1);
+        assert_eq!(s.firewall_ipsets.len(), 1);
+        assert_eq!(s.firewall_groups.len(), 1);
     }
 }
