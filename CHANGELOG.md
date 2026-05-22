@@ -72,6 +72,16 @@ SemVer contract:
   and `state` manages the routing rules that reference them by name.
   `--resource all` now includes notifications.
 
+### Changed
+- **`patch apply` now rejects `max_concurrent > 1` with a loud error**
+  instead of silently downgrading to serial. Patch execution is serial
+  by design (a node upgrade is a non-atomic apt dist-upgrade + reboot;
+  concurrent reboots risk HA quorum loss), so a parallel request that
+  was quietly ignored misled the caller. It now fails fast with a
+  message pointing at the workaround — multiple invocations over
+  disjoint node sets. No CLI flag sets it above 1 today, so this only
+  affects programmatic callers constructing `PatchStrategy`.
+
 ## [0.4.0] — 2026-05-21
 
 Headline: **post-v0.3.0 debug pass** — a code-wide hunt fixed
