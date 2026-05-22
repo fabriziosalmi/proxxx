@@ -14,6 +14,27 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.6.1] — 2026-05-23
+
+Headline: **Correctness — kill the swallowed-error → silent-partial-result
+bug class.** Cluster-wide read paths that gather data per-node used to
+hand-roll `for n in nodes { if let Ok(x) = fetch(n) { out.extend(x) } }`,
+which swallowed a transient per-node failure (a 401 mid token-rotation, a
+fenced node, a network blip) and returned a *partial* list as a complete
+success. Downstream this surfaced as guests/pools vanishing, or a vmid
+reading as "not found" — which could mis-target or abort a mutation on the
+wrong node. The ~24 ad-hoc sites are replaced by three propagating,
+online-gated default methods on `ProxmoxGateway`: `get_all_guests()`,
+`get_all_storage_pools()`, and `find_guest(vmid)` (`Ok(None)` = genuinely
+absent vs `Err` = fetch failed). An offline node reports no error (nothing
+to list); a failed fetch on a *reachable* node propagates. The Prometheus
+exporter — which returns a `String` and cannot propagate — instead gains a
+`proxxx_up` gauge (`0` if any fetch in the scrape failed), the idiomatic
+way to flag a partial scrape without silently dropping counters. CLI
+commands, exit codes, and JSON output are unchanged (additive `proxxx_up`
+only); behavior differs solely on the partial-failure path, now covered by
+a new mock regression test.
+
 ## [0.6.0] — 2026-05-22
 
 Headline: **Per-profile incident freeze.** The `incident freeze` / `thaw`
