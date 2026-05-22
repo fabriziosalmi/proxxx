@@ -215,14 +215,9 @@ pub async fn execute_accounting(
     client: &Arc<PxClient>,
     args: AccountingReportArgs,
 ) -> Result<(Value, i32)> {
-    // Pull every guest in one shot.
-    let nodes = client.get_nodes().await?;
-    let mut all_guests: Vec<crate::api::types::Guest> = Vec::new();
-    for n in &nodes {
-        if let Ok(g) = client.get_guests(&n.node).await {
-            all_guests.extend(g);
-        }
-    }
+    // Pull every guest in one shot (errors propagate — billing must not
+    // silently understate by dropping a node that hit a transient failure).
+    let all_guests = client.get_all_guests().await?;
 
     // Pool membership is per-guest via `/pools/<id>/members`. For
     // current-state accounting we walk every pool once and build a

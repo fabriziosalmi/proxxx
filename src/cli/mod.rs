@@ -1095,26 +1095,11 @@ pub async fn execute(
                 let nodes = client.get_nodes().await?;
                 Ok((serde_json::to_value(nodes)?, 0))
             }
-            "guests" => {
-                let nodes = client.get_nodes().await?;
-                let mut all_guests = Vec::new();
-                for node in &nodes {
-                    if let Ok(guests) = client.get_guests(&node.node).await {
-                        all_guests.extend(guests);
-                    }
-                }
-                Ok((serde_json::to_value(all_guests)?, 0))
-            }
-            "storage" => {
-                let nodes = client.get_nodes().await?;
-                let mut all_storage = Vec::new();
-                for node in &nodes {
-                    if let Ok(pools) = client.get_storage_pools(&node.node).await {
-                        all_storage.extend(pools);
-                    }
-                }
-                Ok((serde_json::to_value(all_storage)?, 0))
-            }
+            "guests" => Ok((serde_json::to_value(client.get_all_guests().await?)?, 0)),
+            "storage" => Ok((
+                serde_json::to_value(client.get_all_storage_pools().await?)?,
+                0,
+            )),
             other => anyhow::bail!("Unknown resource: {other}. Use: nodes, guests, storage"),
         },
         Command::Start {
@@ -1672,26 +1657,19 @@ pub async fn execute(
                         let vmid_str = target.trim_start_matches("vm-");
                         if let Ok(vmid) = vmid_str.parse::<u32>() {
                             let mut found = false;
-                            let nodes = client.get_nodes().await?;
-                            for node in nodes {
-                                if let Ok(guests) = client.get_guests(&node.node).await {
-                                    if let Some(guest) = guests.into_iter().find(|g| g.vmid == vmid)
-                                    {
-                                        found = true;
-                                        let current_val = match key.as_str() {
-                                            "status" => {
-                                                format!("{:?}", guest.status).to_lowercase()
-                                            }
-                                            _ => {
-                                                anyhow::bail!("Unsupported condition key: {key}")
-                                            }
-                                        };
-
-                                        if current_val == value_str {
-                                            met = true;
-                                        }
-                                        break;
-                                    }
+                            if let Some(guest) = client
+                                .get_all_guests()
+                                .await?
+                                .into_iter()
+                                .find(|g| g.vmid == vmid)
+                            {
+                                found = true;
+                                let current_val = match key.as_str() {
+                                    "status" => format!("{:?}", guest.status).to_lowercase(),
+                                    _ => anyhow::bail!("Unsupported condition key: {key}"),
+                                };
+                                if current_val == value_str {
+                                    met = true;
                                 }
                             }
                             if !found {
@@ -1703,29 +1681,23 @@ pub async fn execute(
                     } else if target.starts_with("storage-") {
                         let pool_id = target.trim_start_matches("storage-");
                         let mut found = false;
-                        let nodes = client.get_nodes().await?;
-                        for node in nodes {
-                            if let Ok(pools) = client.get_storage_pools(&node.node).await {
-                                if let Some(pool) = pools.into_iter().find(|p| p.storage == pool_id)
-                                {
-                                    found = true;
-                                    if key == "usage" {
-                                        let usage_pct =
-                                            (pool.used as f64 / pool.total as f64) * 100.0;
-                                        let threshold: f64 =
-                                            value_str.trim_end_matches('%').parse()?;
-                                        met = match comparator {
-                                            '<' => usage_pct < threshold,
-                                            '>' => usage_pct > threshold,
-                                            _ => (usage_pct - threshold).abs() < 0.01,
-                                        };
-                                    } else {
-                                        anyhow::bail!(
-                                            "Unsupported condition key for storage: {key}"
-                                        );
-                                    }
-                                    break;
-                                }
+                        if let Some(pool) = client
+                            .get_all_storage_pools()
+                            .await?
+                            .into_iter()
+                            .find(|p| p.storage == pool_id)
+                        {
+                            found = true;
+                            if key == "usage" {
+                                let usage_pct = (pool.used as f64 / pool.total as f64) * 100.0;
+                                let threshold: f64 = value_str.trim_end_matches('%').parse()?;
+                                met = match comparator {
+                                    '<' => usage_pct < threshold,
+                                    '>' => usage_pct > threshold,
+                                    _ => (usage_pct - threshold).abs() < 0.01,
+                                };
+                            } else {
+                                anyhow::bail!("Unsupported condition key for storage: {key}");
                             }
                         }
                         if !found {
@@ -2018,17 +1990,11 @@ async fn execute_search(
     limit: usize,
 ) -> Result<(Value, i32)> {
     use crate::api::ProxmoxGateway;
+    // Errors propagate: a search that silently omits a transiently-failed
+    // node's guests/pools yields false "not found" results.
     let nodes = client.get_nodes().await?;
-    let mut all_guests = Vec::new();
-    let mut all_storage = Vec::new();
-    for n in &nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            all_guests.extend(guests);
-        }
-        if let Ok(pools) = client.get_storage_pools(&n.node).await {
-            all_storage.extend(pools);
-        }
-    }
+    let all_guests = client.get_all_guests().await?;
+    let all_storage = client.get_all_storage_pools().await?;
     let q_lower = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
     for g in &all_guests {
@@ -2084,16 +2050,12 @@ async fn execute_delete(
     use crate::api::ProxmoxGateway;
     use tracing::warn;
 
-    // Build vmid → (node, type) map from a single cluster scan.
-    let nodes = client.get_nodes().await?;
+    // Build vmid → (node, type) map from a single cluster scan. Errors
+    // propagate: a dropped node would make its guests look "not found".
     let mut guest_map: std::collections::HashMap<u32, (String, crate::api::types::GuestType)> =
         std::collections::HashMap::new();
-    for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            for g in guests {
-                guest_map.insert(g.vmid, (n.node.clone(), g.guest_type));
-            }
-        }
+    for g in client.get_all_guests().await? {
+        guest_map.insert(g.vmid, (g.node, g.guest_type));
     }
 
     if strict {

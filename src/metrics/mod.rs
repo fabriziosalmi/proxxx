@@ -87,7 +87,14 @@ pub async fn scrape(client: &PxClient) -> String {
     let mut w = MetricWriter::new();
 
     // Fetch the node list once and reuse it for all three scrape sections.
-    let nodes = client.get_nodes().await.unwrap_or_default();
+    // `scrape_ok` flips to 0 if ANY fetch fails, surfaced as `proxxx_up` — the
+    // Prometheus-idiomatic way to signal a partial scrape without silently
+    // dropping counters (a vanished guest gauge looks like a mass power-off).
+    let (nodes, mut scrape_ok) = if let Ok(n) = client.get_nodes().await {
+        (n, 1.0_f64)
+    } else {
+        (Vec::new(), 0.0_f64)
+    };
 
     // ── Nodes ─────────────────────────────────────────────────────
     w.help("proxxx_node_up", "1 if node is online");
@@ -133,14 +140,11 @@ pub async fn scrape(client: &PxClient) -> String {
     w.help("proxxx_guest_disk_total_bytes", "Guest disk total bytes");
     w.help("proxxx_guest_uptime_seconds", "Guest uptime seconds");
 
-    let all_guests: Vec<crate::api::types::Guest> = {
-        let mut out = Vec::new();
-        for n in &nodes {
-            if let Ok(gs) = client.get_guests(&n.node).await {
-                out.extend(gs);
-            }
-        }
-        out
+    let all_guests: Vec<crate::api::types::Guest> = if let Ok(g) = client.get_all_guests().await {
+        g
+    } else {
+        scrape_ok = 0.0;
+        Vec::new()
     };
     for g in &all_guests {
         let vmid_s = g.vmid.to_string();
@@ -178,23 +182,35 @@ pub async fn scrape(client: &PxClient) -> String {
     w.help("proxxx_storage_avail_bytes", "Storage pool available bytes");
     w.help("proxxx_storage_active", "1 if storage pool is active");
 
-    {
-        for n in &nodes {
-            if let Ok(pools) = client.get_storage_pools(&n.node).await {
-                for p in &pools {
-                    let l: &[(&str, &str)] = &[
-                        ("node", n.node.as_str()),
-                        ("storage", p.storage.as_str()),
-                        ("type", p.storage_type.as_str()),
-                    ];
-                    w.gauge("proxxx_storage_used_bytes", l, p.used as f64);
-                    w.gauge("proxxx_storage_total_bytes", l, p.total as f64);
-                    w.gauge("proxxx_storage_avail_bytes", l, p.avail as f64);
-                    w.gauge("proxxx_storage_active", l, if p.active { 1.0 } else { 0.0 });
-                }
+    // Per-node (the `node` label needs it); online-gated, and a failed fetch
+    // flips `scrape_ok` rather than silently dropping that node's pools.
+    for n in &nodes {
+        if !matches!(n.status, crate::api::types::NodeStatus::Online) {
+            continue;
+        }
+        if let Ok(pools) = client.get_storage_pools(&n.node).await {
+            for p in &pools {
+                let l: &[(&str, &str)] = &[
+                    ("node", n.node.as_str()),
+                    ("storage", p.storage.as_str()),
+                    ("type", p.storage_type.as_str()),
+                ];
+                w.gauge("proxxx_storage_used_bytes", l, p.used as f64);
+                w.gauge("proxxx_storage_total_bytes", l, p.total as f64);
+                w.gauge("proxxx_storage_avail_bytes", l, p.avail as f64);
+                w.gauge("proxxx_storage_active", l, if p.active { 1.0 } else { 0.0 });
             }
+        } else {
+            scrape_ok = 0.0;
         }
     }
+
+    // Scrape health — 1 only if every fetch above succeeded.
+    w.help(
+        "proxxx_up",
+        "1 if the scrape gathered all data; 0 if any fetch failed",
+    );
+    w.gauge("proxxx_up", &[], scrape_ok);
 
     w.finish()
 }

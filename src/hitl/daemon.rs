@@ -17,7 +17,6 @@
 //!    secure-mode invariant is covered by the sender-side test in
 //!    `tests/hitl_e2e.rs`.
 
-use crate::api::types::GuestType;
 use crate::api::ProxmoxGateway;
 use crate::hitl::pending::{PendingApprovals, ReplayError};
 use crate::hitl::telegram::{TelegramGateway, Update};
@@ -203,20 +202,12 @@ pub async fn handle_callback_update(
     // takes >1s, which is the regime where the operator NEEDS the
     // visual feedback ("did the daemon pick up the click?").
 
-    // Find which node + guest_type this vmid lives on.
-    let mut target_node: Option<String> = None;
-    let mut guest_type: Option<GuestType> = None;
-    if let Ok(nodes) = client.get_nodes().await {
-        for n in nodes {
-            if let Ok(guests) = client.get_guests(&n.node).await {
-                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                    target_node = Some(n.node.clone());
-                    guest_type = Some(g.guest_type);
-                    break;
-                }
-            }
-        }
-    }
+    // Find which node + guest_type this vmid lives on. Propagate a fetch error
+    // (a transient failure must not read as "not found" and silently drop an
+    // already-approved action).
+    let guest = client.find_guest(vmid).await?;
+    let target_node = guest.as_ref().map(|g| g.node.clone());
+    let guest_type = guest.map(|g| g.guest_type);
 
     let (Some(node), Some(gt)) = (target_node, guest_type) else {
         let _ = tg_gateway

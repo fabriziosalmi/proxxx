@@ -178,26 +178,8 @@ async fn query_one_profile(
             let v = client.get_nodes().await?;
             serde_json::to_value(v)?
         }
-        FanoutKind::Guests => {
-            let nodes = client.get_nodes().await?;
-            let mut all = Vec::new();
-            for n in &nodes {
-                if let Ok(g) = client.get_guests(&n.node).await {
-                    all.extend(g);
-                }
-            }
-            serde_json::to_value(all)?
-        }
-        FanoutKind::Storage => {
-            let nodes = client.get_nodes().await?;
-            let mut all = Vec::new();
-            for n in &nodes {
-                if let Ok(s) = client.get_storage_pools(&n.node).await {
-                    all.extend(s);
-                }
-            }
-            serde_json::to_value(all)?
-        }
+        FanoutKind::Guests => serde_json::to_value(client.get_all_guests().await?)?,
+        FanoutKind::Storage => serde_json::to_value(client.get_all_storage_pools().await?)?,
     };
     // Per-resource arrays get flattened to one row per element so
     // the table view shows N rows per profile, each with the
@@ -230,18 +212,13 @@ async fn find_one_profile(
     // each profile is itself fanned out at the outer level — a
     // sequential per-node sweep here keeps the API call count
     // proportional rather than explosive.
-    let nodes = client.get_nodes().await?;
-    for n in &nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok(Some(ProfileRow {
-                    profile: profile.to_string(),
-                    payload: ProfileRowPayload::Data {
-                        data: serde_json::to_value(g)?,
-                    },
-                }));
-            }
-        }
+    if let Some(g) = client.find_guest(vmid).await? {
+        return Ok(Some(ProfileRow {
+            profile: profile.to_string(),
+            payload: ProfileRowPayload::Data {
+                data: serde_json::to_value(&g)?,
+            },
+        }));
     }
     Ok(None)
 }

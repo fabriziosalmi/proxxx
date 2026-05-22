@@ -469,22 +469,17 @@ pub async fn execute_hw(
             // Pull devices + every guest's config; run the pure-logic
             // detector. Exit code reflects "any conflicts found".
             let pci = client.list_pci(&node).await?;
-            let nodes = client.get_nodes().await?;
             let mut configs: std::collections::HashMap<
                 u32,
                 std::collections::HashMap<String, String>,
             > = std::collections::HashMap::new();
-            for n in &nodes {
-                if let Ok(guests) = client.get_guests(&n.node).await {
-                    for g in guests {
-                        if let Ok(cfg) = client
-                            .get_guest_config(&g.node, g.vmid, &g.guest_type)
-                            .await
-                        {
-                            configs.insert(g.vmid, cfg);
-                        }
-                    }
-                }
+            // Errors propagate: a dropped guest/config would hide a real PCI
+            // passthrough conflict (silent partial detection is dangerous here).
+            for g in client.get_all_guests().await? {
+                let cfg = client
+                    .get_guest_config(&g.node, g.vmid, &g.guest_type)
+                    .await?;
+                configs.insert(g.vmid, cfg);
             }
             let (assignments, _) = crate::app::hw::scan_assignments(&configs);
             let conflicts = crate::app::hw::detect_pci_conflicts(&assignments, &pci);

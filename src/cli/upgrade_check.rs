@@ -181,8 +181,10 @@ pub async fn execute_upgrade_check(
 
     let mut findings: Vec<Finding> = Vec::new();
 
-    // Per-node version check.
-    if let Ok(nodes) = client.get_nodes().await {
+    // Per-node version check. Propagate the node-list fetch — a transient
+    // failure must not read as "no upgrade issues".
+    {
+        let nodes = client.get_nodes().await?;
         for n in nodes {
             // Best-effort per-node version probe — PVE's `pveversion`
             // is per-node; the cluster `get_api_version` returns

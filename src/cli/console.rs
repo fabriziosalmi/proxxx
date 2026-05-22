@@ -610,7 +610,6 @@ pub async fn execute_vnc(
     node: Option<String>,
     ws_url: bool,
 ) -> Result<(Value, i32)> {
-    use crate::api::types::GuestType;
     use crate::api::ProxmoxGateway;
 
     let (node_name, gt) = if let Some(n) = node {
@@ -624,19 +623,15 @@ pub async fn execute_vnc(
             .ok_or_else(|| anyhow::anyhow!("vmid {vmid} not on node {n}"))?;
         (n, g.guest_type)
     } else {
-        let nodes = client.get_nodes().await?;
-        let mut found: Option<(String, GuestType)> = None;
-        for n in &nodes {
-            if let Ok(guests) = client.get_guests(&n.node).await {
-                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                    found = Some((n.node.clone(), g.guest_type));
-                    break;
-                }
-            }
-        }
-        found.ok_or_else(|| {
-            anyhow::anyhow!("vmid {vmid} not found on any node — pass --node X to skip discovery")
-        })?
+        client
+            .find_guest(vmid)
+            .await?
+            .map(|g| (g.node, g.guest_type))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "vmid {vmid} not found on any node — pass --node X to skip discovery"
+                )
+            })?
     };
 
     let ticket = client.get_guest_vncproxy(&node_name, vmid, gt).await?;

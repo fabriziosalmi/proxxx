@@ -473,17 +473,16 @@ pub async fn execute_alerts(
 
     // Build a cluster snapshot once (used by Eval and Watch).
     async fn snapshot(client: &crate::api::PxClient) -> Result<ClusterSnapshot> {
-        let nodes = client.get_nodes().await.unwrap_or_default();
+        // Alerts are evaluated against this snapshot — a silently partial one
+        // (a swallowed node/storage/replication fetch) causes false negatives.
+        // Propagate; only online nodes are queried.
+        let nodes = client.get_nodes().await?;
         let mut storage = Vec::new();
         let mut replication = Vec::new();
         for n in &nodes {
             if n.status == crate::api::types::NodeStatus::Online {
-                if let Ok(s) = client.get_storage_pools(&n.node).await {
-                    storage.extend(s);
-                }
-                if let Ok(r) = client.list_replication_status(&n.node).await {
-                    replication.extend(r);
-                }
+                storage.extend(client.get_storage_pools(&n.node).await?);
+                replication.extend(client.list_replication_status(&n.node).await?);
             }
         }
         Ok(ClusterSnapshot {
@@ -787,15 +786,15 @@ pub async fn execute_metrics(
         client: &Arc<crate::api::PxClient>,
         vmid: u32,
     ) -> Result<(String, GuestType)> {
-        let nodes = client.get_nodes().await?;
-        for n in nodes {
-            if let Ok(guests) = client.get_guests(&n.node).await {
-                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                    return Ok((n.node.clone(), g.guest_type));
-                }
-            }
-        }
-        anyhow::bail!("vmid {vmid} not found on any node — pass --node X to skip discovery")
+        client
+            .find_guest(vmid)
+            .await?
+            .map(|g| (g.node, g.guest_type))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "vmid {vmid} not found on any node — pass --node X to skip discovery"
+                )
+            })
     }
 
     let (label, points, field) = match action {
@@ -1329,15 +1328,10 @@ pub async fn execute_ha(
             let cluster = client.cluster_status().await?;
             let online = crate::app::ha::online_nodes(&cluster);
             // To know each resource's CURRENT node, we look at all guests.
-            let nodes = client.get_nodes().await?;
             let mut all_guests: std::collections::HashMap<u32, String> =
                 std::collections::HashMap::new();
-            for n in &nodes {
-                if let Ok(guests) = client.get_guests(&n.node).await {
-                    for g in guests {
-                        all_guests.insert(g.vmid, g.node);
-                    }
-                }
+            for g in client.get_all_guests().await? {
+                all_guests.insert(g.vmid, g.node);
             }
             let mut previews = Vec::new();
             for r in &resources {

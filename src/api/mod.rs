@@ -23,6 +23,46 @@ pub trait ProxmoxGateway: Send + Sync {
     async fn get_guests(&self, node: &str) -> Result<Vec<Guest>>;
     async fn get_guest_status(&self, node: &str, vmid: u32) -> Result<Guest>;
     async fn get_storage_pools(&self, node: &str) -> Result<Vec<StoragePool>>;
+
+    /// Every guest across the cluster. Only ONLINE nodes are queried (an
+    /// offline node has no guests to report); a failed fetch on a reachable
+    /// node PROPAGATES rather than silently truncating — a partial guest list
+    /// looks exactly like guests vanishing. Use this instead of hand-rolling a
+    /// `for node { if let Ok(..) }` loop (which swallows per-node errors).
+    async fn get_all_guests(&self) -> Result<Vec<Guest>> {
+        let mut out = Vec::new();
+        for n in self.get_nodes().await? {
+            if matches!(n.status, crate::api::types::NodeStatus::Online) {
+                out.extend(self.get_guests(&n.node).await?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every storage pool across the cluster (online nodes only; a failed fetch
+    /// on a reachable node propagates rather than silently dropping pools).
+    async fn get_all_storage_pools(&self) -> Result<Vec<StoragePool>> {
+        let mut out = Vec::new();
+        for n in self.get_nodes().await? {
+            if matches!(n.status, crate::api::types::NodeStatus::Online) {
+                out.extend(self.get_storage_pools(&n.node).await?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve a vmid to its guest (carrying `.node` + `.guest_type`) by scanning
+    /// the cluster. `Ok(None)` = genuinely not found; an Err means a node fetch
+    /// failed — so callers don't mistake a transient failure for "not found"
+    /// (which would mis-target or abort a mutation on the wrong/no node).
+    async fn find_guest(&self, vmid: u32) -> Result<Option<Guest>> {
+        Ok(self
+            .get_all_guests()
+            .await?
+            .into_iter()
+            .find(|g| g.vmid == vmid))
+    }
+
     async fn get_task_log(
         &self,
         node: &str,

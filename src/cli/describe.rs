@@ -179,23 +179,19 @@ async fn collect(
         .collect();
 
     let mut guests: Vec<GuestSummary> = Vec::new();
-    for n in &nodes_raw {
-        if let Ok(gs) = client.get_guests(&n.node).await {
-            for g in gs {
-                guests.push(GuestSummary {
-                    vmid: g.vmid,
-                    name: g.name,
-                    kind: match g.guest_type {
-                        crate::api::types::GuestType::Qemu => "qemu".into(),
-                        crate::api::types::GuestType::Lxc => "lxc".into(),
-                    },
-                    node: g.node,
-                    status: format!("{:?}", g.status).to_ascii_lowercase(),
-                    cores: Some(g.cpus),
-                    mem_mb: Some(g.maxmem / (1024 * 1024)),
-                });
-            }
-        }
+    for g in client.get_all_guests().await? {
+        guests.push(GuestSummary {
+            vmid: g.vmid,
+            name: g.name,
+            kind: match g.guest_type {
+                crate::api::types::GuestType::Qemu => "qemu".into(),
+                crate::api::types::GuestType::Lxc => "lxc".into(),
+            },
+            node: g.node,
+            status: format!("{:?}", g.status).to_ascii_lowercase(),
+            cores: Some(g.cpus),
+            mem_mb: Some(g.maxmem / (1024 * 1024)),
+        });
     }
 
     // Storage: PVE returns one row per (storage, node) pair; we
@@ -207,22 +203,22 @@ async fn collect(
     let mut storage_map: std::collections::BTreeMap<String, StorageSummary> =
         std::collections::BTreeMap::new();
     for n in &nodes_raw {
-        if let Ok(ss) = client.get_storage_pools(&n.node).await {
-            for s in ss {
-                let entry =
-                    storage_map
-                        .entry(s.storage.clone())
-                        .or_insert_with(|| StorageSummary {
-                            storage: s.storage.clone(),
-                            kind: s.storage_type.clone(),
-                            used_bytes: s.used,
-                            total_bytes: s.total,
-                            shared: false, // refined after the loop
-                            on_nodes: Vec::new(),
-                        });
-                if !entry.on_nodes.contains(&n.node) {
-                    entry.on_nodes.push(n.node.clone());
-                }
+        if !matches!(n.status, crate::api::types::NodeStatus::Online) {
+            continue;
+        }
+        for s in client.get_storage_pools(&n.node).await? {
+            let entry = storage_map
+                .entry(s.storage.clone())
+                .or_insert_with(|| StorageSummary {
+                    storage: s.storage.clone(),
+                    kind: s.storage_type.clone(),
+                    used_bytes: s.used,
+                    total_bytes: s.total,
+                    shared: false, // refined after the loop
+                    on_nodes: Vec::new(),
+                });
+            if !entry.on_nodes.contains(&n.node) {
+                entry.on_nodes.push(n.node.clone());
             }
         }
     }

@@ -759,17 +759,11 @@ pub async fn execute_snapshot(
     };
 
     // Locate the guest to get its node + type (bug #1 dispatch).
-    let nodes = client.get_nodes().await?;
-    let mut found: Option<(String, crate::api::types::GuestType)> = None;
-    for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                found = Some((n.node.clone(), g.guest_type));
-                break;
-            }
-        }
-    }
-    let (node, gt) = found.ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+    let (node, gt) = client
+        .find_guest(vmid)
+        .await?
+        .map(|g| (g.node, g.guest_type))
+        .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
 
     let upid = if is_create {
         client.create_snapshot(&node, vmid, gt, &name).await?

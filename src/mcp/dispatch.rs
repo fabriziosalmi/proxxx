@@ -62,21 +62,16 @@ pub async fn handle_tool_call(
             let vmid = guest_id as u32;
             let action_str = name;
 
-            let mut tags = Vec::new();
-            if let Ok(nodes) = client.get_nodes().await {
-                for n in nodes {
-                    if let Ok(guests) = client.get_guests(&n.node).await {
-                        if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                            tags = g
-                                .tag_list()
-                                .into_iter()
-                                .map(std::string::ToString::to_string)
-                                .collect();
-                            break;
-                        }
-                    }
-                }
-            }
+            let tags: Vec<String> = client
+                .find_guest(vmid)
+                .await?
+                .map(|g| {
+                    g.tag_list()
+                        .into_iter()
+                        .map(std::string::ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let policies = config.policies.as_deref().unwrap_or_default();
             let tags_ref: Vec<&str> = tags.iter().map(std::string::String::as_str).collect();
@@ -124,17 +119,11 @@ pub async fn handle_tool_call(
             serde_json::to_string_pretty(&nodes)?
         }
         ToolAction::ListGuests => {
-            let mut all_guests = Vec::new();
-            if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
-                all_guests = client.get_guests(node).await?;
+            let all_guests = if let Some(node) = args.get("node").and_then(|v| v.as_str()) {
+                client.get_guests(node).await?
             } else {
-                let nodes = client.get_nodes().await?;
-                for n in nodes {
-                    if let Ok(guests) = client.get_guests(&n.node).await {
-                        all_guests.extend(guests);
-                    }
-                }
-            }
+                client.get_all_guests().await?
+            };
             serde_json::to_string_pretty(&all_guests)?
         }
         ToolAction::GetGuestStatus => {
@@ -579,15 +568,10 @@ pub(crate) async fn find_node_and_type(
     vmid: u32,
 ) -> Result<Option<(String, crate::api::types::GuestType)>> {
     use crate::api::ProxmoxGateway;
-    let nodes = client.get_nodes().await?;
-    for n in nodes {
-        if let Ok(guests) = client.get_guests(&n.node).await {
-            if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                return Ok(Some((n.node.clone(), g.guest_type)));
-            }
-        }
-    }
-    Ok(None)
+    Ok(client
+        .find_guest(vmid)
+        .await?
+        .map(|g| (g.node, g.guest_type)))
 }
 
 /// Shared JSON-RPC response builders — used by both transports.
