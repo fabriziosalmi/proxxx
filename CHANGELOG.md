@@ -14,6 +14,21 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.6.0] — 2026-05-22
+
+Headline: **Per-profile incident freeze.** The `incident freeze` / `thaw`
+write kill-switch gains a `--profile <name>` scope — freeze one cluster
+during an incident while the rest of the fleet stays writable. Without
+`--profile` the freeze is global (fleet-wide), exactly as before. A
+mutation is refused if the global lock OR the client's own profile lock is
+active, so freezing profile A never blocks profile B; the gate lives in
+`PxClient::{post,put,delete}`, so `state apply` and every other write
+honour it. `incident status` now reports all active freezes (global +
+per-profile) — its `--format json` keeps the `state` field (the global
+freeze) and adds a `freezes` array, additive per the SemVer contract.
+Lock files: the global `freeze.lock` (unchanged on disk) plus per-profile
+`freeze.<profile>.lock`; pre-existing/global locks read back byte-identically.
+
 ## [0.5.0] — 2026-05-22
 
 Headline: **GitOps state expansion + cloud-init templates.** Three new
