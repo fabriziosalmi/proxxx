@@ -20,12 +20,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::types::{
     AclEntry, ApiVersion, BackupJob, FirewallAlias, FirewallIpset, FirewallIpsetCidr,
-    FirewallOptions, FirewallSecurityGroup, Pool, PoolDetails, PoolMember, StorageDefinition,
+    FirewallOptions, FirewallSecurityGroup, NotificationMatcher, Pool, PoolDetails, PoolMember,
+    StorageDefinition,
 };
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
-    FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StateMeta,
-    StorageDecl,
+    FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, NotificationMatcherDecl,
+    PoolDecl, StateMeta, StorageDecl,
 };
 
 /// Which resource families to export. Parsed from the CLI `--resource`
@@ -42,6 +43,10 @@ pub enum Resource {
     /// (operators don't juggle four sub-selectors) and matches how the
     /// pieces are reasoned about as a unit.
     FirewallCluster,
+    /// Notification matchers (routing rules). Endpoints are excluded by
+    /// design — they carry secrets PVE won't disclose on `GET`, so they
+    /// can't round-trip; see [`ClusterState::notification_matchers`].
+    Notifications,
 }
 
 impl Resource {
@@ -56,9 +61,10 @@ impl Resource {
             "storage" => Ok(vec![Self::Storage]),
             "backup-jobs" => Ok(vec![Self::BackupJobs]),
             "firewall-cluster" => Ok(vec![Self::FirewallCluster]),
+            "notifications" => Ok(vec![Self::Notifications]),
             "all" => Ok(Self::all()),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | notifications | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
             ),
         }
     }
@@ -78,6 +84,7 @@ impl Resource {
             Self::Storage,
             Self::BackupJobs,
             Self::FirewallCluster,
+            Self::Notifications,
         ]
     }
 
@@ -90,6 +97,7 @@ impl Resource {
             Self::Storage => "storage",
             Self::BackupJobs => "backup-jobs",
             Self::FirewallCluster => "firewall-cluster",
+            Self::Notifications => "notifications",
         }
     }
 }
@@ -117,6 +125,7 @@ pub trait StateReadView: Send + Sync {
         name: &str,
     ) -> Result<Vec<FirewallIpsetCidr>>;
     async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>>;
+    async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -158,6 +167,9 @@ where
     async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>> {
         crate::api::ProxmoxGateway::list_cluster_firewall_groups(self).await
     }
+    async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>> {
+        crate::api::ProxmoxGateway::list_notification_matchers(self).await
+    }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
     }
@@ -192,6 +204,7 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         firewall_aliases: Vec::new(),
         firewall_ipsets: Vec::new(),
         firewall_groups: Vec::new(),
+        notification_matchers: Vec::new(),
     };
 
     for r in resources {
@@ -229,6 +242,11 @@ pub async fn export_state<C: StateReadView + ?Sized>(
                 state.firewall_groups = export_firewall_groups(client)
                     .await
                     .with_context(|| "exporting firewall groups")?;
+            }
+            Resource::Notifications => {
+                state.notification_matchers = export_notification_matchers(client)
+                    .await
+                    .with_context(|| "exporting notification matchers")?;
             }
         }
     }
@@ -479,6 +497,44 @@ async fn export_firewall_groups<C: StateReadView + ?Sized>(
         .collect())
 }
 
+/// Read every notification matcher and project to
+/// `Vec<NotificationMatcherDecl>`, sorted by `name`. The three list
+/// fields (`target` / `match_field` / `match_severity`) are sorted
+/// too — order is not semantically meaningful for `all`/`any` matching,
+/// and sorting keeps the TOML byte-stable across runs. The derived
+/// `origin` provenance field is dropped.
+async fn export_notification_matchers<C: StateReadView + ?Sized>(
+    client: &C,
+) -> Result<Vec<NotificationMatcherDecl>> {
+    let mut matchers = client
+        .list_notification_matchers_view()
+        .await
+        .context("listing notification matchers")?;
+    matchers.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(matchers
+        .into_iter()
+        .map(|m| {
+            let mut target = m.target;
+            let mut match_field = m.match_field;
+            let mut match_severity = m.match_severity;
+            target.sort();
+            match_field.sort();
+            match_severity.sort();
+            NotificationMatcherDecl {
+                name: m.name,
+                comment: m.comment,
+                target,
+                match_field,
+                match_severity,
+                mode: m.mode,
+                invert_match: m.invert_match,
+                disable: m.disable,
+            }
+        })
+        .collect())
+}
+
 /// Sort the comma-separated tokens of a CSV-style PVE field. Empty
 /// input maps to empty output. Whitespace around commas is preserved
 /// (PVE doesn't emit any; if it ever does, we'd reformat on round-
@@ -645,6 +701,7 @@ mod tests {
                 Resource::Storage,
                 Resource::BackupJobs,
                 Resource::FirewallCluster,
+                Resource::Notifications,
             ]
         );
         // `parse("all")` and `Resource::all()` must stay in lockstep —
@@ -667,6 +724,7 @@ mod tests {
             Resource::Storage,
             Resource::BackupJobs,
             Resource::FirewallCluster,
+            Resource::Notifications,
         ] {
             assert!(all.contains(&r), "Resource::all() is missing {r:?}");
         }
@@ -717,6 +775,7 @@ mod tests {
         fw_ipsets: Vec<FirewallIpset>,
         fw_ipset_cidrs: std::collections::HashMap<String, Vec<FirewallIpsetCidr>>,
         fw_groups: Vec<FirewallSecurityGroup>,
+        notif_matchers: Vec<NotificationMatcher>,
     }
 
     #[async_trait]
@@ -756,6 +815,9 @@ mod tests {
         }
         async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>> {
             Ok(self.fw_groups.clone())
+        }
+        async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>> {
+            Ok(self.notif_matchers.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {
@@ -1285,5 +1347,41 @@ mod tests {
         assert_eq!(s.firewall_aliases.len(), 1);
         assert_eq!(s.firewall_ipsets.len(), 1);
         assert_eq!(s.firewall_groups.len(), 1);
+    }
+
+    // ── Notification matchers ─────────────────────────────
+
+    #[tokio::test]
+    async fn export_notification_matchers_sorts_and_canonicalises() {
+        // Matchers sorted by name; the list fields sorted within each;
+        // `origin` dropped.
+        let mut fake = FakeStateView::default();
+        fake.notif_matchers = vec![
+            NotificationMatcher {
+                name: "z-oncall".into(),
+                target: vec!["gotify".into(), "email".into()],
+                match_severity: vec!["warning".into(), "error".into()],
+                origin: "user-created".into(),
+                ..Default::default()
+            },
+            NotificationMatcher {
+                name: "a-default".into(),
+                origin: "builtin".into(),
+                ..Default::default()
+            },
+        ];
+        let out = export_notification_matchers(&fake).await.expect("export");
+        let names: Vec<&str> = out.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["a-default", "z-oncall"], "matchers sorted");
+        // z-oncall's list fields canonicalised (sorted).
+        let z = &out[1];
+        assert_eq!(z.target, vec!["email", "gotify"]);
+        assert_eq!(z.match_severity, vec!["error", "warning"]);
+        // origin is not a Decl field; serialised TOML must not carry it.
+        let toml_str = toml::to_string(&out[0]).expect("serialize");
+        assert!(
+            !toml_str.contains("origin"),
+            "origin dropped, got:\n{toml_str}"
+        );
     }
 }

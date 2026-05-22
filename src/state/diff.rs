@@ -35,7 +35,7 @@ use serde::Serialize;
 
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetDecl,
-    FirewallOptionsDecl, PoolDecl, StorageDecl,
+    FirewallOptionsDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
 };
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
@@ -81,10 +81,10 @@ pub struct Change {
 /// The output order is stable: changes for `pool` first, then `acl`,
 /// then `storage`, then `backup_job`, then the firewall families
 /// (`firewall_options`, `firewall_alias`, `firewall_ipset`,
-/// `firewall_group`), each sorted by identity. Within a family the
-/// order is `Delete` (so apply-with-prune teardown runs before create),
-/// then `Update`, then `Create` — but the apply layer re-orders by
-/// dependency where needed.
+/// `firewall_group`), then `notification_matcher`, each sorted by
+/// identity. Within a family the order is `Delete` (so apply-with-prune
+/// teardown runs before create), then `Update`, then `Create` — but the
+/// apply layer re-orders by dependency where needed.
 #[must_use]
 pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     let mut out = Vec::new();
@@ -100,6 +100,11 @@ pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     diff_firewall_aliases(&declared.firewall_aliases, &live.firewall_aliases, &mut out);
     diff_firewall_ipsets(&declared.firewall_ipsets, &live.firewall_ipsets, &mut out);
     diff_firewall_groups(&declared.firewall_groups, &live.firewall_groups, &mut out);
+    diff_notification_matchers(
+        &declared.notification_matchers,
+        &live.notification_matchers,
+        &mut out,
+    );
     out
 }
 
@@ -528,6 +533,66 @@ fn diff_firewall_groups(
     }
 }
 
+/// Diff notification matchers by `name` — standard create/update/
+/// delete. The full matcher (targets + match clauses + flags) is the
+/// value; touching any field is an `Update`.
+fn diff_notification_matchers(
+    declared: &[NotificationMatcherDecl],
+    live: &[NotificationMatcherDecl],
+    out: &mut Vec<Change>,
+) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &NotificationMatcherDecl> =
+        live.iter().map(|m| (m.name.as_str(), m)).collect();
+    let decl_by: HashMap<&str, &NotificationMatcherDecl> =
+        declared.iter().map(|m| (m.name.as_str(), m)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "notification_matcher",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "notification_matcher",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "notification_matcher",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
 /// Human-readable single-line summary of one change. Used by the
 /// CLI's default output mode. Keep it grep-friendly:
 /// `<sigil> <resource>: <identity>`.
@@ -550,7 +615,8 @@ mod tests {
     use super::*;
     use crate::state::model::{
         AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
-        FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StorageDecl,
+        FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, NotificationMatcherDecl,
+        PoolDecl, StorageDecl,
     };
 
     fn empty() -> ClusterState {
@@ -1085,6 +1151,55 @@ mod tests {
         let delete = diff(&empty(), &declared);
         assert_eq!(delete.len(), 1);
         assert_eq!(delete[0].kind, ChangeKind::Delete);
+    }
+
+    // ── Notification matchers ─────────────────────────────
+
+    #[test]
+    fn diff_notification_matcher_create_update_delete() {
+        let mk = |targets: Vec<&str>| NotificationMatcherDecl {
+            name: "oncall".into(),
+            target: targets.into_iter().map(String::from).collect(),
+            mode: "all".into(),
+            ..NotificationMatcherDecl::default()
+        };
+        // create
+        let declared = ClusterState {
+            notification_matchers: vec![mk(vec!["gotify"])],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &empty());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].resource, "notification_matcher");
+        assert_eq!(d[0].identity, "oncall");
+        // delete
+        let d = diff(&empty(), &declared);
+        assert_eq!(d[0].kind, ChangeKind::Delete);
+        // update (target set changes)
+        let live = ClusterState {
+            notification_matchers: vec![mk(vec!["email"])],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+    }
+
+    #[test]
+    fn diff_identical_matchers_produces_no_change() {
+        let m = NotificationMatcherDecl {
+            name: "m".into(),
+            target: vec!["gotify".into()],
+            match_severity: vec!["error".into()],
+            disable: true,
+            ..NotificationMatcherDecl::default()
+        };
+        let s = ClusterState {
+            notification_matchers: vec![m],
+            ..ClusterState::default()
+        };
+        assert!(diff(&s, &s).is_empty());
     }
 
     #[test]

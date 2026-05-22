@@ -36,6 +36,20 @@ SemVer contract:
   firewall or deleting a security group are **Severe**; loosening a
   default policy to ACCEPT and deleting aliases / IP sets are
   **Warnings**. `--resource all` now includes the firewall.
+- **`state` now manages notification matchers** (epic #74). A new
+  `notifications` resource family brings PVE's native notification
+  *matchers* (routing rules) into the GitOps loop with full CRUD:
+  `state export --resource notifications` snapshots every matcher
+  (`/cluster/notifications/matchers`) sorted by `name` (list fields
+  canonicalised, `origin` dropped), `diff` detects drift, `apply`
+  converges. Matcher updates use PVE's `delete` param to clear emptied
+  fields so a stripped-down matcher actually converges. Deleting a
+  matcher is a pre-flight **Warning** (events it routed go silently
+  unrouted). Notification *endpoints* are intentionally out of scope —
+  they carry secrets PVE never returns on `GET`, so they can't
+  round-trip export→apply; operators provision endpoints out-of-band
+  and `state` manages the routing rules that reference them by name.
+  `--resource all` now includes notifications.
 
 ## [0.4.0] — 2026-05-21
 

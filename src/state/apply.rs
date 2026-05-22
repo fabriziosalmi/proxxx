@@ -36,6 +36,7 @@
 //! | Firewall alias | ✓ | ✓ (cidr + comment) | ✓ |
 //! | Firewall ipset | ✓ | ✓ (comment → recreate; CIDR delta) | ✓ |
 //! | Firewall group | ✓ | — (no PVE update; rules read-only) | ✓ |
+//! | Notification matcher | ✓ | ✓ (all fields) | ✓ |
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -45,7 +46,7 @@ use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
 use crate::state::model::{
     AclDecl, BackupJobDecl, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetCidrDecl,
-    FirewallIpsetDecl, FirewallOptionsDecl, PoolDecl, StorageDecl,
+    FirewallIpsetDecl, FirewallOptionsDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
 };
 
 /// Options controlling apply behaviour.
@@ -161,6 +162,15 @@ pub trait StateWriteView: Send + Sync {
     async fn remove_cluster_firewall_ipset_cidr_view(&self, name: &str, cidr: &str) -> Result<()>;
     async fn create_cluster_firewall_group_view(&self, params: &[(&str, &str)]) -> Result<()>;
     async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()>;
+
+    // ── Notification matchers ─────────────────────────────
+    async fn create_notification_matcher_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_notification_matcher_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()>;
+    async fn delete_notification_matcher_view(&self, name: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -262,6 +272,20 @@ where
     async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_cluster_firewall_group(self, group).await
     }
+
+    async fn create_notification_matcher_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_notification_matcher(self, params).await
+    }
+    async fn update_notification_matcher_view(
+        &self,
+        name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<()> {
+        crate::api::ProxmoxGateway::update_notification_matcher(self, name, params).await
+    }
+    async fn delete_notification_matcher_view(&self, name: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_notification_matcher(self, name).await
+    }
 }
 
 /// Apply a list of changes, in order, against a live cluster.
@@ -340,6 +364,15 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("firewall_ipset", ChangeKind::Delete) => apply_fw_ipset_delete(client, change).await,
         ("firewall_group", ChangeKind::Create) => apply_fw_group_create(client, change).await,
         ("firewall_group", ChangeKind::Delete) => apply_fw_group_delete(client, change).await,
+        ("notification_matcher", ChangeKind::Create) => {
+            apply_notif_matcher_create(client, change).await
+        }
+        ("notification_matcher", ChangeKind::Update) => {
+            apply_notif_matcher_update(client, change).await
+        }
+        ("notification_matcher", ChangeKind::Delete) => {
+            apply_notif_matcher_delete(client, change).await
+        }
         (resource, kind) => Err(anyhow::anyhow!(
             "unhandled change shape: resource={resource} kind={kind:?}"
         )),
@@ -972,6 +1005,99 @@ async fn apply_fw_group_delete<C: StateWriteView + ?Sized>(
     client.delete_cluster_firewall_group_view(&decl.group).await
 }
 
+// ── Notification matchers ────────────────────────────────────
+
+/// Build the `POST`/`PUT /cluster/notifications/matchers` param set.
+/// The three list fields go as repeated form keys (PVE's array
+/// convention). `invert-match` + `disable` are always sent (0/1) so an
+/// update that flips them off actually takes effect. `include_name` is
+/// true for create (name is a body param) and false for update (name is
+/// the URL segment).
+fn notif_matcher_params(
+    decl: &NotificationMatcherDecl,
+    include_name: bool,
+) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    if include_name {
+        params.push(("name".to_string(), decl.name.clone()));
+    }
+    push_optional(&mut params, "comment", &decl.comment);
+    for t in &decl.target {
+        params.push(("target".to_string(), t.clone()));
+    }
+    for m in &decl.match_field {
+        params.push(("match-field".to_string(), m.clone()));
+    }
+    for s in &decl.match_severity {
+        params.push(("match-severity".to_string(), s.clone()));
+    }
+    push_optional(&mut params, "mode", &decl.mode);
+    params.push((
+        "invert-match".to_string(),
+        if decl.invert_match { "1" } else { "0" }.to_string(),
+    ));
+    params.push((
+        "disable".to_string(),
+        if decl.disable { "1" } else { "0" }.to_string(),
+    ));
+    params
+}
+
+async fn apply_notif_matcher_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: NotificationMatcherDecl = decode(change.after.as_ref(), "notification matcher")?;
+    let params = notif_matcher_params(&decl, true);
+    client
+        .create_notification_matcher_view(&borrow(&params))
+        .await
+}
+
+async fn apply_notif_matcher_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: NotificationMatcherDecl = decode(change.after.as_ref(), "notification matcher")?;
+    let mut params = notif_matcher_params(&after, false);
+    // PVE keeps an optional field's old value unless explicitly told to
+    // unset it. So any field the declared state leaves empty is sent in
+    // `delete` — otherwise "clear all match-fields" would never converge
+    // (the diff would show a perpetual Update). The matchers endpoint
+    // wants `delete` as REPEATED keys (`delete=a&delete=b`), not a CSV —
+    // a CSV is rejected as one malformed config-id (verified live).
+    let mut del: Vec<&str> = Vec::new();
+    if after.comment.is_empty() {
+        del.push("comment");
+    }
+    if after.target.is_empty() {
+        del.push("target");
+    }
+    if after.match_field.is_empty() {
+        del.push("match-field");
+    }
+    if after.match_severity.is_empty() {
+        del.push("match-severity");
+    }
+    if after.mode.is_empty() {
+        del.push("mode");
+    }
+    for key in del {
+        params.push(("delete".to_string(), key.to_string()));
+    }
+    client
+        .update_notification_matcher_view(&after.name, &borrow(&params))
+        .await
+}
+
+async fn apply_notif_matcher_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: NotificationMatcherDecl = decode(change.before.as_ref(), "notification matcher")?;
+    client.delete_notification_matcher_view(&decl.name).await
+}
+
 fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
     if !value.is_empty() {
         params.push((key.to_string(), value.to_string()));
@@ -1139,6 +1265,20 @@ mod tests {
         }
         async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()> {
             self.record(format!("delete_fw_group({group})")).await
+        }
+        async fn create_notification_matcher_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_matcher {params:?}")).await
+        }
+        async fn update_notification_matcher_view(
+            &self,
+            name: &str,
+            params: &[(&str, &str)],
+        ) -> Result<()> {
+            self.record(format!("update_matcher({name}) {params:?}"))
+                .await
+        }
+        async fn delete_notification_matcher_view(&self, name: &str) -> Result<()> {
+            self.record(format!("delete_matcher({name})")).await
         }
     }
 
@@ -1717,5 +1857,109 @@ mod tests {
             c2.lines().await,
             vec!["delete_fw_group(web-tier)".to_string()]
         );
+    }
+
+    // ── Notification matchers ─────────────────────────────
+
+    #[test]
+    fn matcher_params_arrays_repeat_and_bools_always_sent() {
+        let decl = NotificationMatcherDecl {
+            name: "oncall".into(),
+            target: vec!["gotify".into(), "email".into()],
+            match_field: vec!["exact:type=vzdump".into()],
+            match_severity: vec!["error".into(), "warning".into()],
+            mode: "any".into(),
+            invert_match: true,
+            disable: false,
+            ..NotificationMatcherDecl::default()
+        };
+        let p = notif_matcher_params(&decl, true);
+        // name only on create
+        assert!(p.iter().any(|(k, v)| k == "name" && v == "oncall"));
+        // arrays as repeated keys
+        assert_eq!(p.iter().filter(|(k, _)| k == "target").count(), 2);
+        assert_eq!(p.iter().filter(|(k, _)| k == "match-severity").count(), 2);
+        assert!(p
+            .iter()
+            .any(|(k, v)| k == "match-field" && v == "exact:type=vzdump"));
+        assert!(p.iter().any(|(k, v)| k == "mode" && v == "any"));
+        // bools always present
+        assert!(p.iter().any(|(k, v)| k == "invert-match" && v == "1"));
+        assert!(p.iter().any(|(k, v)| k == "disable" && v == "0"));
+        // update omits name
+        assert!(!notif_matcher_params(&decl, false)
+            .iter()
+            .any(|(k, _)| k == "name"));
+    }
+
+    #[tokio::test]
+    async fn matcher_update_sends_delete_for_emptied_fields() {
+        // A matcher stripped down to just a target must `delete` the
+        // fields it no longer sets, or PVE keeps the stale values.
+        let after = NotificationMatcherDecl {
+            name: "m".into(),
+            target: vec!["gotify".into()],
+            // comment, match_field, match_severity, mode all empty
+            ..NotificationMatcherDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "notification_matcher",
+            identity: "m".into(),
+            before: Some(serde_json::json!({"name": "m", "match_severity": ["error"]})),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("update_matcher(m)"));
+        assert!(line.contains("\"delete\""), "delete CSV present: {line}");
+        assert!(
+            line.contains("comment")
+                && line.contains("match-field")
+                && line.contains("match-severity")
+                && line.contains("mode")
+        );
+    }
+
+    #[tokio::test]
+    async fn matcher_create_and_delete_dispatch() {
+        let decl = NotificationMatcherDecl {
+            name: "oncall".into(),
+            target: vec!["gotify".into()],
+            ..NotificationMatcherDecl::default()
+        };
+        let c = RecordingClient::default();
+        let create = Change {
+            kind: ChangeKind::Create,
+            resource: "notification_matcher",
+            identity: "oncall".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![create], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        assert!(c.lines().await[0].starts_with("create_matcher"));
+
+        let c2 = RecordingClient::default();
+        let delete = Change {
+            kind: ChangeKind::Delete,
+            resource: "notification_matcher",
+            identity: "oncall".into(),
+            before: Some(serde_json::to_value(&decl).unwrap()),
+            after: None,
+        };
+        let out2 = apply(
+            &c2,
+            vec![delete],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out2[0].result, ApplyResult::Applied));
+        assert_eq!(c2.lines().await, vec!["delete_matcher(oncall)".to_string()]);
     }
 }
