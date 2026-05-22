@@ -13,8 +13,14 @@ use crate::incident;
 
 #[derive(Debug, Subcommand)]
 pub enum IncidentCommand {
-    /// Freeze the cluster — every mutation entry point refuses
-    /// until you `thaw` (or the TTL expires).
+    /// Freeze writes — every mutation entry point refuses until you
+    /// `thaw` (or the TTL expires).
+    ///
+    /// Scope: without `--profile` this is the global (fleet-wide)
+    /// kill-switch — it blocks mutations to *every* profile. With
+    /// `--profile <name>` only that cluster is frozen; the rest stay
+    /// writable. A client is refused if the global lock OR its own
+    /// profile's lock is active.
     ///
     /// Reads keep working: investigators need observation. The lock
     /// is local to this machine — for multi-operator coordination
@@ -24,6 +30,7 @@ pub enum IncidentCommand {
     /// Examples:
     ///   proxxx incident freeze --reason 'pveuser-bot token leaked'
     ///   proxxx incident freeze --reason 'SIEM alert NXLog-42' --ttl 4h
+    ///   proxxx incident freeze --profile prod --reason 'rotating prod token'
     Freeze {
         /// Required free-form text. Surfaced in every refusal and
         /// in the audit log; future-you / teammates need to know why.
@@ -36,6 +43,11 @@ pub enum IncidentCommand {
         /// trying to avoid — pass a TTL when in doubt.
         #[arg(long)]
         ttl: Option<String>,
+
+        /// Freeze only this profile (cluster) instead of the whole
+        /// fleet. Omit for the global kill-switch.
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Lift the freeze. Idempotent — thawing when nothing is frozen
@@ -45,40 +57,56 @@ pub enum IncidentCommand {
         /// Audit-logged.
         #[arg(long)]
         reason: String,
+
+        /// Thaw only this profile's freeze. Must match the `--profile`
+        /// used to freeze it; omit to lift the global freeze.
+        #[arg(long)]
+        profile: Option<String>,
     },
 
-    /// Report the current freeze status (active / inactive +
-    /// metadata). Exits 0 either way — use `--format json` and
-    /// match on `active` for scripting.
+    /// Report the current freeze status — the global freeze plus any
+    /// per-profile freezes, each with metadata. Exits 0 either way —
+    /// use `--format json` and match on `active` for scripting.
     Status,
 }
 
 pub fn execute_incident(action: IncidentCommand) -> Result<(Value, i32)> {
     match action {
-        IncidentCommand::Freeze { reason, ttl } => {
+        IncidentCommand::Freeze {
+            reason,
+            ttl,
+            profile,
+        } => {
             let ttl_secs = match ttl.as_deref() {
                 Some(s) => Some(parse_duration_secs(s)?),
                 None => None,
             };
-            let state = incident::freeze(&reason, ttl_secs)?;
+            let state = incident::freeze_for(profile.as_deref(), &reason, ttl_secs)?;
             audit_event("incident.freeze", &reason, &state);
             Ok((serde_json::to_value(&state)?, 0))
         }
-        IncidentCommand::Thaw { reason } => {
-            let prior = incident::thaw()?;
-            audit_thaw(&reason, prior.as_ref());
+        IncidentCommand::Thaw { reason, profile } => {
+            let prior = incident::thaw_for(profile.as_deref())?;
+            audit_thaw(&reason, profile.as_deref(), prior.as_ref());
             let payload = serde_json::json!({
                 "thawed": prior.is_some(),
                 "reason": reason,
+                "profile": profile,
                 "prior_state": prior,
             });
             Ok((payload, 0))
         }
         IncidentCommand::Status => {
-            let state = incident::current_state()?;
+            // `state` keeps its original meaning (the GLOBAL freeze, or null)
+            // so existing `--format json` consumers stay valid — additive-only
+            // per the SemVer contract. `freezes` is the new per-profile list.
+            let all = incident::list_active_freezes()?;
+            let global = all.iter().find(|s| s.profile.is_none()).cloned();
+            let per_profile: Vec<_> = all.into_iter().filter(|s| s.profile.is_some()).collect();
             let payload = serde_json::json!({
-                "active": state.is_some(),
-                "state": state,
+                "active": global.is_some() || !per_profile.is_empty(),
+                "state": global,
+                "freezes": per_profile,
             });
             Ok((payload, 0))
         }
@@ -93,6 +121,7 @@ fn audit_event(action: &str, reason: &str, state: &incident::FreezeState) {
         "reason": reason,
         "operator": state.operator,
         "ttl_secs": state.ttl_secs,
+        "profile": state.profile,
     }))
     .unwrap_or_default();
     if let Err(e) = with_logger(|l| l.log(action, &state.operator, None, None, Some(&params), "OK"))
@@ -101,12 +130,13 @@ fn audit_event(action: &str, reason: &str, state: &incident::FreezeState) {
     }
 }
 
-fn audit_thaw(reason: &str, prior: Option<&incident::FreezeState>) {
+fn audit_thaw(reason: &str, profile: Option<&str>, prior: Option<&incident::FreezeState>) {
     let operator = prior
         .map(|s| s.operator.clone())
         .unwrap_or_else(default_operator);
     let params = serde_json::to_string(&serde_json::json!({
         "reason": reason,
+        "profile": profile,
         "prior_reason": prior.map(|s| s.reason.as_str()),
     }))
     .unwrap_or_default();

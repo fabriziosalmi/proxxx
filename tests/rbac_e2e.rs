@@ -81,6 +81,7 @@ async fn persona_client(server: &MockServer, user: &str) -> PxClient {
         pbs: None,
         alerts: None,
         mcp_token: None,
+        profile_name: None,
     };
     PxClient::new(cfg, Some("fake-secret"))
         .await

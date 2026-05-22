@@ -51,6 +51,7 @@ mod tests {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            profile_name: None,
         };
         PxClient::new(cfg, Some("fake-secret"))
             .await

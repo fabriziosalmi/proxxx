@@ -560,7 +560,7 @@ impl PxClient {
         // Incident lockdown gate — refuses every mutation when the
         // freeze lock is active. Reads (GET) intentionally skip this
         // check; investigators need observation during an incident.
-        crate::incident::check_not_frozen()?;
+        crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {}", url);
 
@@ -594,7 +594,7 @@ impl PxClient {
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<T> {
-        crate::incident::check_not_frozen()?;
+        crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("PUT {}", url);
 
@@ -615,7 +615,7 @@ impl PxClient {
 
     /// Rate-limited, auth-aware DELETE request with retry on transient failures.
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
-        crate::incident::check_not_frozen()?;
+        crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("DELETE {}", url);
 

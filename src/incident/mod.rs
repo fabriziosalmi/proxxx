@@ -1,9 +1,16 @@
 //! Incident-response primitives.
 //!
-//! `freeze`/`thaw` is a cluster-wide write kill-switch that lives at
-//! `<data_dir>/freeze.lock`. When the lock is present (and not
-//! expired), every mutation call site that respects it refuses
-//! immediately. Reads keep working — investigators need observation.
+//! `freeze`/`thaw` is a write kill-switch with two scopes:
+//!   * **global** (fleet-wide) at `<data_dir>/freeze.lock` — blocks
+//!     mutations to *every* profile;
+//!   * **per-profile** at `<data_dir>/freeze.<profile>.lock` — blocks
+//!     mutations for one cluster only, leaving the rest writable.
+//!
+//! A `PxClient` mutation is refused if the global lock OR its own
+//! profile's lock is active (see [`check_not_frozen_for`]); freezing one
+//! profile never blocks another. When a lock is present (and not
+//! expired), the call site refuses immediately. Reads keep working —
+//! investigators need observation.
 //!
 //! ## File format
 //!
@@ -68,6 +75,13 @@ pub struct FreezeState {
     /// the "still active" predicate. `None` means "until explicitly
     /// thawed" (no auto-expiry).
     pub ttl_secs: Option<u64>,
+    /// Freeze scope. `None` = the global (fleet-wide) kill-switch that
+    /// blocks mutations to *every* profile; `Some(name)` = a single
+    /// profile's freeze. Backward-compatible: lock files written before
+    /// per-profile freeze existed (and every global freeze) omit this
+    /// field, so it reads back as `None` = global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl FreezeState {
@@ -89,13 +103,16 @@ impl FreezeState {
 /// dedicated exit code.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "refusing mutation — fleet is FROZEN (reason: {reason}, since {frozen_at}). \
+    "refusing mutation — {scope} is FROZEN (reason: {reason}, since {frozen_at}). \
      Run `proxxx incident thaw --reason '...'` to lift the freeze, or wait for \
      the TTL to expire."
 )]
 pub struct FreezeRefusal {
     pub reason: String,
     pub frozen_at: u64,
+    /// Human label for what's frozen: `the fleet` (global) or
+    /// `profile '<name>'`. Derived from the lock's `profile` field.
+    pub scope: String,
 }
 
 impl FreezeRefusal {
@@ -113,14 +130,69 @@ impl FreezeRefusal {
 /// the binary still functions in odd container environments.
 #[must_use]
 pub fn freeze_path() -> PathBuf {
+    freeze_locations().1
+}
+
+/// `(base_dir, global_lock_path)`. The `PROXXX_FREEZE_PATH` override names
+/// the GLOBAL lock file; per-profile locks are siblings in its parent dir.
+fn freeze_locations() -> (PathBuf, PathBuf) {
     if let Ok(p) = std::env::var("PROXXX_FREEZE_PATH") {
-        return PathBuf::from(p);
+        let global = PathBuf::from(p);
+        let dir = global
+            .parent()
+            .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+        return (dir, global);
     }
     let dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx").map_or_else(
         || PathBuf::from("/tmp/proxxx"),
         |d| d.data_local_dir().to_path_buf(),
     );
-    dir.join("freeze.lock")
+    let global = dir.join("freeze.lock");
+    (dir, global)
+}
+
+/// Resolve the lock path for a freeze scope. `None` → the global lock
+/// (`freeze.lock`, unchanged); `Some(name)` → that profile's lock
+/// (`freeze.<name>.lock`, with the name sanitized for filesystem safety).
+#[must_use]
+pub fn freeze_path_for(profile: Option<&str>) -> PathBuf {
+    let (dir, global) = freeze_locations();
+    match profile {
+        None => global,
+        Some(name) => dir.join(format!("freeze.{}.lock", sanitize_profile(name))),
+    }
+}
+
+/// Map a profile name to a filesystem-safe lock-file stem. Profile names are
+/// TOML config keys, conventionally `[A-Za-z0-9_-]`; any other char folds to
+/// `_`. The real (unsanitized) name is stored INSIDE the lock as `profile`, so
+/// display + audit stay accurate. Two exotic names that fold to the same stem
+/// would share a lock — acceptable given the convention, same best-effort
+/// trade-off as the operator/hostname resolution above.
+fn sanitize_profile(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "_".to_string()
+    } else {
+        s
+    }
+}
+
+/// Human label for a freeze scope, used in the refusal message + status.
+fn scope_label(profile: Option<&str>) -> String {
+    match profile {
+        None => "the fleet".to_string(),
+        Some(p) => format!("profile '{p}'"),
+    }
 }
 
 fn now_secs() -> u64 {
@@ -157,6 +229,12 @@ pub fn current_state() -> Result<Option<FreezeState>> {
     current_state_at(&freeze_path())
 }
 
+/// Read the freeze state for a scope: `None` = the global lock,
+/// `Some(name)` = that profile's lock. Expired locks read as `None`.
+pub fn current_state_for(profile: Option<&str>) -> Result<Option<FreezeState>> {
+    current_state_at(&freeze_path_for(profile))
+}
+
 /// `current_state` with an explicit lock-file path. Tests use this
 /// form to avoid mutating process-global env vars in parallel.
 pub fn current_state_at(path: &std::path::Path) -> Result<Option<FreezeState>> {
@@ -191,11 +269,39 @@ pub fn check_not_frozen() -> Result<()> {
     check_not_frozen_at(&freeze_path())
 }
 
+/// Refuse if EITHER the global freeze OR the given profile's freeze is
+/// active. Every `PxClient` mutation calls this with its own profile name
+/// (`None` for the flat/default profile → only the global lock applies, so a
+/// single-cluster setup is fully covered by a global freeze). Freezing one
+/// profile never blocks another.
+pub fn check_not_frozen_for(profile: Option<&str>) -> Result<()> {
+    let global = freeze_path_for(None);
+    let prof = profile.map(|n| freeze_path_for(Some(n)));
+    check_not_frozen_paths(&global, prof.as_deref())
+}
+
+/// Combination check with explicit paths (the global lock, plus an optional
+/// per-profile lock). Tests use this to exercise scope isolation without
+/// touching process-global env vars.
+fn check_not_frozen_paths(
+    global: &std::path::Path,
+    profile: Option<&std::path::Path>,
+) -> Result<()> {
+    check_not_frozen_at(global)?;
+    if let Some(p) = profile {
+        check_not_frozen_at(p)?;
+    }
+    Ok(())
+}
+
 /// `check_not_frozen` with an explicit lock-file path. Tests use
-/// this form.
+/// this form. The refusal's scope label is derived from the lock's own
+/// `profile` field, so it reads "the fleet" or "profile '<name>'" correctly
+/// regardless of which path it was handed.
 pub fn check_not_frozen_at(path: &std::path::Path) -> Result<()> {
     match current_state_at(path) {
         Ok(Some(state)) => Err(anyhow::Error::from(FreezeRefusal {
+            scope: scope_label(state.profile.as_deref()),
             reason: state.reason,
             frozen_at: state.frozen_at,
         })),
@@ -211,12 +317,34 @@ pub fn check_not_frozen_at(path: &std::path::Path) -> Result<()> {
 /// supplied reason + optional TTL, returning the persisted state.
 /// Caller is responsible for the audit-log entry.
 pub fn freeze(reason: &str, ttl_secs: Option<u64>) -> Result<FreezeState> {
-    freeze_at(&freeze_path(), reason, ttl_secs)
+    freeze_for(None, reason, ttl_secs)
 }
 
-/// `freeze` with an explicit lock-file path. Tests use this form.
+/// Freeze a scope: `None` = the global (fleet-wide) kill-switch, `Some(name)`
+/// = a single profile. The persisted state records the scope in its `profile`
+/// field. Caller is responsible for the audit-log entry.
+pub fn freeze_for(
+    profile: Option<&str>,
+    reason: &str,
+    ttl_secs: Option<u64>,
+) -> Result<FreezeState> {
+    write_freeze_at(&freeze_path_for(profile), profile, reason, ttl_secs)
+}
+
+/// `freeze` with an explicit lock-file path (global scope). Tests use this form.
 pub fn freeze_at(
     path: &std::path::Path,
+    reason: &str,
+    ttl_secs: Option<u64>,
+) -> Result<FreezeState> {
+    write_freeze_at(path, None, reason, ttl_secs)
+}
+
+/// Core writer: validate, build the `FreezeState` (stamping `profile`), and
+/// persist it atomically. Shared by every freeze entry point.
+fn write_freeze_at(
+    path: &std::path::Path,
+    profile: Option<&str>,
     reason: &str,
     ttl_secs: Option<u64>,
 ) -> Result<FreezeState> {
@@ -228,6 +356,7 @@ pub fn freeze_at(
         operator: operator_id(),
         frozen_at: now_secs(),
         ttl_secs,
+        profile: profile.map(str::to_string),
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -242,6 +371,44 @@ pub fn freeze_at(
 /// is not an error).
 pub fn thaw() -> Result<Option<FreezeState>> {
     thaw_at(&freeze_path())
+}
+
+/// Lift the freeze for a scope: `None` = global, `Some(name)` = that profile.
+pub fn thaw_for(profile: Option<&str>) -> Result<Option<FreezeState>> {
+    thaw_at(&freeze_path_for(profile))
+}
+
+/// List every active freeze — the global one plus any per-profile locks —
+/// by scanning the lock directory. Expired locks are filtered out. The global
+/// freeze (if any) sorts first. For `proxxx incident status`.
+pub fn list_active_freezes() -> Result<Vec<FreezeState>> {
+    list_active_in(&freeze_locations().0)
+}
+
+fn list_active_in(dir: &std::path::Path) -> Result<Vec<FreezeState>> {
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        // No lock directory yet = nothing frozen.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", dir.display()))),
+    };
+    for entry in rd {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // `freeze.lock` (global) and `freeze.<profile>.lock`; the atomic-write
+        // temp files (`freeze.lock.tmp.<pid>.<ts>`) don't end in `.lock`.
+        if !(name.starts_with("freeze.") && name.ends_with(".lock")) {
+            continue;
+        }
+        if let Ok(Some(state)) = current_state_at(&entry.path()) {
+            out.push(state);
+        }
+    }
+    // Global (profile == None) first, then profiles alphabetically.
+    out.sort_by(|a, b| a.profile.cmp(&b.profile));
+    Ok(out)
 }
 
 /// `thaw` with an explicit lock-file path. Tests use this form.
@@ -350,6 +517,7 @@ mod tests {
             operator: "test@host".into(),
             frozen_at: now_secs().saturating_sub(7200),
             ttl_secs: Some(3600),
+            profile: None,
         };
         std::fs::write(&p, toml::to_string_pretty(&expired).unwrap()).unwrap();
         assert!(current_state_at(&p).unwrap().is_none());
@@ -386,6 +554,7 @@ mod tests {
             operator: "test@host".into(),
             frozen_at: 100,
             ttl_secs: None,
+            profile: None,
         };
         assert!(s.is_active_at(0));
         assert!(s.is_active_at(u64::MAX));
@@ -398,9 +567,142 @@ mod tests {
             operator: "test@host".into(),
             frozen_at: 100,
             ttl_secs: Some(50),
+            profile: None,
         };
         assert!(s.is_active_at(149)); // before expiry
         assert!(!s.is_active_at(150)); // exactly at expiry (frozen_at + ttl = 150)
         assert!(!s.is_active_at(200)); // long after
+    }
+
+    // ── Per-profile scope ──────────────────────────────────────────
+
+    #[test]
+    fn freeze_for_stamps_the_profile_into_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("freeze.prod.lock");
+        let st = write_freeze_at(&p, Some("prod"), "rotating prod token", Some(3600)).unwrap();
+        assert_eq!(st.profile.as_deref(), Some("prod"));
+        let read = current_state_at(&p).unwrap().unwrap();
+        assert_eq!(read.profile.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn global_freeze_writes_no_profile_field() {
+        // Back-compat: a global freeze serialises identically to pre-feature
+        // locks (no `profile` key), so old readers stay happy.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("freeze.lock");
+        freeze_at(&p, "fleet-wide", None).unwrap();
+        let toml = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !toml.contains("profile"),
+            "global lock must omit profile: {toml}"
+        );
+    }
+
+    #[test]
+    fn per_profile_freeze_does_not_block_other_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("freeze.lock"); // no global freeze
+        let prof_a = dir.path().join("freeze.a.lock");
+        let prof_b = dir.path().join("freeze.b.lock");
+        write_freeze_at(&prof_a, Some("a"), "incident on A", None).unwrap();
+        // A is blocked …
+        assert!(check_not_frozen_paths(&global, Some(&prof_a)).is_err());
+        // … but B is untouched (only global + B's own lock are consulted).
+        assert!(check_not_frozen_paths(&global, Some(&prof_b)).is_ok());
+    }
+
+    #[test]
+    fn global_freeze_blocks_every_profile_and_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("freeze.lock");
+        let prof = dir.path().join("freeze.x.lock"); // x not frozen on its own
+        freeze_at(&global, "fleet-wide lockdown", None).unwrap();
+        assert!(check_not_frozen_paths(&global, Some(&prof)).is_err());
+        assert!(check_not_frozen_paths(&global, None).is_err()); // flat/default client
+    }
+
+    #[test]
+    fn refusal_scope_label_distinguishes_global_and_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join("freeze.lock");
+        freeze_at(&g, "x", None).unwrap();
+        let e = check_not_frozen_at(&g).unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<FreezeRefusal>().unwrap().scope,
+            "the fleet"
+        );
+
+        let p = dir.path().join("freeze.prod.lock");
+        write_freeze_at(&p, Some("prod"), "x", None).unwrap();
+        let e2 = check_not_frozen_at(&p).unwrap_err();
+        assert_eq!(
+            e2.downcast_ref::<FreezeRefusal>().unwrap().scope,
+            "profile 'prod'"
+        );
+    }
+
+    #[test]
+    fn sanitize_profile_folds_unsafe_chars() {
+        assert_eq!(sanitize_profile("prod"), "prod");
+        assert_eq!(sanitize_profile("dc-1_west"), "dc-1_west");
+        assert_eq!(sanitize_profile("a/b c"), "a_b_c");
+        assert_eq!(sanitize_profile(""), "_");
+    }
+
+    #[test]
+    fn freeze_path_for_filenames() {
+        let fname = |p: PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(fname(freeze_path_for(None)), "freeze.lock");
+        assert_eq!(fname(freeze_path_for(Some("prod"))), "freeze.prod.lock");
+        assert_eq!(fname(freeze_path_for(Some("a/b"))), "freeze.a_b.lock");
+        // None resolves to the same path the legacy global accessor returns.
+        assert_eq!(freeze_path_for(None), freeze_path());
+    }
+
+    #[test]
+    fn list_active_in_reports_global_and_profiles_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        freeze_at(&dir.path().join("freeze.lock"), "fleet", None).unwrap();
+        write_freeze_at(
+            &dir.path().join("freeze.beta.lock"),
+            Some("beta"),
+            "b",
+            None,
+        )
+        .unwrap();
+        write_freeze_at(
+            &dir.path().join("freeze.alpha.lock"),
+            Some("alpha"),
+            "a",
+            None,
+        )
+        .unwrap();
+        // Expired per-profile lock — must be filtered out.
+        let expired = FreezeState {
+            reason: "old".into(),
+            operator: "t@h".into(),
+            frozen_at: now_secs().saturating_sub(7200),
+            ttl_secs: Some(3600),
+            profile: Some("gamma".into()),
+        };
+        std::fs::write(
+            dir.path().join("freeze.gamma.lock"),
+            toml::to_string_pretty(&expired).unwrap(),
+        )
+        .unwrap();
+        // Atomic-write temp file — must be ignored (doesn't end in `.lock`).
+        std::fs::write(dir.path().join("freeze.lock.tmp.999.1"), "garbage").unwrap();
+
+        let scopes: Vec<Option<String>> = list_active_in(dir.path())
+            .unwrap()
+            .iter()
+            .map(|s| s.profile.clone())
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![None, Some("alpha".into()), Some("beta".into())]
+        );
     }
 }

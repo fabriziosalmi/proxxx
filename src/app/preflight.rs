@@ -915,6 +915,7 @@ tcp   0      0      :::443                  :::*                    LISTEN
             pbs: None,
             alerts: None,
             mcp_token: None,
+            profile_name: None,
         };
         crate::api::PxClient::new(cfg, Some("fake-secret"))
             .await

@@ -1920,6 +1920,7 @@ async fn run_demo() -> Result<Option<String>> {
         pbs: None,
         alerts: None,
         mcp_token: None,
+        profile_name: None,
     });
 
     loop {

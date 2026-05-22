@@ -47,6 +47,7 @@ mod http_status {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            profile_name: None,
         };
         PxClient::new(cfg, Some("fake-secret"))
             .await
@@ -291,6 +292,7 @@ mod transport {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            profile_name: None,
         };
         PxClient::new(cfg, Some("fake-secret"))
             .await

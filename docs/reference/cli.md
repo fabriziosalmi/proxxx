@@ -199,9 +199,15 @@ within a major version.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx incident freeze --reason "..." [--ttl 4h]` | Halt every mutation cluster-wide (every `POST`/`PUT`/`DELETE` refuses with exit 8). Reads keep working. Audit-logged. |
-| `proxxx incident thaw --reason "..."` | Lift the freeze. Idempotent. |
-| `proxxx incident status [--output text\|json]` | Report current freeze state. |
+| `proxxx incident freeze --reason "..." [--ttl 4h] [--profile <name>]` | Halt mutations (every `POST`/`PUT`/`DELETE` refuses with exit 8). Reads keep working. Audit-logged. Without `--profile` the freeze is **global** (fleet-wide, blocks every profile); with `--profile <name>` only that cluster is frozen. |
+| `proxxx incident thaw --reason "..." [--profile <name>]` | Lift the freeze. Idempotent. `--profile` must match the freeze's scope (omit for the global freeze). |
+| `proxxx incident status [--output text\|json]` | Report all active freezes — the global one plus any per-profile freezes. |
+
+Scope: a client for profile `P` is refused if the **global** lock OR
+profile `P`'s own lock is active — so a global freeze stops everything,
+while a per-profile freeze stops one cluster and leaves the rest writable.
+The flat/default profile is covered by the global freeze. Lock files live
+at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 
 ## Multi-cluster fanout
 

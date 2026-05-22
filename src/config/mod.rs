@@ -38,6 +38,14 @@ pub struct ProfileConfig {
     /// unset (the default) to run the HTTP server without auth — only do this
     /// on a trusted network or behind a reverse proxy that enforces auth.
     pub mcp_token: Option<String>,
+
+    /// The profile name this config was loaded under (`None` for the flat /
+    /// default top-level config). Not part of the TOML — `load_config` stamps
+    /// it after deserialising so the rest of the code (notably the per-profile
+    /// incident freeze) can attribute a client to its cluster. `#[serde(skip)]`
+    /// keeps it out of the wire format entirely.
+    #[serde(skip)]
+    pub profile_name: Option<String>,
 }
 
 /// One alert rule, declared in TOML.
@@ -822,14 +830,19 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
         v
     };
 
-    profile_value.try_into().map_err(|e| {
+    let mut cfg: ProfileConfig = profile_value.try_into().map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse{} profile from {}: {}",
             profile_name.map_or(String::new(), |n| format!(" '{n}'")),
             config_path.display(),
             e,
         )
-    })
+    })?;
+    // Stamp the profile name so a client built from this config knows which
+    // cluster it talks to (used by the per-profile incident freeze). `None`
+    // for the flat/default config — that client respects only the global lock.
+    cfg.profile_name = profile_name.map(str::to_string);
+    Ok(cfg)
 }
 
 /// Return the names of all named profiles in the config file.
