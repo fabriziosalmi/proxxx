@@ -7,7 +7,7 @@
 //! `app::iso_library::LIBRARY`; this module extends the same
 //! discipline to cloud images.
 //!
-//! ## What this MVP covers (per #65)
+//! ## What this module covers (per #65)
 //!
 //! - **Bundled registry** of cloud-image manifests. Checksum-pinned
 //!   per release (SHA-256 for Ubuntu/Fedora, SHA-512 for Debian/Alpine
