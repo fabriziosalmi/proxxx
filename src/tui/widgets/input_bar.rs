@@ -9,12 +9,26 @@ use ratatui::{
 };
 
 pub fn draw_input_bar(f: &mut Frame, area: Rect, mode: &AppMode, query: &str) {
-    let (prefix, title) = match mode {
-        AppMode::Search => ("/", " Fuzzy Search "),
-        AppMode::Command => (":", " Command "),
-        AppMode::InputTag => ("tag: ", " Select By Tag "),
+    // `mask` hides the typed text behind bullets — used for the SSH key
+    // passphrase so it never renders on screen (or in a screen-share).
+    let (prefix, title, mask) = match mode {
+        AppMode::Search => ("/", " Fuzzy Search ", false),
+        AppMode::Command => (":", " Command ", false),
+        AppMode::InputTag => ("tag: ", " Select By Tag ", false),
+        AppMode::SshPassphrase { .. } => (
+            "passphrase: ",
+            " Unlock SSH key — Enter to connect, Esc to cancel ",
+            true,
+        ),
         _ => return,
     };
+    // Render bullets, not the secret, when masking.
+    let displayed = if mask {
+        "•".repeat(query.chars().count())
+    } else {
+        query.to_string()
+    };
+    let query = displayed.as_str();
 
     // Place the input bar at the bottom — single divider line above
     // the input, no side/bottom chrome (the prefix `/` `:` glyph carries

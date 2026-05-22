@@ -13,6 +13,14 @@ SemVer contract:
 ## [Unreleased]
 
 ### Added
+- **TUI prompts for an SSH key passphrase interactively.** When a guest
+  SSH session uses an encrypted OpenSSH key and no passphrase is set
+  (neither `PROXXX_SSH_KEY_PASSPHRASE` nor a prior prompt), the TUI now
+  shows a masked passphrase prompt before connecting instead of failing.
+  The entered passphrase is cached for the rest of the session (prompted
+  at most once), rendered as bullets (never echoed), and Esc cancels.
+  Detection is a metadata-only check of the key file — no connection
+  attempt is wasted.
 - **`pbs restore --pattern` — single-file / selective restore.** The
   restore command now takes one or more `--pattern <glob>` flags
   (repeatable), wiring `proxmox-backup-client restore`'s own pattern

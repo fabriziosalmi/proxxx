@@ -155,6 +155,15 @@ pub enum AppMode {
     SshSession {
         vmid: u32,
     },
+    /// Interactive SSH key-passphrase prompt, shown when the configured
+    /// key is an encrypted OpenSSH key and no passphrase is set (neither
+    /// `PROXXX_SSH_KEY_PASSPHRASE` nor a prior prompt). The typed
+    /// passphrase accumulates in `command_input` and is rendered masked.
+    /// `vmid` is the guest whose session we're about to open once the
+    /// passphrase is supplied. Esc cancels; Enter submits.
+    SshPassphrase {
+        vmid: u32,
+    },
     /// Profile picker overlay. `profiles` is the sorted list of named
     /// profiles from config; `selected` is the cursor row.
     ProfilePicker {
@@ -390,6 +399,18 @@ pub enum Action {
         vmid: u32,
         error: String,
     },
+    /// Enter the interactive passphrase prompt for guest `vmid`'s SSH
+    /// session (the key is encrypted and no passphrase is set yet).
+    SshPassphrasePrompt {
+        vmid: u32,
+    },
+    /// A keystroke in the passphrase prompt — carries the full buffer so
+    /// far (same shape as `CommandInput`, but does not change mode).
+    SshPassphraseInput(String),
+    /// Submit the typed passphrase: cache it and (re)open the session.
+    SshPassphraseSubmit,
+    /// Abandon the passphrase prompt (Esc) — pops back to the prior view.
+    SshPassphraseCancel,
 
     // Broadcast
     PromptBroadcastCommand,
@@ -1322,6 +1343,37 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             state.error = Some(format!("SSH to {vmid} failed: {error}"));
             state.error_time = Some(std::time::Instant::now());
         }
+        Action::SshPassphrasePrompt { vmid } => {
+            // OpenGuestSsh already pushed View::GuestSshSession and set
+            // SshSession mode; overlay the passphrase prompt on top. The
+            // buffer starts empty.
+            state.command_input.clear();
+            state.mode = AppMode::SshPassphrase { vmid };
+        }
+        Action::SshPassphraseInput(input) => {
+            // Only meaningful while prompting; ignore otherwise (a stray
+            // keystroke shouldn't hijack `command_input`).
+            if matches!(state.mode, AppMode::SshPassphrase { .. }) {
+                state.command_input = input;
+            }
+        }
+        Action::SshPassphraseSubmit => {
+            if let AppMode::SshPassphrase { vmid } = state.mode {
+                let passphrase = state.command_input.clone();
+                state.command_input.clear();
+                // Back to session mode — the GuestSshSession view is
+                // still on the stack from OpenGuestSsh.
+                state.mode = AppMode::SshSession { vmid };
+                return Some(SideEffect::SetSshPassphraseAndOpen { vmid, passphrase });
+            }
+        }
+        Action::SshPassphraseCancel => {
+            state.command_input.clear();
+            state.mode = AppMode::Normal;
+            if matches!(state.current_view(), View::GuestSshSession { .. }) {
+                state.pop_view();
+            }
+        }
 
         // Compare
         Action::CompareGuests => {
@@ -1710,6 +1762,12 @@ pub enum SideEffect {
     OpenSshSession {
         vmid: u32,
     },
+    /// Cache the passphrase the operator just typed at the prompt, then
+    /// open the session — the retry's key load now has the passphrase.
+    SetSshPassphraseAndOpen {
+        vmid: u32,
+        passphrase: String,
+    },
     /// Tell the TUI loop to drop the active `PtySession`.
     CloseSshSession,
 
@@ -1899,5 +1957,73 @@ pub fn parse_command_action(cmd: &str) -> Option<Action> {
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod ssh_passphrase_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_enters_masked_mode_and_clears_buffer() {
+        let mut state = AppState::new();
+        state.command_input = "leftover".into();
+        let eff = update(&mut state, Action::SshPassphrasePrompt { vmid: 100 });
+        assert!(eff.is_none(), "prompt produces no side effect");
+        assert_eq!(state.mode, AppMode::SshPassphrase { vmid: 100 });
+        assert!(
+            state.command_input.is_empty(),
+            "buffer reset for the prompt"
+        );
+    }
+
+    #[test]
+    fn input_appends_only_while_prompting() {
+        let mut state = AppState::new();
+        // Outside the prompt, a stray input action must not hijack the buffer.
+        update(&mut state, Action::SshPassphraseInput("x".into()));
+        assert!(state.command_input.is_empty());
+        // Inside the prompt, it accumulates.
+        update(&mut state, Action::SshPassphrasePrompt { vmid: 7 });
+        update(&mut state, Action::SshPassphraseInput("hunter2".into()));
+        assert_eq!(state.command_input, "hunter2");
+    }
+
+    #[test]
+    fn submit_caches_passphrase_and_reopens() {
+        let mut state = AppState::new();
+        update(&mut state, Action::SshPassphrasePrompt { vmid: 42 });
+        update(&mut state, Action::SshPassphraseInput("s3cret".into()));
+        let eff = update(&mut state, Action::SshPassphraseSubmit);
+        match eff {
+            Some(SideEffect::SetSshPassphraseAndOpen { vmid, passphrase }) => {
+                assert_eq!(vmid, 42);
+                assert_eq!(passphrase, "s3cret");
+            }
+            _ => panic!("expected SetSshPassphraseAndOpen side effect"),
+        }
+        // Back to session mode; the secret is wiped from the input buffer.
+        assert_eq!(state.mode, AppMode::SshSession { vmid: 42 });
+        assert!(
+            state.command_input.is_empty(),
+            "passphrase cleared after submit"
+        );
+    }
+
+    #[test]
+    fn cancel_pops_the_session_view_and_resets() {
+        let mut state = AppState::new();
+        // Mirror OpenGuestSsh: push the session view, then prompt.
+        state.push_view(View::GuestSshSession { vmid: 9 });
+        update(&mut state, Action::SshPassphrasePrompt { vmid: 9 });
+        update(&mut state, Action::SshPassphraseInput("typed".into()));
+        let eff = update(&mut state, Action::SshPassphraseCancel);
+        assert!(eff.is_none());
+        assert_eq!(state.mode, AppMode::Normal);
+        assert!(state.command_input.is_empty());
+        assert!(
+            !matches!(state.current_view(), View::GuestSshSession { .. }),
+            "the connecting view is popped on cancel"
+        );
     }
 }
