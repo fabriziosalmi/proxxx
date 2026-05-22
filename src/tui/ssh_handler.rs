@@ -28,11 +28,12 @@ pub struct SshSessionHandler {
     profile: ProfileConfig,
     known: Arc<TokioRwLock<KnownHosts>>,
     verifier: Arc<dyn HostKeyVerifier>,
-    /// SSH key passphrase (read once at startup from env). For now we
-    /// don't prompt interactively — passphrase-protected keys must be
-    /// either unlocked by ssh-agent (not yet supported here) or have
-    /// `PROXXX_SSH_KEY_PASSPHRASE` set in the environment.
-    passphrase: Option<String>,
+    /// SSH key passphrase. Seeded at startup from
+    /// `PROXXX_SSH_KEY_PASSPHRASE` (if set), and otherwise filled in at
+    /// runtime by the interactive TUI prompt (see [`Self::needs_passphrase`]
+    /// / [`Self::set_passphrase`]). Behind a `Mutex` so the prompt can
+    /// set it on the shared `Arc<SshSessionHandler>` without `&mut`.
+    passphrase: Mutex<Option<String>>,
     active: Mutex<Option<Arc<PtySession>>>,
 }
 
@@ -66,9 +67,48 @@ impl SshSessionHandler {
             profile,
             known,
             verifier,
-            passphrase,
+            passphrase: Mutex::new(passphrase),
             active: Mutex::new(None),
         }
+    }
+
+    fn passphrase(&self) -> Option<String> {
+        match self.passphrase.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Store a passphrase entered via the interactive prompt. Reused for
+    /// every subsequent connection this session, so the operator is
+    /// prompted at most once.
+    pub fn set_passphrase(&self, passphrase: String) {
+        match self.passphrase.lock() {
+            Ok(mut g) => *g = Some(passphrase),
+            Err(p) => *p.into_inner() = Some(passphrase),
+        }
+    }
+
+    /// True when opening a session would need a passphrase we don't have
+    /// yet: the configured key file is an encrypted OpenSSH key AND no
+    /// passphrase is currently set (neither env nor a prior prompt). The
+    /// TUI checks this before connecting and, if true, prompts first.
+    #[must_use]
+    pub fn needs_passphrase(&self) -> bool {
+        if self.passphrase().is_some() {
+            return false;
+        }
+        let Some(ssh) = self.profile.ssh.as_ref() else {
+            return false;
+        };
+        // Profile-level key (tilde-expanded). A per-guest key override is
+        // rare; if one is encrypted and the profile key isn't, the worst
+        // case is the old behaviour (connect surfaces the encrypted-key
+        // error) rather than a prompt — acceptable for the heuristic.
+        let Some(key_path) = ssh.key_path_resolved() else {
+            return false;
+        };
+        key_file_is_encrypted(&key_path)
     }
 
     /// Open a new PTY session. Closes any existing one first.
@@ -97,10 +137,11 @@ impl SshSessionHandler {
             anyhow::anyhow!("guest {vmid} not configured under [profiles.X.ssh.guests.\"{vmid}\"]")
         })?;
 
+        let pass = self.passphrase();
         let session = PtySession::open(
             vmid,
             target,
-            self.passphrase.as_deref(),
+            pass.as_deref(),
             Arc::clone(&self.known),
             Arc::clone(&self.verifier),
             cols,
@@ -190,5 +231,41 @@ impl SshSessionHandler {
     #[must_use]
     pub fn active_user(&self) -> Option<String> {
         self.snapshot().map(|s| s.user.clone())
+    }
+}
+
+/// Whether `key_path` is an *encrypted* OpenSSH private key (one that
+/// needs a passphrase to load). Reads metadata only — no passphrase
+/// required to answer. Returns `false` if the file is missing,
+/// unreadable, not an OpenSSH key, or an unencrypted key: in every such
+/// case we let the normal `load_secret_key` path run and surface any
+/// real error at connect time, rather than prompting spuriously.
+fn key_file_is_encrypted(key_path: &std::path::Path) -> bool {
+    use russh::keys::ssh_key::PrivateKey;
+    std::fs::read_to_string(key_path)
+        .ok()
+        .and_then(|pem| PrivateKey::from_openssh(&pem).ok())
+        .is_some_and(|k| k.is_encrypted())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_file_is_encrypted;
+    use std::io::Write;
+
+    #[test]
+    fn encrypted_check_false_for_missing_file() {
+        let p = std::path::Path::new("/nonexistent/proxxx/no-such-key");
+        assert!(!key_file_is_encrypted(p));
+    }
+
+    #[test]
+    fn encrypted_check_false_for_non_key_content() {
+        // A file that isn't an OpenSSH key must read as "not encrypted"
+        // (false) so we don't prompt — the real error surfaces at
+        // connect time instead.
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(f, "this is not a private key").expect("write");
+        assert!(!key_file_is_encrypted(f.path()));
     }
 }

@@ -80,6 +80,7 @@ const fn mode_label_for(mode: &AppMode) -> &'static str {
         AppMode::ConfigGrep => "config grep",
         AppMode::Confirm { .. } => "confirm",
         AppMode::SshSession { .. } => "ssh",
+        AppMode::SshPassphrase { .. } => "ssh passphrase",
         AppMode::Help => "help",
         AppMode::ProfilePicker { .. } => "profile",
     }
@@ -93,6 +94,9 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
     }
     if matches!(mode, AppMode::SshSession { .. }) {
         return vec![("Ctrl+]", "exit SSH")];
+    }
+    if matches!(mode, AppMode::SshPassphrase { .. }) {
+        return vec![("Enter", "connect"), ("Esc", "cancel")];
     }
     if matches!(mode, AppMode::ProfilePicker { .. }) {
         return vec![("j/k", "nav"), ("Enter", "switch"), ("Esc", "cancel")];

@@ -554,24 +554,30 @@ pub async fn run(
                                         break;
                                     }
                                     Some(SideEffect::OpenSshSession { vmid }) => {
-                                        let h = Arc::clone(&ssh_handler);
-                                        let tx_c = data_tx.clone();
-                                        let area = terminal.size().unwrap_or_default();
-                                        let cols = area.width.max(20);
-                                        let rows = area.height.saturating_sub(2).max(5);
-                                        crate::util::spawn_traced::spawn_traced(
-                                            "ssh_session_open",
-                                            async move {
-                                                let res = h.open(vmid, cols, rows).await;
-                                                let error = res.err().map(|e| format!("{e:#}"));
-                                                let _ = tx_c
-                                                    .send(DataMsg::SshSessionOpenResult {
-                                                        vmid,
-                                                        error,
-                                                    })
-                                                    .await;
-                                            },
-                                        );
+                                        // Encrypted key + no passphrase yet → prompt
+                                        // interactively instead of connecting (which
+                                        // would just fail). The prompt's submit
+                                        // re-enters here via SetSshPassphraseAndOpen.
+                                        if ssh_handler.needs_passphrase() {
+                                            app::update(
+                                                &mut state,
+                                                Action::SshPassphrasePrompt { vmid },
+                                            );
+                                        } else {
+                                            spawn_ssh_open(
+                                                &ssh_handler,
+                                                &data_tx,
+                                                terminal,
+                                                vmid,
+                                            );
+                                        }
+                                    }
+                                    Some(SideEffect::SetSshPassphraseAndOpen {
+                                        vmid,
+                                        passphrase,
+                                    }) => {
+                                        ssh_handler.set_passphrase(passphrase);
+                                        spawn_ssh_open(&ssh_handler, &data_tx, terminal, vmid);
                                     }
                                     Some(SideEffect::CloseSshSession) => {
                                         ssh_handler.close();
@@ -935,6 +941,30 @@ where
             };
         }
     }
+}
+
+/// Spawn the async SSH `open` for `vmid`, sizing the PTY from the
+/// current terminal and reporting the outcome back via `DataMsg`. Shared
+/// by the direct-open path and the post-passphrase-prompt retry so the
+/// two stay in lockstep.
+fn spawn_ssh_open<B: ratatui::backend::Backend>(
+    ssh_handler: &Arc<ssh_handler::SshSessionHandler>,
+    data_tx: &mpsc::Sender<DataMsg>,
+    terminal: &ratatui::Terminal<B>,
+    vmid: u32,
+) {
+    let h = Arc::clone(ssh_handler);
+    let tx_c = data_tx.clone();
+    let area = terminal.size().unwrap_or_default();
+    let cols = area.width.max(20);
+    let rows = area.height.saturating_sub(2).max(5);
+    crate::util::spawn_traced::spawn_traced("ssh_session_open", async move {
+        let res = h.open(vmid, cols, rows).await;
+        let error = res.err().map(|e| format!("{e:#}"));
+        let _ = tx_c
+            .send(DataMsg::SshSessionOpenResult { vmid, error })
+            .await;
+    });
 }
 
 /// Dispatch a side effect to the API. Async because most arms await
@@ -1563,7 +1593,9 @@ async fn dispatch_side_effect(
                 }
             });
         }
-        SideEffect::OpenSshSession { .. } | SideEffect::CloseSshSession => {
+        SideEffect::OpenSshSession { .. }
+        | SideEffect::SetSshPassphraseAndOpen { .. }
+        | SideEffect::CloseSshSession => {
             // SSH session lifecycle is handled directly in the run loop
             // because it owns the SshSessionHandler. Reaching here means
             // the dispatch was invoked from a path that shouldn't —
@@ -2002,8 +2034,10 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
         widgets::modal::draw_help_overlay(f, area);
     } else if matches!(&state.mode, app::AppMode::Search) {
         views::search::draw(f, area, state);
-    } else if let app::AppMode::Command | app::AppMode::InputTag | app::AppMode::InputBroadcast =
-        &state.mode
+    } else if let app::AppMode::Command
+    | app::AppMode::InputTag
+    | app::AppMode::InputBroadcast
+    | app::AppMode::SshPassphrase { .. } = &state.mode
     {
         widgets::input_bar::draw_input_bar(f, area, &state.mode, &state.command_input);
     } else if let app::AppMode::ProfilePicker { profiles, selected } = &state.mode {

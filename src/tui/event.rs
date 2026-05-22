@@ -399,6 +399,24 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
         // PtySession). map_key never sees these keys in practice — but
         // we cover it here so the match is exhaustive.
         AppMode::SshSession { .. } => None,
+        // SSH key-passphrase prompt: same text-entry shape as InputTag,
+        // but its own actions (the buffer is rendered masked and must
+        // not flip the mode the way `CommandInput` does).
+        AppMode::SshPassphrase { .. } => match key.code {
+            KeyCode::Esc => Some(Action::SshPassphraseCancel),
+            KeyCode::Enter => Some(Action::SshPassphraseSubmit),
+            KeyCode::Char(c) => {
+                let mut q = state.command_input.clone();
+                q.push(c);
+                Some(Action::SshPassphraseInput(q))
+            }
+            KeyCode::Backspace => {
+                let mut q = state.command_input.clone();
+                q.pop();
+                Some(Action::SshPassphraseInput(q))
+            }
+            _ => None,
+        },
         // Help is handled by the early-return at the top of map_key so
         // any key dismisses the overlay; this arm is unreachable under
         // normal flow but the match must be exhaustive.
