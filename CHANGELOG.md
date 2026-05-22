@@ -13,6 +13,15 @@ SemVer contract:
 ## [Unreleased]
 
 ### Added
+- **`pbs restore --pattern` — single-file / selective restore.** The
+  restore command now takes one or more `--pattern <glob>` flags
+  (repeatable), wiring `proxmox-backup-client restore`'s own pattern
+  matching to extract just the matching files/subdirs instead of the
+  whole archive (e.g. `--pattern etc/network/interfaces`). Matched
+  files land under `--target` preserving their in-archive path. No FUSE
+  mount needed — the earlier "single-file needs FUSE" assumption was
+  wrong. (Command-construction is unit-tested; an end-to-end restore
+  needs a Linux host with `proxmox-backup-client` + a live datastore.)
 - **`cloud-img provision` — one-command cloud-init template** (#65).
   Completes the feature's original purpose: instead of the manual
   `qm create` → `qm set --scsiN import-from` → `--ide2 cloudinit` →

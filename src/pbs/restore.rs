@@ -1,14 +1,18 @@
 //! PBS restore via `proxmox-backup-client` shell-out.
 //!
-//! MVP scope (per the draconian review's honest cuts):
-//! - Full archive restore only. Single-file extraction needs FUSE mount,
-//!   which is platform-fragile (macFUSE blocked on Apple Silicon, Windows
-//!   needs `WinFsp`). We'd rather refuse than ship a broken half-feature.
-//! - Restore target is a local path. The user pulls the archive to disk,
-//!   then uses normal tools to extract individual files.
+//! Scope:
+//! - Full-archive restore, plus **single-file / selective restore** via
+//!   one or more `--pattern <glob>` flags (`RestoreRequest::patterns`).
+//!   This is `proxmox-backup-client`'s own pattern matching — NOT a FUSE
+//!   mount (the earlier "needs FUSE" assumption was wrong; `restore
+//!   --pattern` extracts a subset directly, no macFUSE/WinFsp needed).
+//!   Matched files land under the target preserving their archive path.
+//! - Restore target is a local path on the host running proxxx.
 //! - No re-injection into a live guest via qemu-guest-agent — the
 //!   `guest-file-write` API only handles small files and can't recreate
 //!   directory trees or permissions safely.
+//! - Interactive catalog browsing (`catalog shell`) is out of scope —
+//!   it needs an interactive TTY, which doesn't fit a one-shot CLI.
 //!
 //! Auth is via two env vars passed to the child:
 //!   `PBS_REPOSITORY` — `user@realm!tokenid@host:store`
@@ -35,6 +39,10 @@ pub struct RestoreRequest {
     pub target: PathBuf,
     /// Datastore to read from.
     pub store: String,
+    /// Restore only files matching these globs within the archive
+    /// (each becomes a `--pattern <glob>` flag — single-file restore).
+    /// Empty = restore the whole archive.
+    pub patterns: Vec<String>,
 }
 
 /// Outcome of a restore attempt.
@@ -86,6 +94,26 @@ fn pbs_host(url: &str) -> Option<String> {
     Some(host_port.to_string())
 }
 
+/// Build the positional + `--pattern` argv for `proxmox-backup-client
+/// restore` (everything except the env vars / stdio wiring). Pure and
+/// testable, so the single-file `--pattern` wiring is verified without
+/// spawning a child process. Order: `restore <snapshot> <archive>
+/// <target> [--pattern <glob>]…`.
+fn restore_args(req: &RestoreRequest) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = vec![
+        OsString::from("restore"),
+        OsString::from(&req.snapshot),
+        OsString::from(&req.archive),
+        req.target.as_os_str().to_os_string(),
+    ];
+    for pat in &req.patterns {
+        args.push(OsString::from("--pattern"));
+        args.push(OsString::from(pat));
+    }
+    args
+}
+
 /// Run `proxmox-backup-client restore` and stream its output line-by-line.
 ///
 /// The `on_line` callback fires for each stdout/stderr line so the TUI
@@ -127,10 +155,7 @@ where
     // when this scope ends.
     let secret_ref: &str = &secret;
     let mut cmd = Command::new(&bin);
-    cmd.arg("restore")
-        .arg(&req.snapshot)
-        .arg(&req.archive)
-        .arg(req.target.as_os_str())
+    cmd.args(restore_args(&req))
         .env("PBS_REPOSITORY", repository)
         .env("PBS_PASSWORD", secret_ref)
         // proxmox-backup-client needs PBS_FINGERPRINT only when verify_tls
@@ -356,6 +381,64 @@ mod tests {
         assert_eq!(buf.len(), 10);
         assert_eq!(buf.first().map(String::as_str), Some("90"));
         assert_eq!(buf.last().map(String::as_str), Some("99"));
+    }
+
+    fn req_with(patterns: Vec<String>) -> RestoreRequest {
+        RestoreRequest {
+            snapshot: "vm/100/2024-01-15T10:00:00Z".into(),
+            archive: "root.pxar.didx".into(),
+            target: PathBuf::from("/restore/here"),
+            store: "main".into(),
+            patterns,
+        }
+    }
+
+    fn args_of(req: &RestoreRequest) -> Vec<String> {
+        restore_args(req)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn restore_args_whole_archive_has_no_pattern() {
+        let args = args_of(&req_with(vec![]));
+        assert_eq!(
+            args,
+            vec![
+                "restore",
+                "vm/100/2024-01-15T10:00:00Z",
+                "root.pxar.didx",
+                "/restore/here",
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "--pattern"));
+    }
+
+    #[test]
+    fn restore_args_single_file_appends_one_pattern() {
+        let args = args_of(&req_with(vec!["etc/network/interfaces".into()]));
+        // Positionals stay first; the pattern flag comes after the target.
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--pattern" && w[1] == "etc/network/interfaces"));
+        assert_eq!(args.iter().filter(|a| *a == "--pattern").count(), 1);
+        // target still present and precedes the pattern flag.
+        let t = args.iter().position(|a| a == "/restore/here").unwrap();
+        let p = args.iter().position(|a| a == "--pattern").unwrap();
+        assert!(t < p, "target must precede --pattern");
+    }
+
+    #[test]
+    fn restore_args_multiple_patterns_repeat_the_flag() {
+        let args = args_of(&req_with(vec!["etc/hosts".into(), "etc/hostname".into()]));
+        assert_eq!(args.iter().filter(|a| *a == "--pattern").count(), 2);
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--pattern" && w[1] == "etc/hosts"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--pattern" && w[1] == "etc/hostname"));
     }
 
     // PBS restore subprocess: kill_on_drop smoke test. Spawn `sleep` directly via
