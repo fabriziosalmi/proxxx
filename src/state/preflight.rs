@@ -24,6 +24,7 @@
 //! | [`StateRisk::FirewallPolicyLoosened`] | Warning — a default policy goes to ACCEPT; every unmatched packet in that direction now passes. |
 //! | [`StateRisk::FirewallAliasDelete`] / [`StateRisk::FirewallIpsetDelete`] | Warning — rules referencing `+name` break. |
 //! | [`StateRisk::FirewallGroupDelete`] | Severe — drops the group's rules (not modelled, so unrecoverable) and breaks group-direction rules. |
+//! | [`StateRisk::NotificationMatcherDelete`] | Warning — events that matched it stop being routed; alerting silently goes quiet. |
 //! | [`StateRisk::BulkChangeCount { n }`] | Notice → Warning if `n ≥ 10`, Severe if `n ≥ 50` (very large batches = high attention cost). |
 //!
 //! ## Decision contract
@@ -112,6 +113,11 @@ pub enum StateRisk {
     /// group-direction rule that references it.
     FirewallGroupDelete { group: String },
 
+    /// Delete of a notification matcher. Events that matched it stop
+    /// being routed to their targets — alerting silently goes quiet
+    /// (no error, the notifications just stop arriving).
+    NotificationMatcherDelete { name: String },
+
     /// Very-large-batch warning. Increases attention cost
     /// proportionally; defer with `--allow-risk` if intentional.
     BulkChangeCount { n: usize },
@@ -133,7 +139,8 @@ impl StateRisk {
             | Self::BackupJobDelete { .. }
             | Self::FirewallPolicyLoosened { .. }
             | Self::FirewallAliasDelete { .. }
-            | Self::FirewallIpsetDelete { .. } => RiskLevel::Warning,
+            | Self::FirewallIpsetDelete { .. }
+            | Self::NotificationMatcherDelete { .. } => RiskLevel::Warning,
             Self::BulkChangeCount { n } => {
                 if *n >= 50 {
                     RiskLevel::Severe
@@ -203,6 +210,10 @@ impl StateRisk {
             Self::FirewallGroupDelete { group } => format!(
                 "delete security group `{group}` — drops its rules \
                  (unrecoverable here) and breaks rules that reference it"
+            ),
+            Self::NotificationMatcherDelete { name } => format!(
+                "delete notification matcher `{name}` — events it matched \
+                 will silently stop being routed"
             ),
             Self::BulkChangeCount { n } => {
                 format!("{n} changes in one apply — attention cost proportional")
@@ -372,6 +383,11 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
         (ChangeKind::Delete, "firewall_group") => {
             out.push(StateRisk::FirewallGroupDelete {
                 group: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Delete, "notification_matcher") => {
+            out.push(StateRisk::NotificationMatcherDelete {
+                name: change.identity.clone(),
             });
         }
         _ => {}
@@ -775,5 +791,15 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].level(), RiskLevel::Severe);
         assert!(matches!(&g[0], StateRisk::FirewallGroupDelete { group } if group == "web-tier"));
+    }
+
+    #[test]
+    fn notification_matcher_delete_is_warning() {
+        // Deleting a matcher silently stops routing matched events.
+        let live = sample_live();
+        let r = assess(&[delete_change("notification_matcher", "oncall")], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Warning);
+        assert!(matches!(&r[0], StateRisk::NotificationMatcherDelete { name } if name == "oncall"));
     }
 }

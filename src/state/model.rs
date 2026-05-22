@@ -97,6 +97,21 @@ pub struct ClusterState {
     /// an existing group is therefore NOT applied (documented limitation).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub firewall_groups: Vec<FirewallGroupDecl>,
+
+    /// Notification matchers — `GET /cluster/notifications/matchers`.
+    /// Identity is `name`. These are the PVE-native routing rules
+    /// ("send vzdump failures to gotify-oncall"); full CRUD.
+    ///
+    /// Scope note: the notification *endpoints* (sendmail/smtp/gotify/
+    /// webhook) are deliberately NOT modelled — they carry secrets
+    /// (gotify tokens, SMTP passwords) that PVE never returns on `GET`,
+    /// so an export→apply round-trip could not recreate them. Operators
+    /// provision endpoints out-of-band (web UI / `proxxx notifications
+    /// endpoint`); state manages the routing rules that reference them
+    /// by name. A matcher whose `target` names a missing endpoint will
+    /// fail at apply with PVE's own error.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notification_matchers: Vec<NotificationMatcherDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -336,6 +351,45 @@ pub struct FirewallGroupDecl {
     /// Free-text comment.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub comment: String,
+}
+
+/// One notification matcher — a PVE-native routing rule. `name` is the
+/// identity; everything else is value. The `origin` field
+/// (`builtin`/`modified-builtin`/`user-created`) from PVE's response is
+/// not modelled — it's derived provenance, not desired state.
+///
+/// The three list fields are sorted on export for diff-stability;
+/// order is not semantically meaningful for `all`/`any` matching.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationMatcherDecl {
+    /// Matcher name. The identity. Operators pick a readable one
+    /// (`vzdump-failures`, `oncall`); PVE accepts it on create.
+    pub name: String,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// Delivery target names (endpoints or groups) matching events are
+    /// routed to. Empty = matched events are dropped (a valid config).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub target: Vec<String>,
+    /// Per-field match clauses, e.g. `exact:type=vzdump`,
+    /// `regex:hostname=^pve-.*`. Empty = match every event.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub match_field: Vec<String>,
+    /// Severity filters, e.g. `error`, `warning`. Empty = any severity.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub match_severity: Vec<String>,
+    /// `all` (default) | `any` — how multiple clauses combine. Empty
+    /// lets PVE default it to `all`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// Invert the overall match decision.
+    #[serde(skip_serializing_if = "is_false")]
+    pub invert_match: bool,
+    /// `true` = matcher is kept but inactive (no routing).
+    #[serde(skip_serializing_if = "is_false")]
+    pub disable: bool,
 }
 
 /// One cluster-wide storage definition — `GET /storage`. The
@@ -740,5 +794,43 @@ members = ["qemu/100", "storage/ceph-rbd"]
         let toml_str = toml::to_string(&decl).expect("serialize");
         assert!(!toml_str.contains("comment"), "empty comment skipped");
         assert!(!toml_str.contains("nomatch"), "false nomatch skipped");
+    }
+
+    #[test]
+    fn notification_matcher_round_trips_through_toml() {
+        let s = ClusterState {
+            notification_matchers: vec![NotificationMatcherDecl {
+                name: "vzdump-failures".into(),
+                comment: "page oncall on backup failure".into(),
+                target: vec!["gotify-oncall".into(), "mail-to-root".into()],
+                match_field: vec!["exact:type=vzdump".into()],
+                match_severity: vec!["error".into()],
+                mode: "all".into(),
+                invert_match: false,
+                disable: false,
+            }],
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&s).expect("serialize");
+        let parsed: ClusterState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn notification_matcher_minimal_skips_empty_fields() {
+        // A match-everything matcher with one target is just name +
+        // target + the two always-false bools (which skip).
+        let m = NotificationMatcherDecl {
+            name: "catch-all".into(),
+            target: vec!["mail-to-root".into()],
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&m).expect("serialize");
+        assert!(!toml_str.contains("comment"));
+        assert!(!toml_str.contains("match_field"));
+        assert!(!toml_str.contains("match_severity"));
+        assert!(!toml_str.contains("mode"));
+        assert!(!toml_str.contains("invert_match"));
+        assert!(!toml_str.contains("disable"));
     }
 }
