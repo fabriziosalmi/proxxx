@@ -11,10 +11,13 @@
 //! That's an intentional design choice on their side ("pull, don't push"
 //! mirror trust). The orchestrator inherits SSH layer for the upgrade phase.
 //!
-//! Concurrency: hard cap of `max_concurrent` nodes mid-upgrade (default 1).
-//! "Mid-upgrade" = phase ∈ {Upgrade, Reboot, `WaitReboot`}. The orchestrator
-//! itself runs serially through the plan; if you want parallelism, multiple
-//! plans can run side-by-side, each capped.
+//! Concurrency: execution is **serial by design** (`max_concurrent`
+//! must be 1). Patching a node is a non-atomic apt dist-upgrade +
+//! reboot; running several at once risks HA quorum loss or losing
+//! multiple nodes to one bad upgrade. A `max_concurrent > 1` request is
+//! REJECTED by [`Orchestrator::apply`] (a loud error), not silently
+//! downgraded. For parallelism, run multiple invocations side-by-side,
+//! each scoped to a disjoint node set.
 //!
 //! Abort semantics: any node failure stops the rest of the plan. Already-
 //! completed nodes stay completed; the partially-failed node is left in
@@ -54,6 +57,14 @@ pub enum RebootPolicy {
 
 #[derive(Debug, Clone)]
 pub struct PatchStrategy {
+    /// Nodes patched at once. **Must be 1** — execution is serial by
+    /// design (concurrent node reboots risk HA quorum loss). [`apply`]
+    /// rejects any other value rather than silently downgrading to
+    /// serial. For parallelism, run multiple invocations over disjoint
+    /// node sets. Kept as a field (not a constant) so the contract is
+    /// explicit and a future parallel implementation has a home.
+    ///
+    /// [`apply`]: Orchestrator::apply
     pub max_concurrent: u32,
     pub reboot_policy: RebootPolicy,
     /// Hard timeout for the apt upgrade phase. Default 1800s (30 min) —
@@ -313,12 +324,20 @@ impl Orchestrator {
     where
         P: FnMut(&str, &Phase) + Send,
     {
-        // Concurrency: we run sequentially in this MVP. A future iteration
-        // can use a JoinSet bounded by max_concurrent — but the failure
-        // model gets harder (do you abort siblings?). One thing at a time.
+        // Concurrency: execution is serial **by design** — patching a
+        // node is a non-atomic apt dist-upgrade + reboot, and running
+        // several at once risks taking out HA quorum or losing more than
+        // one node to a bad upgrade simultaneously. So rather than
+        // silently downgrade a `max_concurrent > 1` request to serial
+        // (which misleads the caller into thinking they got parallelism),
+        // we reject it loudly. Parallelism across nodes is achieved by
+        // running multiple `proxxx patch apply` invocations, each scoped
+        // to a disjoint node set.
         if self.strategy.max_concurrent != 1 {
-            warn!(
-                "max_concurrent={} requested; MVP only supports serial execution",
+            anyhow::bail!(
+                "max_concurrent={} is not supported: patch execution is serial by design \
+                 (concurrent node reboots risk HA quorum loss). Use max_concurrent=1, or run \
+                 multiple `proxxx patch apply` invocations over disjoint node sets for parallelism.",
                 self.strategy.max_concurrent
             );
         }
@@ -1885,6 +1904,37 @@ mod tests {
             matches!(p2.status, Phase::Pending),
             "pve2 must be untouched after pve1 fail, was {:?}",
             p2.status
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_max_concurrent_above_one() {
+        // Serial-by-design: a `max_concurrent > 1` request must be a loud
+        // error, NOT a silent downgrade to serial (which would mislead a
+        // caller into thinking concurrent reboots are happening).
+        let mut api = MockApi::default();
+        api.nodes = vec![online("pve1")];
+        api.upgradable
+            .insert("pve1".into(), vec![upg("vim", "9.0", "9.1")]);
+        let ssh = Arc::new(MockSsh::default());
+        let orch = Orchestrator::new(
+            Arc::new(api),
+            ssh as Arc<dyn SshGateway>,
+            PatchStrategy {
+                max_concurrent: 2,
+                ..Default::default()
+            },
+        );
+        let plan = orch.plan(None).await.unwrap();
+        let err = orch
+            .apply(plan, |_, _| {})
+            .await
+            .expect_err("max_concurrent=2 must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("max_concurrent=2"), "msg: {msg}");
+        assert!(
+            msg.contains("serial"),
+            "error should explain the serial-by-design contract: {msg}"
         );
     }
 
