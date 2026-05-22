@@ -13,6 +13,18 @@ SemVer contract:
 ## [Unreleased]
 
 ### Added
+- **`cloud-img provision` — one-command cloud-init template** (#65).
+  Completes the feature's original purpose: instead of the manual
+  `qm create` → `qm set --scsiN import-from` → `--ide2 cloudinit` →
+  `--ciuser/--sshkeys/--ipconfig0` → `qm template` dance, a single
+  verified command does it all. It (optionally) downloads the
+  checksum-pinned image, creates the VM with the image imported as its
+  boot disk (PVE 8.2+ `import-from`), attaches a cloud-init drive, wires
+  the serial console + guest agent (cloud images need a serial console),
+  applies cloud-init config, optionally grows the disk, and converts to
+  a template. `--no-template` / `--start` stop short of templating for
+  boot-testing; `--download` fetches the image inline. Verified
+  end-to-end against PVE 9.1.1.
 - **`state` now manages scheduled backup jobs** (epic #74). A new
   `backup-jobs` resource family is wired through the full GitOps loop:
   `state export --resource backup-jobs` snapshots every recurring

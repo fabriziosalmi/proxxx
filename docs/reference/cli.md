@@ -231,6 +231,7 @@ within a major version.
 | :--- | :--- |
 | `proxxx cloud-img list [--output text\|json]` | Bundled SHA-256-pinned registry (Ubuntu / Debian / Alpine / Fedora). |
 | `proxxx cloud-img download <id> --node N --storage S` | Download via PVE's `download-url` with server-side SHA-256 verification. |
+| `proxxx cloud-img provision <id> --node N --storage S [--vmid --name --cores --memory --bridge --disk-size --ssh-key-file --ciuser --ipconfig --download --no-template --start --output]` | One-command cloud-init **template**: (optional download →) `qm create` with the image imported as the boot disk (`import-from`), cloud-init drive, serial console + agent, cloud-init config, optional disk grow, then `qm template`. `--no-template`/`--start` stop short for boot-testing. |
 
 ## GPU / PCI passthrough
 

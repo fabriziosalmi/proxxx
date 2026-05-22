@@ -1,4 +1,4 @@
-//! `proxxx template …` — cloud-image template provisioner.
+//! `proxxx cloud-img …` — cloud-image template provisioner.
 //!
 //! Why it exists: setting up a cloud-init template VM today is a
 //! ~10-step manual process per distro per cluster, and the community
@@ -24,15 +24,14 @@
 //!   bytes never transit through proxxx; PVE downloads + verifies
 //!   in one atomic step and rejects on hash mismatch. `.img` images
 //!   deposit as `iso` content, `.qcow2` as `import` (PVE 8.2+).
-//!
-//! ## Scope deferred to a follow-up
-//!
-//! - Full VM-create orchestration (`qm create`, `qm set --scsi0`,
-//!   cloud-init drive attach, `qm template <vmid>`). The download
-//!   step is the cryptographic-discipline value-add; the create
-//!   step is a multi-call API dance that benefits from its own PR.
-//!   Operators can run the create steps via `proxxx vm raw-set`
-//!   today; orchestrating them lives in #65 follow-up.
+//! - **`proxxx cloud-img provision <id> --node <n> --storage <s>`** —
+//!   the full template orchestration (#65): (optionally download →)
+//!   `qm create` with the image imported as the boot disk
+//!   (`import-from`), a cloud-init drive on `ide2`, serial console +
+//!   guest agent, cloud-init config (`ciuser`/`sshkeys`/`ipconfig0`),
+//!   an optional disk grow, then `qm template`. One verified command
+//!   in place of the ~5-step manual dance. `--no-template` / `--start`
+//!   stop short of templating for boot-testing.
 //!
 //! ## Updating the registry
 //!
@@ -56,9 +55,12 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::Serialize;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::api::types::GuestType;
 use crate::api::{ProxmoxGateway, PxClient};
+use crate::cli::common::poll_task_until_done;
 
 /// One cloud-image entry in the bundled registry. All `'static`
 /// — the registry is a compile-time constant.
@@ -175,6 +177,76 @@ pub fn by_id(id: &str) -> Option<&'static CloudImg> {
     REGISTRY.iter().find(|e| e.id == id)
 }
 
+/// Sanitize a registry id into a PVE-legal VM name: `.` and `_` → `-`
+/// (PVE guest names are DNS-ish and reject dots/underscores).
+fn sanitize_template_name(id: &str) -> String {
+    id.replace(['.', '_'], "-")
+}
+
+/// PVE volid of a downloaded registry image on `storage`. `.qcow2`
+/// images land under `import/` (content=import, PVE 8.2+), `.img`
+/// under `iso/` (content=iso) — keyed off the entry's `content`.
+fn source_volid(storage: &str, entry: &CloudImg) -> String {
+    let dir = if entry.content == "import" {
+        "import"
+    } else {
+        "iso"
+    };
+    format!("{storage}:{dir}/{}", entry.filename)
+}
+
+/// Inputs to [`build_create_params`]. Grouped into a struct so the
+/// param builder stays a pure, unit-testable function.
+struct CreateSpec {
+    vmid: u32,
+    name: String,
+    cores: u32,
+    memory: u32,
+    bridge: String,
+    storage: String,
+    source_volid: String,
+    ciuser: Option<String>,
+    sshkeys: Option<String>,
+    ipconfig: String,
+}
+
+/// Build the `POST /nodes/{node}/qemu` body for a cloud-init template:
+/// boot disk imported from `source_volid` (PVE 8.2+ `import-from`), a
+/// cloud-init drive on `ide2`, a serial console + `serial0` VGA (cloud
+/// images expect a serial console — without it boot output is invisible
+/// and some images hang), and the guest agent. cloud-init config
+/// (`ciuser` / `sshkeys` / `ipconfig0`) is applied when supplied.
+fn build_create_params(spec: &CreateSpec) -> Vec<(String, String)> {
+    let mut p: Vec<(String, String)> = vec![
+        ("vmid".into(), spec.vmid.to_string()),
+        ("name".into(), spec.name.clone()),
+        ("cores".into(), spec.cores.to_string()),
+        ("memory".into(), spec.memory.to_string()),
+        ("ostype".into(), "l26".into()),
+        ("scsihw".into(), "virtio-scsi-single".into()),
+        ("net0".into(), format!("virtio,bridge={}", spec.bridge)),
+        (
+            "scsi0".into(),
+            format!("{}:0,import-from={}", spec.storage, spec.source_volid),
+        ),
+        ("ide2".into(), format!("{}:cloudinit", spec.storage)),
+        ("boot".into(), "order=scsi0".into()),
+        ("serial0".into(), "socket".into()),
+        ("vga".into(), "serial0".into()),
+        ("agent".into(), "1".into()),
+        ("ipconfig0".into(), spec.ipconfig.clone()),
+    ];
+    if let Some(u) = &spec.ciuser {
+        p.push(("ciuser".into(), u.clone()));
+    }
+    if let Some(k) = &spec.sshkeys {
+        // Raw key — reqwest URL-encodes form bodies, matching the
+        // existing `proxxx vm` cloud-init path (src/cli/vm.rs).
+        p.push(("sshkeys".into(), k.clone()));
+    }
+    p
+}
+
 #[derive(Debug, Subcommand)]
 pub enum CloudImgCommand {
     /// Print the bundled cloud-image registry (id / distro / version /
@@ -197,7 +269,7 @@ pub enum CloudImgCommand {
     /// follow progress; the typical 500 MiB image takes 30 s to a
     /// few minutes depending on upstream bandwidth.
     Download {
-        /// Registry id (run `proxxx template list` for the catalog).
+        /// Registry id (run `proxxx cloud-img list` for the catalog).
         id: String,
         /// Target PVE node.
         #[arg(long)]
@@ -205,6 +277,80 @@ pub enum CloudImgCommand {
         /// Target PVE storage. Must accept `content = iso`.
         #[arg(long)]
         storage: String,
+    },
+
+    /// Provision a cloud-init **template** from a registry image in one
+    /// command: (optionally download →) create the VM with the image
+    /// imported as its boot disk, attach a cloud-init drive, wire the
+    /// serial console + guest agent, apply cloud-init config, optionally
+    /// grow the disk, then convert to a template.
+    ///
+    /// Collapses the manual `qm create` / `qm set --scsiN import-from`
+    /// / `qm set --ide2 cloudinit` / `qm set --ciuser/--sshkeys` /
+    /// `qm template` dance into a single verified step. Requires PVE
+    /// 8.2+ for the `import-from` disk syntax (the cluster is 9.x).
+    ///
+    /// The image must already be on `--storage` (run `cloud-img
+    /// download` first), unless `--download` is passed to fetch it
+    /// inline. Returns once the template exists.
+    Provision {
+        /// Registry id (run `proxxx cloud-img list` for the catalog).
+        id: String,
+        /// Target PVE node.
+        #[arg(long)]
+        node: String,
+        /// Target PVE storage for the image, cloud-init drive, and the
+        /// VM's imported disk. Must accept disk images + `import`/`iso`.
+        #[arg(long)]
+        storage: String,
+        /// VMID for the new template. Default: next free id from the
+        /// cluster (`/cluster/nextid`).
+        #[arg(long)]
+        vmid: Option<u32>,
+        /// Template name. Default: the registry id with `.`/`_` → `-`
+        /// (PVE names can't contain dots).
+        #[arg(long)]
+        name: Option<String>,
+        /// vCPU cores.
+        #[arg(long, default_value_t = 2)]
+        cores: u32,
+        /// Memory in MiB.
+        #[arg(long, default_value_t = 2048)]
+        memory: u32,
+        /// Network bridge for net0 (virtio).
+        #[arg(long, default_value = "vmbr0")]
+        bridge: String,
+        /// Grow the imported boot disk to this size, e.g. `20G` or
+        /// `+10G`. Cloud images ship small (~2-4 GiB); most operators
+        /// want headroom. Omit to keep the image's native size.
+        #[arg(long)]
+        disk_size: Option<String>,
+        /// File with SSH public key(s) to inject via cloud-init
+        /// (`sshkeys`). One key per line.
+        #[arg(long)]
+        ssh_key_file: Option<PathBuf>,
+        /// cloud-init default username (`ciuser`).
+        #[arg(long)]
+        ciuser: Option<String>,
+        /// cloud-init `ipconfig0` for net0, e.g. `ip=dhcp` or
+        /// `ip=10.0.0.50/24,gw=10.0.0.1`.
+        #[arg(long, default_value = "ip=dhcp")]
+        ipconfig: String,
+        /// Download the image first (waits for completion) instead of
+        /// requiring it already on `--storage`.
+        #[arg(long)]
+        download: bool,
+        /// Leave the result as a stopped VM instead of converting it to
+        /// a template (e.g. to boot-test the image before templating).
+        #[arg(long)]
+        no_template: bool,
+        /// Start the VM at the end instead of templating it. Implies
+        /// `--no-template`. Useful for a smoke boot.
+        #[arg(long)]
+        start: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = CloudImgOutput::Text)]
+        output: CloudImgOutput,
     },
 }
 
@@ -288,6 +434,180 @@ pub async fn execute_cloudimg(
                 }),
                 0,
             ))
+        }
+
+        CloudImgCommand::Provision {
+            id,
+            node,
+            storage,
+            vmid,
+            name,
+            cores,
+            memory,
+            bridge,
+            disk_size,
+            ssh_key_file,
+            ciuser,
+            ipconfig,
+            download,
+            no_template,
+            start,
+            output,
+        } => {
+            let entry = by_id(&id).with_context(|| {
+                format!("unknown template id `{id}` — run `proxxx cloud-img list` for the catalog")
+            })?;
+
+            // Read the SSH key file up front so a bad path fails before
+            // we mutate the cluster.
+            let sshkeys = match &ssh_key_file {
+                Some(p) => Some(
+                    std::fs::read_to_string(p)
+                        .with_context(|| format!("reading SSH key file {}", p.display()))?
+                        .trim()
+                        .to_string(),
+                ),
+                None => None,
+            };
+
+            let vmid = match vmid {
+                Some(v) => v,
+                None => client
+                    .get_next_vmid()
+                    .await
+                    .context("allocating next VMID from /cluster/nextid")?,
+            };
+            let name = name.unwrap_or_else(|| sanitize_template_name(entry.id));
+
+            // 1. Optionally download the image first (and wait for it).
+            if download {
+                eprintln!(
+                    "→ downloading {} to {storage} (PVE verifies checksum)…",
+                    entry.id
+                );
+                let upid = client
+                    .download_to_storage(
+                        &node,
+                        &storage,
+                        entry.url,
+                        entry.filename,
+                        Some(entry.checksum_algorithm),
+                        Some(entry.checksum),
+                        entry.content,
+                    )
+                    .await
+                    .context("starting image download")?;
+                let st = poll_task_until_done(client, &node, &upid, 0)
+                    .await
+                    .context("waiting for image download")?;
+                if !st.is_success() {
+                    anyhow::bail!(
+                        "image download task failed (status: {}) — check `proxxx tasks --node {node}`",
+                        st.status
+                    );
+                }
+            }
+
+            // 2. Create the VM with the image imported as its boot disk.
+            let spec = CreateSpec {
+                vmid,
+                name: name.clone(),
+                cores,
+                memory,
+                bridge,
+                storage: storage.clone(),
+                source_volid: source_volid(&storage, entry),
+                ciuser,
+                sshkeys,
+                ipconfig,
+            };
+            let params = build_create_params(&spec);
+            let borrowed: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            eprintln!(
+                "→ creating VM {vmid} ({name}) — importing disk from {}…",
+                spec.source_volid
+            );
+            let create_upid = client
+                .create_qemu(&node, &borrowed)
+                .await
+                .context("creating VM")?;
+            let st = poll_task_until_done(client, &node, &create_upid, 0)
+                .await
+                .context("waiting for VM create + disk import")?;
+            if !st.is_success() {
+                anyhow::bail!(
+                    "VM create task failed (status: {}) — check `proxxx tasks --node {node}`",
+                    st.status
+                );
+            }
+
+            // 3. Optionally grow the imported boot disk.
+            if let Some(size) = &disk_size {
+                eprintln!("→ resizing scsi0 to {size}…");
+                let rupid = client
+                    .resize_disk(&node, vmid, GuestType::Qemu, "scsi0", size)
+                    .await
+                    .context("resizing boot disk")?;
+                if !rupid.is_empty() {
+                    poll_task_until_done(client, &node, &rupid, 0)
+                        .await
+                        .context("waiting for disk resize")?;
+                }
+            }
+
+            // 4. Terminal action: template (default), leave as VM, or start.
+            let final_state = if start {
+                eprintln!("→ starting VM {vmid}…");
+                let supid = client
+                    .start_guest(&node, vmid, GuestType::Qemu)
+                    .await
+                    .context("starting VM")?;
+                if !supid.is_empty() {
+                    poll_task_until_done(client, &node, &supid, 0)
+                        .await
+                        .context("waiting for VM start")?;
+                }
+                "started"
+            } else if no_template {
+                "vm"
+            } else {
+                eprintln!("→ converting VM {vmid} to template…");
+                client
+                    .convert_to_template(&node, vmid, GuestType::Qemu)
+                    .await
+                    .context("converting to template")?;
+                "template"
+            };
+
+            let summary = serde_json::json!({
+                "id": entry.id,
+                "node": node,
+                "vmid": vmid,
+                "name": name,
+                "storage": storage,
+                "source": spec.source_volid,
+                "disk_size": disk_size,
+                "state": final_state,
+            });
+            if matches!(output, CloudImgOutput::Json) {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                let what = match final_state {
+                    "template" => format!("template {vmid} ({name})"),
+                    "started" => format!("running VM {vmid} ({name})"),
+                    _ => format!("VM {vmid} ({name})"),
+                };
+                println!("✓ provisioned {what} on {node} from {}", entry.id);
+                if final_state == "template" {
+                    println!("  clone it: proxxx clone {vmid} <new-vmid> --name <name>");
+                }
+            }
+            // Self-printed above (text or JSON), so return Null to avoid a
+            // double-render by the caller — same convention as `List`.
+            Ok((Value::Null, 0))
         }
     }
 }
@@ -389,5 +709,98 @@ mod tests {
     fn by_id_returns_none_for_unknown() {
         assert!(by_id("totally-fake-distro").is_none());
         assert!(by_id("").is_none());
+    }
+
+    // ── provision helpers ─────────────────────────────────
+
+    #[test]
+    fn sanitize_template_name_strips_dots_and_underscores() {
+        // PVE guest names reject `.`/`_`; the registry ids carry both.
+        assert_eq!(
+            sanitize_template_name("ubuntu-24.04-noble-amd64"),
+            "ubuntu-24-04-noble-amd64"
+        );
+        assert_eq!(sanitize_template_name("alpine_3.20_x86"), "alpine-3-20-x86");
+        assert_eq!(sanitize_template_name("plain-id"), "plain-id");
+    }
+
+    #[test]
+    fn source_volid_picks_dir_from_content_type() {
+        let import_entry = REGISTRY
+            .iter()
+            .find(|e| e.content == "import")
+            .expect("registry has an import-content entry");
+        assert_eq!(
+            source_volid("local", import_entry),
+            format!("local:import/{}", import_entry.filename)
+        );
+        if let Some(iso_entry) = REGISTRY.iter().find(|e| e.content == "iso") {
+            assert_eq!(
+                source_volid("nvme", iso_entry),
+                format!("nvme:iso/{}", iso_entry.filename)
+            );
+        }
+    }
+
+    #[test]
+    fn build_create_params_wires_import_cloudinit_serial_agent() {
+        let spec = CreateSpec {
+            vmid: 9001,
+            name: "ubuntu-tmpl".into(),
+            cores: 2,
+            memory: 2048,
+            bridge: "vmbr0".into(),
+            storage: "local-lvm".into(),
+            source_volid: "local:import/x.qcow2".into(),
+            ciuser: Some("admin".into()),
+            sshkeys: Some("ssh-ed25519 AAAAExample".into()),
+            ipconfig: "ip=dhcp".into(),
+        };
+        let p = build_create_params(&spec);
+        let get = |k: &str| p.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("vmid"), Some("9001"));
+        assert_eq!(get("name"), Some("ubuntu-tmpl"));
+        // The load-bearing bit: boot disk imported from the source volid.
+        assert_eq!(
+            get("scsi0"),
+            Some("local-lvm:0,import-from=local:import/x.qcow2")
+        );
+        assert_eq!(get("ide2"), Some("local-lvm:cloudinit"));
+        assert_eq!(get("boot"), Some("order=scsi0"));
+        // Cloud images need a serial console or boot output is invisible.
+        assert_eq!(get("serial0"), Some("socket"));
+        assert_eq!(get("vga"), Some("serial0"));
+        assert_eq!(get("agent"), Some("1"));
+        assert_eq!(get("net0"), Some("virtio,bridge=vmbr0"));
+        assert_eq!(get("ciuser"), Some("admin"));
+        assert_eq!(get("sshkeys"), Some("ssh-ed25519 AAAAExample"));
+        assert_eq!(get("ipconfig0"), Some("ip=dhcp"));
+    }
+
+    #[test]
+    fn build_create_params_omits_absent_cloudinit_fields() {
+        let spec = CreateSpec {
+            vmid: 9001,
+            name: "t".into(),
+            cores: 1,
+            memory: 512,
+            bridge: "vmbr0".into(),
+            storage: "local".into(),
+            source_volid: "local:iso/x.img".into(),
+            ciuser: None,
+            sshkeys: None,
+            ipconfig: "ip=dhcp".into(),
+        };
+        let p = build_create_params(&spec);
+        assert!(
+            !p.iter().any(|(k, _)| k == "ciuser"),
+            "no ciuser when unset"
+        );
+        assert!(
+            !p.iter().any(|(k, _)| k == "sshkeys"),
+            "no sshkeys when unset"
+        );
+        // ipconfig0 always present (the CLI arg defaults to ip=dhcp).
+        assert!(p.iter().any(|(k, _)| k == "ipconfig0"));
     }
 }
