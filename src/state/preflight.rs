@@ -27,6 +27,8 @@
 //! | [`StateRisk::NotificationMatcherDelete`] | Warning — events that matched it stop being routed; alerting silently goes quiet. |
 //! | [`StateRisk::HaRuleDelete`] | Warning — resources fall back to global HA defaults (no node preference / no affinity); does not stop them, just removes the constraint. |
 //! | [`StateRisk::HaRuleStrictChange`] | Severe — flipping `strict` on a node-affinity rule can force-migrate every constrained guest (or refuse them placement) within seconds. |
+//! | [`StateRisk::HaResourceDelete`] | Severe — removes a VM/CT from HA management entirely (CRM stops restarting/relocating it) AND auto-purges referencing rules via PVE's `purge=1` default. Operator-visible behaviour shift; not destructive to the guest itself, but a meaningful HA-policy change. |
+//! | [`StateRisk::HaResourceStateChange`] | Warning — changing the desired CRM state (e.g. `started` → `disabled`, or `started` → `ignored`) shifts how the guest is managed. Going to `disabled` or `ignored` makes CRM stop enforcing; going to `stopped` makes CRM keep it stopped. |
 //! | [`StateRisk::BulkChangeCount { n }`] | Notice → Warning if `n ≥ 10`, Severe if `n ≥ 50` (very large batches = high attention cost). |
 //!
 //! ## Decision contract
@@ -135,6 +137,29 @@ pub enum StateRisk {
     /// the direction here cheaply so we surface both as Severe.
     HaRuleStrictChange { rule: String },
 
+    /// Delete of an HA resource. Removes a VM/CT from HA management
+    /// entirely (CRM stops restarting/relocating it on failure) and,
+    /// via PVE's `purge=1` default, auto-removes the SID from any
+    /// referencing HA rules — deleting a rule entirely if it had only
+    /// this resource. The guest itself isn't affected, but the
+    /// HA-policy footprint shifts meaningfully. Severe because the
+    /// operator-perceived behaviour (CRM no longer recovers this
+    /// guest if its node dies) is a step change.
+    HaResourceDelete { sid: String },
+
+    /// State change on an HA resource that disables CRM enforcement
+    /// for it (`started`/`enabled` → `disabled` / `ignored` / `stopped`,
+    /// where `stopped` means CRM keeps it stopped — not the same as
+    /// the guest being stopped). Warning because the guest itself
+    /// continues running (or stays stopped) by inertia, but CRM's
+    /// recovery posture toward it changes. Going the other direction
+    /// (re-enabling) is not flagged — additive HA management is benign.
+    HaResourceStateChange {
+        sid: String,
+        before: String,
+        after: String,
+    },
+
     /// Very-large-batch warning. Increases attention cost
     /// proportionally; defer with `--allow-risk` if intentional.
     BulkChangeCount { n: usize },
@@ -150,7 +175,8 @@ impl StateRisk {
             | Self::StorageDeleteShared { .. }
             | Self::FirewallDisabled
             | Self::FirewallGroupDelete { .. }
-            | Self::HaRuleStrictChange { .. } => RiskLevel::Severe,
+            | Self::HaRuleStrictChange { .. }
+            | Self::HaResourceDelete { .. } => RiskLevel::Severe,
             Self::StoragePropertyChange { .. }
             | Self::AclPropagateFlip { .. }
             | Self::AclDeleteAuditor { .. }
@@ -159,7 +185,8 @@ impl StateRisk {
             | Self::FirewallAliasDelete { .. }
             | Self::FirewallIpsetDelete { .. }
             | Self::NotificationMatcherDelete { .. }
-            | Self::HaRuleDelete { .. } => RiskLevel::Warning,
+            | Self::HaRuleDelete { .. }
+            | Self::HaResourceStateChange { .. } => RiskLevel::Warning,
             Self::BulkChangeCount { n } => {
                 if *n >= 50 {
                     RiskLevel::Severe
@@ -241,6 +268,16 @@ impl StateRisk {
             Self::HaRuleStrictChange { rule } => format!(
                 "node-affinity rule `{rule}` `strict` flag changed — CRM may \
                  force-migrate every constrained guest within seconds"
+            ),
+            Self::HaResourceDelete { sid } => format!(
+                "delete HA resource `{sid}` — CRM stops restarting/relocating it; \
+                 PVE's purge=1 default also auto-removes the SID from referencing \
+                 rules (deleting rules that had only this resource)"
+            ),
+            Self::HaResourceStateChange { sid, before, after } => format!(
+                "HA resource `{sid}` state changed `{before}` → `{after}` — CRM \
+                 enforcement posture shifts (a move to disabled/ignored stops \
+                 enforcement; a move to stopped keeps the guest stopped)"
             ),
             Self::BulkChangeCount { n } => {
                 format!("{n} changes in one apply — attention cost proportional")
@@ -437,6 +474,39 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
                 if a.rule_type == "node-affinity" && b.strict != a.strict {
                     out.push(StateRisk::HaRuleStrictChange {
                         rule: change.identity.clone(),
+                    });
+                }
+            }
+        }
+        (ChangeKind::Delete, "ha_resource") => {
+            out.push(StateRisk::HaResourceDelete {
+                sid: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Update, "ha_resource") => {
+            // Surface CRM-enforcement-disabling state changes as
+            // Warning. Going from `started`/`enabled` to `disabled`/
+            // `ignored`/`stopped` is the worth-flagging direction.
+            let before: Option<crate::state::model::HaResourceDecl> = change
+                .before
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let after: Option<crate::state::model::HaResourceDecl> = change
+                .after
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            if let (Some(b), Some(a)) = (before, after) {
+                // Normalise — empty string at PVE side means "default"
+                // which is `started`. Empty stays empty for comparison
+                // intent (operator didn't set it explicitly).
+                let became_less_enforced =
+                    matches!(a.state.as_str(), "disabled" | "ignored" | "stopped")
+                        && !matches!(b.state.as_str(), "disabled" | "ignored" | "stopped");
+                if became_less_enforced {
+                    out.push(StateRisk::HaResourceStateChange {
+                        sid: change.identity.clone(),
+                        before: b.state,
+                        after: a.state,
                     });
                 }
             }
@@ -918,5 +988,106 @@ mod tests {
         let live = sample_live();
         let r = assess(&[change], &live);
         assert!(r.is_empty(), "comment-only Update must be risk-free");
+    }
+
+    // ── HA resources (epic #74 epilogue, 7/6) ─────────────────────
+
+    #[test]
+    fn ha_resource_delete_is_severe() {
+        // Deleting an HA resource removes the guest from HA management
+        // AND auto-purges referencing rules via PVE's purge=1 default.
+        // Operator-perceived behaviour shift → Severe-tier.
+        let live = sample_live();
+        let r = assess(&[delete_change("ha_resource", "vm:8888")], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Severe);
+        assert!(matches!(&r[0], StateRisk::HaResourceDelete { sid } if sid == "vm:8888"));
+    }
+
+    #[test]
+    fn ha_resource_state_change_to_disabled_is_warning() {
+        let before = crate::state::model::HaResourceDecl {
+            sid: "vm:8888".into(),
+            state: "started".into(),
+            ..crate::state::model::HaResourceDecl::default()
+        };
+        let after = crate::state::model::HaResourceDecl {
+            state: "disabled".into(),
+            ..before.clone()
+        };
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_resource",
+            identity: "vm:8888".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let live = sample_live();
+        let r = assess(&[change], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Warning);
+        assert!(matches!(
+            &r[0],
+            StateRisk::HaResourceStateChange { sid, before, after }
+                if sid == "vm:8888" && before == "started" && after == "disabled"
+        ));
+    }
+
+    #[test]
+    fn ha_resource_state_change_re_enable_emits_no_risk() {
+        // The Warning fires only on enforcement-DISABLING transitions.
+        // Going from disabled → started (re-enabling HA management)
+        // is additive and risk-free.
+        let before = crate::state::model::HaResourceDecl {
+            sid: "vm:8888".into(),
+            state: "disabled".into(),
+            ..crate::state::model::HaResourceDecl::default()
+        };
+        let after = crate::state::model::HaResourceDecl {
+            state: "started".into(),
+            ..before.clone()
+        };
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_resource",
+            identity: "vm:8888".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let live = sample_live();
+        let r = assess(&[change], &live);
+        assert!(
+            r.is_empty(),
+            "re-enabling HA management (disabled → started) must not trigger a warning"
+        );
+    }
+
+    #[test]
+    fn ha_resource_update_routine_field_change_emits_no_risk() {
+        // Tweaking max_restart / comment / failback without flipping
+        // the enforcement posture is risk-free.
+        let before = crate::state::model::HaResourceDecl {
+            sid: "ct:7777".into(),
+            state: "started".into(),
+            max_restart: 3,
+            ..crate::state::model::HaResourceDecl::default()
+        };
+        let after = crate::state::model::HaResourceDecl {
+            max_restart: 5,
+            ..before.clone()
+        };
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_resource",
+            identity: "ct:7777".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let live = sample_live();
+        let r = assess(&[change], &live);
+        assert!(
+            r.is_empty(),
+            "max_restart tweak (state preserved) must not flag any risk"
+        );
     }
 }

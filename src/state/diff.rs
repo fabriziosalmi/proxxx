@@ -40,7 +40,8 @@ use serde::Serialize;
 
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetDecl,
-    FirewallOptionsDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
+    FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl,
+    StorageDecl,
 };
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
@@ -110,6 +111,12 @@ pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
         &live.notification_matchers,
         &mut out,
     );
+    // HA resources MUST be diffed BEFORE HA rules so create-order flows
+    // resources-then-rules at apply time (rules reference resource SIDs).
+    // On the delete side, PVE's `purge=1` default on resource DELETE
+    // auto-removes the SID from referencing rules — apply_ha_rule_delete
+    // tolerates 404 to keep the cleanup idempotent.
+    diff_ha_resources(&declared.ha_resources, &live.ha_resources, &mut out);
     diff_ha_rules(&declared.ha_rules, &live.ha_rules, &mut out);
     out
 }
@@ -592,6 +599,64 @@ fn diff_notification_matchers(
         out.push(Change {
             kind: ChangeKind::Create,
             resource: "notification_matcher",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
+/// Diff HA resources by `sid` (identifier — `vm:100`, `ct:200`).
+/// Identity-by-`sid`; any other field change (`state` / `max_restart` /
+/// `max_relocate` / `failback` / `auto_rebalance` / `comment`) is an
+/// Update. The PVE-side `type` (vm/ct) is derivable from `sid` and is
+/// immutable; the apply layer always emits it but never lets it change.
+fn diff_ha_resources(declared: &[HaResourceDecl], live: &[HaResourceDecl], out: &mut Vec<Change>) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &HaResourceDecl> =
+        live.iter().map(|r| (r.sid.as_str(), r)).collect();
+    let decl_by: HashMap<&str, &HaResourceDecl> =
+        declared.iter().map(|r| (r.sid.as_str(), r)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "ha_resource",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "ha_resource",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "ha_resource",
             identity: (*k).to_string(),
             before: None,
             after: serde_json::to_value(decl_by[k]).ok(),
@@ -1377,6 +1442,94 @@ mod tests {
         assert!(
             !before.strict && after.strict,
             "strict flip must be visible"
+        );
+    }
+
+    // ── HA resources (epic #74 epilogue, 7/6) ─────────────────────
+
+    #[test]
+    fn diff_ha_resource_create_update_delete() {
+        let mk = |sid: &str, state: &str| HaResourceDecl {
+            sid: sid.into(),
+            state: state.into(),
+            ..HaResourceDecl::default()
+        };
+        // CREATE: declared has resource, live empty.
+        let declared = ClusterState {
+            ha_resources: vec![mk("vm:100", "started")],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &ClusterState::default());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].resource, "ha_resource");
+        assert_eq!(d[0].identity, "vm:100");
+
+        // DELETE: declared empty, live has resource.
+        let d = diff(&ClusterState::default(), &declared);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Delete);
+        assert_eq!(d[0].resource, "ha_resource");
+
+        // UPDATE: same SID, state changes started → disabled.
+        let live = ClusterState {
+            ha_resources: vec![mk("vm:100", "disabled")],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        // Both sides serialised — preflight needs before/after to
+        // detect the started→disabled transition for the Warning tier.
+        assert!(d[0].before.is_some() && d[0].after.is_some());
+    }
+
+    #[test]
+    fn diff_identical_ha_resources_produces_no_change() {
+        let r = HaResourceDecl {
+            sid: "ct:200".into(),
+            state: "stopped".into(),
+            max_restart: 3,
+            failback: true,
+            auto_rebalance: true,
+            ..HaResourceDecl::default()
+        };
+        let s = ClusterState {
+            ha_resources: vec![r],
+            ..ClusterState::default()
+        };
+        assert!(diff(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_emits_ha_resources_changes_before_ha_rules() {
+        // Inter-family dependency: when a TOML declares both a new
+        // resource and a new rule referencing it, the Create changes
+        // must come out resources-then-rules so the apply runs in the
+        // right order (PVE refuses rule create if resource isn't
+        // HA-managed yet).
+        let declared = ClusterState {
+            ha_resources: vec![HaResourceDecl {
+                sid: "vm:100".into(),
+                ..HaResourceDecl::default()
+            }],
+            ha_rules: vec![HaRuleDecl {
+                rule: "pin-vm100".into(),
+                rule_type: "node-affinity".into(),
+                resources: vec!["vm:100".into()],
+                nodes: "pve1".into(),
+                ..HaRuleDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &ClusterState::default());
+        assert_eq!(d.len(), 2);
+        // Position of ha_resource MUST come before ha_rule.
+        let resource_idx = d.iter().position(|c| c.resource == "ha_resource").unwrap();
+        let rule_idx = d.iter().position(|c| c.resource == "ha_rule").unwrap();
+        assert!(
+            resource_idx < rule_idx,
+            "ha_resource changes must precede ha_rule changes in diff order"
         );
     }
 
