@@ -274,10 +274,22 @@ jobs:
           ( cd dist && shasum -a 256 "proxxx-${VERSION}.cdx.json" > "proxxx-${VERSION}.cdx.json.sha256" )
 
       - name: Compose release notes
-        # Pull the `[Unreleased]` section from CHANGELOG.md if present;
-        # otherwise emit a minimal blurb. We deliberately do NOT use
+        # Pull the `[X.Y.Z]` section from CHANGELOG.md (the curated,
+        # human-written notes for THIS tag), falling back to
+        # `[Unreleased]` for the case where a tag is cut before the
+        # bump commit has renamed the section, and finally to a link
+        # to the file if both are missing. We deliberately do NOT use
         # `gh release create --generate-notes` — the curated CHANGELOG
         # entries beat the auto-generated commit-list every time.
+        #
+        # Why version-first (and not [Unreleased]-first like the
+        # original implementation): the repo's bump convention adds a
+        # new `## [X.Y.Z] — YYYY-MM-DD` section while leaving
+        # `## [Unreleased]` alone with a `_no entries yet._` placeholder.
+        # Old behaviour: every release page got that placeholder
+        # instead of the actual notes (visible on the v0.6.1 / v0.6.2
+        # pages before this fix). Version-first matches the section
+        # the bump commit just wrote.
         id: notes
         run: |
           set -e
@@ -286,10 +298,17 @@ jobs:
           {
             echo "## proxxx ${GITHUB_REF_NAME}"
             echo
-            # Try to extract the [Unreleased] section, stop at the
-            # next `## [` marker.
-            if awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/unreleased.md && [ -s /tmp/unreleased.md ]; then
-              cat /tmp/unreleased.md
+            # 1) Per-version section — `## [X.Y.Z]` through the next
+            #    `## [` marker. `awk -v v=...` injects the version as
+            #    a literal substring (SemVer's `.` matches itself in
+            #    regex; no quoting needed for that).
+            # 2) `[Unreleased]` section — safety net for the
+            #    pre-bump-commit window or any future convention drift.
+            # 3) Link to CHANGELOG.md on the repo at this tag.
+            if awk -v v="$VERSION" '$0 ~ "^## \\["v"\\]"{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/notes.md && [ -s /tmp/notes.md ]; then
+              cat /tmp/notes.md
+            elif awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/notes.md && [ -s /tmp/notes.md ]; then
+              cat /tmp/notes.md
             else
               echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) for details."
             fi
