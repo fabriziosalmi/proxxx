@@ -5,6 +5,7 @@ mod auth;
 mod client;
 pub mod error;
 pub mod tls_pin;
+mod transport;
 pub mod types;
 
 pub use client::PxClient;
