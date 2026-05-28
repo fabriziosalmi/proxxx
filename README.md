@@ -47,9 +47,9 @@ Pick the row that matches you and jump straight to the right page.
 
 - **One binary** — `proxxx`. CLI, TUI, MCP server, unified daemon (alerts + HITL + schedule) all in the same executable.
 - **Cluster-wide read in a second** — `proxxx ls nodes`, `proxxx ls guests`, fuzzy search across the whole cluster from `/`. `--all-profiles` fans the read across every configured cluster in parallel.
-- **GitOps for Proxmox** — `proxxx state {export,diff,apply}` produces a byte-stable TOML of pools/ACL/storage, diffs against live, converges via dispatched API calls. Pre-flight risk gates refuse Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete) unless `--allow-risk`; `--interactive` adds per-Severe `[y/N]` stdin prompts.
+- **GitOps for Proxmox** — `proxxx state {export,diff,apply}` produces a byte-stable TOML across **eight state families** (pools, ACL grants, storage definitions, backup jobs, cluster firewall, notification matchers, HA rules, HA resources), diffs against live, converges via dispatched API calls. Pre-flight risk gates refuse Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete, HA-rule strict-flip) unless `--allow-risk`; `--interactive` adds per-Severe `[y/N]` stdin prompts.
 - **Pipeline writes** — start, stop, migrate, snapshot, clone, backup, patch, disk-move, with `--format json` for jq. `migrate --stream` shows live per-disk progress.
-- **Pre-flight risk gate** — both per-guest (Locked/Running/LongUptime/TaggedProd/ActiveNetTraffic/HaManaged) and state-change (PoolDeleteNonEmpty/AclDeleteRootRole/StorageDeleteShared/BulkChangeCount) — refuses destructive ops without explicit override.
+- **Pre-flight risk gate** — both per-guest (Locked/Running/LongUptime/TaggedProd/ActiveNetTraffic/HaManaged + 5 more) and state-change (PoolDeleteNonEmpty/AclDeleteRootRole/StorageDeleteShared/BackupJobDelete/NotificationMatcherDelete/HaRuleDelete/HaRuleStrictChange/HaResourceDelete/HaResourceStateChange/BulkChangeCount) — refuses destructive ops without explicit override.
 - **HITL** — Telegram-mediated human approval gate, deny-on-timeout (120 s), policy-driven by tag / vmid / wildcard.
 - **Incident lockdown** — `proxxx incident freeze --reason X --ttl 4h` halts every mutation cluster-wide (`POST`/`PUT`/`DELETE` refuse with exit 8); `thaw` lifts it. Reads keep working for investigators.
 - **Console handoff + recording** — SSH/serial/SPICE/noVNC, all from `proxxx <verb> <vmid>`. `proxxx serial --record` writes asciinema cast v2; `proxxx play-cast` replays.
@@ -57,7 +57,7 @@ Pick the row that matches you and jump straight to the right page.
 - **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision. `proxxx backup-verify` does metadata-level integrity probing.
 - **Observability** — `proxxx logs tail` (cross-node journalctl fanout via SSH), `proxxx heatmap` (per-node API RTT), `proxxx anomaly` (z-score outliers), `proxxx accounting --timeframe month` (CPU-hours/GiB·h/net-GiB from per-guest RRD).
 - **Upgrade pre-flight** — `proxxx upgrade-check --target 9.x` scans cluster + config against bundled rules; exit code 1 on any block-severity finding (CI-gateable).
-- **Bundled error knowledge base** — `proxxx explain <error-id>` for every typed error proxxx can emit (13 entries; ships with the binary, no network needed).
+- **Bundled error knowledge base** — `proxxx explain <error-id>` for every typed error proxxx can emit (15 entries; ships with the binary, no network needed).
 - **Cluster digest for LLMs** — `proxxx describe --output llm-context` emits a token-compact prose+key:value paste-pronto for AI chats.
 - **MCP server** — stdio JSON-RPC + HTTP/SSE for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned. Server-sent `notifications/cluster-event` on both transports (task lifecycle + freeze/thaw events).
 - **Verifiable releases** — every tarball ships with three layers: SHA-256 sidecar, sigstore keyless cosign signature pinned to this exact workflow path (offline-verifiable; transparency-log inclusion proof embedded), and a CycloneDX SBOM generated from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`.
@@ -276,9 +276,9 @@ Eight stages, run as both a pre-commit hook and the CI contract in [`.github/wor
 | 2 | `cargo clippy --release --all-targets` | 10–60 s |
 | 3 | `cargo audit --deny warnings` | 3–5 s |
 | 4 | `cargo deny check` (license / banned crates / sources / wildcards) | 2–4 s |
-| 5 | `cargo test --release --all-targets` (unit + integration + ~25 proptest properties × 256 cases each) | 10–90 s |
-| 6 | `tests/live/test_run.sh` (87 read-only probes against the live cluster) | ~30 s |
-| 7 | `tests/live/test_mutation.sh` (LXC + cluster-level CRUD + QEMU; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>`) | ~60 s |
+| 5 | `cargo test --release --all-targets` (646 lib tests + 447 integration tests including ~25 proptest properties × 256 cases each) | 10–90 s |
+| 6 | `tests/live/test_run.sh` (67 read-only probes against the live cluster) | ~30 s |
+| 7 | `tests/live/test_mutation.sh` (34 mutation probes: LXC + cluster-level CRUD across all 8 state families + QEMU; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>`) | ~60 s |
 
 End-to-end wall time against a reachable cluster: **~340–480 s**.
 
@@ -317,8 +317,9 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
 | Module | Responsibility |
 | :--- | :--- |
 | [`src/app.rs`](src/app.rs) | Pure reducer. No I/O, no async. ~70 `Action` variants, ~20 `SideEffect`. |
-| [`src/api/`](src/api) | `ProxmoxGateway` trait, typed `ApiError` enum (8 categorical variants), reqwest client with 32 MiB body cap and rate limiter. |
-| [`src/api/error.rs`](src/api/error.rs) | `Unauthorized`, `Forbidden`, `NotFound`, `RateLimited`, `PayloadTooLarge`, `StorageHang`, `Transport`, `Schema`. Callers `.downcast_ref()` for differentiated handling. |
+| [`src/api/`](src/api) | `ProxmoxGateway` trait, typed `ApiError` enum (9 categorical variants), reqwest client with 32 MiB body cap and rate limiter. The `types/` directory holds ~3100 LOC of serde-typed PVE responses split across 16 submodules. |
+| [`src/api/error.rs`](src/api/error.rs) | `Unauthorized`, `Forbidden`, `NotFound`, `RateLimited`, `PayloadTooLarge`, `StorageHang`, `Transport`, `Parse`, `Other`. Callers `.downcast_ref()` for differentiated handling. |
+| [`src/state/`](src/state) | GitOps loop — model + export + diff + apply + preflight, eight state families (pools, ACL, storage, backup-jobs, firewall-cluster, notifications, HA rules, HA resources), byte-stable TOML. |
 | [`src/pbs/`](src/pbs) | PBS REST browse + `kill_on_drop(true)` supervision over `proxmox-backup-client restore`. |
 | [`src/ssh/`](src/ssh) | `russh`, publickey only, dedicated TOFU `known_hosts` (separate from `~/.ssh/`), per-node connection pool. |
 | [`src/app/cache.rs`](src/app/cache.rs) | SQLite-backed time-travel cache, drives `proxxx replay <timestamp>`. |
@@ -349,8 +350,8 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
 
 | File | Tracked | Purpose |
 | :--- | :---: | :--- |
-| [`test_run.sh`](tests/live/test_run.sh) | ✓ | 87 read-only probes covering the full CLI surface; logs to `test_run.log` |
-| [`test_mutation.sh`](tests/live/test_mutation.sh) | ✓ | Full mutation lifecycle with `trap EXIT` cleanup: LXC 9999 (create → start → snapshot → stop → delete), cluster-level CRUD (pool / firewall-cluster alias+group+ipset / backup-job / notifications endpoint+matcher / storage-defs), QEMU 9998 from alpine ISO, opt-in QGA round-trips via `PROXXX_E2E_QGA_VMID=<vmid>` |
+| [`test_run.sh`](tests/live/test_run.sh) | ✓ | 67 read-only probes covering the full CLI surface; logs to `test_run.log` |
+| [`test_mutation.sh`](tests/live/test_mutation.sh) | ✓ | 34 mutation probes with `trap EXIT` cleanup: LXC 9999 (create → start → snapshot → stop → delete), cluster-level CRUD across all 8 state families (pool / ACL / storage-defs / backup-job / firewall-cluster alias+group+ipset / notifications matcher / HA rules / HA resources), QEMU 9998 from alpine ISO, opt-in QGA round-trips via `PROXXX_E2E_QGA_VMID=<vmid>` |
 | `test_*.log` | — | Generated by the harness |
 
 ## Honest non-goals
