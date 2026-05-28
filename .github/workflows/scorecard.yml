@@ -21,6 +21,7 @@
 name: Scorecard
 
 on:
+  workflow_dispatch:  # test manuale via "gh workflow run"
   branch_protection_rule:
   schedule:
     - cron: "31 4 * * 1"  # Mondays 04:31 UTC
@@ -32,7 +33,7 @@ permissions: read-all
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, homelab]
     permissions:
       # Required for codeql-action/upload-sarif.
       security-events: write
