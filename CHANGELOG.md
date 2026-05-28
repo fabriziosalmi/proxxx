@@ -14,6 +14,91 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.7.0] — 2026-05-28
+
+Headline: **HA-rules closes epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74) at 6/6 +
+`russh` ZIP-bomb security bump + release-notes extractor fix.** Minor bump because HA rules is
+the sixth (and final) writable GitOps state family — `proxxx state {export,diff,apply}` now
+covers pools, ACL, storage, backup jobs, cluster firewall, notification matchers, AND HA
+placement rules (`node-affinity` + `resource-affinity` under `/cluster/ha/rules`, PVE 9+),
+with full preflight risk tiering. The original deferral reason ("PVE 9 has no write gateway
+for HA rules") is gone — `pve-ha-manager.git src/PVE/API2/HA/Rules.pm` exposes the full
+CRUD surface today (POST + PUT + DELETE under `Sys.Console`); proxxx now uses it.
+Alongside the family: `russh 0.60.3 → 0.61.1` absorbs **GHSA-wwx6-x28x-8259** (a malicious SSH
+peer could craft a ZIP-bomb-style packet under compression negotiation to OOM the client
+process), the release-notes extractor in `release.yml` now picks the per-version CHANGELOG
+section instead of `[Unreleased]` (the v0.6.1 / v0.6.2 release pages shipped with
+`_no entries yet._` as their body; backfilled to the actual content as part of this release),
+and routine dependabot drains: `serde_json 1.0.150`, `codeql-action 4.36.0`, Ubuntu 24.04
+cloud-image re-pinned (build 20260518).
+
+### Added — HA placement rules state family (epic #74 close)
+
+- **`proxxx state --resource ha-rules`** — full CRUD via `/cluster/ha/rules` (PVE 9+).
+  Two PVE-side rule types are modelled today and both round-trip through export → diff →
+  apply unchanged:
+  - **`node-affinity`** — pin an HA resource set to a node set, optionally with
+    `node:priority` notation (`pve1:5,pve2`), optionally `strict` (no fallback to other
+    nodes). Replaces what PVE-8 HA *groups* did. Strict-flip on an Update is preflight-
+    Severe (CRM can force-migrate constrained guests within seconds).
+  - **`resource-affinity`** — `positive` collocates the set on one node, `negative`
+    keeps them on different nodes (anti-affinity / spread). No `nodes` field; placement
+    is computed relative to the set itself.
+  - Common fields across both: `rule` (identity), `type` (immutable on PUT —
+    type-change is caught upstream with an actionable `"delete + re-create"` error
+    instead of PVE's cryptic message), `resources` (sorted `Vec<String>` of SIDs on
+    disk for TOML readability + diff-stable set equality), `disable`, `comment`.
+  - Update path applies the matcher lesson: empty fields are cleared via repeated
+    `delete=<key>` params (never CSV — PVE rejects CSV on per-rule endpoints).
+  - Preflight: `HaRuleDelete` is Warning (resources fall back to global HA defaults;
+    no outage, just constraint loss). `HaRuleStrictChange` on a `node-affinity` rule
+    is Severe — flipping `strict` can cascade into a fleet-wide forced migration as
+    soon as the CRM tick.
+  - +12 unit tests across `diff` / `apply` / `preflight` covering CRUD dispatch, leak
+    checks (no field bleed across plugin types), type-change rejection, strict-flip
+    preflight detection. `Resource::all()` now guards seven variants — adding a family
+    here is the durable single-source-of-truth lesson from v0.5.0.
+
+### Security
+
+- **`russh 0.60.3 → 0.61.1` — GHSA-wwx6-x28x-8259.** When compression is negotiated, a
+  malicious SSH peer could craft a "ZIP-bomb" packet that bypassed the maximum-packet-size
+  check and forced the receiver to OOM. proxxx uses `russh` for guest SSH consoles + the
+  PBS / SSH worker pool, so a compromised PVE node or a hostile guest could have exploited
+  this against the proxxx client process. Russh 0.61.1 closes it. The 0.61 series also adds
+  zero-copy `*_bytes` write APIs (not yet adopted by proxxx — performance follow-up).
+
+### Changed — dependencies + CI
+
+- **`serde_json 1.0.149 → 1.0.150`** (patch-and-minor dependabot group). Tightens
+  non-string enum-object-key rejection on deserialize.
+- **`github/codeql-action 4.35.5 → 4.36.0`** (CI action only).
+- **Cloud-image registry re-pinned**: Ubuntu 24.04 noble → build 20260518 + fresh SHA-256
+  (automated weekly cron, single registry-entry change, validated by the
+  `cargo test --release --lib cloudimg` invariants).
+
+### Fixed — release-notes extractor
+
+- **`release.yml` "Compose release notes" step now prefers the per-version
+  `## [X.Y.Z]` CHANGELOG section** over `[Unreleased]`. The repo's bump convention
+  adds a new versioned section while leaving `[Unreleased]` with a `_no entries yet._`
+  placeholder; every release page from v0.6.1 onward was shipping with that
+  placeholder as the rendered body. The new extractor uses `awk -v v="$VERSION"`
+  to match the literal version-stamped header, falling back to `[Unreleased]`
+  for the pre-bump-commit window and to a CHANGELOG.md link if both are empty.
+  The v0.6.1 and v0.6.2 release pages have been backfilled in-place to the
+  proper content as part of this release.
+
+### Out of scope (deferred)
+
+- **HA resources** (`/cluster/ha/resources`) — which guests are HA-managed (vs. *how*
+  they're placed). The read path is wired (`list_ha_resources`); a separate state family
+  for the write path is a follow-up.
+- **Legacy `/cluster/ha/groups`** — PVE 9 migrated this to `/cluster/ha/rules`. proxxx
+  targets PVE 9.x; no compat shim shipped.
+- **Live e2e for HA-rules** against the homelab cluster — pending; schema validated
+  against `pve-ha-manager.git` HEAD, unit + integration suites green offline (~1078 / 1078).
+
 ## [0.6.2] — 2026-05-28
 
 Headline: **Module shape — lift HTTP transport and the watch dispatch out
