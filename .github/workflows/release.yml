@@ -295,6 +295,43 @@ jobs:
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
           NOTES_FILE="$(mktemp)"
+
+          # The unwrap-prototype lesson (v0.7.3 → v0.7.4): GitHub's
+          # release-page renderer treats single newlines INSIDE
+          # paragraphs as hard line breaks, NOT as the soft-wrap-becomes-
+          # space behaviour of standard GFM. CHANGELOG.md hard-wraps at
+          # ~75 chars for git-diff readability, so without post-processing
+          # every release page renders with visible mid-sentence breaks
+          # (visible on v0.6.1–v0.7.3 — backfilled in-place after this
+          # commit lands). The script below joins paragraph-internal
+          # lines into single lines while preserving list items
+          # (`- ...` / `* ...` / `1. ...`), headings (`# ...`),
+          # blockquotes (`> ...`), tables (`| ...`), indented continuations,
+          # and fenced code blocks.
+          cat > /tmp/unwrap.py <<'PY'
+          import sys, re
+          in_code = False
+          buf = []
+          def flush():
+              if buf:
+                  sys.stdout.write(" ".join(buf) + "\n")
+                  buf.clear()
+          for raw in sys.stdin.read().splitlines():
+              if raw.startswith("```"):
+                  flush(); print(raw); in_code = not in_code; continue
+              if in_code:
+                  flush(); print(raw); continue
+              if not raw.strip():
+                  flush(); print(); continue
+              stripped = raw.lstrip()
+              if raw != stripped:
+                  flush(); print(raw); continue
+              if re.match(r"^([-*+>#|]|\d+[.)]\s)", stripped):
+                  flush(); print(raw); continue
+              buf.append(raw)
+          flush()
+          PY
+
           {
             echo "## proxxx ${GITHUB_REF_NAME}"
             echo
@@ -306,9 +343,9 @@ jobs:
             #    pre-bump-commit window or any future convention drift.
             # 3) Link to CHANGELOG.md on the repo at this tag.
             if awk -v v="$VERSION" '$0 ~ "^## \\["v"\\]"{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/notes.md && [ -s /tmp/notes.md ]; then
-              cat /tmp/notes.md
+              python3 /tmp/unwrap.py < /tmp/notes.md
             elif awk '/^## \[Unreleased\]/{flag=1;next} /^## \[/{flag=0} flag' CHANGELOG.md > /tmp/notes.md && [ -s /tmp/notes.md ]; then
-              cat /tmp/notes.md
+              python3 /tmp/unwrap.py < /tmp/notes.md
             else
               echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) for details."
             fi
