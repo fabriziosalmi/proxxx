@@ -112,6 +112,21 @@ pub struct ClusterState {
     /// fail at apply with PVE's own error.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notification_matchers: Vec<NotificationMatcherDecl>,
+
+    /// HA rules — `GET /cluster/ha/rules` (PVE 9+). Identity is `rule`.
+    /// Closes epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74).
+    ///
+    /// Two `rule_type` values today: `node-affinity` (pin resources to a
+    /// node set, optionally with `:priority` and `strict` mode) and
+    /// `resource-affinity` (collocate or anti-collocate a set). The
+    /// legacy PVE-8 `/cluster/ha/groups` endpoint is NOT modelled: PVE 9
+    /// migrated it to rules (the old POST 500s), and we don't ship
+    /// two parallel families for the same desired-state surface.
+    ///
+    /// `digest` is server-generated for optimistic concurrency and is
+    /// deliberately NOT exported (would churn the TOML on every read).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ha_rules: Vec<HaRuleDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -390,6 +405,72 @@ pub struct NotificationMatcherDecl {
     /// `true` = matcher is kept but inactive (no routing).
     #[serde(skip_serializing_if = "is_false")]
     pub disable: bool,
+}
+
+/// One HA placement rule — `GET /cluster/ha/rules` (PVE 9+). Identity
+/// is `rule`. Two rule types today (more may land upstream):
+///
+/// * **`node-affinity`** — pin `resources` to `nodes` (optionally with
+///   `node:priority` notation), optionally `strict` (no fallback).
+///   Replaces what PVE-8 HA groups did. Plugin-specific fields:
+///   `nodes`, `strict`.
+/// * **`resource-affinity`** — `positive` collocates a set on the same
+///   node; `negative` keeps them on different nodes (anti-affinity).
+///   No `nodes` field — placement is computed against the set itself.
+///   Plugin-specific field: `affinity`.
+///
+/// Resources are kept as a sorted `Vec<String>` of HA SIDs (`vm:100`,
+/// `ct:200`) on disk; the wire form uses a comma-encoded string. The
+/// list-form is friendlier for TOML editing and identity equality in
+/// the diff (`{"vm:100","ct:200"} == {"ct:200","vm:100"}`).
+///
+/// `nodes` is kept as `String` (priority-encoded) to match PVE's wire
+/// form exactly — splitting and recomposing would lose validation that
+/// PVE's parser does (e.g. duplicate-node rejection). Diff equality is
+/// byte-by-byte, so operators should write the canonical form
+/// (sorted nodes, `:priority` only where != 0).
+///
+/// `digest` is deliberately NOT modelled — server-generated, would
+/// churn the TOML on every export.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaRuleDecl {
+    /// Rule identifier — the URL last-segment. Operator-chosen on
+    /// create (`keep-db-on-pve1`, `web-spread`).
+    pub rule: String,
+    /// `node-affinity` or `resource-affinity`. Mutating this on an
+    /// existing rule is rejected by PVE; the diff/apply layer treats a
+    /// `rule_type` change as Delete + Create (handled by identity
+    /// remaining the same, equality differing → Update; PVE will reject
+    /// the Update PUT; operators should delete + re-declare).
+    #[serde(rename = "type")]
+    pub rule_type: String,
+    /// HA SIDs the rule constrains, e.g. `vm:100`, `ct:200`. Sorted on
+    /// export. Empty = no resources bound (PVE rejects this on create).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// `true` = rule kept but inactive (CRM ignores it).
+    #[serde(skip_serializing_if = "is_false")]
+    pub disable: bool,
+
+    // ── node-affinity specific ─────────────────────────────────────
+    /// Target nodes with optional `:priority` (`pve1:5,pve2`). Only
+    /// meaningful for `node-affinity`; empty for `resource-affinity`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nodes: String,
+    /// `true` = resources MUST run on `nodes` (no fallback). Only
+    /// meaningful for `node-affinity`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub strict: bool,
+
+    // ── resource-affinity specific ─────────────────────────────────
+    /// `positive` (collocate) or `negative` (anti-collocate). Only
+    /// meaningful for `resource-affinity`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub affinity: String,
 }
 
 /// One cluster-wide storage definition — `GET /storage`. The

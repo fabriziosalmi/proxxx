@@ -46,7 +46,8 @@ use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
 use crate::state::model::{
     AclDecl, BackupJobDecl, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetCidrDecl,
-    FirewallIpsetDecl, FirewallOptionsDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
+    FirewallIpsetDecl, FirewallOptionsDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl,
+    StorageDecl,
 };
 
 /// Options controlling apply behaviour.
@@ -171,6 +172,11 @@ pub trait StateWriteView: Send + Sync {
         params: &[(&str, &str)],
     ) -> Result<()>;
     async fn delete_notification_matcher_view(&self, name: &str) -> Result<()>;
+
+    // ── HA rules (PVE 9, epic #74) ────────────────────────
+    async fn create_ha_rule_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_ha_rule_view(&self, rule: &str, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_ha_rule_view(&self, rule: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -286,6 +292,16 @@ where
     async fn delete_notification_matcher_view(&self, name: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_notification_matcher(self, name).await
     }
+
+    async fn create_ha_rule_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_ha_rule(self, params).await
+    }
+    async fn update_ha_rule_view(&self, rule: &str, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_ha_rule(self, rule, params).await
+    }
+    async fn delete_ha_rule_view(&self, rule: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_ha_rule(self, rule).await
+    }
 }
 
 /// Apply a list of changes, in order, against a live cluster.
@@ -373,6 +389,9 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("notification_matcher", ChangeKind::Delete) => {
             apply_notif_matcher_delete(client, change).await
         }
+        ("ha_rule", ChangeKind::Create) => apply_ha_rule_create(client, change).await,
+        ("ha_rule", ChangeKind::Update) => apply_ha_rule_update(client, change).await,
+        ("ha_rule", ChangeKind::Delete) => apply_ha_rule_delete(client, change).await,
         (resource, kind) => Err(anyhow::anyhow!(
             "unhandled change shape: resource={resource} kind={kind:?}"
         )),
@@ -1098,6 +1117,124 @@ async fn apply_notif_matcher_delete<C: StateWriteView + ?Sized>(
     client.delete_notification_matcher_view(&decl.name).await
 }
 
+/// Build the form-encoded params for `POST /cluster/ha/rules` and
+/// `PUT /cluster/ha/rules/{rule}`. The wire shape is flat: `type`,
+/// `rule` (POST only — PUT identifies via URL), `resources` as a
+/// CSV, `nodes` already-encoded with priority suffixes, `affinity`
+/// for resource-affinity, plus the common `comment`/`disable`/`strict`.
+///
+/// PVE's params parser accepts `0`/`1` for booleans uniformly across
+/// the API; we serialize that way (matches the notification matcher
+/// pattern and avoids `true`/`false` edge cases on older PVE versions).
+fn ha_rule_params(decl: &HaRuleDecl, include_rule_and_type: bool) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    if include_rule_and_type {
+        // `type` is immutable on PUT (PVE rejects); only sent on create.
+        params.push(("type".to_string(), decl.rule_type.clone()));
+        params.push(("rule".to_string(), decl.rule.clone()));
+    }
+    // resources: rejoin the sorted Vec<String> into the wire CSV.
+    if !decl.resources.is_empty() {
+        params.push(("resources".to_string(), decl.resources.join(",")));
+    }
+    push_optional(&mut params, "comment", &decl.comment);
+    params.push((
+        "disable".to_string(),
+        if decl.disable { "1" } else { "0" }.to_string(),
+    ));
+    // node-affinity-only fields. Sending these for a resource-affinity
+    // rule is harmless — PVE's plugin layer drops fields not in the
+    // active plugin's schema with a 400 only when an unknown KEY is
+    // sent; `nodes`/`strict`/`affinity` are all *known* across both
+    // plugins (just dropped by the irrelevant one). Test this with a
+    // live cluster before relying on it; safer to filter by `rule_type`.
+    if decl.rule_type == "node-affinity" {
+        push_optional(&mut params, "nodes", &decl.nodes);
+        params.push((
+            "strict".to_string(),
+            if decl.strict { "1" } else { "0" }.to_string(),
+        ));
+    }
+    // resource-affinity-only field.
+    if decl.rule_type == "resource-affinity" {
+        push_optional(&mut params, "affinity", &decl.affinity);
+    }
+    params
+}
+
+async fn apply_ha_rule_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: HaRuleDecl = decode(change.after.as_ref(), "HA rule")?;
+    if decl.rule_type.is_empty() {
+        anyhow::bail!(
+            "HA rule '{}' missing `type` — must be 'node-affinity' or 'resource-affinity'",
+            decl.rule
+        );
+    }
+    let params = ha_rule_params(&decl, true);
+    client.create_ha_rule_view(&borrow(&params)).await
+}
+
+async fn apply_ha_rule_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: HaRuleDecl = decode(change.after.as_ref(), "HA rule")?;
+    // PUT cannot change `type` — PVE rejects with `type is immutable`.
+    // Detect a type change against `before` and surface an actionable
+    // error rather than letting PVE produce the cryptic one.
+    if let Some(before_val) = change.before.as_ref() {
+        let before: HaRuleDecl = decode(Some(before_val), "HA rule (before)")?;
+        if !before.rule_type.is_empty()
+            && !after.rule_type.is_empty()
+            && before.rule_type != after.rule_type
+        {
+            anyhow::bail!(
+                "HA rule '{}' type change ({} -> {}) is not supported by PVE — \
+                 delete + re-create the rule with the new type",
+                after.rule,
+                before.rule_type,
+                after.rule_type
+            );
+        }
+    }
+    let mut params = ha_rule_params(&after, false);
+    // PVE keeps unspecified fields at their old values (same trap the
+    // notification matcher hit). Send `delete=<key>` for fields that are
+    // now empty so the cluster converges. Per the matcher live-caught
+    // lesson, `delete` must be REPEATED keys (one per cleared field),
+    // never a CSV.
+    let mut del: Vec<&str> = Vec::new();
+    if after.comment.is_empty() {
+        del.push("comment");
+    }
+    if after.resources.is_empty() {
+        del.push("resources");
+    }
+    if after.rule_type == "node-affinity" && after.nodes.is_empty() {
+        del.push("nodes");
+    }
+    if after.rule_type == "resource-affinity" && after.affinity.is_empty() {
+        del.push("affinity");
+    }
+    for key in del {
+        params.push(("delete".to_string(), key.to_string()));
+    }
+    client
+        .update_ha_rule_view(&after.rule, &borrow(&params))
+        .await
+}
+
+async fn apply_ha_rule_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: HaRuleDecl = decode(change.before.as_ref(), "HA rule")?;
+    client.delete_ha_rule_view(&decl.rule).await
+}
+
 fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
     if !value.is_empty() {
         params.push((key.to_string(), value.to_string()));
@@ -1279,6 +1416,16 @@ mod tests {
         }
         async fn delete_notification_matcher_view(&self, name: &str) -> Result<()> {
             self.record(format!("delete_matcher({name})")).await
+        }
+        async fn create_ha_rule_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_ha_rule {params:?}")).await
+        }
+        async fn update_ha_rule_view(&self, rule: &str, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("update_ha_rule({rule}) {params:?}"))
+                .await
+        }
+        async fn delete_ha_rule_view(&self, rule: &str) -> Result<()> {
+            self.record(format!("delete_ha_rule({rule})")).await
         }
     }
 
@@ -1961,5 +2108,183 @@ mod tests {
         .await;
         assert!(matches!(out2[0].result, ApplyResult::Applied));
         assert_eq!(c2.lines().await, vec!["delete_matcher(oncall)".to_string()]);
+    }
+
+    // ── HA rules (epic #74) ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn ha_rule_create_node_affinity_dispatches_with_type_and_strict() {
+        let decl = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into(), "vm:101".into()],
+            nodes: "pve1:5,pve2".into(),
+            strict: true,
+            ..HaRuleDecl::default()
+        };
+        let c = RecordingClient::default();
+        let create = Change {
+            kind: ChangeKind::Create,
+            resource: "ha_rule",
+            identity: "pin-db".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![create], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("create_ha_rule"));
+        // Type, rule id, resources CSV, nodes, strict=1 all wired.
+        assert!(line.contains("\"type\""));
+        assert!(line.contains("\"node-affinity\""));
+        assert!(line.contains("\"pin-db\""));
+        assert!(line.contains("vm:100,vm:101"), "resources CSV: {line}");
+        assert!(line.contains("\"nodes\""));
+        assert!(line.contains("\"strict\""));
+        assert!(line.contains("\"1\""), "strict serialised as 1: {line}");
+        // `affinity` is resource-affinity-only — must not be sent for
+        // a node-affinity rule.
+        assert!(!line.contains("\"affinity\""), "leak: {line}");
+    }
+
+    #[tokio::test]
+    async fn ha_rule_create_resource_affinity_omits_node_fields() {
+        let decl = HaRuleDecl {
+            rule: "web-spread".into(),
+            rule_type: "resource-affinity".into(),
+            resources: vec!["vm:200".into(), "vm:201".into()],
+            affinity: "negative".into(),
+            ..HaRuleDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Create,
+            resource: "ha_rule",
+            identity: "web-spread".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("create_ha_rule"));
+        assert!(line.contains("\"affinity\""));
+        assert!(line.contains("\"negative\""));
+        // node-affinity-only fields must NOT leak through for a
+        // resource-affinity rule.
+        assert!(!line.contains("\"nodes\""), "leak: {line}");
+        assert!(!line.contains("\"strict\""), "leak: {line}");
+    }
+
+    #[tokio::test]
+    async fn ha_rule_update_clears_emptied_fields_via_repeated_delete_keys() {
+        // PVE keeps old values unless explicitly told to unset them;
+        // declaring an empty `comment` must send `delete=comment` as a
+        // standalone key. Same matcher-lesson: repeated keys, never a
+        // CSV list.
+        let after = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into()],
+            // intentionally empty: comment cleared, nodes kept
+            comment: String::new(),
+            nodes: "pve1".into(),
+            ..HaRuleDecl::default()
+        };
+        let before = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into()],
+            comment: "old".into(),
+            nodes: "pve1".into(),
+            ..HaRuleDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_rule",
+            identity: "pin-db".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("update_ha_rule(pin-db)"));
+        // `type` must NOT be sent on Update (PVE rejects type mutation).
+        assert!(!line.contains("\"type\""), "type leaked on PUT: {line}");
+        // `delete=comment` repeated key must be present.
+        assert!(
+            line.contains("\"delete\""),
+            "delete keys absent for cleared comment: {line}"
+        );
+        assert!(line.contains("\"comment\""));
+    }
+
+    #[tokio::test]
+    async fn ha_rule_update_rejects_type_change_with_actionable_error() {
+        // Switching `rule_type` on the same identifier is rejected by
+        // PVE with a cryptic message; we catch it upstream with a
+        // human-readable bail.
+        let before = HaRuleDecl {
+            rule: "r1".into(),
+            rule_type: "node-affinity".into(),
+            ..HaRuleDecl::default()
+        };
+        let after = HaRuleDecl {
+            rule: "r1".into(),
+            rule_type: "resource-affinity".into(),
+            affinity: "positive".into(),
+            ..HaRuleDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_rule",
+            identity: "r1".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        match &out[0].result {
+            ApplyResult::Failed { error, .. } => {
+                assert!(
+                    error.contains("type change") && error.contains("delete + re-create"),
+                    "expected actionable type-change error, got: {error}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // Apply should not have called the gateway at all for the
+        // rejected change.
+        assert!(c.lines().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ha_rule_delete_dispatches() {
+        let decl = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            ..HaRuleDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Delete,
+            resource: "ha_rule",
+            identity: "pin-db".into(),
+            before: Some(serde_json::to_value(&decl).unwrap()),
+            after: None,
+        };
+        let out = apply(
+            &c,
+            vec![change],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        assert_eq!(c.lines().await, vec!["delete_ha_rule(pin-db)".to_string()]);
     }
 }

@@ -25,6 +25,8 @@
 //! | [`StateRisk::FirewallAliasDelete`] / [`StateRisk::FirewallIpsetDelete`] | Warning — rules referencing `+name` break. |
 //! | [`StateRisk::FirewallGroupDelete`] | Severe — drops the group's rules (not modelled, so unrecoverable) and breaks group-direction rules. |
 //! | [`StateRisk::NotificationMatcherDelete`] | Warning — events that matched it stop being routed; alerting silently goes quiet. |
+//! | [`StateRisk::HaRuleDelete`] | Warning — resources fall back to global HA defaults (no node preference / no affinity); does not stop them, just removes the constraint. |
+//! | [`StateRisk::HaRuleStrictChange`] | Severe — flipping `strict` on a node-affinity rule can force-migrate every constrained guest (or refuse them placement) within seconds. |
 //! | [`StateRisk::BulkChangeCount { n }`] | Notice → Warning if `n ≥ 10`, Severe if `n ≥ 50` (very large batches = high attention cost). |
 //!
 //! ## Decision contract
@@ -118,6 +120,21 @@ pub enum StateRisk {
     /// (no error, the notifications just stop arriving).
     NotificationMatcherDelete { name: String },
 
+    /// Delete of an HA rule. Resources the rule constrained revert to
+    /// the global HA defaults (no node preference for node-affinity,
+    /// no collocation for resource-affinity). The guests don't stop —
+    /// they just lose the placement constraint.
+    HaRuleDelete { rule: String },
+
+    /// `strict` flag on a node-affinity HA rule flipped on an existing
+    /// rule. PVE's CRM enforces strict mode by force-migrating any
+    /// guest the rule binds that's not currently on one of `nodes` —
+    /// this can be a fleet-wide move within ~30s of apply. The
+    /// reverse direction (strict → non-strict) is non-destructive (the
+    /// constraint just relaxes), but the diff/apply layer can't tell
+    /// the direction here cheaply so we surface both as Severe.
+    HaRuleStrictChange { rule: String },
+
     /// Very-large-batch warning. Increases attention cost
     /// proportionally; defer with `--allow-risk` if intentional.
     BulkChangeCount { n: usize },
@@ -132,7 +149,8 @@ impl StateRisk {
             | Self::AclDeleteRootRole { .. }
             | Self::StorageDeleteShared { .. }
             | Self::FirewallDisabled
-            | Self::FirewallGroupDelete { .. } => RiskLevel::Severe,
+            | Self::FirewallGroupDelete { .. }
+            | Self::HaRuleStrictChange { .. } => RiskLevel::Severe,
             Self::StoragePropertyChange { .. }
             | Self::AclPropagateFlip { .. }
             | Self::AclDeleteAuditor { .. }
@@ -140,7 +158,8 @@ impl StateRisk {
             | Self::FirewallPolicyLoosened { .. }
             | Self::FirewallAliasDelete { .. }
             | Self::FirewallIpsetDelete { .. }
-            | Self::NotificationMatcherDelete { .. } => RiskLevel::Warning,
+            | Self::NotificationMatcherDelete { .. }
+            | Self::HaRuleDelete { .. } => RiskLevel::Warning,
             Self::BulkChangeCount { n } => {
                 if *n >= 50 {
                     RiskLevel::Severe
@@ -214,6 +233,14 @@ impl StateRisk {
             Self::NotificationMatcherDelete { name } => format!(
                 "delete notification matcher `{name}` — events it matched \
                  will silently stop being routed"
+            ),
+            Self::HaRuleDelete { rule } => format!(
+                "delete HA rule `{rule}` — constrained resources revert to \
+                 global HA defaults (no node preference, no affinity)"
+            ),
+            Self::HaRuleStrictChange { rule } => format!(
+                "node-affinity rule `{rule}` `strict` flag changed — CRM may \
+                 force-migrate every constrained guest within seconds"
             ),
             Self::BulkChangeCount { n } => {
                 format!("{n} changes in one apply — attention cost proportional")
@@ -389,6 +416,30 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
             out.push(StateRisk::NotificationMatcherDelete {
                 name: change.identity.clone(),
             });
+        }
+        (ChangeKind::Delete, "ha_rule") => {
+            out.push(StateRisk::HaRuleDelete {
+                rule: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Update, "ha_rule") => {
+            // Surface `strict` flips on node-affinity rules as Severe.
+            // Other Updates (resources list, comment, etc.) are routine.
+            let before: Option<crate::state::model::HaRuleDecl> = change
+                .before
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let after: Option<crate::state::model::HaRuleDecl> = change
+                .after
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            if let (Some(b), Some(a)) = (before, after) {
+                if a.rule_type == "node-affinity" && b.strict != a.strict {
+                    out.push(StateRisk::HaRuleStrictChange {
+                        rule: change.identity.clone(),
+                    });
+                }
+            }
         }
         _ => {}
     }
@@ -801,5 +852,71 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].level(), RiskLevel::Warning);
         assert!(matches!(&r[0], StateRisk::NotificationMatcherDelete { name } if name == "oncall"));
+    }
+
+    #[test]
+    fn ha_rule_delete_is_warning() {
+        let live = sample_live();
+        let r = assess(&[delete_change("ha_rule", "pin-db")], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Warning);
+        assert!(matches!(&r[0], StateRisk::HaRuleDelete { rule } if rule == "pin-db"));
+    }
+
+    #[test]
+    fn ha_rule_strict_flip_is_severe() {
+        // node-affinity rule with strict flipping false → true.
+        // The diff layer emits Update with both sides serialised;
+        // preflight inspects before/after to detect the flip.
+        let before = crate::state::model::HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            nodes: "pve1".into(),
+            strict: false,
+            ..crate::state::model::HaRuleDecl::default()
+        };
+        let after = crate::state::model::HaRuleDecl {
+            strict: true,
+            ..before.clone()
+        };
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_rule",
+            identity: "pin-db".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let live = sample_live();
+        let r = assess(&[change], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Severe);
+        assert!(matches!(&r[0], StateRisk::HaRuleStrictChange { rule } if rule == "pin-db"));
+    }
+
+    #[test]
+    fn ha_rule_update_without_strict_flip_emits_no_risk() {
+        // Routine Updates (resources, comment) shouldn't trigger any
+        // risk — only `strict` flips on node-affinity rules do.
+        let before = crate::state::model::HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            nodes: "pve1".into(),
+            comment: "old".into(),
+            ..crate::state::model::HaRuleDecl::default()
+        };
+        let after = crate::state::model::HaRuleDecl {
+            comment: "new".into(),
+            ..before.clone()
+        };
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_rule",
+            identity: "pin-db".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let live = sample_live();
+        let r = assess(&[change], &live);
+        assert!(r.is_empty(), "comment-only Update must be risk-free");
     }
 }

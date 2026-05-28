@@ -925,6 +925,18 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn delete_ha_group(&self, _: &str) -> Result<()> {
         anyhow::bail!("unused")
     }
+    async fn list_ha_rules(&self) -> Result<Vec<proxxx::api::types::HaRule>> {
+        Ok(vec![])
+    }
+    async fn create_ha_rule(&self, _: &[(&str, &str)]) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+    async fn update_ha_rule(&self, _: &str, _: &[(&str, &str)]) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+    async fn delete_ha_rule(&self, _: &str) -> Result<()> {
+        anyhow::bail!("unused")
+    }
     async fn list_notification_endpoints(
         &self,
     ) -> Result<Vec<proxxx::api::types::NotificationEndpoint>> {

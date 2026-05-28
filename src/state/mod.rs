@@ -6,12 +6,13 @@
 //!
 //! Today this module covers **pools, ACL grants, storage definitions,
 //! scheduled backup jobs, the cluster firewall (options + aliases + IP
-//! sets + security groups), and notification matchers** across the full
-//! export → diff → apply loop. HA groups are the one remaining family
-//! from the epic, deferred while PVE 9's node-affinity `/cluster/ha/rules`
-//! lacks a write gateway. Pre-flight risk gates + HITL approval per
-//! destructive apply change (shipped v0.3.0) wrap the dispatch layer in
-//! [`preflight`] without changing it.
+//! sets + security groups), notification matchers, and HA rules
+//! (node-affinity + resource-affinity)** across the full export → diff
+//! → apply loop. Epic #74 is now at 6/6 writable families. (Legacy PVE-8
+//! `/cluster/ha/groups` is intentionally not modelled — PVE 9 migrated
+//! it to `/cluster/ha/rules`, and proxxx targets PVE 9.x.) Pre-flight
+//! risk gates + HITL approval per destructive apply change (shipped
+//! v0.3.0) wrap the dispatch layer in [`preflight`] without changing it.
 //!
 //! ## Layered design
 //!

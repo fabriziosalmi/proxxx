@@ -2501,6 +2501,33 @@ impl ProxmoxGateway for PxClient {
         Ok(())
     }
 
+    // ── PVE 9 HA rules — node-affinity + resource-affinity ─
+
+    async fn list_ha_rules(&self) -> Result<Vec<crate::api::types::HaRule>> {
+        let resp: ApiResponse<Vec<crate::api::types::HaRule>> =
+            self.get("/cluster/ha/rules").await?;
+        Ok(resp.data)
+    }
+
+    async fn create_ha_rule(&self, params: &[(&str, &str)]) -> Result<()> {
+        let _resp: ApiResponse<Option<String>> = self.post("/cluster/ha/rules", params).await?;
+        Ok(())
+    }
+
+    async fn update_ha_rule(&self, rule: &str, params: &[(&str, &str)]) -> Result<()> {
+        let _resp: ApiResponse<Option<String>> = self
+            .put(&format!("/cluster/ha/rules/{}", urlenc(rule)), params)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_ha_rule(&self, rule: &str) -> Result<()> {
+        let _resp: ApiResponse<Option<String>> = self
+            .delete(&format!("/cluster/ha/rules/{}", urlenc(rule)))
+            .await?;
+        Ok(())
+    }
+
     // ── PVE 8+ notifications impls ─────────────────────────
 
     async fn list_notification_endpoints(
