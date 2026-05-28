@@ -40,7 +40,7 @@ use serde::Serialize;
 
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetDecl,
-    FirewallOptionsDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
+    FirewallOptionsDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
 };
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
@@ -110,6 +110,7 @@ pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
         &live.notification_matchers,
         &mut out,
     );
+    diff_ha_rules(&declared.ha_rules, &live.ha_rules, &mut out);
     out
 }
 
@@ -591,6 +592,65 @@ fn diff_notification_matchers(
         out.push(Change {
             kind: ChangeKind::Create,
             resource: "notification_matcher",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
+/// Diff HA rules by `rule` (identifier). Identity-by-`rule`; any other
+/// field change (type / resources / nodes / strict / affinity / disable
+/// / comment) is an Update. A `rule_type` change between an existing
+/// and a declared rule with the same `rule` id surfaces as an Update;
+/// PVE will refuse the PUT (type is immutable) and the apply error
+/// surfaces actionable next-step text. Operators wanting to switch
+/// type must Delete + re-Create.
+fn diff_ha_rules(declared: &[HaRuleDecl], live: &[HaRuleDecl], out: &mut Vec<Change>) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &HaRuleDecl> = live.iter().map(|r| (r.rule.as_str(), r)).collect();
+    let decl_by: HashMap<&str, &HaRuleDecl> =
+        declared.iter().map(|r| (r.rule.as_str(), r)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "ha_rule",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "ha_rule",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "ha_rule",
             identity: (*k).to_string(),
             before: None,
             after: serde_json::to_value(decl_by[k]).ok(),
@@ -1205,6 +1265,119 @@ mod tests {
             ..ClusterState::default()
         };
         assert!(diff(&s, &s).is_empty());
+    }
+
+    // ── HA rules (epic #74) ───────────────────────────────────────
+
+    #[test]
+    fn diff_ha_rule_create_update_delete() {
+        let mk_node = |rule: &str, nodes: &str, strict: bool| HaRuleDecl {
+            rule: rule.into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into(), "vm:101".into()],
+            nodes: nodes.into(),
+            strict,
+            ..HaRuleDecl::default()
+        };
+        // CREATE: declared has the rule, live empty.
+        let declared = ClusterState {
+            ha_rules: vec![mk_node("pin-db", "pve1:5,pve2", false)],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &ClusterState::default());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].resource, "ha_rule");
+        assert_eq!(d[0].identity, "pin-db");
+
+        // DELETE: declared empty, live has the rule.
+        let d = diff(&ClusterState::default(), &declared);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Delete);
+        assert_eq!(d[0].resource, "ha_rule");
+
+        // UPDATE: same id, different `nodes` priority encoding.
+        let live = ClusterState {
+            ha_rules: vec![mk_node("pin-db", "pve1,pve2", false)],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        assert_eq!(d[0].identity, "pin-db");
+        // Both sides serialised — preflight needs the before/after pair
+        // to detect a `strict` flip (Severe-tier).
+        assert!(d[0].before.is_some() && d[0].after.is_some());
+    }
+
+    #[test]
+    fn diff_ha_rule_resource_affinity_create() {
+        // Different rule_type — exercise the resource-affinity branch.
+        let declared = ClusterState {
+            ha_rules: vec![HaRuleDecl {
+                rule: "web-spread".into(),
+                rule_type: "resource-affinity".into(),
+                resources: vec!["vm:200".into(), "vm:201".into(), "vm:202".into()],
+                affinity: "negative".into(),
+                ..HaRuleDecl::default()
+            }],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &ClusterState::default());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Create);
+        assert_eq!(d[0].identity, "web-spread");
+    }
+
+    #[test]
+    fn diff_identical_ha_rules_produces_no_change() {
+        let r = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into()],
+            nodes: "pve1".into(),
+            strict: true,
+            ..HaRuleDecl::default()
+        };
+        let s = ClusterState {
+            ha_rules: vec![r],
+            ..ClusterState::default()
+        };
+        assert!(diff(&s, &s).is_empty());
+    }
+
+    #[test]
+    fn diff_ha_rule_strict_flip_is_an_update() {
+        // Regression guard for the Severe-tier preflight path: a
+        // `strict` flip must produce an Update with before+after so
+        // preflight can detect it.
+        let live_rule = HaRuleDecl {
+            rule: "pin-db".into(),
+            rule_type: "node-affinity".into(),
+            resources: vec!["vm:100".into()],
+            nodes: "pve1".into(),
+            strict: false,
+            ..HaRuleDecl::default()
+        };
+        let mut decl_rule = live_rule.clone();
+        decl_rule.strict = true;
+        let declared = ClusterState {
+            ha_rules: vec![decl_rule],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            ha_rules: vec![live_rule],
+            ..ClusterState::default()
+        };
+        let d = diff(&declared, &live);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, ChangeKind::Update);
+        let before: HaRuleDecl = serde_json::from_value(d[0].before.clone().unwrap()).unwrap();
+        let after: HaRuleDecl = serde_json::from_value(d[0].after.clone().unwrap()).unwrap();
+        assert!(
+            !before.strict && after.strict,
+            "strict flip must be visible"
+        );
     }
 
     #[test]

@@ -2005,6 +2005,114 @@ impl HaGroup {
     }
 }
 
+/// One HA placement rule. Returned by `GET /cluster/ha/rules` (PVE 9+).
+///
+/// PVE 9 split the legacy `/cluster/ha/groups` "preferred-nodes-per-VM-set"
+/// concept into a plugin architecture under `/cluster/ha/rules` with two
+/// rule types today (more may land upstream):
+///
+/// * **`node-affinity`** — replaces what HA groups did: pin a set of HA
+///   resources to a set of nodes, optionally with `:priority` suffixes
+///   (`pve1:5,pve2`), optionally `strict` (no fallback to other nodes).
+/// * **`resource-affinity`** — `positive` keeps a set of resources on
+///   the SAME node (collocation); `negative` keeps them on DIFFERENT
+///   nodes (anti-affinity / spread). No `nodes` field — placement is
+///   computed relative to the set itself.
+///
+/// `digest` is server-generated and only relevant on PUT (optimistic
+/// concurrency — pass it back to detect a racing edit). On GET it's
+/// returned for inspection.
+///
+/// Plugin-specific fields not relevant to a given `rule_type` are simply
+/// absent in the response; serde's `default` makes the deserialize lossy
+/// across rule shapes without ad-hoc enum gymnastics — the consumer
+/// reads only the fields meaningful for `rule_type`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaRule {
+    /// Rule identifier (the URL last-segment). Operator-chosen on create
+    /// — readable names like `keep-db-on-pve1`, `web-spread-cluster-a`.
+    pub rule: String,
+    /// `"node-affinity"` or `"resource-affinity"`. Future PVE versions
+    /// may add more; consumers should default-handle unknown types.
+    #[serde(rename = "type")]
+    pub rule_type: String,
+    /// Comma-separated HA SIDs the rule binds, e.g. `"vm:100,ct:200"`.
+    /// Parse with `parse_resource_list()` for structured access.
+    #[serde(default)]
+    pub resources: String,
+    /// Free-text comment.
+    #[serde(default)]
+    pub comment: String,
+    /// 1 = rule defined but inactive (CRM ignores it).
+    #[serde(default, deserialize_with = "deserialize_bool_from_int")]
+    pub disable: bool,
+    /// Server-generated config digest. Used as the `digest=` param on PUT
+    /// for optimistic concurrency; empty (or default) means "don't check".
+    #[serde(default)]
+    pub digest: String,
+
+    // ── node-affinity specific ─────────────────────────────────────
+    /// Target-node list, comma-separated with optional `:priority`
+    /// suffixes (`pve1:5,pve2`). Only meaningful when
+    /// `rule_type == "node-affinity"`. Parse with
+    /// `parse_priority_list()` for structured access.
+    #[serde(default)]
+    pub nodes: String,
+    /// 1 = resources must run on `nodes` (no fallback). 0 = `nodes` is a
+    /// preference; other nodes can host on failure. Only meaningful for
+    /// `node-affinity`.
+    #[serde(default, deserialize_with = "deserialize_bool_from_int")]
+    pub strict: bool,
+
+    // ── resource-affinity specific ─────────────────────────────────
+    /// `"positive"` (collocate) or `"negative"` (anti-collocate). Only
+    /// meaningful for `rule_type == "resource-affinity"`.
+    #[serde(default)]
+    pub affinity: String,
+}
+
+impl HaRule {
+    /// Parse `resources` (`"vm:100,ct:200"`) into a sorted, de-duplicated
+    /// `Vec<String>`. Empty input → empty Vec.
+    #[must_use]
+    pub fn parse_resource_list(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .resources
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Parse `nodes` (`"pve1:5,pve2,pve3:2"`) into `(name, priority)`
+    /// pairs (priority defaults to 0 when no suffix), sorted by
+    /// descending priority then name — same ordering as `HaGroup`.
+    #[must_use]
+    pub fn parse_priority_list(&self) -> Vec<(String, i32)> {
+        let mut out: Vec<(String, i32)> = self
+            .nodes
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|piece| {
+                if let Some((n, p)) = piece.split_once(':') {
+                    let prio = p.trim().parse::<i32>().unwrap_or(0);
+                    (n.trim().to_string(), prio)
+                } else {
+                    (piece.to_string(), 0)
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
+}
+
 /// One HA-managed resource (VM or CT). Returned by
 /// `GET /cluster/ha/resources`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

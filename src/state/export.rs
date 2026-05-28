@@ -20,13 +20,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::types::{
     AclEntry, ApiVersion, BackupJob, FirewallAlias, FirewallIpset, FirewallIpsetCidr,
-    FirewallOptions, FirewallSecurityGroup, NotificationMatcher, Pool, PoolDetails, PoolMember,
-    StorageDefinition,
+    FirewallOptions, FirewallSecurityGroup, HaRule, NotificationMatcher, Pool, PoolDetails,
+    PoolMember, StorageDefinition,
 };
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
-    FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, NotificationMatcherDecl,
-    PoolDecl, StateMeta, StorageDecl,
+    FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, HaRuleDecl,
+    NotificationMatcherDecl, PoolDecl, StateMeta, StorageDecl,
 };
 
 /// Which resource families to export. Parsed from the CLI `--resource`
@@ -47,6 +47,13 @@ pub enum Resource {
     /// design — they carry secrets PVE won't disclose on `GET`, so they
     /// can't round-trip; see [`ClusterState::notification_matchers`].
     Notifications,
+    /// HA placement rules (`/cluster/ha/rules`, PVE 9+) — node-affinity
+    /// and resource-affinity. Closes epic
+    /// [#74](https://github.com/fabriziosalmi/proxxx/issues/74). Legacy
+    /// `/cluster/ha/groups` (PVE 8) is intentionally NOT modelled — PVE 9
+    /// migrated it to rules, and we don't ship two parallel families for
+    /// the same desired-state surface.
+    HaRules,
 }
 
 impl Resource {
@@ -62,9 +69,10 @@ impl Resource {
             "backup-jobs" => Ok(vec![Self::BackupJobs]),
             "firewall-cluster" => Ok(vec![Self::FirewallCluster]),
             "notifications" => Ok(vec![Self::Notifications]),
+            "ha-rules" => Ok(vec![Self::HaRules]),
             "all" => Ok(Self::all()),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | notifications | all — see https://github.com/fabriziosalmi/proxxx/issues/74 for the roadmap)"
+                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | notifications | ha-rules | all)"
             ),
         }
     }
@@ -85,6 +93,7 @@ impl Resource {
             Self::BackupJobs,
             Self::FirewallCluster,
             Self::Notifications,
+            Self::HaRules,
         ]
     }
 
@@ -98,6 +107,7 @@ impl Resource {
             Self::BackupJobs => "backup-jobs",
             Self::FirewallCluster => "firewall-cluster",
             Self::Notifications => "notifications",
+            Self::HaRules => "ha-rules",
         }
     }
 }
@@ -126,6 +136,7 @@ pub trait StateReadView: Send + Sync {
     ) -> Result<Vec<FirewallIpsetCidr>>;
     async fn list_cluster_firewall_groups_view(&self) -> Result<Vec<FirewallSecurityGroup>>;
     async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>>;
+    async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -170,6 +181,9 @@ where
     async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>> {
         crate::api::ProxmoxGateway::list_notification_matchers(self).await
     }
+    async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>> {
+        crate::api::ProxmoxGateway::list_ha_rules(self).await
+    }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
     }
@@ -205,6 +219,7 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         firewall_ipsets: Vec::new(),
         firewall_groups: Vec::new(),
         notification_matchers: Vec::new(),
+        ha_rules: Vec::new(),
     };
 
     for r in resources {
@@ -247,6 +262,11 @@ pub async fn export_state<C: StateReadView + ?Sized>(
                 state.notification_matchers = export_notification_matchers(client)
                     .await
                     .with_context(|| "exporting notification matchers")?;
+            }
+            Resource::HaRules => {
+                state.ha_rules = export_ha_rules(client)
+                    .await
+                    .with_context(|| "exporting HA rules")?;
             }
         }
     }
@@ -535,6 +555,47 @@ async fn export_notification_matchers<C: StateReadView + ?Sized>(
         .collect())
 }
 
+/// Read every HA rule and project to `Vec<HaRuleDecl>`, sorted by
+/// `rule`. The wire-side `resources` comma-string is split, sorted, and
+/// deduped into a `Vec<String>` for TOML-friendly editing and for
+/// diff-stable identity equality (set equality vs string equality). The
+/// wire `nodes` priority-encoded string is kept verbatim — splitting
+/// would lose PVE's parser validation (duplicate-node rejection),
+/// recomposing risks reordering, and operators write the canonical
+/// `nodes` form by hand. `digest` is dropped (server-derived churn).
+async fn export_ha_rules<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<HaRuleDecl>> {
+    let mut rules = client
+        .list_ha_rules_view()
+        .await
+        .context("listing HA rules")?;
+    rules.sort_by(|a, b| a.rule.cmp(&b.rule));
+
+    Ok(rules
+        .into_iter()
+        .map(|r| {
+            let mut resources: Vec<String> = r
+                .resources
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            resources.sort();
+            resources.dedup();
+            HaRuleDecl {
+                rule: r.rule,
+                rule_type: r.rule_type,
+                resources,
+                comment: r.comment,
+                disable: r.disable,
+                nodes: r.nodes,
+                strict: r.strict,
+                affinity: r.affinity,
+            }
+        })
+        .collect())
+}
+
 /// Sort the comma-separated tokens of a CSV-style PVE field. Empty
 /// input maps to empty output. Whitespace around commas is preserved
 /// (PVE doesn't emit any; if it ever does, we'd reformat on round-
@@ -702,6 +763,7 @@ mod tests {
                 Resource::BackupJobs,
                 Resource::FirewallCluster,
                 Resource::Notifications,
+                Resource::HaRules,
             ]
         );
         // `parse("all")` and `Resource::all()` must stay in lockstep —
@@ -725,6 +787,7 @@ mod tests {
             Resource::BackupJobs,
             Resource::FirewallCluster,
             Resource::Notifications,
+            Resource::HaRules,
         ] {
             assert!(all.contains(&r), "Resource::all() is missing {r:?}");
         }
@@ -776,6 +839,7 @@ mod tests {
         fw_ipset_cidrs: std::collections::HashMap<String, Vec<FirewallIpsetCidr>>,
         fw_groups: Vec<FirewallSecurityGroup>,
         notif_matchers: Vec<NotificationMatcher>,
+        ha_rules: Vec<HaRule>,
     }
 
     #[async_trait]
@@ -818,6 +882,9 @@ mod tests {
         }
         async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>> {
             Ok(self.notif_matchers.clone())
+        }
+        async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>> {
+            Ok(self.ha_rules.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {

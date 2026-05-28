@@ -1048,6 +1048,34 @@ pub trait ProxmoxGateway: Send + Sync {
     async fn update_ha_group(&self, group: &str, params: &[(&str, &str)]) -> Result<()>;
     async fn delete_ha_group(&self, group: &str) -> Result<()>;
 
+    // ── PVE 9 HA rules — node-affinity + resource-affinity (epic #74)
+
+    /// List HA rules — node-affinity + resource-affinity, mixed in one
+    /// array. PVE 9+ only; PVE 8 has no `/cluster/ha/rules` endpoint.
+    /// Read-only — `/cluster/ha/rules`.
+    async fn list_ha_rules(&self) -> Result<Vec<crate::api::types::HaRule>>;
+
+    /// Create an HA rule. `params` must include `type` (one of
+    /// `node-affinity` / `resource-affinity`) and `rule` (the id), plus
+    /// the plugin-specific fields (`nodes`+`strict` for node-affinity,
+    /// `affinity` for resource-affinity). Common fields (`resources`,
+    /// `comment`, `disable`) are accepted by both plugins. Requires
+    /// `Sys.Console` on `/`. POST `/cluster/ha/rules`.
+    async fn create_ha_rule(&self, params: &[(&str, &str)]) -> Result<()>;
+
+    /// Update one HA rule. The rule's `type` is immutable (PVE rejects
+    /// changes); to switch types, delete + create. Plugin-specific
+    /// fields apply per the existing rule's type. PVE keeps unspecified
+    /// fields at their old values — pass them in `delete` (repeated keys
+    /// per the matchers lesson) to clear them. PUT
+    /// `/cluster/ha/rules/{rule}`. Sys.Console on `/`.
+    async fn update_ha_rule(&self, rule: &str, params: &[(&str, &str)]) -> Result<()>;
+
+    /// Delete an HA rule. Resources it constrained revert to the global
+    /// HA defaults (no node preference, no affinity). DELETE
+    /// `/cluster/ha/rules/{rule}`. Sys.Console on `/`.
+    async fn delete_ha_rule(&self, rule: &str) -> Result<()>;
+
     // ── PVE 8+ notification system (cluster.notifications.*) ──
 
     async fn list_notification_endpoints(
