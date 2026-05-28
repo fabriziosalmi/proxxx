@@ -115,12 +115,12 @@ pub const REGISTRY: &[CloudImg] = &[
     CloudImg {
         id: "ubuntu-24.04-noble-amd64",
         distro: "Ubuntu",
-        version: "24.04 LTS (noble, build 20260321)",
+        version: "24.04 LTS (noble, build 20260518)",
         arch: "amd64",
         // Dated immutable build dir (not noble/current/, which rotates
         // daily). Checksum from this dir's SHA256SUMS.
-        url: "https://cloud-images.ubuntu.com/releases/noble/release-20260321/ubuntu-24.04-server-cloudimg-amd64.img",
-        checksum: "5c3ddb00f60bc455dac0862fabe9d8bacec46c33ac1751143c5c3683404b110d",
+        url: "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-amd64.img",
+        checksum: "53fdde898feed8b027d94baa9cfe8229867f330a1d9c49dc7d84465ee7f229f7",
         checksum_algorithm: "sha256",
         size_human: "~580 MiB",
         filename: "ubuntu-24.04-noble-amd64.img",
