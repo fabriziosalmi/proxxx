@@ -47,9 +47,10 @@ The architecture is shaped by four hard rules:
 
 1. **Single binary, no installer.** Cross-platform (macOS, Linux,
    musl static), zero system deps beyond TLS (rustls, no openssl).
-2. **No skip flags in the gate.** Six-stage pre-commit gate (fmt,
-   clippy, audit, all-tests, live read, live mutation) — anything
-   that bypasses it is owned by the bypasser.
+2. **No skip flags in the gate.** Eight-stage pre-commit gate
+   (secret-shape scan, fmt, clippy, audit, cargo-deny, all-tests,
+   live read, live mutation) — anything that bypasses it is owned
+   by the bypasser.
 3. **Three callers, one core.** CLI, TUI, MCP — same risk gate, same
    HITL gate, same API client. Whatever protections apply to one,
    apply to all.
@@ -68,7 +69,11 @@ src/
 │   ├── error.rs         ;   ApiError closed enum 
 │   ├── auth.rs          ;   Token / ticket / Zeroizing<String> 
 │   ├── mod.rs           ;   ProxmoxGateway trait
-│   └── types.rs         ;   ~2000 LOC of serde-typed PVE responses
+│   └── types/           ;   ~3100 LOC of serde-typed PVE responses,
+│                        ;   split across 16 submodules (cluster, ha,
+│                        ;   guest, guest_agent, storage, firewall,
+│                        ;   pool, node, node_hw, task, replication,
+│                        ;   access, acme, backup, console, notifications)
 ├── pbs/                 ; PBS REST client + restore subprocess
 ├── ssh/                 ; russh client + TOFU known_hosts + per-node pool
 ├── wsterm/              ; WebSocket termproxy client (serial console)
@@ -78,9 +83,16 @@ src/
 ├── mcp/                 ; Stdio JSON-RPC server + tool registry
 ├── access/              ; pveum shell-out for full grant-tree expansion
                           ; (`access permissions` API path is in api/client.rs)
+├── state/               ; GitOps loop — export, diff, apply across 8
+                          ; state families (pools, ACL, storage,
+                          ; backup-jobs, firewall-cluster,
+                          ; notifications, HA rules, HA resources)
+├── audit/               ; Append-only SQLite mutation log + HMAC chain
+├── incident/            ; Cluster-wide write kill-switch (freeze/thaw)
+├── metrics/             ; Cluster heatmap + accounting + anomaly
 ├── config/              ; TOML loader + secret resolution
 ├── util/                ; panic_hook, shutdown, format
-├── app.rs               ; Elm reducer (1700 LOC)
+├── app.rs               ; Elm reducer (~2000 LOC)
 ├── app/                 ; Sub-state for views
 │   ├── cache.rs         ;   SQLite time-travel cache
 │   ├── queue.rs         ;   Operation queue + replay-as-script
@@ -95,7 +107,7 @@ src/
 │   ├── mod.rs           ;   Run loop, dispatch, terminal guard
 │   ├── event.rs         ;   Crossterm key → Action mapping
 │   ├── terminal_guard.rs;   RAII enter/leave raw mode 
-│   ├── views/           ;   19 view modules (one per screen)
+│   ├── views/           ;   18 view modules (one per screen)
 │   └── widgets/         ;   modal, input_bar, pty
 └── cli/                 ; argv parser + execute()
 ```

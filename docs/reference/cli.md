@@ -191,7 +191,7 @@ within a major version.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx state export [--resource pools\|acl\|storage\|backup-jobs\|firewall-cluster\|notifications\|all] [--output toml\|json]` | Byte-stable snapshot of cluster state. Default emits TOML; `--output json` for piping. `firewall-cluster` covers options + aliases + IP sets + security groups; `notifications` covers matchers (routing rules; endpoints are out-of-band — they carry secrets PVE won't disclose). Diff-stable across runs against an unchanged cluster. |
+| `proxxx state export [--resource pools\|acl\|storage\|backup-jobs\|firewall-cluster\|notifications\|ha-rules\|ha-resources\|all] [--output toml\|json]` | Byte-stable snapshot of cluster state. Default emits TOML; `--output json` for piping. `firewall-cluster` covers options + aliases + IP sets + security groups; `notifications` covers matchers (routing rules; endpoints are out-of-band — they carry secrets PVE won't disclose); `ha-rules` covers node-affinity + resource-affinity rules (PVE 9+); `ha-resources` covers per-guest HA-managed declarations (state / group / max-relocate / max-restart / failback / comment). Diff-stable across runs against an unchanged cluster. |
 | `proxxx state diff <declared.toml> [--output text\|json]` | Structural diff of declared vs live. Exit 2 on drift. |
 | `proxxx state apply <declared.toml> [--dry-run] [--prune] [--continue-on-error] [--allow-risk] [--interactive] [--output text\|json]` | Converge live toward declared. Pre-flight risk gate refuses Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50) without `--allow-risk`. `--interactive` adds per-Severe `[y/N]` stdin prompts. Exit code 6 on refusal. |
 
