@@ -1118,19 +1118,34 @@ async fn apply_notif_matcher_delete<C: StateWriteView + ?Sized>(
 }
 
 /// Build the form-encoded params for `POST /cluster/ha/rules` and
-/// `PUT /cluster/ha/rules/{rule}`. The wire shape is flat: `type`,
-/// `rule` (POST only — PUT identifies via URL), `resources` as a
-/// CSV, `nodes` already-encoded with priority suffixes, `affinity`
-/// for resource-affinity, plus the common `comment`/`disable`/`strict`.
+/// `PUT /cluster/ha/rules/{rule}`. The wire shape is flat: `type` (PVE
+/// requires this on BOTH create AND update — see below), `rule` (POST
+/// only; PUT identifies via the URL), `resources` as a CSV, `nodes`
+/// already-encoded with priority suffixes, `affinity` for
+/// resource-affinity, plus the common `comment`/`disable`/`strict`.
 ///
 /// PVE's params parser accepts `0`/`1` for booleans uniformly across
 /// the API; we serialize that way (matches the notification matcher
 /// pattern and avoids `true`/`false` edge cases on older PVE versions).
-fn ha_rule_params(decl: &HaRuleDecl, include_rule_and_type: bool) -> Vec<(String, String)> {
+///
+/// ## `type` on PUT — live-caught gotcha (v0.7.0 → v0.7.1)
+///
+/// Reading pve-ha-manager.git's `Rules.pm` made it look like `type` was
+/// "immutable on PUT" (the API rejects type *changes*) — so v0.7.0's
+/// original impl omitted `type` from PUT params. Live-tested against
+/// PVE 9.1.1: that's wrong. PVE *requires* the `type` field on PUT and
+/// 400s with `{"errors":{"type":"property is missing and it is not
+/// optional"}}` if it's absent. "Immutable" means *you must send it
+/// AND it must equal the existing value* — not "omit it". So we send
+/// it on both verbs; the diff/apply layer (`apply_ha_rule_update`)
+/// guards against actual type *changes* with a clear pre-call bail.
+fn ha_rule_params(decl: &HaRuleDecl, include_rule_id: bool) -> Vec<(String, String)> {
     let mut params: Vec<(String, String)> = Vec::new();
-    if include_rule_and_type {
-        // `type` is immutable on PUT (PVE rejects); only sent on create.
-        params.push(("type".to_string(), decl.rule_type.clone()));
+    // `type` always emitted — PVE requires it on both POST and PUT.
+    params.push(("type".to_string(), decl.rule_type.clone()));
+    if include_rule_id {
+        // `rule` is the URL last-segment on PUT; only sent in the body
+        // on POST where there's no URL to read it from.
         params.push(("rule".to_string(), decl.rule.clone()));
     }
     // resources: rejoin the sorted Vec<String> into the wire CSV.
@@ -2211,8 +2226,16 @@ mod tests {
         assert!(matches!(out[0].result, ApplyResult::Applied));
         let line = &c.lines().await[0];
         assert!(line.starts_with("update_ha_rule(pin-db)"));
-        // `type` must NOT be sent on Update (PVE rejects type mutation).
-        assert!(!line.contains("\"type\""), "type leaked on PUT: {line}");
+        // `type` MUST be sent on Update — live PVE 9.1.1 rejects PUT
+        // with HTTP 400 `{"errors":{"type":"property is missing and it
+        // is not optional"}}` if absent. v0.7.0 omitted it (mis-read
+        // of "type is immutable on PUT" — that means cannot CHANGE,
+        // not must omit). v0.7.1 always sends it.
+        assert!(line.contains("\"type\""), "type missing on PUT: {line}");
+        assert!(
+            line.contains("\"node-affinity\""),
+            "type value should echo existing rule_type: {line}"
+        );
         // `delete=comment` repeated key must be present.
         assert!(
             line.contains("\"delete\""),
