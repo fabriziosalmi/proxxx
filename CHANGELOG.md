@@ -14,6 +14,53 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.7.4] — 2026-05-28
+
+Headline: **WebSocket handshake auth headers + release-notes line-wrap fix.** Two small focused threads landed since v0.7.3, neither user-facing on the CLI surface but both important on the operational surface. The WS auth headers PR (#135) plumbs PVE authentication into the WebSocket termproxy handshake — proxxx's `serial <vmid>` console previously relied solely on the URL-embedded ticket that PVE happens to accept; this release also sends the proper `Authorization` / `Cookie` headers as belt-and-suspenders, opens the door for future WS endpoints (vncproxy, spiceproxy) that don't embed the ticket in the URL, and refreshes any about-to-expire PAM ticket before the handshake (the existing `ensure_auth()` is now called before exposing the cookie — a long-idle session no longer fails on the WS upgrade). The release-notes line-wrap fix (#134, already shipped on main, retroactively backfilled across v0.6.1 through v0.7.3 release pages) makes future tags render flat paragraphs on the GitHub release page; the `release.yml` extractor now runs the awk-extracted CHANGELOG section through a small Python paragraph-unwrap that preserves list items, headings, blockquotes, tables, and fenced code blocks.
+
+### Added — `AuthMethod::headers()` + `PxClient::auth_headers()`
+
+- **`AuthMethod::headers()`** (`src/api/auth.rs`) returns the raw header pairs the WS handshake needs:
+  - Token auth → one `Authorization: PVEAPIToken=<user>!<id>=<secret>`
+  - Password auth → one `Cookie: PVEAuthCookie=<ticket>`
+  The CSRF prevention token is **deliberately omitted** — PVE requires it only on state-changing HTTP requests, never on the WebSocket upgrade. A regression test pins the omission so a future contributor doesn't "helpfully" add it.
+
+- **`PxClient::auth_headers() -> Result<Vec<(String, String)>>`** (`src/api/client.rs`) wraps the above and **calls the existing `ensure_auth()` first** — so an idle PAM session about to expire gets refreshed before we expose the cookie. Token auth is a no-op refresh (token secrets don't have a TTL on the PVE side).
+
+- **`wsterm::connect()`** (`src/wsterm/mod.rs`) now takes `headers: &[(String, String)]` and injects them into the tungstenite request before handshake. Empty slice = no headers (the existing in-tree callers either pass `&[]` for no creds or `client.auth_headers().await?` for authenticated WS).
+
+- **`execute_serial`** in `src/cli/console.rs` wires `client.auth_headers().await?` into the `wsterm::connect` call. Comment in-source explains why the refresh-before-WS matters.
+
+### Fixed — release-notes line-wrap rendering
+
+- **`release.yml` "Compose release notes" step** (PR #134, already on main pre-v0.7.4) now pipes the awk-extracted CHANGELOG section through a small Python paragraph-unwrap. GitHub's release-page renderer treats single newlines inside paragraphs as **hard line breaks** (visible as `<br>`-style splits), NOT as the soft-wrap-becomes-space behaviour of standard GFM. Without post-processing, every release page from v0.6.1 onward was rendering with visible mid-sentence breaks. The unwrap preserves list items (`- / * / + / N. / N)`), headings (`#`), blockquotes (`>`), tables (`|`), indented continuations, and fenced code blocks. Idempotent on already-flat input. **Backfilled in-place across v0.6.1 – v0.7.3** (6 release pages, 142 paragraph-internal newlines unwrapped) via `gh release edit --notes-file` before #134 merged.
+
+### Tests
+
+- **+3 lib unit tests** for `AuthMethod`:
+  - `token_headers_emit_pveapi_authorization` — pins exact `PVEAPIToken=<user>!<id>=<secret>` shape
+  - `password_headers_emit_pveauthcookie_only` — pins cookie shape + CSRF-non-leak
+  - `token_headers_handle_special_chars_in_user_and_token_id` — delimiter robustness for `@` / `-` / digits
+- Lib total: 643 → **646**.
+
+### Carved out of this release (deliberate scope discipline)
+
+The starting WIP for #135 contained two unrelated changes that I split out:
+- A `PxClient::get_node_zfs_detail()` method (no caller in-tree yet) — belongs in a focused ZFS-detail PR when there's an operator-facing entry point for it.
+- A `fn config_path() → pub fn config_path()` visibility flip — unused by anything else in the WIP. Belongs with whatever future feature actually needs cross-module access to the config path.
+
+Neither carve-out was destructive; both are trivially re-applied in their own PR when scope is clear.
+
+### Lessons saved to l0-memory
+
+Six durable lessons from this multi-sprint session went into l0-memory (`repo:proxxx` scope) — searchable via FTS:
+- `pve-api-immutability-means-echo-not-omit` — the v0.7.0 → v0.7.1 type-on-PUT trap
+- `live-e2e-essential-for-state-families` — mocked tests can't catch wire-contract bugs
+- `inter-family-ordering-state-apply` — cross-family dependency ordering + 404-tolerant deletes (v0.7.3)
+- `config-url-drift-false-alarm` — the v0.7.1 → v0.7.2 PAM-auth phantom debug
+- `state-family-implementation-checklist` — 19-step recipe for adding a new state family
+- `release-notes-line-wrap-rendering` — the v0.7.4 line-wrap fix lesson
+
 ## [0.7.3] — 2026-05-28
 
 Headline: **Epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74)
