@@ -14,6 +14,63 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.6.2] — 2026-05-28
+
+Headline: **Module shape — lift HTTP transport and the watch dispatch out
+of the two largest monolithic files, behind a green audit gate.** Pure
+housekeeping patch release: zero behaviour change, zero public-surface
+change, no CLI/JSON contract movement. The retry/backoff state machine
+and the bounded-response reader move from `src/api/client.rs` into a new
+`src/api/transport.rs` (10 helpers, all `pub(super)`, ~149 lines lifted);
+doc comments, audit-trail rationales (SPOF 2.2, Gemini wave-3, the
+blocking-threshold derivation) and byte-for-byte semantics survive the
+move unchanged. The 173-line `Command::Watch` arm in `src/cli/mod.rs`
+becomes a four-function module at `src/cli/watch.rs` (`execute_watch`
+dispatch + `watch_until` / `watch_since` + per-target probes); `proxxx
+watch --help` and the emitted JSON shapes (`condition_met`, the `diff`
+array) are byte-identical pre and post. The scheduled supply-chain audit
+cron is unblocked by transitively bumping `aes 0.9.0 → 0.9.1` (upstream
+yanked 0.9.0 on 2026-05-27; we pull it via `russh 0.60.3` only). And the
+`pbs_missing_binary_yields_clear_message` regression test is now hermetic
+— tempdir HOME, explicit `--yes` (the confirmation gate `pbs restore` now
+requires), unset stray `PROXXX_*` creds — so it tests the named behaviour
+on any machine instead of passing-by-accident against whatever
+`~/.config/proxxx/config.toml` happens to exist locally.
+
+### Changed
+- **HTTP transport helpers extracted to `src/api/transport.rs`.**
+  Retry policy (`RETRY_MAX_ATTEMPTS`, `RETRY_BASE_DELAY_MS`,
+  `is_retryable_status`, `is_retryable_error`, `backoff_delay`,
+  `retry_after_secs`) and the bounded-body / blocking-parse plumbing
+  (`MAX_RESPONSE_BYTES`, `PARSE_BLOCKING_THRESHOLD`,
+  `parse_json_maybe_blocking`, `read_bounded_body`) all moved verbatim,
+  `pub(super)` only. `client.rs` keeps a single
+  `use super::transport::{...}`. No public API change.
+- **`Command::Watch` dispatch extracted to `src/cli/watch.rs`.** Single
+  call site in `cli/mod.rs`; same flags, same JSON shapes, same
+  behaviour, plus three falls-out cleanups from the split
+  (`parse.map_err(...)?`, `find().ok_or_else(...)?`,
+  `notify.as_deref() == Some("telegram")`).
+- **`aes 0.9.0 → 0.9.1`** (Cargo.lock only). Upstream yanked 0.9.0 on
+  2026-05-27; we pull it transitively via `russh 0.60.3`'s pre-release
+  crypto chain. Zero source change, zero behavioural risk. Unblocks the
+  scheduled `cargo audit --deny warnings` cron.
+
+### Fixed
+- **`pbs_missing_binary_yields_clear_message` regression test.** Two
+  silent passes:
+  1. `pbs restore --yes` became a required confirmation gate; the test
+     was bailing on that before reaching the missing-binary check.
+  2. The test inherited the developer's real `$HOME` and picked up any
+     existing `~/.config/proxxx/config.toml`.
+  Both fixed: explicit `--yes`, tempdir HOME with a minimal pinned
+  `config.toml`, and explicit `env_remove` of `PROXXX_TOKEN_SECRET` /
+  `PROXXX_PASSWORD` / `PROXXX_PBS_TOKEN_SECRET`. The match bar is also
+  broadened to accept any of `proxmox-backup-client` / `not found` /
+  `install` / `config` / `pbs` / `profile`, since depending on whether
+  the binary check or the config check fires first, both messages are
+  actionable.
+
 ## [0.6.1] — 2026-05-23
 
 Headline: **Correctness — kill the swallowed-error → silent-partial-result
