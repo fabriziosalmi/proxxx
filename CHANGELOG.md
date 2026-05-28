@@ -14,6 +14,87 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.7.3] — 2026-05-28
+
+Headline: **Epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74)
+epilogue — HA resources ship as the seventh state family at 7/6.** The
+HA-rules family in v0.7.0 closed epic #74 at 6/6 writable GitOps
+families but left an asymmetry: declaring an HA rule still required
+the operator to pre-register the referenced resource SIDs via raw curl
+to `/cluster/ha/resources`. v0.7.3 adds the resources family as the
+self-contained epilogue, making the GitOps loop fully round-trippable
+through `proxxx state {export,diff,apply}` end-to-end with no raw-API
+side channels. `tests/live/test_state_ha_rules.sh` now declares
+resources + rules in a single TOML and runs the full lifecycle as one
+self-contained sequence — **7/7 PASS, 0 FAIL** against PVE 9.1.1.
+
+### Added — HA resources state family
+
+- **`proxxx state --resource ha-resources`** — full CRUD via
+  `/cluster/ha/resources` (PVE 9+). Identity is `sid` (`vm:<vmid>` or
+  `ct:<vmid>`). Fields: `state` (`started` | `enabled` | `stopped` |
+  `disabled` | `ignored`), `max_restart`, `max_relocate`, `failback`,
+  `auto_rebalance`, `comment`. `type` (`vm`/`ct`) is auto-derived from
+  the SID prefix and never set in TOML. `group` is **never sent** —
+  PVE 9 rejects with `invalid parameter 'group': ha groups have been
+  migrated to rules`.
+- **Inter-family dependency handled**: `Resource::all()` orders
+  `HaResources` BEFORE `HaRules` so creates flow naturally
+  (resources-then-rules; rules reference resource SIDs). On the
+  delete side, PVE's `purge=1` default on resource DELETE
+  auto-removes the SID from referencing rules; the rule-delete apply
+  path is now **404-tolerant** to keep the cleanup idempotent. A
+  dedicated `diff_emits_ha_resources_changes_before_ha_rules` test +
+  the `resource_all_includes_every_variant` assertion pin the
+  ordering invariant.
+- **Preflight tiers**:
+  - `HaResourceDelete` → **Severe**. Removes a VM/CT from HA
+    management (CRM stops restarting/relocating it) AND auto-purges
+    referencing rules. Operator-perceived behaviour shift is a step
+    change; refuses without `--allow-risk`.
+  - `HaResourceStateChange` → **Warning** when going from
+    `started`/`enabled` to `disabled`/`ignored`/`stopped` (CRM
+    enforcement stops). Re-enabling (the reverse direction) is
+    additive and risk-free, deliberately not flagged.
+
+### Discovered live (fix shipped this commit)
+
+- **PVE 9.1.1's `/cluster/ha/resources` schema rejects `auto-rebalance`**
+  outright with HTTP 400 `"property is not defined in schema and the
+  schema does not allow additional properties"`. The field exists in
+  `pve-ha-manager.git` HEAD but hasn't yet shipped in the 9.1.x
+  stable line. Fix: `ha_resource_params` emits both `failback` and
+  `auto-rebalance` ONLY when explicitly opt-out (`false`); when at
+  PVE's server-side default (`true`), they're skipped on the wire. On
+  PVE 9.2+ where the field lands, an explicit `failback = false` or
+  `auto_rebalance = false` in TOML will still cleanly opt out (the
+  test `ha_resource_create_emits_failback_only_when_explicitly_false`
+  pins this contract).
+
+### Changed — test infrastructure
+
+- **`tests/live/test_state_ha_rules.sh`** — pre-step ⓪ (raw-API
+  resource registration) is GONE. The test TOML now declares
+  `[[ha_resources]]` alongside `[[ha_rules]]` and the apply runs as
+  one operation. Step 1 expects 4 `— applied` lines (2 resources +
+  2 rules). Step 6 expects 4 `— applied` deletes with preflight
+  firing SEVERE on each resource + Warning on each rule. Defensive
+  raw-API cleanup loop in `trap EXIT` stays as a belt-and-braces
+  safety net in case the proxxx apply itself fails mid-run.
+- **`pre-commit/01-feature-coverage.md`** — new row for the HA
+  resources family, with all the live-caught findings inlined.
+  The HA-rules row's "Discovered live #2" (raw-API pre-registration
+  workaround) is updated to point at v0.7.3's resolution.
+
+### Tests
+
+- **+12 lib unit tests** (3 diff, 5 apply, 4 preflight). Lib total:
+  631 → 643.
+- **Cross-family invariant test**: `Resource::all()` now asserts
+  `HaResources` is positioned BEFORE `HaRules` so a future re-order
+  breaks the build, not the live cluster.
+- **Live e2e**: 7/7 PASS against PVE 9.1.1 (homelab 192.168.0.122).
+
 ## [0.7.2] — 2026-05-28
 
 Headline: **Corrigendum to v0.7.1 — the "PAM-auth POST limitation" was a

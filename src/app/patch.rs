@@ -1466,6 +1466,15 @@ mod tests {
         async fn delete_ha_rule(&self, _: &str) -> Result<()> {
             anyhow::bail!("unused")
         }
+        async fn create_ha_resource(&self, _: &[(&str, &str)]) -> Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn update_ha_resource(&self, _: &str, _: &[(&str, &str)]) -> Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn delete_ha_resource(&self, _: &str) -> Result<()> {
+            anyhow::bail!("unused")
+        }
         async fn list_notification_endpoints(
             &self,
         ) -> Result<Vec<crate::api::types::NotificationEndpoint>> {

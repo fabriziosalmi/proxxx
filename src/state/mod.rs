@@ -6,9 +6,18 @@
 //!
 //! Today this module covers **pools, ACL grants, storage definitions,
 //! scheduled backup jobs, the cluster firewall (options + aliases + IP
-//! sets + security groups), notification matchers, and HA rules
-//! (node-affinity + resource-affinity)** across the full export → diff
-//! → apply loop. Epic #74 is now at 6/6 writable families. (Legacy PVE-8
+//! sets + security groups), notification matchers, HA rules
+//! (node-affinity + resource-affinity), and HA resources (which guests
+//! are HA-managed + their per-resource CRM knobs)** across the full
+//! export → diff → apply loop. **Epic #74 is now at 7/6 writable
+//! families** — HA resources is the epilogue family that makes the
+//! `GitOps` loop fully self-contained (declaring a rule no longer
+//! requires the operator to register its referenced SIDs via raw curl
+//! out-of-band). The `HaResources` family is intentionally ordered
+//! BEFORE `HaRules` in [`export::Resource::all`] so creates flow
+//! resources-then-rules; deletes ride on PVE's `purge=1` default
+//! (resource-delete auto-purges referencing rules) with idempotent
+//! 404-tolerance in the rule-delete apply path. (Legacy PVE-8
 //! `/cluster/ha/groups` is intentionally not modelled — PVE 9 migrated
 //! it to `/cluster/ha/rules`, and proxxx targets PVE 9.x.) Pre-flight
 //! risk gates + HITL approval per destructive apply change (shipped

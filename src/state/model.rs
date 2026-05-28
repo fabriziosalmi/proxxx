@@ -113,6 +113,25 @@ pub struct ClusterState {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notification_matchers: Vec<NotificationMatcherDecl>,
 
+    /// HA resources — `GET /cluster/ha/resources` (PVE 9+). Identity is
+    /// `sid` (e.g. `vm:100`, `ct:200`). Closes epic
+    /// [#74](https://github.com/fabriziosalmi/proxxx/issues/74) at 7/6
+    /// (resources is the epilogue family — HA rules at 6/6 reference
+    /// these SIDs; managing both as state makes the `GitOps` loop
+    /// self-contained without raw-API pre-registration).
+    ///
+    /// Note on inter-family ordering: HA rules reference HA resource
+    /// SIDs. The diff/apply pipeline emits `ha_resources` BEFORE
+    /// `ha_rules` so creates flow in the right sequence
+    /// (resources → rules). On the delete side, PVE's
+    /// `DELETE /cluster/ha/resources/{sid}` defaults to `purge=1`
+    /// which auto-removes the SID from any referencing rules
+    /// (deleting a rule entirely if it had only this resource), so the
+    /// subsequent `ha_rules` delete may find the rule already gone —
+    /// `apply_ha_rule_delete` tolerates that 404 idempotently.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ha_resources: Vec<HaResourceDecl>,
+
     /// HA rules — `GET /cluster/ha/rules` (PVE 9+). Identity is `rule`.
     /// Closes epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74).
     ///
@@ -220,6 +239,15 @@ const fn is_false(b: &bool) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_true(b: &bool) -> bool {
     *b
+}
+
+/// Skip-serialize a `u32` whose unset / default value is `0`. Used by
+/// [`HaResourceDecl`] for `max_restart` / `max_relocate` so a TOML
+/// declaration that omits them stays terse, while PVE's own defaults
+/// apply at the server.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One cluster backup (vzdump) job — `GET /cluster/backup`. The `id`
@@ -471,6 +499,86 @@ pub struct HaRuleDecl {
     /// meaningful for `resource-affinity`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub affinity: String,
+}
+
+/// One HA-managed resource — `GET /cluster/ha/resources` (PVE 9+).
+/// Identity is `sid` (e.g. `vm:100`, `ct:200`). The companion to
+/// [`HaRuleDecl`]: rules reference resources by SID, and CRM enforces
+/// placement based on the rule set for each resource.
+///
+/// PVE 9 dropped the legacy `group` field — it returns
+/// `invalid parameter 'group': ha groups have been migrated to rules`
+/// on POST/PUT if `group` is sent. We deliberately do NOT model
+/// `group` here; the apply layer never emits it.
+///
+/// `type` (`vm` or `ct`) is required by PVE on both create and update
+/// but is fully derivable from the SID prefix — the apply layer
+/// derives it and emits it; operators never set it in the TOML.
+///
+/// State values that PVE 9 accepts:
+/// * `started` (default if `state` is unset) — CRM keeps it running
+/// * `enabled` — alias of `started`, accepted but `started` is canonical
+/// * `stopped` — CRM keeps it stopped (still HA-aware)
+/// * `disabled` — CRM ignores this resource until you re-enable it
+/// * `ignored` — fully HA-decoupled; CRM passes through
+///
+/// `failback` and `auto-rebalance` are PVE 9 fields; both default `true`
+/// at the server. We emit them only when the operator declares `false`
+/// (`is_true` skip — matches the `enabled` / `is_true` precedent on
+/// [`BackupJobDecl`]).
+///
+/// `max_restart` and `max_relocate` use 0 as "unset" (PVE applies its
+/// own defaults — typically 1 and 1). Emitted only when > 0.
+///
+/// `digest` is deliberately NOT modelled — server-generated, would
+/// churn the TOML on every export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaResourceDecl {
+    /// HA SID. Identity. `vm:<vmid>` or `ct:<vmid>`.
+    pub sid: String,
+    /// Desired CRM state. Empty = PVE default (`started`). Valid:
+    /// `started`, `enabled`, `stopped`, `disabled`, `ignored`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// Maximum restart attempts before giving up. `0` = PVE default.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub max_restart: u32,
+    /// Maximum relocations to other nodes before giving up. `0` = PVE
+    /// default.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub max_relocate: u32,
+    /// `true` (PVE default) = CRM fails back to the preferred node when
+    /// it returns. `false` = sticky on the recovery node until manual
+    /// intervention. Emitted only when `false`.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub failback: bool,
+    /// `true` (PVE default) = participates in CRM's auto-rebalance pass.
+    /// `false` = excluded. Emitted only when `false`. PVE wire field is
+    /// `auto-rebalance` (hyphen).
+    #[serde(
+        rename = "auto-rebalance",
+        default = "default_true",
+        skip_serializing_if = "is_true"
+    )]
+    pub auto_rebalance: bool,
+    /// Free-text comment.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+}
+
+impl Default for HaResourceDecl {
+    fn default() -> Self {
+        Self {
+            sid: String::new(),
+            state: String::new(),
+            max_restart: 0,
+            max_relocate: 0,
+            failback: true,
+            auto_rebalance: true,
+            comment: String::new(),
+        }
+    }
 }
 
 /// One cluster-wide storage definition — `GET /storage`. The

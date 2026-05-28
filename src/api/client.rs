@@ -2528,6 +2528,30 @@ impl ProxmoxGateway for PxClient {
         Ok(())
     }
 
+    // ── PVE 9 HA resources CRUD (epic #74 epilogue) ──────────
+
+    async fn create_ha_resource(&self, params: &[(&str, &str)]) -> Result<()> {
+        let _resp: ApiResponse<Option<String>> = self.post("/cluster/ha/resources", params).await?;
+        Ok(())
+    }
+
+    async fn update_ha_resource(&self, sid: &str, params: &[(&str, &str)]) -> Result<()> {
+        let _resp: ApiResponse<Option<String>> = self
+            .put(&format!("/cluster/ha/resources/{}", urlenc(sid)), params)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_ha_resource(&self, sid: &str) -> Result<()> {
+        // PVE defaults purge=1 — removes this SID from any HA rules
+        // referencing it (and deletes a rule entirely if it had only
+        // this resource). Explicit in the URL for documentation.
+        let _resp: ApiResponse<Option<String>> = self
+            .delete(&format!("/cluster/ha/resources/{}", urlenc(sid)))
+            .await?;
+        Ok(())
+    }
+
     // ── PVE 8+ notifications impls ─────────────────────────
 
     async fn list_notification_endpoints(

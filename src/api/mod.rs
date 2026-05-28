@@ -1076,6 +1076,30 @@ pub trait ProxmoxGateway: Send + Sync {
     /// `/cluster/ha/rules/{rule}`. Sys.Console on `/`.
     async fn delete_ha_rule(&self, rule: &str) -> Result<()>;
 
+    // ── PVE 9 HA resources CRUD (epic #74 epilogue, 7/6) ─────
+
+    /// Create an HA resource. `params` must include `sid` (the
+    /// identity — e.g. `vm:100`, `ct:200`) and `type` (`vm` or `ct`,
+    /// derivable from the SID prefix). Optional: `state`
+    /// (`started`/`stopped`/`disabled`/`ignored`), `max_restart`,
+    /// `max_relocate`, `failback`, `auto-rebalance`, `comment`.
+    /// **Do not** pass `group` — PVE 9 rejects it ("ha groups have
+    /// been migrated to rules"). Requires `Sys.Console` on `/`.
+    /// POST `/cluster/ha/resources`.
+    async fn create_ha_resource(&self, params: &[(&str, &str)]) -> Result<()>;
+
+    /// Update one HA resource's mutable fields. SID and type are
+    /// immutable; type must still be echoed in `params`. Unset
+    /// fields are passed via repeated `delete=<key>` params (matcher
+    /// lesson). PUT `/cluster/ha/resources/{sid}`. Sys.Console.
+    async fn update_ha_resource(&self, sid: &str, params: &[(&str, &str)]) -> Result<()>;
+
+    /// Delete an HA resource. PVE defaults `purge=1` which
+    /// automatically removes the SID from any HA rules referencing
+    /// it (and deletes a rule entirely if its only remaining resource
+    /// was this one). DELETE `/cluster/ha/resources/{sid}`. Sys.Console.
+    async fn delete_ha_resource(&self, sid: &str) -> Result<()>;
+
     // ── PVE 8+ notification system (cluster.notifications.*) ──
 
     async fn list_notification_endpoints(

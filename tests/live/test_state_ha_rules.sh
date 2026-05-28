@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
-# HA-rules state-family live mutation test — runs the full GitOps
-# round-trip against a real PVE 9.1.x cluster:
+# HA-rules + HA-resources state-family live mutation test — runs the
+# full GitOps round-trip against a real PVE 9.1.x cluster, end-to-end
+# self-contained (no raw-curl pre-registration as of v0.7.3 — HA
+# resources is now its own state family, epic #74 epilogue at 7/6):
 #
-#   ① state apply (Create both rule types: node-affinity + resource-affinity)
-#   ② state diff after a `strict` flip on the node-affinity rule
-#   ③ state apply without --allow-risk → MUST refuse (Severe preflight)
-#   ④ state apply --allow-risk → MUST succeed (the `type-on-PUT` fix path)
-#   ⑤ state export → MUST round-trip strict=true persisted
-#   ⑥ state apply baseline.toml --prune --allow-risk → delete both
-#   ⑦ state export → final ha_rules section absent
+#   ① state apply: CREATE 2 HA resources (ct:7777, vm:8888) + 2 rules
+#      (node-affinity + resource-affinity). Total 4 "applied" lines.
+#      Inter-family ordering: resources flow BEFORE rules (rules
+#      reference resource SIDs), so the diff order is
+#      ha_resource creates → ha_rule creates.
+#   ② state diff after a `strict` flip on the node-affinity rule.
+#   ③ state apply without --allow-risk → MUST refuse (Severe preflight
+#      on the strict flip — message verbatim from src/state/preflight.rs).
+#   ④ state apply --allow-risk → MUST succeed (the `type`-on-PUT fix
+#      from v0.7.1 keeps the field present on PUT).
+#   ⑤ state export → MUST round-trip `strict = true` persisted.
+#   ⑥ state apply baseline.toml --prune --allow-risk → delete all 4
+#      (2 rules + 2 resources). PVE's resource-DELETE has `purge=1`
+#      default which auto-cleans referencing rules; the v0.7.3 rule-
+#      delete path is 404-tolerant so an already-purged rule shows up
+#      as a clean idempotent delete. Cleanup triggers BOTH preflight
+#      Severe (HaResourceDelete on each resource) AND Warning
+#      (HaRuleDelete on each rule).
+#   ⑦ state export → final ha_resources + ha_rules sections both absent.
 #
-# Plus pre-step ⓪: register ct:7777 + vm:8888 as HA *resources* via
-# raw `/cluster/ha/resources` (proxxx doesn't yet manage HA resources
-# as a state family — separate follow-up; the read side already exists
-# via `list_ha_resources`). Without this, PVE rejects rule creates with
-# `cannot use unmanaged resource(s) <sid>.\n` at the rule POST.
-#
-# RAII via trap EXIT — un-registers HA resources + restores the config
-# regardless of how we got there. Idempotent on a clean cluster.
+# RAII via trap EXIT — restores the operator's config + sweeps any
+# residual test artifacts on the cluster. Idempotent on a clean cluster.
 #
 # Required env (sourced from tests/live/env.local if present):
 #   PROXXX_E2E_PVE_URL    — https://192.168.0.122:8006
@@ -88,11 +96,13 @@ cleanup() {
     log "═══════════════════════════════════════════════════════════"
     log "[cleanup] RAII teardown"
     log "═══════════════════════════════════════════════════════════"
-    # Sweep any leftover HA rules with the proxxx-e2e- prefix.
+    # Defensive sweep: belt-and-braces in case `state apply --prune`
+    # itself failed mid-run. Step ⑥ should have done the work via
+    # proxxx; these raw-API deletes only catch leaks. Idempotent (404
+    # is fine — already gone).
     for r in proxxx-e2e-pin proxxx-e2e-spread; do
         curl -ks -X DELETE "$URL/api2/json/cluster/ha/rules/$r" -H "$T_H" >/dev/null 2>&1 || true
     done
-    # Un-manage the HA resources we registered.
     for sid in "$LXC_SID" "$VM_SID"; do
         curl -ks -X DELETE "$URL/api2/json/cluster/ha/resources/$sid" -H "$T_H" >/dev/null 2>&1 || true
     done
@@ -134,33 +144,24 @@ log "Target: $URL"
 log "Fixtures: $LXC_SID + $VM_SID on $NODE"
 log "═══════════════════════════════════════════════════════════"
 
-# ── ⓪ Pre-step: register HA resources (precondition for rule create) ──
-log ""
-log "[step 0] registering HA resources $LXC_SID + $VM_SID (state=stopped)"
-for sid in "$LXC_SID" "$VM_SID"; do
-    resp=$(curl -ks -X POST "$URL/api2/json/cluster/ha/resources" -H "$T_H" \
-        --data-urlencode "sid=$sid" --data-urlencode "state=stopped" 2>&1)
-    log "  POST $sid -> $resp"
-done
-# Verify both visible.
-sids_visible=$(curl -ks -H "$T_H" "$URL/api2/json/cluster/ha/resources" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)['data']
-print(' '.join(sorted(e['sid'] for e in data)))
-")
-if [[ "$sids_visible" == *"$LXC_SID"* && "$sids_visible" == *"$VM_SID"* ]]; then
-    ok "step 0: both HA resources registered"
-else
-    bad "step 0: expected both SIDs visible, got: $sids_visible"
-    exit 1
-fi
-
 # ── Snapshot baseline + compose declared TOML ──
 log ""
 log "[setup] capturing live baseline + composing declared TOML"
+log "        (no raw-API HA-resource pre-registration — v0.7.3 state family handles it)"
 "$BIN" state export --resource all > "$BASELINE"
 cp "$BASELINE" "$DECL"
 cat >> "$DECL" <<EOF
+
+# HA resources first (state apply respects family ordering: resources
+# are diff'd + applied BEFORE rules, so the create-then-reference
+# dependency flows naturally).
+[[ha_resources]]
+sid = "$LXC_SID"
+state = "stopped"
+
+[[ha_resources]]
+sid = "$VM_SID"
+state = "stopped"
 
 [[ha_rules]]
 rule = "proxxx-e2e-pin"
@@ -177,16 +178,16 @@ comment = "proxxx live e2e - resource-affinity"
 affinity = "negative"
 EOF
 
-# ── ① CREATE both rules ──
+# ── ① CREATE 2 HA resources + 2 HA rules in one state apply ──
 log ""
-log "[step 1] state apply: CREATE node-affinity + resource-affinity"
+log "[step 1] state apply: CREATE 2 resources + 2 rules (single proxxx call)"
 out=$("$BIN" state apply "$DECL" 2>&1)
 log "$out"
-applied=$(echo "$out" | grep -c "applied")
-if [[ "$applied" -eq 2 ]]; then
-    ok "step 1: both rules applied"
+applied=$(echo "$out" | grep -c "— applied")
+if [[ "$applied" -eq 4 ]]; then
+    ok "step 1: 2 resources + 2 rules applied (epic #74 epilogue: self-contained GitOps loop)"
 else
-    bad "step 1: expected 2 applied, got $applied"
+    bad "step 1: expected 4 applied (2 resources + 2 rules), got $applied"
 fi
 
 # ── ② FLIP strict=true + diff ──
@@ -237,25 +238,34 @@ fi
 
 # ── ⑥ CLEANUP via --prune ──
 log ""
-log "[step 6] restore baseline (--prune --allow-risk)"
+log "[step 6] restore baseline (--prune --allow-risk) — deletes 2 rules + 2 resources"
 out=$("$BIN" state apply "$BASELINE" --prune --allow-risk 2>&1)
 log "$out"
-deleted=$(echo "$out" | grep -c "^- ha_rule:.*— applied")
-if [[ "$deleted" -eq 2 ]]; then
-    ok "step 6: both rules pruned"
+# Apply emits one `- <family>: <id> — applied` line per delete. The v0.7.3
+# 404-tolerant `apply_ha_rule_delete` means an already-purged rule (PVE
+# auto-cleaned it when its referenced resource was deleted first) still
+# surfaces as `— applied` from proxxx's perspective.
+deleted_rules=$(echo "$out" | grep -c "^- ha_rule:.*— applied")
+deleted_resources=$(echo "$out" | grep -c "^- ha_resource:.*— applied")
+total_deleted=$((deleted_rules + deleted_resources))
+if [[ "$total_deleted" -eq 4 ]]; then
+    ok "step 6: 2 rules + 2 resources pruned (total 4)"
 else
-    bad "step 6: expected 2 deleted, got $deleted"
+    bad "step 6: expected 4 deletes (2 rules + 2 resources), got $total_deleted (rules=$deleted_rules resources=$deleted_resources)"
 fi
 
-# ── ⑦ FINAL: no HA rules remain ──
+# ── ⑦ FINAL: no HA rules + no HA resources remain ──
 log ""
-log "[step 7] final state — ha_rules section absent"
-final_export=$("$BIN" state export --resource ha-rules 2>&1)
-log "$final_export"
-if ! echo "$final_export" | grep -q "^\[\[ha_rules\]\]$"; then
-    ok "step 7: no ha_rules sections present (clean)"
+log "[step 7] final state — ha_rules + ha_resources sections both absent"
+final_rules=$("$BIN" state export --resource ha-rules 2>&1)
+final_resources=$("$BIN" state export --resource ha-resources 2>&1)
+log "$final_rules"
+log "$final_resources"
+if ! echo "$final_rules" | grep -q "^\[\[ha_rules\]\]$" &&
+    ! echo "$final_resources" | grep -q "^\[\[ha_resources\]\]$"; then
+    ok "step 7: no ha_rules + no ha_resources sections present (clean)"
 else
-    bad "step 7: leftover ha_rules section"
+    bad "step 7: leftover HA family entries in final export"
 fi
 
 if [[ "$FAIL" -gt 0 ]]; then

@@ -46,8 +46,8 @@ use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
 use crate::state::model::{
     AclDecl, BackupJobDecl, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetCidrDecl,
-    FirewallIpsetDecl, FirewallOptionsDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl,
-    StorageDecl,
+    FirewallIpsetDecl, FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, NotificationMatcherDecl,
+    PoolDecl, StorageDecl,
 };
 
 /// Options controlling apply behaviour.
@@ -177,6 +177,11 @@ pub trait StateWriteView: Send + Sync {
     async fn create_ha_rule_view(&self, params: &[(&str, &str)]) -> Result<()>;
     async fn update_ha_rule_view(&self, rule: &str, params: &[(&str, &str)]) -> Result<()>;
     async fn delete_ha_rule_view(&self, rule: &str) -> Result<()>;
+
+    // ── HA resources (PVE 9, epic #74 epilogue) ──────────
+    async fn create_ha_resource_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_ha_resource_view(&self, sid: &str, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_ha_resource_view(&self, sid: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -302,6 +307,16 @@ where
     async fn delete_ha_rule_view(&self, rule: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_ha_rule(self, rule).await
     }
+
+    async fn create_ha_resource_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_ha_resource(self, params).await
+    }
+    async fn update_ha_resource_view(&self, sid: &str, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_ha_resource(self, sid, params).await
+    }
+    async fn delete_ha_resource_view(&self, sid: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_ha_resource(self, sid).await
+    }
 }
 
 /// Apply a list of changes, in order, against a live cluster.
@@ -392,6 +407,9 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("ha_rule", ChangeKind::Create) => apply_ha_rule_create(client, change).await,
         ("ha_rule", ChangeKind::Update) => apply_ha_rule_update(client, change).await,
         ("ha_rule", ChangeKind::Delete) => apply_ha_rule_delete(client, change).await,
+        ("ha_resource", ChangeKind::Create) => apply_ha_resource_create(client, change).await,
+        ("ha_resource", ChangeKind::Update) => apply_ha_resource_update(client, change).await,
+        ("ha_resource", ChangeKind::Delete) => apply_ha_resource_delete(client, change).await,
         (resource, kind) => Err(anyhow::anyhow!(
             "unhandled change shape: resource={resource} kind={kind:?}"
         )),
@@ -1247,7 +1265,159 @@ async fn apply_ha_rule_delete<C: StateWriteView + ?Sized>(
     change: &Change,
 ) -> Result<()> {
     let decl: HaRuleDecl = decode(change.before.as_ref(), "HA rule")?;
-    client.delete_ha_rule_view(&decl.rule).await
+    // 404 tolerance: deleting an HA resource via the resources family
+    // (with PVE's default `purge=1`) auto-removes the SID from any
+    // referencing rules — deleting a rule entirely if it had only that
+    // resource. By the time the rule-delete change runs (HaRules comes
+    // after HaResources in diff order), the rule may already be gone.
+    // Treat 404 as a successful idempotent delete (the desired
+    // end-state is "rule is absent" and we got there).
+    match client.delete_ha_rule_view(&decl.rule).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(crate::api::ApiError::NotFound(_)) = e.downcast_ref() {
+                tracing::debug!(
+                    rule = %decl.rule,
+                    "HA rule already absent — auto-purged by resource delete or external action; treating as success"
+                );
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Build the form-encoded params for `POST /cluster/ha/resources` and
+/// `PUT /cluster/ha/resources/{sid}`. PVE 9 schema:
+///
+/// * `sid` — POST only (PUT identifies via URL); `<type>:<vmid>`.
+/// * `type` — required on BOTH POST and PUT (the same lesson as HA
+///   rules — "immutable" means *value must match*, not *omit*).
+///   Auto-derived from the SID prefix (`vm:100` → `type=vm`).
+/// * `state` — optional enum (`started` | `enabled` | `stopped` |
+///   `disabled` | `ignored`). Empty = PVE default (`started`).
+/// * `max_restart` / `max_relocate` — int, 0 = PVE default. Emitted
+///   only when > 0.
+/// * `failback` / `auto-rebalance` — bool. PVE defaults both true.
+///   We emit `0` only when the declared value is `false` (operator
+///   explicitly opting out); we emit `1` explicitly on the create
+///   path so the PVE-side default is locked in regardless of any
+///   future server-side default flip.
+/// * `comment` — optional free text.
+/// * `group` — **NEVER SENT**. PVE 9 rejects it with `invalid
+///   parameter 'group': ha groups have been migrated to rules`.
+fn ha_resource_params(decl: &HaResourceDecl, include_sid: bool) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    // type is REQUIRED on both POST and PUT — derive from sid prefix.
+    let resource_type = decl.sid.split_once(':').map_or("", |(k, _)| k);
+    params.push(("type".to_string(), resource_type.to_string()));
+    if include_sid {
+        // sid is the URL last-segment on PUT; emit in body only on POST.
+        params.push(("sid".to_string(), decl.sid.clone()));
+    }
+    push_optional(&mut params, "state", &decl.state);
+    if decl.max_restart > 0 {
+        params.push(("max_restart".to_string(), decl.max_restart.to_string()));
+    }
+    if decl.max_relocate > 0 {
+        params.push(("max_relocate".to_string(), decl.max_relocate.to_string()));
+    }
+    // `failback` and `auto-rebalance` — PVE 9-era HA-resource knobs.
+    // **Live-caught (v0.7.3 sprint)**: PVE 9.1.1's `/cluster/ha/resources`
+    // schema rejects `auto-rebalance` with HTTP 400 `"property is not
+    // defined in schema and the schema does not allow additional
+    // properties"` — the field exists in pve-ha-manager.git HEAD but
+    // isn't yet shipped in the 9.1.x stable line. We err on the side
+    // of compatibility: emit each bool ONLY when it diverges from PVE's
+    // server-side default (`true`). On clusters where the field is in
+    // the schema, this still works (PVE applies its `true` default
+    // when we omit). On clusters where it isn't (PVE 9.1.x at the
+    // moment), the omission keeps the POST clean.
+    //
+    // Operators who explicitly write `failback = false` or
+    // `auto_rebalance = false` in TOML will see proxxx try to send
+    // the `0` — if the cluster still rejects, the operator gets a
+    // clean error with the PVE field name, not silent fallback.
+    if !decl.failback {
+        params.push(("failback".to_string(), "0".to_string()));
+    }
+    if !decl.auto_rebalance {
+        params.push(("auto-rebalance".to_string(), "0".to_string()));
+    }
+    push_optional(&mut params, "comment", &decl.comment);
+    params
+}
+
+async fn apply_ha_resource_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: HaResourceDecl = decode(change.after.as_ref(), "HA resource")?;
+    if decl.sid.is_empty() || !decl.sid.contains(':') {
+        anyhow::bail!(
+            "HA resource missing or malformed `sid` — expected `vm:<vmid>` or `ct:<vmid>`, got {:?}",
+            decl.sid
+        );
+    }
+    let params = ha_resource_params(&decl, true);
+    client.create_ha_resource_view(&borrow(&params)).await
+}
+
+async fn apply_ha_resource_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: HaResourceDecl = decode(change.after.as_ref(), "HA resource")?;
+    let mut params = ha_resource_params(&after, false);
+    // PVE keeps unspecified fields at their old values; an empty
+    // `comment` (or any field we want to clear) goes via repeated
+    // `delete=<key>`. Same matcher lesson — never CSV.
+    let mut del: Vec<&str> = Vec::new();
+    if after.state.is_empty() {
+        del.push("state");
+    }
+    if after.comment.is_empty() {
+        del.push("comment");
+    }
+    if after.max_restart == 0 {
+        del.push("max_restart");
+    }
+    if after.max_relocate == 0 {
+        del.push("max_relocate");
+    }
+    for key in del {
+        params.push(("delete".to_string(), key.to_string()));
+    }
+    client
+        .update_ha_resource_view(&after.sid, &borrow(&params))
+        .await
+}
+
+async fn apply_ha_resource_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: HaResourceDecl = decode(change.before.as_ref(), "HA resource")?;
+    // 404 tolerance for the same reason as `apply_ha_rule_delete`:
+    // external action may have removed the resource between diff +
+    // apply; the desired end-state ("resource is absent") is already
+    // satisfied. PVE's purge=1 default on this endpoint also cleans
+    // up referencing rules — see the diff-order doc on Resource::HaResources.
+    match client.delete_ha_resource_view(&decl.sid).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(crate::api::ApiError::NotFound(_)) = e.downcast_ref() {
+                tracing::debug!(
+                    sid = %decl.sid,
+                    "HA resource already absent — treating as successful idempotent delete"
+                );
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -1441,6 +1611,16 @@ mod tests {
         }
         async fn delete_ha_rule_view(&self, rule: &str) -> Result<()> {
             self.record(format!("delete_ha_rule({rule})")).await
+        }
+        async fn create_ha_resource_view(&self, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("create_ha_resource {params:?}")).await
+        }
+        async fn update_ha_resource_view(&self, sid: &str, params: &[(&str, &str)]) -> Result<()> {
+            self.record(format!("update_ha_resource({sid}) {params:?}"))
+                .await
+        }
+        async fn delete_ha_resource_view(&self, sid: &str) -> Result<()> {
+            self.record(format!("delete_ha_resource({sid})")).await
         }
     }
 
@@ -2309,5 +2489,197 @@ mod tests {
         .await;
         assert!(matches!(out[0].result, ApplyResult::Applied));
         assert_eq!(c.lines().await, vec!["delete_ha_rule(pin-db)".to_string()]);
+    }
+
+    // ── HA resources (epic #74 epilogue, 7/6) ─────────────────────
+
+    #[tokio::test]
+    async fn ha_resource_create_dispatches_with_derived_type_and_sid() {
+        let decl = HaResourceDecl {
+            sid: "vm:8888".into(),
+            state: "started".into(),
+            max_restart: 3,
+            max_relocate: 1,
+            failback: true,
+            auto_rebalance: true,
+            comment: "live e2e fixture".into(),
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Create,
+            resource: "ha_resource",
+            identity: "vm:8888".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("create_ha_resource"));
+        // type derived from sid prefix.
+        assert!(line.contains("\"type\""));
+        assert!(
+            line.contains("\"vm\""),
+            "type=vm derived from vm:8888: {line}"
+        );
+        // sid in body (POST has no URL last-segment).
+        assert!(line.contains("\"sid\""));
+        assert!(line.contains("\"vm:8888\""));
+        // state + max_restart + max_relocate emitted.
+        assert!(line.contains("\"state\""));
+        assert!(line.contains("\"started\""));
+        assert!(line.contains("\"max_restart\""));
+        assert!(line.contains("\"max_relocate\""));
+        // failback + auto-rebalance: at PVE-default `true`, skipped on
+        // the wire (v0.7.3 live-caught — PVE 9.1.x rejects auto-rebalance
+        // outright; failback fate uncertain, so we apply the same skip
+        // semantics for symmetry).
+        assert!(!line.contains("\"failback\""));
+        assert!(!line.contains("\"auto-rebalance\""));
+        // PVE 9 rejects `group` — must NOT leak.
+        assert!(
+            !line.contains("\"group\""),
+            "group leaked into POST: {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ha_resource_create_emits_failback_only_when_explicitly_false() {
+        // Symmetric to the "skipped on default" test above: when an
+        // operator EXPLICITLY opts out (`failback = false`), proxxx
+        // emits `failback=0` so PVE flips the bit. Same for
+        // `auto_rebalance`. Live-caught regression guard: PVE 9.1.x
+        // rejects `auto-rebalance` (any value) outright, but PVE 9.2+
+        // accepts it — this test pins the wire contract for the
+        // operator-opt-out path so the upgrade is seamless.
+        let decl = HaResourceDecl {
+            sid: "vm:100".into(),
+            failback: false,
+            auto_rebalance: false,
+            ..HaResourceDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Create,
+            resource: "ha_resource",
+            identity: "vm:100".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.contains("\"failback\""));
+        assert!(line.contains("\"auto-rebalance\""));
+        // Both serialised as "0".
+        let zero_count = line.matches("\"0\"").count();
+        assert!(
+            zero_count >= 2,
+            "expected failback=0 + auto-rebalance=0 → at least two \"0\" tokens: {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ha_resource_create_rejects_malformed_sid() {
+        let decl = HaResourceDecl {
+            sid: "not-a-valid-sid".into(),
+            ..HaResourceDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Create,
+            resource: "ha_resource",
+            identity: "not-a-valid-sid".into(),
+            before: None,
+            after: Some(serde_json::to_value(&decl).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        match &out[0].result {
+            ApplyResult::Failed { error, .. } => {
+                assert!(
+                    error.contains("malformed `sid`") || error.contains("vm:<vmid>"),
+                    "expected actionable error for malformed sid, got: {error}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // Gateway never called for the invalid input.
+        assert!(c.lines().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ha_resource_update_clears_emptied_fields_via_repeated_delete_keys() {
+        let after = HaResourceDecl {
+            sid: "ct:7777".into(),
+            state: String::new(),   // cleared
+            comment: String::new(), // cleared
+            max_restart: 0,         // cleared (was 5)
+            max_relocate: 1,        // kept
+            failback: true,
+            auto_rebalance: true,
+        };
+        let before = HaResourceDecl {
+            sid: "ct:7777".into(),
+            state: "started".into(),
+            comment: "was set".into(),
+            max_restart: 5,
+            max_relocate: 1,
+            failback: true,
+            auto_rebalance: true,
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Update,
+            resource: "ha_resource",
+            identity: "ct:7777".into(),
+            before: Some(serde_json::to_value(&before).unwrap()),
+            after: Some(serde_json::to_value(&after).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("update_ha_resource(ct:7777)"));
+        // `type` MUST be sent on PUT (same lesson as HA rules in v0.7.1).
+        assert!(line.contains("\"type\""));
+        assert!(line.contains("\"ct\""));
+        // Cleared fields surface as `delete=<key>` repeated params.
+        assert!(line.contains("\"delete\""));
+        assert!(line.contains("\"state\""));
+        assert!(line.contains("\"comment\""));
+        assert!(line.contains("\"max_restart\""));
+        // At least one `delete=` repeated key is present (coarse pin —
+        // full structured-param introspection would be heavier than
+        // this test merits).
+        assert!(line.matches("\"delete\"").next().is_some());
+    }
+
+    #[tokio::test]
+    async fn ha_resource_delete_dispatches() {
+        let decl = HaResourceDecl {
+            sid: "vm:8888".into(),
+            ..HaResourceDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Delete,
+            resource: "ha_resource",
+            identity: "vm:8888".into(),
+            before: Some(serde_json::to_value(&decl).unwrap()),
+            after: None,
+        };
+        let out = apply(
+            &c,
+            vec![change],
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        assert_eq!(
+            c.lines().await,
+            vec!["delete_ha_resource(vm:8888)".to_string()]
+        );
     }
 }
