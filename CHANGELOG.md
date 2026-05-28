@@ -14,6 +14,94 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.7.1] — 2026-05-28
+
+Headline: **HA-rules PUT bug fix (caught by new live e2e) + `api/types.rs`
+modularised by PVE category.** Patch release closing the v0.7.0 verification
+debt: the new HA-rules state family from v0.7.0 had a real bug that mocked
+unit tests didn't catch — `ha_rule_params` omitted the `type` field from
+PUT requests, based on a mis-reading of pve-ha-manager.git's `Rules.pm`
+comment that the field is "immutable on PUT" (PVE-API parlance for "value
+cannot CHANGE between current state and request" — NOT "omit the field").
+Live PVE 9.1.1 rejects PUT `/cluster/ha/rules/{rule}` with HTTP 400
+`{"errors":{"type":"property is missing"}}` when absent. v0.7.1 always
+emits `type` on both POST and PUT; the actual immutability guard stays in
+`apply_ha_rule_update` (a type *change* between before/after still surfaces
+an actionable "delete + re-create" error before the gateway call). Caught
+by a new self-contained live mutation script (`tests/live/
+test_state_ha_rules.sh`) that runs the full GitOps lifecycle for both rule
+types against PVE 9.1.x — create node-affinity + resource-affinity, flip
+`strict=true` (SEVERE preflight refuses without `--allow-risk`),
+`--allow-risk` succeeds (the fix-verification step), `state export`
+round-trips `strict = true` persisted, restore baseline via `--prune
+--allow-risk`. 8/8 PASS, 0 FAIL with RAII cleanup. Alongside the fix:
+`src/api/types.rs` (which had grown to 3 511 LOC / 96 types over many
+feature PRs — the cliff point for adding new wire types had become "find
+the right neighborhood in the 3.5K file") split into 16 per-category
+submodules under `src/api/types/`. Pure mechanical refactor — every `pub
+struct` / `pub enum` moved verbatim with doc comments, derive attrs, body,
+and `impl` blocks; the 3 deserialize helpers promoted to `pub(crate) fn`
+in `mod.rs`. Public API surface byte-identical (every
+`crate::api::types::Foo` callsite still resolves via `pub use X::*;`
+re-exports). 631 lib + ~1078 all-targets tests green pre+post, zero
+behaviour change.
+
+### Fixed — HA-rule PUT contract
+
+- **`type` field now emitted on PUT `/cluster/ha/rules/{rule}`.**
+  v0.7.0 omitted it under the wrong reading of "immutable on PUT" — PVE
+  9.1.x rejects the omission with HTTP 400. `ha_rule_params` always
+  sends `type` now; the unit-test regression
+  (`ha_rule_update_clears_emptied_fields_via_repeated_delete_keys`)
+  asserts the field IS present + matches `before.rule_type`. The
+  pre-existing type-change rejection (live PVE error wrapped in an
+  actionable `"delete + re-create"` bail) still runs at the apply layer
+  before any gateway call.
+
+### Added — live HA-rules e2e harness
+
+- **`tests/live/test_state_ha_rules.sh`** — full GitOps mutation
+  lifecycle for HA rules against a real PVE 9.1.x cluster. Two rule
+  types, strict-flip preflight, `--allow-risk` override, `--prune`
+  restore, RAII via `trap EXIT`. Forces token auth via a temporary
+  `config.toml` swap (see "known limitation" below).
+- Coverage matrix `pre-commit/01-feature-coverage.md` updated: rows
+  55+56 (Read HA topology) promoted ⚠️ → ✅; new dedicated row for the
+  HA-rules state family inserted after row 124, with the three
+  live-discovered findings inlined.
+
+### Changed — `api/types.rs` modularised
+
+- **`src/api/types.rs` (3 511 LOC, 96 types) → `src/api/types/` (16 submodules).**
+  Per-category split: `task` · `node` · `node_hw` · `guest` ·
+  `guest_agent` · `storage` · `cluster` · `pool` · `firewall` · `ha` ·
+  `notifications` · `access` · `acme` · `backup` · `console` ·
+  `replication`. Smallest module is `pool.rs` (34 LOC, 3 small structs);
+  largest is `guest.rs` (790 LOC — QEMU/LXC config soup with the
+  `QemuNetSpec` / `QemuDiskSpec` parsers). `mod.rs` is 150 LOC of
+  re-exports + 3 shared `pub(crate)` deserialize helpers
+  (`deserialize_u32_from_str_or_num`, `deserialize_u64_from_str_or_num`,
+  `deserialize_bool_from_int`).
+- **Public API surface byte-identical.** Every consumer of
+  `crate::api::types::Foo` (and the test files using
+  `use proxxx::api::types::*`) resolves through the `pub use X::*;`
+  re-exports. Zero caller changes anywhere else in the tree.
+
+### Known limitations (documented, not fixed in this release)
+
+- **PVE rejects HA-rule creates referencing SIDs not registered as HA
+  resources** — `cannot use unmanaged resource(s) <sid>`. The live test
+  script pre-registers via the raw `/cluster/ha/resources` API.
+  proxxx doesn't yet manage HA *resources* as a state family — natural
+  follow-up to epic #74 (which closed at 6/6 writable families with
+  v0.7.0; HA resources would make it 7/6, an epic #74 epilogue).
+- **PAM-authenticated `state apply` POST to `/cluster/ha/rules` fails
+  where API-token POST succeeds** with byte-identical params. Direct
+  curl with PAM headers reproduces, so it's not a proxxx serialisation
+  issue — likely a PVE-side worker-cache or session-context quirk; not
+  introduced by v0.7.0. The live test forces token auth via a
+  temporary config swap. Investigation tracked separately.
+
 ## [0.7.0] — 2026-05-28
 
 Headline: **HA-rules closes epic [#74](https://github.com/fabriziosalmi/proxxx/issues/74) at 6/6 +
