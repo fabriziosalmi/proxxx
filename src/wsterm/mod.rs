@@ -37,6 +37,7 @@ pub use url::{build_ws_target, WsTarget};
 pub async fn connect(
     target: &WsTarget,
     verify_tls: bool,
+    headers: &[(String, String)],
 ) -> Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
@@ -49,11 +50,18 @@ pub async fn connect(
         Some(Connector::Rustls(Arc::new(cfg)))
     };
 
-    let request: tokio_tungstenite::tungstenite::handshake::client::Request = target
+    let mut request: tokio_tungstenite::tungstenite::handshake::client::Request = target
         .url
         .as_str()
         .into_client_request()
         .context("bad WS URL")?;
+
+    for (name, val) in headers {
+        let hn =
+            tokio_tungstenite::tungstenite::http::header::HeaderName::from_bytes(name.as_bytes())?;
+        let hv = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(val)?;
+        request.headers_mut().insert(hn, hv);
+    }
 
     // (Gemini audit) — explicit frame/message size limits.
     //

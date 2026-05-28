@@ -137,6 +137,27 @@ impl AuthMethod {
         }
     }
 
+    /// Get the raw headers representing this auth method (e.g. for WebSocket handshakes)
+    pub fn headers(&self) -> Vec<(String, String)> {
+        match self {
+            Self::Token {
+                user,
+                token_id,
+                token_secret,
+            } => {
+                let secret_ref: &str = token_secret;
+                vec![(
+                    "Authorization".to_string(),
+                    format!("PVEAPIToken={user}!{token_id}={secret_ref}"),
+                )]
+            }
+            Self::Password { ticket, .. } => {
+                let ticket_ref: &str = ticket;
+                vec![("Cookie".to_string(), format!("PVEAuthCookie={ticket_ref}"))]
+            }
+        }
+    }
+
     /// Check if auth needs refresh (only relevant for password auth)
     pub fn needs_refresh(&self) -> bool {
         match self {
@@ -145,5 +166,82 @@ impl AuthMethod {
                 *expires_at < std::time::Instant::now() + std::time::Duration::from_mins(2)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_headers_emit_pveapi_authorization() {
+        // PVE's API-token auth flavor expects a single `Authorization`
+        // header of shape `PVEAPIToken=<user>!<tokenid>=<secret>`. This
+        // pins the format the WebSocket termproxy / vncproxy handshakes
+        // need — same shape as our HTTP requests (route through reqwest's
+        // header builder there, vs tungstenite's here).
+        let auth =
+            AuthMethod::from_token("root@pam", "proxxx-rw", "9b1c-be01-deca-fbad-deadbeefcafe");
+        let headers = auth.headers();
+        assert_eq!(headers.len(), 1, "token auth must emit exactly 1 header");
+        assert_eq!(headers[0].0, "Authorization");
+        assert_eq!(
+            headers[0].1,
+            "PVEAPIToken=root@pam!proxxx-rw=9b1c-be01-deca-fbad-deadbeefcafe"
+        );
+    }
+
+    #[test]
+    fn password_headers_emit_pveauthcookie_only() {
+        // For PAM/ticket auth the WS handshake needs the
+        // `PVEAuthCookie=<ticket>` cookie. The CSRF prevention token is
+        // deliberately NOT in this header set — PVE requires it only on
+        // state-changing HTTP requests, never on the WS upgrade. A
+        // future contributor reading the source should not "fix" the
+        // omission by adding it here.
+        use zeroize::Zeroizing;
+        let auth = AuthMethod::Password {
+            ticket: Zeroizing::new("PVE:root@pam:6A185B44::ZDPSgsM...".to_string()),
+            csrf_token: Zeroizing::new("6A185B44:4BTds5sVl8Z...".to_string()),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_hours(2),
+        };
+        let headers = auth.headers();
+        assert_eq!(headers.len(), 1, "password auth must emit exactly 1 header");
+        assert_eq!(headers[0].0, "Cookie");
+        assert!(
+            headers[0].1.starts_with("PVEAuthCookie="),
+            "cookie value must be prefixed `PVEAuthCookie=`: {}",
+            headers[0].1
+        );
+        assert!(
+            headers[0].1.contains("PVE:root@pam:6A185B44::ZDPSgsM..."),
+            "cookie value must carry the full ticket verbatim: {}",
+            headers[0].1
+        );
+        // The CSRF prevention token must NOT leak into the WS headers.
+        // Pin it so a future "let's also send csrf" change breaks this test.
+        let combined = format!("{}: {}", headers[0].0, headers[0].1);
+        assert!(
+            !combined.contains("CSRFPreventionToken"),
+            "CSRF prevention token leaked into WS headers: {combined}"
+        );
+        assert!(
+            !combined.contains("6A185B44:4BTds5sVl8Z"),
+            "CSRF token value leaked into WS headers: {combined}"
+        );
+    }
+
+    #[test]
+    fn token_headers_handle_special_chars_in_user_and_token_id() {
+        // PVE userids can contain `@` (`<user>@<realm>`) and tokenids
+        // can contain `-` / digits. Both flow into the Authorization
+        // header verbatim — the format string takes care of the
+        // delimiters.
+        let auth = AuthMethod::from_token("alice@pve", "ops-2026-q2", "uuid-secret");
+        let headers = auth.headers();
+        assert_eq!(
+            headers[0].1,
+            "PVEAPIToken=alice@pve!ops-2026-q2=uuid-secret"
+        );
     }
 }

@@ -273,6 +273,29 @@ impl PxClient {
         &self.profile_config
     }
 
+    /// Retrieve the authentication headers for this client, suitable for
+    /// outbound non-HTTP connections that PVE authenticates the same way
+    /// (today: WebSocket termproxy + vncproxy handshakes).
+    ///
+    /// Calls [`PxClient::ensure_auth`] first so a long-idle PAM session
+    /// with an expiring ticket gets refreshed before we expose the
+    /// `PVEAuthCookie` header — otherwise the WS handshake would carry
+    /// a stale ticket and PVE would `401` the upgrade. Token auth is a
+    /// no-op refresh (token secrets don't expire).
+    ///
+    /// The returned vector is `(header-name, header-value)` pairs ready
+    /// for the tungstenite request builder:
+    /// * Token auth → one `Authorization: PVEAPIToken=<user>!<id>=<secret>`
+    /// * Password auth → one `Cookie: PVEAuthCookie=<ticket>`
+    ///
+    /// The CSRF prevention token is deliberately omitted — PVE only
+    /// requires it on state-changing HTTP requests, never on the
+    /// WebSocket upgrade.
+    pub async fn auth_headers(&self) -> Result<Vec<(String, String)>> {
+        self.ensure_auth().await?;
+        Ok(self.auth.read().await.headers())
+    }
+
     /// Send a request with retry on transient failures (SPOF 2.2 fix).
     ///
     /// `make_req` rebuilds the `RequestBuilder` on each attempt — required
