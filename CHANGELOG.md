@@ -14,6 +14,61 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.7.2] — 2026-05-28
+
+Headline: **Corrigendum to v0.7.1 — the "PAM-auth POST limitation" was a
+false alarm.** Docs-only patch release; zero code change. Sprint 2 set out
+to investigate the scope of a "PAM-authenticated `state apply` POST fails
+where API-token POST succeeds" limitation flagged in v0.7.1's CHANGELOG.
+A deliberate matrix test — pools, firewall aliases, backup-jobs,
+notification matchers, and HA rules, all POST'd via `proxxx state apply`
+under PAM auth on the test cluster — came back **5/5 `applied`**. PAM auth
+is not broken on any state family.
+
+The original v0.7.1 finding was caused by **config-URL drift between
+sessions**, not by an auth-flavor bug: while Sprint 1.A was running the
+live HA-rules tests, the operator's default `config.toml` pointed at one
+cluster (`192.168.0.120`) while `tests/live/env.local`'s API token
+addressed a different cluster (`192.168.0.122`). The "cannot use
+unmanaged resource(s) ct:7777" error was correct from the
+`config.toml`-cluster's perspective — `ct:7777` had been registered as
+an HA resource on the env.local-cluster via raw curl, but never on the
+config-cluster which proxxx was actually hitting. Apples-to-oranges in
+disguise, not a PVE worker-cache quirk and not a proxxx serialisation
+bug.
+
+### Changed — docs retracted
+
+- **`CHANGELOG.md` [0.7.1]**: leaves the historical section unchanged
+  (commit history immutable), but the v0.7.1 GitHub release page body is
+  backfilled in-place via `gh release edit` with the "PAM-auth POST
+  limitation" paragraph replaced by a retraction pointer to this v0.7.2
+  entry. Operator-facing surface stays accurate.
+- **`pre-commit/01-feature-coverage.md` HA-rules row**: the "Discovered
+  live #3 (known limitation, not yet fixed)" paragraph is retracted with
+  a note explaining the Sprint 2 matrix outcome + the root cause
+  (config-URL drift). "Discovered live #1" (the real type-on-PUT bug
+  fixed in v0.7.1) and "Discovered live #2" (HA resources need
+  pre-registration before rule creates — real PVE behaviour) are
+  unchanged.
+- **`tests/live/test_state_ha_rules.sh`**: the auth-note header paragraph
+  is rewritten — the temporary token-auth config swap stays as a
+  defensive fixture-isolation measure (consistent known-good auth flavor
+  for the test), but the framing as a "PAM bug workaround" is corrected.
+
+### Lesson
+
+The Sprint 1.A live-test discovery uncovered a real bug (the v0.7.1
+`type`-on-PUT fix) but also a false alarm. The false alarm survived to a
+shipped release because the in-the-moment debugging conflated two
+variables: the in-tree `tests/live/env.local` had a different URL than
+the operator's macOS-default `config.toml`. Future live-mutation scripts
+should explicitly **assert the cluster URL is the same across both
+ends** — either log it from each side, or use only one source of truth
+(env.local) for the duration of the test. The Sprint 2 matrix script
+captures this discipline (single source of URL, no implicit fallback to
+the operator's default config).
+
 ## [0.7.1] — 2026-05-28
 
 Headline: **HA-rules PUT bug fix (caught by new live e2e) + `api/types.rs`

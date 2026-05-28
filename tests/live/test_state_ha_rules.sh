@@ -24,13 +24,22 @@
 #   PROXXX_E2E_PVE_TOKEN  — tokenid=secret  (root@pam!proxxx=<uuid>)
 #   PROXXX_E2E_NODE       — pve-test-1
 #
-# Auth note (live-caught — see § "PAM-vs-token POST quirk" in v0.7.1
-# release notes): proxxx's `state apply` POST to /cluster/ha/rules
-# succeeds with API-token auth but PVE returns "cannot use unmanaged
-# resource(s) <sid>" when proxxx authenticates via PAM (ticket+cookie).
-# Direct curl with the same params + PAM headers also reproduces. This
-# script forces token auth by temporarily swapping config.toml.
-# Investigation is tracked separately.
+# Auth note (corrected in v0.7.2 — retracts a v0.7.1 false alarm):
+# v0.7.1's CHANGELOG + this header originally claimed a "PAM-vs-token
+# POST quirk" where state-apply POSTs supposedly failed under PAM auth.
+# Sprint 2's deliberate matrix test (pools / firewall-alias /
+# backup-jobs / notification-matchers / ha-rules, all five POST'd
+# successfully under PAM auth on the same test cluster) disproved it.
+# The original failure was config-URL drift between sessions, not auth:
+# the operator's default config pointed at one cluster while
+# tests/live/env.local's token addressed another, so a resource
+# registered on cluster A via curl was genuinely unmanaged from
+# cluster B's perspective.
+#
+# The script STILL swaps to token auth temporarily — but as a defensive
+# fixture-isolation measure (a known-good auth flavor for the test), NOT
+# because PAM is broken. Operators running with PAM auth against this
+# same cluster + fixtures will see the same lifecycle pass.
 
 set -uo pipefail
 
