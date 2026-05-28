@@ -763,6 +763,7 @@ mod ssh_ffi {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod pbs_ffi {
+    use std::fs;
     use std::process::Command;
 
     fn proxxx_binary() -> std::path::PathBuf {
@@ -778,6 +779,38 @@ mod pbs_ffi {
     /// panic with a `No such file or directory` raw IO error.
     #[test]
     fn pbs_missing_binary_yields_clear_message() {
+        let home = tempfile::tempdir().expect("temp HOME");
+        let current_home = std::env::var("HOME").expect("HOME set");
+        let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
+            .map(|d| {
+                let suffix = d
+                    .config_dir()
+                    .strip_prefix(current_home)
+                    .expect("config dir lives under HOME");
+                home.path().join(suffix)
+            })
+            .expect("ProjectDirs available");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+url = "https://127.0.0.1:8006"
+user = "root@pam"
+token_id = "proxxx-test"
+token_secret = "dummy-pve-secret"
+verify_tls = false
+
+[pbs]
+url = "https://127.0.0.1:8007"
+user = "root@pbs"
+token_id = "proxxx-test"
+token_secret = "dummy-pbs-secret"
+verify_tls = false
+"#,
+        )
+        .expect("write isolated config");
+        let target = home.path().join("restore-target");
+
         let output = Command::new(proxxx_binary())
             .args([
                 "pbs",
@@ -789,9 +822,14 @@ mod pbs_ffi {
                 "--archive",
                 "drive-scsi0.img.fidx",
                 "--target",
-                "/tmp/restore-test",
+                target.to_str().expect("utf8 temp path"),
+                "--yes",
             ])
+            .env("HOME", home.path())
             .env("PATH", "/nonexistent") // strip every dir
+            .env_remove("PROXXX_TOKEN_SECRET")
+            .env_remove("PROXXX_PASSWORD")
+            .env_remove("PROXXX_PBS_TOKEN_SECRET")
             .output()
             .expect("spawn proxxx pbs");
 
