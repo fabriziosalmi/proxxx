@@ -879,6 +879,13 @@ pub enum Command {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+    /// Read-only fleet view — a full-screen TUI that aggregates nodes,
+    /// guests, and storage across EVERY configured `[profiles.NAME]`
+    /// (clusters and standalone hosts, mixed) into one screen. Strictly
+    /// read-only: no mutation path is reachable. Ignores `--profile`
+    /// (it aggregates all of them). Launched as its own dedicated TUI
+    /// runner; intercepted in `main.rs` before the CLI/stdout pipeline.
+    Fleet,
     /// Self-diagnostic: validate config, cluster connectivity, auth,
     /// Telegram HITL, PBS, SSH key, and audit log in one pass. Prints
     /// a status table and exits 0 if all critical checks pass, 1 if
@@ -1748,6 +1755,11 @@ pub async fn execute(
             unreachable!("Init handled in early-exit block")
         }
         Command::Completions { .. } => Ok((serde_json::json!({}), 0)),
+        // `Fleet` launches a TUI runner — intercepted in `main.rs`
+        // before `execute` (like `Completions`), so it never reaches
+        // the CLI/stdout pipeline. This arm exists only for match
+        // exhaustiveness.
+        Command::Fleet => Ok((serde_json::json!({}), 0)),
         Command::Doctor => Ok((serde_json::json!({}), 0)),
         Command::Audit { .. } => Ok((serde_json::json!({}), 0)),
         Command::State { action } => state::execute_state(&client, profile, action).await,

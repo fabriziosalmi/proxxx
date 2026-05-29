@@ -12,7 +12,13 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet._
+### Added — `proxxx fleet`: read-only multi-cluster fleet view
+
+- **New CLI subcommand `proxxx fleet`** launches a full-screen, **strictly read-only** TUI that aggregates nodes, guests, and storage across **every** configured `[profiles.NAME]` — clusters and standalone hosts, mixed — into one screen. Closes the long-standing "one cluster at a time in the TUI" gap: a homelab with N Proxmox endpoints is now viewable from a single pane without profile-switching.
+- **Read-only by construction, not by convention.** The fleet view runs in its own dedicated runner (`src/tui/fleet/`) that is a stripped-down mirror of `tui::run`: it wires **no** `SideEffect` channel, **no** HITL coordinator, **no** SSH handler, **no** op-queue, and **no** cache writes, and its keymap is navigation-only (`q`/`Esc`, `↑↓`/`jk`, `Tab`) — there is no code path from a keystroke to a mutation. It reuses the proven multi-profile read fan-out from `proxxx ls --all-profiles` (one fresh `PxClient` per profile; per-cluster failures degrade gracefully to a `DOWN` row and never abort the others).
+- **Attribution by containment, zero contract change.** Each cluster's `Node`/`Guest`/`StoragePool` live in a per-profile bucket that owns the profile name — the domain structs are **unmodified**, so the `--format json` CLI shape and the SQLite cache schema are byte-identical. No change to `AppState`, the single-profile TUI loop, or any existing command. `proxxx fleet` ignores `--profile` (it aggregates all of them); `--secure` is irrelevant (no writes exist).
+- The screen shows a per-cluster summary (reachable/down + error, node count, running/stopped guests, aggregate CPU cores, memory used/total, and storage used/total de-duplicated across nodes) plus an aggregated guest table; `Tab` toggles the guest pane between the selected cluster and the whole fleet. An unreachable cluster retains its last-known data (flagged stale) instead of flickering empty.
+- Tests: 11 reducer/aggregation unit tests, a wiremock multi-server integration test (real `PxClient` fan-out + graceful one-cluster-down degradation + shared-VMID attribution), a render snapshot, and a read-only live verification script (`tests/live/test_fleet_readonly.sh`).
 
 ## [0.7.4] — 2026-05-28
 

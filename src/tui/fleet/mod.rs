@@ -1,0 +1,561 @@
+//! Read-only fleet view — aggregate nodes / guests / storage across
+//! EVERY configured profile into one screen.
+//!
+//! ## Why a separate runner
+//!
+//! The single-profile TUI (`tui::run`) is built around one
+//! `Arc<PxClient>`, one `DataMsg` channel, an `AppState`, an SSH
+//! handler, a HITL coordinator, and a keymap full of mutation actions.
+//! The fleet view aggregates N clusters and is *strictly read-only*, so
+//! it gets its OWN tiny runner instead of being bolted onto that loop.
+//! Nothing here touches `AppState`, the `SQLite` cache, or any write
+//! method on the gateway — the mutation machinery simply does not exist
+//! in this module, which is the structural guarantee that fleet mode
+//! cannot mutate a cluster.
+//!
+//! ## Attribution by containment
+//!
+//! Each cluster's `Node`/`Guest`/`StoragePool` live inside a
+//! [`FleetCluster`] bucket that owns the `profile` name. The domain
+//! structs are stored UNMODIFIED — we never add a `profile` field to
+//! them (that would change the CLI JSON contract and the cache schema).
+//! The `cluster` column in the guest table is synthesised from the
+//! bucket, never read off the guest.
+
+// `pub` so the snapshot test harness can call `fleet::view::draw`.
+pub mod view;
+mod worker;
+
+pub use worker::{fetch_with_gateway, fleet_fetch_all, FleetDataMsg};
+
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::mpsc;
+
+use super::event::{self, AppEvent};
+use super::terminal_guard::TerminalGuard;
+use crate::api::types::{GuestStatus, Node, StoragePool};
+
+/// Fleet poll cadence. Slower than the single-profile loop's 5s: a
+/// fleet sweep fans out over N clusters, so 10s halves the aggregate
+/// API load and is plenty for an at-a-glance overview.
+const FLEET_POLL_SECS: u64 = 10;
+
+/// One cluster/host's slice of the fleet. Attribution lives here: every
+/// `Node`/`Guest`/`StoragePool` inside is owned by `profile`.
+#[derive(Debug, Clone, Default)]
+pub struct FleetCluster {
+    pub profile: String,
+    /// `false` => unreachable / errored this cycle. The last-known
+    /// `nodes`/`guests`/`storage` are RETAINED (not blanked) so a
+    /// transient blip doesn't flicker the row empty; `error` says why.
+    pub reachable: bool,
+    pub error: Option<String>,
+    pub nodes: Vec<Node>,
+    pub guests: Vec<crate::api::types::Guest>,
+    pub storage: Vec<StoragePool>,
+}
+
+impl FleetCluster {
+    fn empty(profile: &str) -> Self {
+        Self {
+            profile: profile.to_string(),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn running_guests(&self) -> usize {
+        self.guests
+            .iter()
+            .filter(|g| g.status == GuestStatus::Running)
+            .count()
+    }
+
+    #[must_use]
+    pub fn stopped_guests(&self) -> usize {
+        self.guests
+            .iter()
+            .filter(|g| g.status == GuestStatus::Stopped)
+            .count()
+    }
+
+    #[must_use]
+    pub fn total_cpu_cores(&self) -> u32 {
+        self.nodes.iter().map(|n| n.maxcpu).sum()
+    }
+
+    #[must_use]
+    pub fn mem_used(&self) -> u64 {
+        self.nodes.iter().map(|n| n.mem).sum()
+    }
+
+    #[must_use]
+    pub fn mem_total(&self) -> u64 {
+        self.nodes.iter().map(|n| n.maxmem).sum()
+    }
+
+    /// Storage usage, de-duplicated by pool name. Shared storage (NFS,
+    /// PBS, `CephFS`) is reported once per-node by PVE; summing raw would
+    /// multiply a single 4 TB NAS by the node count. We fold by the
+    /// `storage` id and count each pool once.
+    #[must_use]
+    pub fn storage_used(&self) -> u64 {
+        self.dedup_storage(|p| p.used)
+    }
+
+    #[must_use]
+    pub fn storage_total(&self) -> u64 {
+        self.dedup_storage(|p| p.total)
+    }
+
+    fn dedup_storage(&self, field: impl Fn(&StoragePool) -> u64) -> u64 {
+        let mut seen = std::collections::HashSet::new();
+        let mut sum = 0u64;
+        for p in &self.storage {
+            if seen.insert(p.storage.as_str()) {
+                sum = sum.saturating_add(field(p));
+            }
+        }
+        sum
+    }
+}
+
+/// Which content the bottom pane shows. `↑↓` always moves the cluster
+/// selection in the summary table; `Tab` flips this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FleetFocus {
+    /// Guests of the currently-selected cluster only.
+    #[default]
+    SelectedCluster,
+    /// Every guest across the whole fleet, with the `cluster` column.
+    AllGuests,
+}
+
+/// Single source of truth for fleet mode. Lives ONLY inside the fleet
+/// runner — never inside `AppState` — so the single-profile contract
+/// stays pristine. Fields are `pub` so the snapshot/integration tests
+/// can build a deterministic state without a constructor.
+#[derive(Debug, Clone, Default)]
+pub struct FleetState {
+    /// Stable, sorted by profile name (matches `fanout.rs` ordering).
+    pub clusters: Vec<FleetCluster>,
+    pub selected_index: usize,
+    pub focus: FleetFocus,
+    pub last_sync: Option<Instant>,
+    /// Hard error: couldn't even enumerate profiles. Shown as a banner.
+    pub fatal: Option<String>,
+}
+
+impl FleetState {
+    const fn select_next(&mut self) {
+        if !self.clusters.is_empty() {
+            self.selected_index = (self.selected_index + 1) % self.clusters.len();
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if !self.clusters.is_empty() {
+            self.selected_index = self
+                .selected_index
+                .checked_sub(1)
+                .unwrap_or(self.clusters.len() - 1);
+        }
+    }
+
+    const fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            FleetFocus::SelectedCluster => FleetFocus::AllGuests,
+            FleetFocus::AllGuests => FleetFocus::SelectedCluster,
+        };
+    }
+
+    /// `(profile, &Guest)` pairs for the bottom pane, attribution by
+    /// containment. Stable order `(profile, vmid)` for deterministic
+    /// rendering + snapshot diffs.
+    #[must_use]
+    pub fn visible_guests(&self) -> Vec<(&str, &crate::api::types::Guest)> {
+        let mut out: Vec<(&str, &crate::api::types::Guest)> = match self.focus {
+            FleetFocus::SelectedCluster => self
+                .clusters
+                .get(self.selected_index)
+                .map(|c| c.guests.iter().map(|g| (c.profile.as_str(), g)).collect())
+                .unwrap_or_default(),
+            FleetFocus::AllGuests => self
+                .clusters
+                .iter()
+                .flat_map(|c| c.guests.iter().map(move |g| (c.profile.as_str(), g)))
+                .collect(),
+        };
+        out.sort_by(|(pa, ga), (pb, gb)| pa.cmp(pb).then(ga.vmid.cmp(&gb.vmid)));
+        out
+    }
+}
+
+/// Find the bucket for `profile`, inserting an empty (unreachable) one
+/// when first seen. Returns its index in the sorted `clusters` vec.
+fn idx_for(clusters: &mut Vec<FleetCluster>, profile: &str) -> usize {
+    if let Some(i) = clusters.iter().position(|c| c.profile == profile) {
+        return i;
+    }
+    clusters.push(FleetCluster::empty(profile));
+    clusters.sort_by(|a, b| a.profile.cmp(&b.profile));
+    clusters
+        .iter()
+        .position(|c| c.profile == profile)
+        .unwrap_or(0)
+}
+
+/// Pure reducer: fold one [`FleetDataMsg`] into the [`FleetState`]. No
+/// I/O, no clock reads — fully deterministic for unit tests.
+pub fn apply(state: &mut FleetState, msg: FleetDataMsg) {
+    match msg {
+        FleetDataMsg::ClusterSnapshot {
+            profile,
+            nodes,
+            guests,
+            storage,
+        } => {
+            // A successful snapshot anywhere clears a prior fatal
+            // (profiles became enumerable again).
+            state.fatal = None;
+            let i = idx_for(&mut state.clusters, &profile);
+            if let Some(c) = state.clusters.get_mut(i) {
+                c.nodes = nodes;
+                c.guests = guests;
+                c.storage = storage;
+                c.reachable = true;
+                c.error = None;
+            }
+        }
+        FleetDataMsg::ClusterError { profile, error } => {
+            let i = idx_for(&mut state.clusters, &profile);
+            if let Some(c) = state.clusters.get_mut(i) {
+                // Retain last-known data; just flag it stale.
+                c.reachable = false;
+                c.error = Some(error);
+            }
+        }
+        FleetDataMsg::FatalError(e) => {
+            state.fatal = Some(e);
+        }
+    }
+    // Keep the selection in range as clusters appear.
+    if state.selected_index >= state.clusters.len() {
+        state.selected_index = state.clusters.len().saturating_sub(1);
+    }
+}
+
+/// Top-level fleet runner. A stripped-down read-only mirror of
+/// `tui::run`: terminal guard + a poll worker + a tiny event loop with
+/// a navigation-only keymap. No `SideEffect`, no HITL, no SSH, no cache
+/// writes — there is no code path from a keystroke to a mutation.
+pub async fn run_fleet(cli_secret: Option<&str>) -> Result<()> {
+    let mut guard = TerminalGuard::install()?;
+    guard.terminal_mut().clear()?;
+
+    let mut state = FleetState::default();
+
+    let (tx, mut rx) = mpsc::channel::<FleetDataMsg>(64);
+    let secret = cli_secret.map(str::to_owned);
+    // The worker is the only sender; it owns `tx` for its lifetime.
+    let worker = tokio::spawn(async move {
+        loop {
+            fleet_fetch_all(secret.as_deref(), &tx).await;
+            tokio::time::sleep(Duration::from_secs(FLEET_POLL_SECS)).await;
+        }
+    });
+
+    // 250ms tick guarantees we drain data + redraw ~4×/s even with no
+    // keyboard input.
+    let mut events = event::spawn_event_loop(Duration::from_millis(250));
+
+    loop {
+        let mut dirty = false;
+        while let Ok(msg) = rx.try_recv() {
+            apply(&mut state, msg);
+            dirty = true;
+        }
+        if dirty {
+            state.last_sync = Some(Instant::now());
+        }
+
+        guard
+            .terminal_mut()
+            .draw(|f| view::draw(f, f.area(), &state))?;
+
+        match events.recv().await {
+            Some(AppEvent::Key(key)) => {
+                if handle_key(&mut state, key) {
+                    break;
+                }
+            }
+            Some(AppEvent::Resize(..) | AppEvent::Tick) => {}
+            None => break,
+        }
+    }
+
+    worker.abort();
+    guard.restore()?;
+    Ok(())
+}
+
+/// Navigation-only keymap. Returns `true` when the user wants to quit.
+/// Deliberately NOT `event::map_key` — that maps `s`/`S`/`d` to
+/// destructive actions. Every key here is read-only.
+fn handle_key(state: &mut FleetState, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return true;
+    }
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('j') | KeyCode::Down => state.select_next(),
+        KeyCode::Char('k') | KeyCode::Up => state.select_prev(),
+        KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
+        _ => {}
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{Guest, GuestStatus, GuestType, Node, NodeStatus, StoragePool};
+
+    fn node(name: &str, cores: u32, mem: u64, maxmem: u64) -> Node {
+        Node {
+            node: name.into(),
+            status: NodeStatus::Online,
+            maxcpu: cores,
+            mem,
+            maxmem,
+            ..Node::default()
+        }
+    }
+
+    fn guest(vmid: u32, name: &str, running: bool) -> Guest {
+        Guest {
+            vmid,
+            name: name.into(),
+            status: if running {
+                GuestStatus::Running
+            } else {
+                GuestStatus::Stopped
+            },
+            guest_type: GuestType::Qemu,
+            ..Guest::default()
+        }
+    }
+
+    fn pool(name: &str, used: u64, total: u64) -> StoragePool {
+        StoragePool {
+            storage: name.into(),
+            used,
+            total,
+            ..StoragePool::default()
+        }
+    }
+
+    fn snapshot(profile: &str, nodes: Vec<Node>, guests: Vec<Guest>) -> FleetDataMsg {
+        FleetDataMsg::ClusterSnapshot {
+            profile: profile.into(),
+            nodes,
+            guests,
+            storage: vec![],
+        }
+    }
+
+    #[test]
+    fn snapshot_merges_into_named_cluster() {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            snapshot(
+                "dev",
+                vec![node("pve1", 8, 0, 0)],
+                vec![guest(100, "a", true)],
+            ),
+        );
+        assert_eq!(s.clusters.len(), 1);
+        let c = &s.clusters[0];
+        assert_eq!(c.profile, "dev");
+        assert!(c.reachable);
+        assert!(c.error.is_none());
+        assert_eq!(c.nodes.len(), 1);
+        assert_eq!(c.guests.len(), 1);
+    }
+
+    #[test]
+    fn error_marks_cluster_down_without_blanking_others_or_itself() {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            snapshot("dev", vec![node("d1", 4, 0, 0)], vec![guest(1, "x", true)]),
+        );
+        apply(
+            &mut s,
+            snapshot("prod", vec![node("p1", 4, 0, 0)], vec![guest(2, "y", true)]),
+        );
+        // prod goes down this cycle.
+        apply(
+            &mut s,
+            FleetDataMsg::ClusterError {
+                profile: "prod".into(),
+                error: "connection refused".into(),
+            },
+        );
+        let dev = s.clusters.iter().find(|c| c.profile == "dev").unwrap();
+        let prod = s.clusters.iter().find(|c| c.profile == "prod").unwrap();
+        // dev untouched.
+        assert!(dev.reachable);
+        assert_eq!(dev.guests.len(), 1);
+        // prod flagged down but retains last-known data (no flicker).
+        assert!(!prod.reachable);
+        assert_eq!(prod.error.as_deref(), Some("connection refused"));
+        assert_eq!(prod.guests.len(), 1, "down cluster keeps prior data");
+    }
+
+    #[test]
+    fn first_cycle_error_inserts_empty_unreachable_bucket() {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            FleetDataMsg::ClusterError {
+                profile: "lab".into(),
+                error: "timeout".into(),
+            },
+        );
+        assert_eq!(s.clusters.len(), 1);
+        assert!(!s.clusters[0].reachable);
+        assert!(s.clusters[0].guests.is_empty());
+    }
+
+    #[test]
+    fn clusters_stay_sorted_by_profile_regardless_of_arrival_order() {
+        let mut s = FleetState::default();
+        apply(&mut s, snapshot("zeta", vec![], vec![]));
+        apply(&mut s, snapshot("alpha", vec![], vec![]));
+        apply(&mut s, snapshot("mike", vec![], vec![]));
+        let names: Vec<&str> = s.clusters.iter().map(|c| c.profile.as_str()).collect();
+        assert_eq!(names, ["alpha", "mike", "zeta"]);
+    }
+
+    #[test]
+    fn repeated_snapshot_updates_in_place_not_duplicates() {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            snapshot("dev", vec![node("d1", 4, 0, 0)], vec![guest(1, "x", true)]),
+        );
+        apply(
+            &mut s,
+            snapshot("dev", vec![node("d1", 4, 0, 0)], vec![guest(1, "x", false)]),
+        );
+        assert_eq!(s.clusters.len(), 1);
+        assert_eq!(s.clusters[0].stopped_guests(), 1);
+    }
+
+    #[test]
+    fn fatal_sets_banner_without_panicking_or_dropping_clusters() {
+        let mut s = FleetState::default();
+        apply(&mut s, snapshot("dev", vec![], vec![]));
+        apply(&mut s, FleetDataMsg::FatalError("config unreadable".into()));
+        assert_eq!(s.fatal.as_deref(), Some("config unreadable"));
+        assert_eq!(s.clusters.len(), 1);
+        // A later good snapshot clears the banner.
+        apply(&mut s, snapshot("dev", vec![], vec![]));
+        assert!(s.fatal.is_none());
+    }
+
+    #[test]
+    fn all_guests_pairs_each_guest_with_its_own_profile_even_on_shared_vmid() {
+        let mut s = FleetState::default();
+        // Same VMID 100 exists on both clusters — attribution must
+        // come from the bucket, not the guest struct.
+        apply(
+            &mut s,
+            snapshot("dev", vec![], vec![guest(100, "dev-vm", true)]),
+        );
+        apply(
+            &mut s,
+            snapshot("prod", vec![], vec![guest(100, "prod-vm", true)]),
+        );
+        s.focus = FleetFocus::AllGuests;
+        let pairs = s.visible_guests();
+        assert_eq!(pairs.len(), 2);
+        // Sorted by (profile, vmid): dev first, prod second.
+        assert_eq!(pairs[0].0, "dev");
+        assert_eq!(pairs[0].1.name, "dev-vm");
+        assert_eq!(pairs[1].0, "prod");
+        assert_eq!(pairs[1].1.name, "prod-vm");
+    }
+
+    #[test]
+    fn selected_cluster_focus_shows_only_that_cluster_guests() {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            snapshot(
+                "alpha",
+                vec![],
+                vec![guest(1, "a1", true), guest(2, "a2", true)],
+            ),
+        );
+        apply(&mut s, snapshot("beta", vec![], vec![guest(9, "b1", true)]));
+        s.selected_index = 0; // alpha
+        s.focus = FleetFocus::SelectedCluster;
+        let pairs = s.visible_guests();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(p, _)| *p == "alpha"));
+    }
+
+    #[test]
+    fn storage_usage_dedupes_shared_pools_across_nodes() {
+        let c = FleetCluster {
+            profile: "x".into(),
+            reachable: true,
+            error: None,
+            nodes: vec![],
+            guests: vec![],
+            // "nfs" reported by 3 nodes; "local" distinct per node name.
+            storage: vec![
+                pool("nfs", 1000, 4000),
+                pool("nfs", 1000, 4000),
+                pool("nfs", 1000, 4000),
+                pool("local", 50, 100),
+            ],
+        };
+        // nfs counted once (1000/4000) + local (50/100).
+        assert_eq!(c.storage_used(), 1050);
+        assert_eq!(c.storage_total(), 4100);
+    }
+
+    #[test]
+    fn aggregate_cpu_and_mem_sum_across_nodes() {
+        let c = FleetCluster {
+            profile: "x".into(),
+            reachable: true,
+            error: None,
+            nodes: vec![node("n1", 8, 16, 64), node("n2", 16, 32, 128)],
+            guests: vec![],
+            storage: vec![],
+        };
+        assert_eq!(c.total_cpu_cores(), 24);
+        assert_eq!(c.mem_used(), 48);
+        assert_eq!(c.mem_total(), 192);
+    }
+
+    #[test]
+    fn selection_wraps_and_stays_in_range() {
+        let mut s = FleetState::default();
+        apply(&mut s, snapshot("a", vec![], vec![]));
+        apply(&mut s, snapshot("b", vec![], vec![]));
+        assert_eq!(s.selected_index, 0);
+        s.select_prev(); // wrap to last
+        assert_eq!(s.selected_index, 1);
+        s.select_next(); // wrap to first
+        assert_eq!(s.selected_index, 0);
+    }
+}

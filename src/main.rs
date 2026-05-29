@@ -105,6 +105,15 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            // Fleet is a read-only full-screen TUI, not a stdout
+            // command — intercept it before `cli::execute` (mirrors the
+            // Completions early-exit). It aggregates ALL profiles, so it
+            // ignores `--profile`; `--secure` is irrelevant (no writes).
+            if matches!(cmd, cli::Command::Fleet) {
+                rt.block_on(tui::fleet::run_fleet(cli.token_secret.as_deref()))?;
+                return Ok(());
+            }
+
             match rt.block_on(cli::execute(
                 cmd,
                 cli.profile.as_deref(),

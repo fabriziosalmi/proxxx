@@ -46,6 +46,7 @@
 
 use proxxx::api::types::{Guest, GuestStatus, GuestType, Node, NodeStatus, StoragePool};
 use proxxx::app::{AppState, View};
+use proxxx::tui::fleet::{self, FleetCluster, FleetFocus, FleetState};
 use proxxx::tui::{views, widgets};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -583,4 +584,87 @@ fn nodes_view_with_quorum_and_stale_stats_badges() {
         "nodes header must reflect 2 nodes, got:\n{dump}"
     );
     insta::assert_snapshot!(dump);
+}
+
+// ── Fleet view (read-only multi-cluster) ───────────────────────
+
+fn fleet_cluster(profile: &str, nodes: Vec<Node>, guests: Vec<Guest>) -> FleetCluster {
+    FleetCluster {
+        profile: profile.to_string(),
+        reachable: true,
+        error: None,
+        nodes,
+        guests,
+        storage: vec![storage_pool("local", 50 << 30, 200 << 30)],
+    }
+}
+
+#[test]
+fn fleet_view_renders_reachable_and_down_clusters() {
+    // Deterministic fleet: one healthy cluster + one standalone host +
+    // one unreachable cluster (retaining last-known data + an error).
+    let mut state = FleetState {
+        clusters: vec![
+            fleet_cluster(
+                "homelab-a",
+                vec![online_node("a1", 0.1, 8 << 30, 64 << 30)],
+                vec![
+                    running_qemu(100, "web", "a1"),
+                    stopped_lxc(200, "cache", "a1"),
+                ],
+            ),
+            fleet_cluster(
+                "standalone-b",
+                vec![online_node("b1", 0.2, 4 << 30, 32 << 30)],
+                vec![running_qemu(300, "media", "b1")],
+            ),
+            FleetCluster {
+                profile: "prod-c".to_string(),
+                reachable: false,
+                error: Some("connection refused".to_string()),
+                nodes: vec![online_node("c1", 0.0, 0, 0)],
+                guests: vec![running_qemu(400, "db", "c1")],
+                storage: vec![],
+            },
+        ],
+        selected_index: 0,
+        focus: FleetFocus::AllGuests,
+        last_sync: None,
+        fatal: None,
+    };
+
+    let dump = render_to_string(100, 24, |f| {
+        fleet::view::draw(f, f.area(), &state);
+    });
+
+    // Header counts: 3 clusters, 2 reachable, 1 down.
+    assert!(
+        dump.contains("3 clusters"),
+        "header lists cluster count:\n{dump}"
+    );
+    assert!(dump.contains("2 reachable"), "header lists reachable count");
+    // Every cluster row is present, including the down one with its error.
+    assert!(dump.contains("homelab-a"), "reachable cluster listed");
+    assert!(dump.contains("standalone-b"), "standalone host listed");
+    assert!(dump.contains("prod-c"), "down cluster still listed");
+    assert!(
+        dump.contains("connection refused"),
+        "down cluster shows its error"
+    );
+    // AllGuests focus surfaces guests from every cluster with attribution.
+    assert!(
+        dump.contains("web") && dump.contains("media"),
+        "fleet-wide guests shown"
+    );
+    insta::assert_snapshot!(dump);
+
+    // SelectedCluster focus narrows the bottom pane to one cluster.
+    state.focus = FleetFocus::SelectedCluster;
+    let dump_sel = render_to_string(100, 24, |f| {
+        fleet::view::draw(f, f.area(), &state);
+    });
+    assert!(
+        dump_sel.contains("homelab-a"),
+        "selected cluster summary present"
+    );
 }
