@@ -433,12 +433,34 @@ impl PxClient {
         parse_json_maybe_blocking::<T>(bytes, path).await
     }
 
+    /// Client-side write lock. Refuses the mutation before the request
+    /// leaves the process when the profile is `read_only = true`. Sits
+    /// alongside the per-incident freeze check in every write verb; the
+    /// two are independent (config-declared vs runtime-operational).
+    fn guard_read_only(&self, path: &str) -> Result<()> {
+        if self.profile_config.read_only {
+            return Err(crate::config::ReadOnlyRefusal {
+                profile: self
+                    .profile_config
+                    .profile_name
+                    .clone()
+                    .unwrap_or_else(|| "(default)".to_string()),
+                path: path.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Rate-limited, auth-aware POST request with retry on transient failures.
     async fn post<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<T> {
+        // Declarative read-only lock — refuses the write before it leaves
+        // the process when the profile is `read_only = true`.
+        self.guard_read_only(path)?;
         // Incident lockdown gate — refuses every mutation when the
         // freeze lock is active. Reads (GET) intentionally skip this
         // check; investigators need observation during an incident.
@@ -476,6 +498,7 @@ impl PxClient {
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<T> {
+        self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("PUT {}", url);
@@ -497,6 +520,7 @@ impl PxClient {
 
     /// Rate-limited, auth-aware DELETE request with retry on transient failures.
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
+        self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("DELETE {}", url);

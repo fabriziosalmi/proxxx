@@ -908,6 +908,7 @@ tcp   0      0      :::443                  :::*                    LISTEN
             password: None,
             verify_tls: false,
             tls_pin_mode: None,
+            read_only: false,
             rate_limit: Some(100),
             policies: None,
             telegram: None,

@@ -44,6 +44,7 @@ mod tests {
             password: None,
             verify_tls: false,
             tls_pin_mode: None,
+            read_only: false,
             rate_limit: Some(100),
             policies: None,
             telegram: None,
@@ -6104,6 +6105,71 @@ mod tests {
             .await
             .expect("rollback lxc");
         assert!(upid.contains("UPID:"));
+    }
+
+    // ── read_only profile: client-side write lock ──────────────────
+
+    #[tokio::test]
+    async fn read_only_profile_refuses_writes_before_touching_pve() {
+        let server = MockServer::start().await;
+        // If the write ever leaves the process this mock is hit, and the
+        // `.expect(0)` fails the test on server drop — proving the refusal
+        // happens BEFORE the network, not via a PVE 403.
+        Mock::given(method("POST"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+            .respond_with(ok_upid("pve1"))
+            .expect(0)
+            .mount(&server)
+            .await;
+        // Reads MUST still work under read_only.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        let cfg = ProfileConfig {
+            url: server.uri(),
+            user: "root@pam".into(),
+            auth: "token".into(),
+            token_id: Some("test".into()),
+            token_secret: None,
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            tls_pin_mode: None,
+            read_only: true,
+            rate_limit: Some(100),
+            policies: None,
+            telegram: None,
+            ssh: None,
+            pbs: None,
+            alerts: None,
+            mcp_token: None,
+            profile_name: Some("prod".into()),
+        };
+        let c = PxClient::new(cfg, Some("fake-secret"))
+            .await
+            .expect("client builds");
+
+        // GET still allowed.
+        c.get_nodes().await.expect("read-only must still allow GET");
+
+        // POST refused with a typed ReadOnlyRefusal (exit-8 family), and
+        // the request never reaches the server.
+        let err = c
+            .start_guest("pve1", 100, GuestType::Qemu)
+            .await
+            .expect_err("read-only profile must refuse the write");
+        assert!(err.to_string().contains("read-only"), "got: {err:#}");
+        assert!(
+            err.chain().any(|e| e
+                .downcast_ref::<proxxx::config::ReadOnlyRefusal>()
+                .is_some()),
+            "must be a typed ReadOnlyRefusal so main.rs maps exit 8"
+        );
     }
 }
 

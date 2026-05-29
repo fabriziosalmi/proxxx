@@ -13,7 +13,7 @@ instead of grepping stderr.
 | `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc. Also `proxxx find <vmid>` when no profile owns the VMID. |
 | `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from both per-guest pre-flight (running guest, etc.) and state-apply pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
-| `8` | Incident lockdown active | A mutation was attempted while `proxxx incident freeze` is in effect. Run `proxxx incident thaw` first (with operator review), or wait for the TTL to expire. |
+| `8` | Mutation refused by a local lock | A mutation was refused by a proxxx-side lock before reaching PVE. Either `proxxx incident freeze` is in effect (run `proxxx incident thaw` first, or wait for the TTL), or the active profile is configured `read_only = true` (point at a writable profile, or remove the flag from `config.toml`). |
 
 ## Handling in shell
 
