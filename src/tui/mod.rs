@@ -5,6 +5,10 @@
 // `event` is `pub` so integration tests in `tests/console_test.rs`
 // can import `map_key` and pin the keymap → action contract.
 pub mod event;
+// `fleet` is `pub` so the snapshot test harness in `tests/tui_snapshot.rs`
+// can drive `fleet::view::draw` against a hand-built `FleetState`, and so
+// `main.rs` can launch `fleet::run_fleet`. Read-only multi-cluster view.
+pub mod fleet;
 mod ssh_handler;
 mod terminal_guard;
 mod theme;
