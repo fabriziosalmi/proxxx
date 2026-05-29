@@ -26,6 +26,16 @@ pub struct ProfileConfig {
     /// re-trust on the next connect.
     #[serde(default)]
     pub tls_pin_mode: Option<String>,
+    /// Declarative, always-on write lock for this profile. When `true`,
+    /// proxxx refuses EVERY mutation (POST/PUT/DELETE) on this profile
+    /// before the request leaves the process; reads (GET) are unaffected.
+    /// Independent of — and complementary to — a read-only PVE API token:
+    /// the token is server-enforced, this is client-enforced, and either
+    /// alone blocks writes. Unlike `incident freeze` (a runtime lock you
+    /// have to remember to set and can `thaw`), this lives with the
+    /// profile in config and is version-controllable. Default `false`.
+    #[serde(default)]
+    pub read_only: bool,
     pub rate_limit: Option<u32>,
     pub policies: Option<Vec<crate::hitl::policy::Policy>>,
     pub telegram: Option<TelegramConfig>,
@@ -46,6 +56,28 @@ pub struct ProfileConfig {
     /// keeps it out of the wire format entirely.
     #[serde(skip)]
     pub profile_name: Option<String>,
+}
+
+/// Refusal returned by the API write helpers when the active profile is
+/// configured `read_only = true`. Carried via `anyhow` so callers `?`
+/// through it unchanged; `main.rs` downcasts to map the exit code. Shares
+/// the "mutation refused by a local lock" exit code (8) with the incident
+/// freeze — both mean "proxxx declined to write before touching PVE".
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing mutation on {path} — profile '{profile}' is configured read-only \
+     (read_only = true). Remove the flag from this profile in config.toml to \
+     allow writes (or point it at a writable profile)."
+)]
+pub struct ReadOnlyRefusal {
+    pub profile: String,
+    pub path: String,
+}
+
+impl ReadOnlyRefusal {
+    /// Process exit code — matches the "mutation refused by a local lock"
+    /// contract shared with `incident freeze` (docs/reference/exit-codes.md).
+    pub const EXIT_CODE: i32 = 8;
 }
 
 /// One alert rule, declared in TOML.
@@ -871,6 +903,47 @@ fn dirs_fallback() -> std::path::PathBuf {
         |_| std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from,
     )
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_defaults_false_when_absent() {
+        // A minimal profile with no `read_only` key must deserialize
+        // with the flag off — existing configs keep writing.
+        let cfg: ProfileConfig =
+            toml::from_str("url = \"https://x:8006\"\nuser = \"root@pam\"\n").unwrap();
+        assert!(!cfg.read_only);
+    }
+
+    #[test]
+    fn read_only_true_parses() {
+        let cfg: ProfileConfig =
+            toml::from_str("url = \"https://x:8006\"\nuser = \"root@pam\"\nread_only = true\n")
+                .unwrap();
+        assert!(cfg.read_only);
+    }
+
+    #[test]
+    fn read_only_refusal_exit_code_is_eight() {
+        // Shares exit 8 with the incident freeze ("mutation refused by a
+        // local lock"). Locked here so a future edit can't silently drift
+        // the documented contract.
+        assert_eq!(ReadOnlyRefusal::EXIT_CODE, 8);
+    }
+
+    #[test]
+    fn read_only_refusal_message_is_actionable() {
+        let e = ReadOnlyRefusal {
+            profile: "prod".into(),
+            path: "/nodes/pve1/qemu/100/status/start".into(),
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("read-only"), "got: {msg}");
+        assert!(msg.contains("prod"), "names the profile: {msg}");
+    }
 }
 
 #[cfg(test)]

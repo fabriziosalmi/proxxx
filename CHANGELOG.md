@@ -12,6 +12,13 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Added — `read_only = true` per-profile declarative write lock
+
+- **New per-profile config flag `read_only = true`** makes proxxx refuse **every** mutation (POST/PUT/DELETE) on that profile, **before the request leaves the process**. Reads (GET) are unaffected. Enforced at the single API write chokepoint (`src/api/client.rs`), alongside the existing incident-freeze check, so it covers the CLI, the TUI, and MCP uniformly — there is no write path that skips it.
+- **Why, vs the alternatives:** unlike `[[policies]]` (which only *request* approval) and `proxxx incident freeze` (a runtime lock you must remember to set and can `thaw`), `read_only` is **declarative** — it lives with the profile in `config.toml`, is version-controllable, and is always on. Designed to pair with a read-only PVE API token (`PVEAuditor` role): the token is **server-enforced** (PVE returns 403), `read_only` is **client-enforced** (proxxx never sends the write) — either alone blocks writes; together they're belt-and-suspenders for production clusters you only ever observe. The intended setup: production hosts get a `PVEAuditor` token **and** `read_only = true`; the one writable test cluster gets neither.
+- Refusal surfaces a typed `ReadOnlyRefusal` error → **exit code 8** (the same "mutation refused by a local lock" family as the incident freeze). Backward-compatible: the flag defaults to `false` (`#[serde(default)]`), so existing configs are unchanged.
+- Documented in `development/config.example.toml`. Tested: config deserialize (default-off + explicit-on), exit-code/message pins, and a wiremock integration test proving a `read_only` profile refuses a write **without the request reaching the server** (`.expect(0)`) while GETs still succeed.
+
 ### Added — `proxxx fleet`: read-only multi-cluster fleet view
 
 - **New CLI subcommand `proxxx fleet`** launches a full-screen, **strictly read-only** TUI that aggregates nodes, guests, and storage across **every** configured `[profiles.NAME]` — clusters and standalone hosts, mixed — into one screen. Closes the long-standing "one cluster at a time in the TUI" gap: a homelab with N Proxmox endpoints is now viewable from a single pane without profile-switching.

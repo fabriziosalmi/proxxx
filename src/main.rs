@@ -185,6 +185,15 @@ fn main() -> Result<()> {
                         {
                             return Some(proxxx::config::ConfigError::EXIT_CODE);
                         }
+                        // Read-only profile lock — exit 8, the same
+                        // "mutation refused by a local lock" family as
+                        // the incident freeze below.
+                        if cause
+                            .downcast_ref::<proxxx::config::ReadOnlyRefusal>()
+                            .is_some()
+                        {
+                            return Some(proxxx::config::ReadOnlyRefusal::EXIT_CODE);
+                        }
                         // Incident lockdown — exit 8 maps to the
                         // "fleet is frozen, refused mutation" case.
                         if cause
