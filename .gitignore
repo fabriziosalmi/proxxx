@@ -14,6 +14,11 @@ tests/live/*_summary.md
 # .example template is tracked.
 tests/e2e.env
 .env
+# proxxx's own runtime config carries live credentials (PVE
+# url/user/password or API token). It normally lives under the XDG
+# config dir, but a stray copy in the repo root (e.g. produced while
+# exercising the fleet live test) must never be committed.
+/config.toml
 # Pre-publication history backup (text + restorable bundle).
 git_history_backup.md
 proxxx-pre-reset.bundle
