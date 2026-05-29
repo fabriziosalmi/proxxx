@@ -42,8 +42,19 @@ if [ ! -x "$BIN" ]; then
 fi
 
 # ── 1. config has ≥2 named profiles (fleet's whole premise) ──
+# `proxxx profiles --format json` emits [{"profiles": ["a","b",...]}]; be
+# tolerant of either that shape or a bare list of profile names.
 PROFILE_COUNT=$(timeout 10 "$BIN" --format json profiles 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)" 2>/dev/null)
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list) and d and isinstance(d[0], dict) and 'profiles' in d[0]:
+    print(len(d[0]['profiles']))
+elif isinstance(d, list):
+    print(len(d))
+else:
+    print(0)
+" 2>/dev/null)
 PROFILE_COUNT="${PROFILE_COUNT:-0}"
 echo "configured profiles: $PROFILE_COUNT" | tee -a "$LOG"
 if [ "$PROFILE_COUNT" -ge 2 ]; then
