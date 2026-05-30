@@ -18,6 +18,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
     let fatal_h: u16 = if state.fatal.is_some() { 2 } else { 0 };
     // Summary: borders (2) + header (1) + one row per cluster, capped.
     let summary_h = u16::try_from(state.clusters.len().clamp(1, 12)).unwrap_or(12) + 3;
+    // Search line only takes a row when typing or a filter is active.
+    let search_h: u16 = u16::from(state.search_active || !state.search_query.is_empty());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -25,8 +27,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
             Constraint::Length(1),         // 0 header
             Constraint::Length(fatal_h),   // 1 fatal banner (0 when none)
             Constraint::Length(summary_h), // 2 per-cluster summary
-            Constraint::Min(3),            // 3 aggregated guests
-            Constraint::Length(1),         // 4 footer
+            Constraint::Length(search_h),  // 3 search line (0 when idle)
+            Constraint::Min(3),            // 4 aggregated guests
+            Constraint::Length(1),         // 5 footer
         ])
         .split(area);
 
@@ -35,8 +38,26 @@ pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
         draw_fatal(f, chunks[1], state);
     }
     draw_summary(f, chunks[2], state);
-    draw_guests(f, chunks[3], state);
-    draw_footer(f, chunks[4], state);
+    if search_h == 1 {
+        draw_search(f, chunks[3], state);
+    }
+    draw_guests(f, chunks[4], state);
+    draw_footer(f, chunks[5], state);
+}
+
+fn draw_search(f: &mut Frame, area: Rect, state: &FleetState) {
+    // Trailing cursor block while typing.
+    let cursor = if state.search_active { "█" } else { "" };
+    let style = if state.search_active {
+        Style::default().fg(Theme::ACCENT)
+    } else {
+        Theme::dim()
+    };
+    let line = Line::from(Span::styled(
+        format!(" /{}{cursor} ", sanitize_display(&state.search_query)),
+        style,
+    ));
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, state: &FleetState) {
@@ -165,9 +186,15 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
         ),
         FleetFocus::AllGuests => "all fleet".to_string(),
     };
-    let mut title = format!(" Guests · {scope} [{total}] ");
+    let filt = if state.search_query.is_empty() {
+        String::new()
+    } else {
+        format!(" · match \"{}\"", sanitize_display(&state.search_query))
+    };
+    let sort = format!(" · sort:{}", state.sort.label());
+    let mut title = format!(" Guests · {scope} [{total}]{filt}{sort} ");
     if total > visible_height {
-        title = format!(" Guests · {scope} [showing {visible_height}/{total}] ");
+        title = format!(" Guests · {scope} [showing {visible_height}/{total}]{filt}{sort} ");
     }
 
     let header = Row::new(vec![
@@ -224,15 +251,28 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &FleetState) {
-    let focus = match state.focus {
-        FleetFocus::SelectedCluster => "selected-cluster guests",
-        FleetFocus::AllGuests => "all-fleet guests",
+    // While typing, the footer shows the input-mode hints instead.
+    let text = if state.search_active {
+        " type to filter · Enter apply · Esc cancel ".to_string()
+    } else {
+        let focus = match state.focus {
+            FleetFocus::SelectedCluster => "selected-cluster guests",
+            FleetFocus::AllGuests => "all-fleet guests",
+        };
+        let esc = if state.search_query.is_empty() {
+            ""
+        } else {
+            "Esc clear · "
+        };
+        format!(
+            " q quit · ↑↓ select · Enter open · Tab: {focus} · / search · s sort:{} · {esc}read-only ",
+            state.sort.label()
+        )
     };
-    let line = Line::from(Span::styled(
-        format!(" q quit · ↑↓ select · Enter open cluster · Tab: {focus} · read-only "),
-        Theme::dim(),
-    ));
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, Theme::dim()))),
+        area,
+    );
 }
 
 /// IEC byte formatting, matching the per-view helper used across

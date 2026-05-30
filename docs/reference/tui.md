@@ -40,7 +40,14 @@ path is reachable, and its keymap is navigation-only.
 | `↑` / `↓` or `j` / `k` | Select a cluster |
 | `Tab` | Toggle the guest pane: selected cluster ↔ whole fleet |
 | `Enter` | Drill into the selected cluster's full single-profile TUI (returns to the fleet on quit) |
-| `q` / `Esc` | Quit |
+| `/` | Search — filter the guest pane (case-insensitive across cluster / name / vmid / node / tags). `Enter` applies, `Esc` cancels |
+| `s` | Cycle the guest sort: cluster → vmid → name → status → cpu↓ → mem↓ |
+| `Esc` | Clear an active filter; quit when there's none |
+| `q` | Quit |
+
+Scales to hundreds of guests: type `/` to narrow, `s` to surface the
+busy ones (cpu↓ / mem↓). Search and sort are pure view-state — still
+strictly read-only.
 
 An unreachable cluster keeps its last-known data (flagged stale) instead
 of flickering empty. Production profiles with `read_only = true` stay

@@ -134,6 +134,48 @@ pub enum FleetFocus {
     AllGuests,
 }
 
+/// Sort order for the guest pane. Cycled with `s`. `Cluster` is the
+/// default and preserves the original stable `(profile, vmid)` order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FleetSort {
+    #[default]
+    Cluster,
+    Vmid,
+    Name,
+    Status,
+    /// CPU usage, highest first (find the busy guests across the fleet).
+    CpuDesc,
+    /// Memory usage, highest first.
+    MemDesc,
+}
+
+impl FleetSort {
+    /// Next variant in the cycle (wraps).
+    const fn next(self) -> Self {
+        match self {
+            Self::Cluster => Self::Vmid,
+            Self::Vmid => Self::Name,
+            Self::Name => Self::Status,
+            Self::Status => Self::CpuDesc,
+            Self::CpuDesc => Self::MemDesc,
+            Self::MemDesc => Self::Cluster,
+        }
+    }
+
+    /// Short label for the footer.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cluster => "cluster",
+            Self::Vmid => "vmid",
+            Self::Name => "name",
+            Self::Status => "status",
+            Self::CpuDesc => "cpu↓",
+            Self::MemDesc => "mem↓",
+        }
+    }
+}
+
 /// Single source of truth for fleet mode. Lives ONLY inside the fleet
 /// runner — never inside `AppState` — so the single-profile contract
 /// stays pristine. Fields are `pub` so the snapshot/integration tests
@@ -147,6 +189,14 @@ pub struct FleetState {
     pub last_sync: Option<Instant>,
     /// Hard error: couldn't even enumerate profiles. Shown as a banner.
     pub fatal: Option<String>,
+    /// Case-insensitive filter applied to the guest pane (name / vmid /
+    /// node / cluster / tags). Empty = no filter.
+    pub search_query: String,
+    /// True while the user is typing into the search box (keystrokes
+    /// edit `search_query` instead of navigating).
+    pub search_active: bool,
+    /// Sort order for the guest pane.
+    pub sort: FleetSort,
 }
 
 impl FleetState {
@@ -172,12 +222,32 @@ impl FleetState {
         };
     }
 
+    const fn cycle_sort(&mut self) {
+        self.sort = self.sort.next();
+    }
+
+    /// True if a guest matches the active filter (case-insensitive across
+    /// cluster / name / vmid / node / tags). Empty query matches all.
+    fn matches(&self, profile: &str, g: &crate::api::types::Guest) -> bool {
+        if self.search_query.is_empty() {
+            return true;
+        }
+        let q = self.search_query.to_lowercase();
+        profile.to_lowercase().contains(&q)
+            || g.name.to_lowercase().contains(&q)
+            || g.vmid.to_string().contains(&q)
+            || g.node.to_lowercase().contains(&q)
+            || g.tags.to_lowercase().contains(&q)
+    }
+
     /// `(profile, &Guest)` pairs for the bottom pane, attribution by
-    /// containment. Stable order `(profile, vmid)` for deterministic
-    /// rendering + snapshot diffs.
+    /// containment — filtered by `search_query`, then ordered by `sort`.
+    /// Ties always break on `(profile, vmid)` so the order is stable
+    /// (deterministic rendering + snapshot diffs).
     #[must_use]
     pub fn visible_guests(&self) -> Vec<(&str, &crate::api::types::Guest)> {
-        let mut out: Vec<(&str, &crate::api::types::Guest)> = match self.focus {
+        use crate::api::types::Guest;
+        let mut out: Vec<(&str, &Guest)> = match self.focus {
             FleetFocus::SelectedCluster => self
                 .clusters
                 .get(self.selected_index)
@@ -189,7 +259,27 @@ impl FleetState {
                 .flat_map(|c| c.guests.iter().map(move |g| (c.profile.as_str(), g)))
                 .collect(),
         };
-        out.sort_by(|(pa, ga), (pb, gb)| pa.cmp(pb).then(ga.vmid.cmp(&gb.vmid)));
+        out.retain(|(p, g)| self.matches(p, g));
+
+        let tiebreak =
+            |a: &(&str, &Guest), b: &(&str, &Guest)| a.0.cmp(b.0).then(a.1.vmid.cmp(&b.1.vmid));
+        out.sort_by(|a, b| {
+            let (ga, gb) = (a.1, b.1);
+            let primary = match self.sort {
+                FleetSort::Cluster => std::cmp::Ordering::Equal, // tiebreak handles it
+                FleetSort::Vmid => ga.vmid.cmp(&gb.vmid),
+                FleetSort::Name => ga.name.to_lowercase().cmp(&gb.name.to_lowercase()),
+                FleetSort::Status => format!("{:?}", ga.status).cmp(&format!("{:?}", gb.status)),
+                // Descending: bigger first. partial_cmp can't fail on
+                // these finite PVE-sourced values; Equal on the rare NaN.
+                FleetSort::CpuDesc => gb
+                    .cpu
+                    .partial_cmp(&ga.cpu)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                FleetSort::MemDesc => gb.mem.cmp(&ga.mem),
+            };
+            primary.then_with(|| tiebreak(a, b))
+        });
         out
     }
 }
@@ -329,16 +419,50 @@ enum FleetAction {
     Open,
 }
 
-/// Navigation-only keymap. Deliberately NOT `event::map_key` — that maps
-/// `s`/`S`/`d` to destructive actions. Every key here is read-only;
-/// `Enter` only hands off to the (separately-gated) single-profile TUI.
+/// Navigation + read-only filter/sort keymap. Deliberately NOT
+/// `event::map_key` — that maps `s`/`S`/`d` to destructive actions. Every
+/// key here is read-only; `Enter` only hands off to the (separately-gated)
+/// single-profile TUI. Has two modes: normal navigation, and a search
+/// input sub-mode (`state.search_active`) where keystrokes edit the query.
 fn handle_key(state: &mut FleetState, key: KeyEvent) -> FleetAction {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return FleetAction::Quit;
     }
+
+    // ── Search input sub-mode: keystrokes edit the filter ──
+    if state.search_active {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel: drop the filter entirely.
+                state.search_active = false;
+                state.search_query.clear();
+            }
+            KeyCode::Enter => {
+                // Confirm: keep the filter, leave input mode.
+                state.search_active = false;
+            }
+            KeyCode::Backspace => {
+                state.search_query.pop();
+            }
+            KeyCode::Char(c) => state.search_query.push(c),
+            _ => {}
+        }
+        return FleetAction::Continue;
+    }
+
+    // ── Normal navigation mode ──
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return FleetAction::Quit,
+        KeyCode::Char('q') => return FleetAction::Quit,
+        // Esc clears an active filter first; only quits when there's none.
+        KeyCode::Esc => {
+            if state.search_query.is_empty() {
+                return FleetAction::Quit;
+            }
+            state.search_query.clear();
+        }
         KeyCode::Enter => return FleetAction::Open,
+        KeyCode::Char('/') => state.search_active = true,
+        KeyCode::Char('s') => state.cycle_sort(),
         KeyCode::Char('j') | KeyCode::Down => state.select_next(),
         KeyCode::Char('k') | KeyCode::Up => state.select_prev(),
         KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
@@ -585,5 +709,165 @@ mod tests {
         assert_eq!(s.selected_index, 1);
         s.select_next(); // wrap to first
         assert_eq!(s.selected_index, 0);
+    }
+
+    fn fleet_with_two() -> FleetState {
+        let mut s = FleetState::default();
+        apply(
+            &mut s,
+            snapshot(
+                "alpha",
+                vec![],
+                vec![guest(100, "web-prod", true), guest(101, "db", false)],
+            ),
+        );
+        apply(
+            &mut s,
+            snapshot("beta", vec![], vec![guest(200, "web-test", true)]),
+        );
+        s.focus = FleetFocus::AllGuests;
+        s
+    }
+
+    #[test]
+    fn search_filters_across_name_vmid_node_cluster_tags() {
+        let mut s = fleet_with_two();
+        // name match
+        s.search_query = "web".into();
+        let names: Vec<&str> = s
+            .visible_guests()
+            .iter()
+            .map(|(_, g)| g.name.as_str())
+            .collect();
+        assert_eq!(names, ["web-prod", "web-test"]);
+        // cluster match
+        s.search_query = "beta".into();
+        let v = s.visible_guests();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "beta");
+        // vmid substring match
+        s.search_query = "101".into();
+        let v = s.visible_guests();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].1.vmid, 101);
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_empty_matches_all() {
+        let mut s = fleet_with_two();
+        s.search_query = "WEB-PROD".into();
+        assert_eq!(s.visible_guests().len(), 1);
+        s.search_query = String::new();
+        assert_eq!(s.visible_guests().len(), 3);
+    }
+
+    #[test]
+    fn no_match_yields_empty_not_panic() {
+        let mut s = fleet_with_two();
+        s.search_query = "zzz-nope".into();
+        assert!(s.visible_guests().is_empty());
+    }
+
+    #[test]
+    fn sort_cycle_visits_all_then_wraps() {
+        let mut s = FleetState::default();
+        assert_eq!(s.sort, FleetSort::Cluster);
+        let seq = [
+            FleetSort::Vmid,
+            FleetSort::Name,
+            FleetSort::Status,
+            FleetSort::CpuDesc,
+            FleetSort::MemDesc,
+            FleetSort::Cluster, // wrap
+        ];
+        for expected in seq {
+            s.cycle_sort();
+            assert_eq!(s.sort, expected);
+        }
+    }
+
+    #[test]
+    fn sort_by_vmid_orders_ascending_across_clusters() {
+        let mut s = fleet_with_two();
+        s.sort = FleetSort::Vmid;
+        let ids: Vec<u32> = s.visible_guests().iter().map(|(_, g)| g.vmid).collect();
+        assert_eq!(ids, [100, 101, 200]);
+    }
+
+    #[test]
+    fn sort_by_mem_desc_puts_biggest_first() {
+        let mut s = FleetState::default();
+        let big = Guest {
+            vmid: 1,
+            name: "big".into(),
+            mem: 9_000,
+            ..Guest::default()
+        };
+        let small = Guest {
+            vmid: 2,
+            name: "small".into(),
+            mem: 10,
+            ..Guest::default()
+        };
+        apply(
+            &mut s,
+            FleetDataMsg::ClusterSnapshot {
+                profile: "x".into(),
+                nodes: vec![],
+                guests: vec![small, big],
+                storage: vec![],
+            },
+        );
+        s.focus = FleetFocus::AllGuests;
+        s.sort = FleetSort::MemDesc;
+        let order: Vec<&str> = s
+            .visible_guests()
+            .iter()
+            .map(|(_, g)| g.name.as_str())
+            .collect();
+        assert_eq!(order, ["big", "small"]);
+    }
+
+    #[test]
+    fn esc_in_search_input_cancels_and_clears() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut s = fleet_with_two();
+        // enter search, type, then Esc cancels
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('/')));
+        assert!(s.search_active);
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('w')));
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('e')));
+        assert_eq!(s.search_query, "we");
+        handle_key(&mut s, KeyEvent::from(KeyCode::Esc));
+        assert!(!s.search_active);
+        assert!(s.search_query.is_empty());
+    }
+
+    #[test]
+    fn enter_in_search_input_keeps_filter() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut s = fleet_with_two();
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('/')));
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('d')));
+        handle_key(&mut s, KeyEvent::from(KeyCode::Char('b')));
+        let act = handle_key(&mut s, KeyEvent::from(KeyCode::Enter));
+        // Enter confirms the filter — must NOT be read as "drill in".
+        assert!(matches!(act, FleetAction::Continue));
+        assert!(!s.search_active);
+        assert_eq!(s.search_query, "db");
+    }
+
+    #[test]
+    fn esc_in_normal_mode_clears_filter_before_quitting() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut s = fleet_with_two();
+        s.search_query = "web".into();
+        // first Esc clears the filter (Continue), not quit
+        let a1 = handle_key(&mut s, KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(a1, FleetAction::Continue));
+        assert!(s.search_query.is_empty());
+        // second Esc (no filter) quits
+        let a2 = handle_key(&mut s, KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(a2, FleetAction::Quit));
     }
 }
