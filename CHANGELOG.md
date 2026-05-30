@@ -12,6 +12,12 @@ SemVer contract:
 
 ## [Unreleased]
 
+_no entries yet._
+
+## [0.8.2] — 2026-05-30
+
+Headline: **Multi-cluster setup UX.** Now that multi-profile is first-class (`proxxx fleet`, `--all-profiles`, per-profile `read_only`), `proxxx init` catches up: add a cluster without hand-editing TOML or clobbering your other profiles, and get a helpful error — not a serde dump — when a profile-only config has no default.
+
 ### Added — `proxxx init --profile <name>` (append) + smarter profile-only config loading (#142)
 
 - **`proxxx init --profile <name>`** now **appends** a `[profiles.<name>]` block to the existing `config.toml`, preserving every other profile, comment, and formatting (format-preserving via `toml_edit`). Creates the file if absent; refuses to overwrite a same-named profile without `--force` (other profiles are always preserved). This is the multi-cluster setup path: `proxxx init --profile prod` then `proxxx init --profile lab`, … — bare `proxxx init` still writes the flat starter template. (The interactive wizard still writes the flat config; `--interactive --profile` points you at the non-interactive append.)
