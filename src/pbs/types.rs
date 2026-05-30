@@ -5,7 +5,22 @@
 //! browse + restore flows need; PBS returns many more fields per call
 //! that we ignore via `#[serde(default)]` or by simply not declaring.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize a field that PBS may send as an explicit JSON `null`,
+/// mapping `null` → `T::default()`. Paired with `#[serde(default, …)]`
+/// this also covers a fully-absent key. Plain `#[serde(default)]` ONLY
+/// handles a missing key — an explicit `null` (which PBS 4.x returns for
+/// e.g. an unset datastore `comment`) makes `String`'s Deserialize fail
+/// with "invalid type: null, expected a string". Live e2e against PBS
+/// 4.2 caught exactly this on `/admin/datastore`.
+fn null_to_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
+}
 
 /// PBS server version. Returned by `GET /api2/json/version` (no auth required
 /// on PBS ≥ 2.x, auth required on older builds — we send creds anyway).
@@ -13,7 +28,7 @@ use serde::{Deserialize, Serialize};
 pub struct PbsVersion {
     pub version: String,
     pub release: String,
-    #[serde(rename = "repoid", default)]
+    #[serde(rename = "repoid", default, deserialize_with = "null_to_default")]
     pub repo_id: String,
 }
 
@@ -21,7 +36,7 @@ pub struct PbsVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatastoreInfo {
     pub store: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub comment: String,
 }
 
@@ -40,9 +55,9 @@ pub struct SnapshotInfo {
     pub backup_time: u64,
     #[serde(default)]
     pub size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub owner: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub comment: String,
     /// PBS reports `protected: true/false`. Protected snapshots can't be
     /// pruned automatically — useful flag for the UI.
@@ -75,7 +90,7 @@ pub struct ArchiveInfo {
     pub size: u64,
     /// One of: `none`, `encrypt`, `sign-only` (PBS speak for whether
     /// the chunks are crypto-protected).
-    #[serde(rename = "crypt-mode", default)]
+    #[serde(rename = "crypt-mode", default, deserialize_with = "null_to_default")]
     pub crypt_mode: String,
 }
 
@@ -160,6 +175,41 @@ mod tests {
             files: vec![],
         };
         assert_eq!(s.snapshot_ref(), "vm/100/2024-01-15T10:00:00Z");
+    }
+
+    #[test]
+    fn datastore_info_accepts_null_comment() {
+        // PBS 4.2 returns `"comment":null` for an unset comment — this
+        // used to crash with "invalid type: null, expected a string".
+        // Regression for the bug live e2e caught against test-store.
+        let raw = r#"{"store":"test-store","comment":null,"backend-type":"filesystem"}"#;
+        let ds: DatastoreInfo = serde_json::from_str(raw).expect("null comment must parse");
+        assert_eq!(ds.store, "test-store");
+        assert_eq!(ds.comment, "");
+    }
+
+    #[test]
+    fn datastore_info_accepts_missing_and_present_comment() {
+        let missing: DatastoreInfo =
+            serde_json::from_str(r#"{"store":"s"}"#).expect("missing comment ok");
+        assert_eq!(missing.comment, "");
+        let present: DatastoreInfo =
+            serde_json::from_str(r#"{"store":"s","comment":"hi"}"#).expect("present comment ok");
+        assert_eq!(present.comment, "hi");
+    }
+
+    #[test]
+    fn snapshot_and_archive_accept_null_strings() {
+        // owner/comment null on a snapshot, crypt-mode null on a file.
+        let snap_raw = r#"{"backup-type":"ct","backup-id":"7777","backup-time":1705312800,
+            "owner":null,"comment":null}"#;
+        let snap: SnapshotInfo = serde_json::from_str(snap_raw).expect("null snapshot strings");
+        assert_eq!(snap.owner, "");
+        assert_eq!(snap.comment, "");
+        let arc_raw = r#"{"filename":"root.pxar.didx","crypt-mode":null}"#;
+        let arc: ArchiveInfo = serde_json::from_str(arc_raw).expect("null crypt-mode");
+        assert_eq!(arc.crypt_mode, "");
+        assert!(!arc.is_encrypted());
     }
 
     #[test]
