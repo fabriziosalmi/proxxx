@@ -163,6 +163,7 @@ impl FleetSort {
     }
 
     /// Short label for the footer.
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Cluster => "cluster",
@@ -221,7 +222,7 @@ impl FleetState {
         };
     }
 
-    fn cycle_sort(&mut self) {
+    const fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
     }
 

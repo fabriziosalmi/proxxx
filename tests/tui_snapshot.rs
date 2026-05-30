@@ -631,6 +631,7 @@ fn fleet_view_renders_reachable_and_down_clusters() {
         focus: FleetFocus::AllGuests,
         last_sync: None,
         fatal: None,
+        ..FleetState::default()
     };
 
     let dump = render_to_string(100, 24, |f| {

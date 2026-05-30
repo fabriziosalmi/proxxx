@@ -19,11 +19,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
     // Summary: borders (2) + header (1) + one row per cluster, capped.
     let summary_h = u16::try_from(state.clusters.len().clamp(1, 12)).unwrap_or(12) + 3;
     // Search line only takes a row when typing or a filter is active.
-    let search_h: u16 = if state.search_active || !state.search_query.is_empty() {
-        1
-    } else {
-        0
-    };
+    let search_h: u16 = u16::from(state.search_active || !state.search_query.is_empty());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

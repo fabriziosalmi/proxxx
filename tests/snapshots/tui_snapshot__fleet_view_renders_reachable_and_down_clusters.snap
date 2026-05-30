@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 659
+assertion_line: 660
 expression: dump
 ---
  Fleet  3 clusters  2 reachable  1 down
@@ -10,7 +10,7 @@ expression: dump
 │   standalone-b          ● OK                 1     1/0       4c     4.0G/32.0G    50.0G/200.0G   │
 │   prod-c                ● connection refused 1     1/0       4c     0M/0M         0M/0M          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Guests · all fleet [4] ──────────────────────────────────────────────────────────────────────────┐
+┌ Guests · all fleet [4] · sort:cluster ───────────────────────────────────────────────────────────┐
 │cluster      vmid   name                                 type status   node         cpu   mem     │
 │homelab-a    100    web                                  VM   running  a1           5%    512M    │
 │homelab-a    200    cache                                LXC  stopped  a1           0%    0M      │
@@ -26,4 +26,4 @@ expression: dump
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit · ↑↓ select · Enter open cluster · Tab: all-fleet guests · read-only
+ q quit · ↑↓ select · Enter open · Tab: all-fleet guests · / search · s sort:cluster · read-only
