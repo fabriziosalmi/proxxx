@@ -107,37 +107,54 @@ token_id = "proxxx"
 # route = "telegram:default"
 "#;
 
-/// `proxxx init` — write a starter config.toml to the OS-default
-/// proxxx config directory. First-mile UX: the config-not-found
-/// error message points here, so this command MUST work on a fresh
-/// machine without an existing config.
-pub fn execute(force: bool) -> Result<(serde_json::Value, i32)> {
+/// `proxxx init` — create or extend config.toml.
+///
+/// * `profile_name == None` — write the flat starter template (first-run
+///   UX). Refuses to clobber an existing config without `force`.
+/// * `profile_name == Some(name)` — **append** a `[profiles.name]` block
+///   to the existing config, preserving every other profile, comment, and
+///   formatting (via `toml_edit`). Creates the file if absent. Refuses to
+///   overwrite a profile of the same name without `force`. This is the
+///   multi-cluster path: `proxxx init --profile prod` then
+///   `proxxx init --profile lab`, etc.
+///
+/// Honors the `PROXXX_CONFIG` override via `config::resolved_config_path`.
+pub fn execute(force: bool, profile_name: Option<&str>) -> Result<(serde_json::Value, i32)> {
+    match profile_name {
+        Some(name) => add_profile(name, force),
+        None => write_flat_template(force),
+    }
+}
+
+/// Resolve the config path + its parent dir, both honoring `PROXXX_CONFIG`.
+fn config_paths() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let config_path = crate::config::resolved_config_path();
+    let config_dir = config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow::anyhow!("config path {} has no parent dir", config_path.display())
+        })?;
+    Ok((config_dir, config_path))
+}
+
+/// Atomic write: temp file in the same dir + fsync + rename. A partial
+/// write can never leave a half-config the next `load_config` would
+/// parse-error on. Sets 0600 on Unix (the file may hold inline secrets).
+fn atomic_write(
+    config_dir: &std::path::Path,
+    config_path: &std::path::Path,
+    body: &str,
+) -> Result<()> {
     use anyhow::Context as _;
     use std::io::Write as _;
 
-    let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
-        .map(|d| d.config_dir().to_path_buf())
-        .ok_or_else(|| anyhow::anyhow!("could not resolve OS config directory for proxxx"))?;
-
-    let config_path = config_dir.join("config.toml");
-
-    if config_path.exists() && !force {
-        anyhow::bail!(
-            "Config already exists at {}. Re-run with --force to overwrite.",
-            config_path.display()
-        );
-    }
-
-    std::fs::create_dir_all(&config_dir).with_context(|| {
+    std::fs::create_dir_all(config_dir).with_context(|| {
         format!(
             "creating config directory {} (check filesystem perms)",
             config_dir.display()
         )
     })?;
-
-    // Write atomically via a temp file in the same dir + rename — so a
-    // partial write can't leave a half-template config.toml that the
-    // next `load_config` call would parse-error on.
     let tmp_path = config_dir.join("config.toml.proxxx-init-tmp");
     {
         let mut f = std::fs::File::create(&tmp_path).with_context(|| {
@@ -146,21 +163,126 @@ pub fn execute(force: bool) -> Result<(serde_json::Value, i32)> {
                 tmp_path.display()
             )
         })?;
-        f.write_all(INIT_CONFIG_TEMPLATE.as_bytes())?;
+        f.write_all(body.as_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp_path, &config_path).with_context(|| {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting 0600 on {}", tmp_path.display()))?;
+    }
+    std::fs::rename(&tmp_path, config_path).with_context(|| {
         format!(
             "renaming temp config into place at {}",
             config_path.display()
         )
     })?;
+    Ok(())
+}
 
+fn write_flat_template(force: bool) -> Result<(serde_json::Value, i32)> {
+    let (config_dir, config_path) = config_paths()?;
+    if config_path.exists() && !force {
+        anyhow::bail!(
+            "Config already exists at {}. Re-run with --force to overwrite, or add a \
+             named profile with `proxxx init --profile <name>` (appends, never clobbers).",
+            config_path.display()
+        );
+    }
+    atomic_write(&config_dir, &config_path, INIT_CONFIG_TEMPLATE)?;
     Ok((
         serde_json::json!({
             "wrote": config_path.display().to_string(),
             "force": force,
             "next_step": "edit `url`, `user`, `token_id`, `token_secret`, then run `proxxx ls nodes`",
+        }),
+        0,
+    ))
+}
+
+/// Append a `[profiles.<name>]` block to the existing config (or a fresh
+/// one), preserving everything else. Format-preserving via `toml_edit`.
+fn add_profile(name: &str, force: bool) -> Result<(serde_json::Value, i32)> {
+    use anyhow::Context as _;
+    use toml_edit::{value, Item, Table};
+
+    if name.trim().is_empty() {
+        anyhow::bail!("profile name must not be empty");
+    }
+
+    let (config_dir, config_path) = config_paths()?;
+
+    let mut doc = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("reading existing config at {}", config_path.display()))?;
+        content.parse::<toml_edit::DocumentMut>().with_context(|| {
+            format!(
+                "parsing existing config at {} as TOML",
+                config_path.display()
+            )
+        })?
+    } else {
+        let mut d = toml_edit::DocumentMut::new();
+        // Friendly header so a profile-only config isn't a bare table dump.
+        d.decor_mut().set_prefix(
+            "# proxxx config — created by `proxxx init --profile`.\n\
+             # Each [profiles.NAME] is one Proxmox endpoint. Use\n\
+             # `proxxx --profile <name> ...`, or `proxxx fleet` to view all\n\
+             # of them read-only. Optionally set `default = \"<name>\"` below.\n\n",
+        );
+        d
+    };
+
+    // Ensure a [profiles] table exists (non-implicit so it can hold subtables).
+    if doc.get("profiles").is_none() {
+        let mut t = Table::new();
+        t.set_implicit(true); // render only the [profiles.<name>] header, not a bare [profiles]
+        doc["profiles"] = Item::Table(t);
+    }
+    let profiles = doc["profiles"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`profiles` in config.toml is not a table"))?;
+
+    let existed = profiles.contains_key(name);
+    if existed && !force {
+        anyhow::bail!(
+            "Profile '{}' already exists in {}. Re-run with --force to overwrite just that \
+             profile (other profiles are preserved either way).",
+            name,
+            config_path.display()
+        );
+    }
+
+    let mut t = Table::new();
+    t.insert("url", value("https://pve1.lan:8006"));
+    t.insert("user", value("root@pam"));
+    t.insert("auth", value("token"));
+    t.insert("token_id", value("proxxx"));
+    // token_secret resolves via env / *_secret_file / keychain — leave the
+    // inline value out so the placeholder profile doesn't ship a fake one.
+    t.insert("verify_tls", value(true));
+    t.insert("rate_limit", value(10_i64));
+    // read-only lock is off by default; hint at it for prod profiles.
+    let mut ro = toml_edit::Formatted::new(false);
+    *ro.decor_mut().suffix_mut() =
+        "  # set true (+ a PVEAuditor token) to refuse all writes on this profile".into();
+    t.insert("read_only", Item::Value(toml_edit::Value::Boolean(ro)));
+    profiles.insert(name, Item::Table(t));
+
+    atomic_write(&config_dir, &config_path, &doc.to_string())?;
+
+    Ok((
+        serde_json::json!({
+            "wrote": config_path.display().to_string(),
+            "profile": name,
+            "action": if existed { "updated" } else { "added" },
+            "force": force,
+            "next_step": format!(
+                "edit [profiles.{name}] url/user/token_id, set the secret \
+                 (token_secret_file / PROXXX_TOKEN_SECRET / keychain), then run \
+                 `proxxx --profile {name} ls nodes`"
+            ),
         }),
         0,
     ))

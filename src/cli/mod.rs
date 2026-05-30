@@ -1018,10 +1018,14 @@ pub async fn execute(
     // recommended `proxxx init` but the command did not exist —
     // dismiss-after-five-seconds territory.)
     if let Command::Init { force, interactive } = &cmd {
+        // The global `--profile <name>` doubles as "which profile to
+        // create": `proxxx init --profile prod` APPENDS a [profiles.prod]
+        // block (preserving any existing profiles); bare `proxxx init`
+        // writes the flat starter template.
         if *interactive {
-            return init_wizard::run().await;
+            return init_wizard::run(profile).await;
         }
-        return init::execute(*force);
+        return init::execute(*force, profile);
     }
 
     // `proxxx profiles` lists named profiles without needing a valid config.
