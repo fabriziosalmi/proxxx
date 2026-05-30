@@ -48,25 +48,13 @@ impl Drop for ConfigEnv {
     }
 }
 
-async fn run(cmd: proxxx::cli::Command) -> (serde_json::Value, i32) {
-    proxxx::cli::execute(
-        cmd,
-        None,
-        None,
-        false,
-        proxxx::util::format::OutputFormat::Json,
-    )
-    .await
-    .expect("command executes")
-}
-
 // ── init --profile: append, never clobber ──────────────────────
 
 #[tokio::test]
 #[serial]
-async fn init_profile_appends_without_clobbering_existing() {
+async fn bare_init_refuses_to_clobber_existing_and_suggests_profile() {
     let env = ConfigEnv::new("append");
-    // Pre-existing config: one named profile + a comment to preserve.
+    // Pre-existing multi-profile config + a comment to preserve.
     env.write(
         "# my homelab config\n\
          [profiles.alpha]\n\
@@ -75,17 +63,26 @@ async fn init_profile_appends_without_clobbering_existing() {
          token_id = \"t\"\n",
     );
 
-    let (val, code) = run(proxxx::cli::proxxx::cli::Command::Init {
-        force: false,
-        interactive: false,
-    })
-    .await;
-    // Bare init would clobber — but we pass --profile via the global arg.
-    // The dispatcher reads `profile` from execute()'s 2nd param, which is
-    // None here, so this call writes the FLAT template and would refuse
-    // (config exists). Assert it refused rather than clobbered:
-    let _ = (val, code);
-    // existing content still intact (flat init refused on existing file)
+    // Bare `proxxx init` (no --profile) must NOT clobber an existing config.
+    let err = proxxx::cli::execute(
+        proxxx::cli::Command::Init {
+            force: false,
+            interactive: false,
+        },
+        None,
+        None,
+        false,
+        proxxx::util::format::OutputFormat::Json,
+    )
+    .await
+    .expect_err("bare init must refuse to overwrite an existing config");
+    let msg = err.to_string();
+    assert!(msg.contains("already exists"), "got: {msg}");
+    assert!(
+        msg.contains("--profile"),
+        "points at the append path: {msg}"
+    );
+    // Existing content fully intact.
     assert!(env.read().contains("[profiles.alpha]"), "alpha preserved");
 }
 
@@ -153,7 +150,7 @@ async fn init_profile_refuses_duplicate_without_force() {
     .unwrap_err();
     assert!(err.to_string().contains("already exists"), "got: {err:#}");
     // --force overwrites just that profile.
-    let (val, _) = execute(
+    let (val, _) = proxxx::cli::execute(
         proxxx::cli::Command::Init {
             force: true,
             interactive: false,

@@ -263,11 +263,16 @@ fn add_profile(name: &str, force: bool) -> Result<(serde_json::Value, i32)> {
     // inline value out so the placeholder profile doesn't ship a fake one.
     t.insert("verify_tls", value(true));
     t.insert("rate_limit", value(10_i64));
-    // read-only lock is off by default; hint at it for prod profiles.
-    let mut ro = toml_edit::Formatted::new(false);
-    *ro.decor_mut().suffix_mut() =
-        "  # set true (+ a PVEAuditor token) to refuse all writes on this profile".into();
-    t.insert("read_only", Item::Value(toml_edit::Value::Boolean(ro)));
+    // read-only lock is off by default; hint at it for prod profiles via a
+    // trailing comment on the value's decor (toml_edit 0.22 API).
+    t.insert("read_only", value(false));
+    if let Some(item) = t.get_mut("read_only") {
+        if let Some(v) = item.as_value_mut() {
+            v.decor_mut().set_suffix(
+                "  # set true (+ a PVEAuditor token) to refuse all writes on this profile",
+            );
+        }
+    }
     profiles.insert(name, Item::Table(t));
 
     atomic_write(&config_dir, &config_path, &doc.to_string())?;
