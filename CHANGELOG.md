@@ -12,6 +12,12 @@ SemVer contract:
 
 ## [Unreleased]
 
+_no entries yet._
+
+## [0.8.0] — 2026-05-30
+
+Headline: **Multi-Proxmox, safely.** Two features that make proxxx pleasant *and* safe across a whole fleet of Proxmox at once. `proxxx fleet` aggregates every configured `[profiles.NAME]` — clusters and standalone hosts, mixed — into a single, strictly read-only TUI, closing the long-standing "one cluster at a time" gap. And `read_only = true` declaratively locks a profile against **all** mutations client-side, designed to pair with a `PVEAuditor` PVE token: the token is server-enforced (403), `read_only` is client-enforced (proxxx never sends the write) — belt-and-suspenders for the production clusters you only ever observe. Both shipped backward-compatible (no change to existing config, CLI JSON, or the cache schema) and verified live against a real homelab (read-only on production, full read+write on the test cluster + PBS), including an end-to-end proof that a `read_only` production profile refuses a write before the request leaves the process while reads keep working.
+
 ### Added — `read_only = true` per-profile declarative write lock
 
 - **New per-profile config flag `read_only = true`** makes proxxx refuse **every** mutation (POST/PUT/DELETE) on that profile, **before the request leaves the process**. Reads (GET) are unaffected. Enforced at the single API write chokepoint (`src/api/client.rs`), alongside the existing incident-freeze check, so it covers the CLI, the TUI, and MCP uniformly — there is no write path that skips it.
