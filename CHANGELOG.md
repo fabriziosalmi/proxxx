@@ -12,6 +12,12 @@ SemVer contract:
 
 ## [Unreleased]
 
+_no entries yet._
+
+## [0.8.4] — 2026-05-30
+
+Headline: **PBS on Proxmox Backup Server 4.x — `pbs datastores` no longer crashes, and `pbs restore` works against a self-signed PBS.** Patch release closing the #140 backup/restore coverage gap. A live end-to-end run against a real PBS 4.2 (homelab `pve-pbs` + datastore `test-store`) immediately caught two real bugs that the mocked unit tests missed — the recurring "live e2e catches what mocks can't" lesson. Both are fixed and verified through proxxx: a full `backup → list → restore` round-trip of a throwaway alpine LXC restored 313 files (incl. `/etc/alpine-release`) on the PBS host via `proxxx pbs restore`.
+
 ### Fixed
 
 - **PBS datastore/snapshot listing crashed on `null` string fields.** PBS 4.x returns an explicit JSON `null` (not an absent key) for an unset datastore `comment` — and likewise for a snapshot's `owner`/`comment` and an archive's `crypt-mode`. `#[serde(default)]` only covers a *missing* key, so `proxxx pbs datastores` aborted with `Fatal Error: response parse error from /admin/datastore: invalid type: null, expected a string`. These fields now map `null` → default via a `null_to_default` deserializer. Caught by live e2e against PBS 4.2 (the #140 coverage work).
@@ -19,7 +25,7 @@ SemVer contract:
 ### Added
 
 - **`pbs.fingerprint` config field** — SHA-256 cert fingerprint for the PBS server, passed to `proxmox-backup-client` as `PBS_FINGERPRINT` so `proxxx pbs restore` can trust a self-signed PBS cert. Without it, restore against the typical homelab self-signed PBS failed with `certificate fingerprint was not confirmed` (the client has no "insecure" switch). Also fixes a latent bug: the old code set `PBS_FINGERPRINT=""` under `verify_tls = false`, which does **not** disable verification — restore still failed. Now an empty/unset fingerprint is simply not passed.
-- **`tests/live/test_pbs_backup_restore.sh`** — profile-based PBS backup → list → restore → verify live e2e (RAII snapshot-forget), closing the #140 coverage gap. See `tests/live/env.local.example` for the one-time setup (incl. the PBS privilege-separation ACL gotcha).
+- **`tests/live/test_pbs_backup_restore.sh`** — profile-based PBS backup → list → restore → verify live e2e (RAII snapshot-forget), closing the #140 coverage gap. See `tests/live/env.local.example` for the one-time setup (incl. the PBS privilege-separation ACL gotcha: the *user* needs a datastore ACL, not just the token).
 
 ## [0.8.3] — 2026-05-30
 
