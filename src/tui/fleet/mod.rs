@@ -252,7 +252,13 @@ pub fn apply(state: &mut FleetState, msg: FleetDataMsg) {
 /// `tui::run`: terminal guard + a poll worker + a tiny event loop with
 /// a navigation-only keymap. No `SideEffect`, no HITL, no SSH, no cache
 /// writes — there is no code path from a keystroke to a mutation.
-pub async fn run_fleet(cli_secret: Option<&str>) -> Result<()> {
+///
+/// Returns `Ok(Some(profile))` when the user pressed Enter on a cluster
+/// to drill in — the caller (`main.rs`) opens that profile's full
+/// single-profile TUI and then re-enters the fleet view. `Ok(None)` on
+/// quit. The terminal is torn down before returning either way so the
+/// next runner can install its own.
+pub async fn run_fleet(cli_secret: Option<&str>) -> Result<Option<String>> {
     let mut guard = TerminalGuard::install()?;
     guard.terminal_mut().clear()?;
 
