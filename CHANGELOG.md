@@ -14,6 +14,16 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.8.1] — 2026-05-30
+
+Headline: **Fleet view scales — search + sort.** Follow-up to the v0.8.0 fleet view: with dozens–hundreds of guests across many clusters, the flat overview needed a way to find things. `/` opens a search box that filters the aggregated guest pane case-insensitively across cluster / name / vmid / node / tags (`Enter` applies, `Esc` cancels; in normal mode `Esc` clears an active filter before quitting). `s` cycles the sort: cluster → vmid → name → status → cpu↓ → mem↓ (cpu/mem descending to surface the busy guests). Ties always break on `(profile, vmid)` so order stays deterministic. All new state is pure view-state on `FleetState` — the fleet view remains strictly read-only, no new mutation surface.
+
+### Added — fleet search (`/`) + sort (`s`)
+
+- **`/` search** — filters the guest pane across cluster / name / vmid / node / tags, case-insensitive. A search line appears only while typing or when a filter is active; the guest-pane title and footer reflect the active match + sort.
+- **`s` sort** — cycles `cluster → vmid → name → status → cpu↓ → mem↓`.
+- Tested: 9 new fleet unit tests (filter across each field, case-insensitivity, empty + no-match, sort cycle + wrap, vmid/mem ordering, and the search-input key semantics — `Esc` cancels, `Enter` keeps the filter and is *not* read as drill-in, normal-mode `Esc` clears-then-quits). Snapshot + `docs/reference/tui.md` updated.
+
 ## [0.8.0] — 2026-05-30
 
 Headline: **Multi-Proxmox, safely.** Two features that make proxxx pleasant *and* safe across a whole fleet of Proxmox at once. `proxxx fleet` aggregates every configured `[profiles.NAME]` — clusters and standalone hosts, mixed — into a single, strictly read-only TUI, closing the long-standing "one cluster at a time" gap. And `read_only = true` declaratively locks a profile against **all** mutations client-side, designed to pair with a `PVEAuditor` PVE token: the token is server-enforced (403), `read_only` is client-enforced (proxxx never sends the write) — belt-and-suspenders for the production clusters you only ever observe. Both shipped backward-compatible (no change to existing config, CLI JSON, or the cache schema) and verified live against a real homelab (read-only on production, full read+write on the test cluster + PBS), including an end-to-end proof that a `read_only` production profile refuses a write before the request leaves the process while reads keep working.
