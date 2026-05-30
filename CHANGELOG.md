@@ -14,6 +14,18 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.8.3] — 2026-05-30
+
+Headline: **Fleet view search + sort — now actually shipped.** Correction release: the fleet guest-pane search (`/`) and sort (`s`) were described in the v0.8.1 notes but the code did not make it onto `main` for that tag (the feature branch was never merged before the release was cut; v0.8.1/v0.8.2 binaries do **not** contain it). This release lands the real implementation.
+
+### Added — fleet search (`/`) + sort (`s`)
+
+- **`/` search** — filters the aggregated guest pane case-insensitively across cluster / name / vmid / node / tags. `Enter` applies, `Esc` cancels; in normal mode `Esc` clears an active filter before quitting. A search line shows only while typing or when a filter is active.
+- **`s` sort** — cycles the guest order `cluster → vmid → name → status → cpu↓ → mem↓` (cpu/mem descending to surface the busy guests). Ties always break on `(profile, vmid)` so order stays deterministic. The guest-pane title + footer reflect the active match and sort.
+- Pure view-state on `FleetState` — the fleet view remains strictly read-only. 9 new fleet unit tests (filter across each field, case-insensitivity, empty/no-match, sort cycle + wrap, ordering, search-input key semantics) + render snapshot + `docs/reference/tui.md`.
+
+> Note: the `## [0.8.1]` entry below describes this same feature; it was premature — the feature is genuinely in **0.8.3**.
+
 ## [0.8.2] — 2026-05-30
 
 Headline: **Multi-cluster setup UX.** Now that multi-profile is first-class (`proxxx fleet`, `--all-profiles`, per-profile `read_only`), `proxxx init` catches up: add a cluster without hand-editing TOML or clobbering your other profiles, and get a helpful error — not a serde dump — when a profile-only config has no default.
