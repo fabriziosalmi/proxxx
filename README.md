@@ -54,6 +54,8 @@ Pick the row that matches you and jump straight to the right page.
 - **Incident lockdown** — `proxxx incident freeze --reason X --ttl 4h` halts every mutation cluster-wide (`POST`/`PUT`/`DELETE` refuse with exit 8); `thaw` lifts it. Reads keep working for investigators.
 - **Console handoff + recording** — SSH/serial/SPICE/noVNC, all from `proxxx <verb> <vmid>`. `proxxx serial --record` writes asciinema cast v2; `proxxx play-cast` replays.
 - **Cross-cluster** — `proxxx find <vmid>` answers "which cluster owns this guest?" without manual profile-switching.
+- **Fleet view** — `proxxx fleet` aggregates **every** configured profile (clusters + standalone hosts, mixed) into one read-only TUI: per-cluster health summary + an aggregated guest table. `↑↓` select a cluster, `Tab` toggle the guest pane (selected vs whole fleet), `Enter` drill into a cluster's full TUI, `q` quit.
+- **Read-only profiles** — `read_only = true` on a profile makes proxxx refuse *every* mutation on it client-side (reads still work); pair with a `PVEAuditor` PVE token for a server-enforced lock too. Observe production safely, write only on your test cluster.
 - **PBS browse + restore** — REST browse plus `proxmox-backup-client` restore with `kill_on_drop` supervision. `proxxx backup-verify` does metadata-level integrity probing.
 - **Observability** — `proxxx logs tail` (cross-node journalctl fanout via SSH), `proxxx heatmap` (per-node API RTT), `proxxx anomaly` (z-score outliers), `proxxx accounting --timeframe month` (CPU-hours/GiB·h/net-GiB from per-guest RRD).
 - **Upgrade pre-flight** — `proxxx upgrade-check --target 9.x` scans cluster + config against bundled rules; exit code 1 on any block-severity finding (CI-gateable).
@@ -157,6 +159,8 @@ Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command 
 | `H` Heatmap | `B` Backup board | `G` Config grep | `Q` Operation queue |
 | `T` Audit timeline | `Z` Snapshot tree | `D` Drift compare | `W` Hardware passthrough |
 
+Plus a read-only **fleet view** (`proxxx fleet`) that aggregates every configured profile into one screen — `↑↓` select cluster, `Tab` toggle guest pane, `Enter` drill into a cluster, `q` quit.
+
 Multi-select + bulk ops with pre-flight risk preview. Operation queue with dry-run, diff preview, replay-as-script export (proxxx CLI / pvesh / curl / Ansible), and HITL approval gate (Telegram, policy-driven).
 
 The terminal is restored on every exit path — happy, `?` early-return, panic. RAII `TerminalGuard` plus a flight-recorder panic hook installed in `main()` before the runtime starts.
@@ -206,6 +210,7 @@ proxxx state apply state.toml --prune --interactive  # per-Severe [y/N] prompt
 # Cross-cluster fanout + cluster digest
 proxxx find 100                                   # which profile owns VMID 100?
 proxxx ls guests --all-profiles                   # every guest across every cluster
+proxxx fleet                                      # read-only TUI: ALL profiles in one screen
 proxxx describe --output llm-context              # paste at top of an LLM chat
 proxxx accounting --group-by pool --timeframe month  # CPU-hours / GiB·h / net-GiB
 proxxx heatmap                                    # per-node API RTT, color-bucketed
@@ -264,6 +269,8 @@ Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → `token_secr
 | `[pbs]`          | PBS browse + restore |
 | `[[alerts]]`     | Alerting daemon — `node_offline`, `storage_above`, `replication_failing` |
 | `[[policies]]`   | HITL gating rules — match by tag / vmid / wildcard |
+
+Per-profile, set `read_only = true` to refuse all mutations on that profile client-side (reads unaffected, exit 8) — pair with a `PVEAuditor` PVE token for a server-side lock. See the [configuration guide](docs/guide/configuration.md#read-only-profiles-read_only).
 
 ## Quality gate
 
