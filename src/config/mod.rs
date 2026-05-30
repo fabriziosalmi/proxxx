@@ -798,7 +798,16 @@ impl ConfigError {
     pub const EXIT_CODE: i32 = 3;
 }
 
+/// Resolve the config.toml path. The `PROXXX_CONFIG` env var overrides
+/// the OS-default location — used by integration tests for a hermetic
+/// config (mirrors the `PROXXX_FREEZE_PATH` override on the freeze lock)
+/// and handy for operators juggling several config files.
 fn config_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("PROXXX_CONFIG") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
     let config_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
@@ -807,6 +816,14 @@ fn config_path() -> std::path::PathBuf {
             p
         });
     config_dir.join("config.toml")
+}
+
+/// Public accessor for the resolved config path — `proxxx init` and the
+/// wizard write here, so they must agree with `load_config` on the
+/// location (including the `PROXXX_CONFIG` override).
+#[must_use]
+pub fn resolved_config_path() -> std::path::PathBuf {
+    config_path()
 }
 
 /// Load configuration from TOML file. Errors carry a typed
@@ -835,23 +852,67 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
         source,
     })?;
 
-    let profile_value: toml::Value = if let Some(name) = profile_name {
+    // Resolve which profile to load when none was passed on the CLI:
+    //   1. an explicit `--profile` always wins (the `Some` arm below);
+    //   2. else a top-level `default = "name"` key in config.toml;
+    //   3. else, if the config is profile-only (no flat `url`) and has
+    //      exactly ONE profile, transparently use it;
+    //   4. else fall back to the flat top-level config.
+    // (3)+(2) turn the opaque "missing field `url`" into a usable default
+    // for the common single-profile case, and (see below) a profile-only
+    // config with several profiles and no default yields an actionable
+    // "use --profile X" error instead of the serde message.
+    let effective: Option<String> = profile_name.map(str::to_string).or_else(|| {
+        raw.get("default")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                let flat = raw.get("url").is_some();
+                if flat {
+                    return None;
+                }
+                let names = profile_names(&raw);
+                (names.len() == 1).then(|| names[0].clone())
+            })
+    });
+
+    let profile_value: toml::Value = if let Some(name) = effective.as_deref() {
         raw.get("profiles")
             .and_then(|p| p.get(name))
             .cloned()
             .ok_or_else(|| {
-                let known = raw
-                    .get("profiles")
-                    .and_then(|p| p.as_table())
-                    .map(|t| t.keys().cloned().collect::<Vec<_>>().join(", "))
-                    .unwrap_or_else(|| "(none defined)".to_string());
+                let known = profile_names(&raw);
+                let known_str = if known.is_empty() {
+                    "(none defined)".to_string()
+                } else {
+                    known.join(", ")
+                };
                 anyhow::anyhow!(
                     "Profile '{}' not found in config. Known profiles: {}",
                     name,
-                    known,
+                    known_str,
                 )
             })?
     } else {
+        // No profile resolved. If the config is profile-only (no flat
+        // `url`/`user`) emit an actionable error listing the profiles —
+        // instead of the opaque serde "missing field `url`" — so the user
+        // knows to pass `--profile <name>` (or `proxxx fleet`), or set a
+        // top-level `default = "name"`.
+        let flat_present = raw.get("url").is_some() || raw.get("user").is_some();
+        if !flat_present {
+            let names = profile_names(&raw);
+            if !names.is_empty() {
+                anyhow::bail!(
+                    "no default profile and this config has no flat top-level connection. \
+                     Available profiles: {}. Re-run with `--profile <name>` (e.g. \
+                     `proxxx --profile {} ls nodes`), aggregate all of them read-only with \
+                     `proxxx fleet`, or set a top-level `default = \"<name>\"` in config.toml.",
+                    names.join(", "),
+                    names[0],
+                );
+            }
+        }
         // Flat top-level config (backwards compat). Strip the [profiles]
         // table before deserializing so unknown-field errors don't fire
         // on parsers that use deny_unknown_fields in the future.
@@ -865,16 +926,32 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     let mut cfg: ProfileConfig = profile_value.try_into().map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse{} profile from {}: {}",
-            profile_name.map_or(String::new(), |n| format!(" '{n}'")),
+            effective
+                .as_deref()
+                .map_or(String::new(), |n| format!(" '{n}'")),
             config_path.display(),
             e,
         )
     })?;
-    // Stamp the profile name so a client built from this config knows which
-    // cluster it talks to (used by the per-profile incident freeze). `None`
-    // for the flat/default config — that client respects only the global lock.
-    cfg.profile_name = profile_name.map(str::to_string);
+    // Stamp the resolved profile name so a client built from this config
+    // knows which cluster it talks to (used by the per-profile incident
+    // freeze). `None` for the flat/default config — that client respects
+    // only the global lock. Note this is `effective`, not the raw CLI arg,
+    // so a `default = "x"` key or single-profile auto-default is attributed.
+    cfg.profile_name = effective;
     Ok(cfg)
+}
+
+/// Sorted names of the `[profiles.*]` tables in a parsed config.
+fn profile_names(raw: &toml::Value) -> Vec<String> {
+    raw.get("profiles")
+        .and_then(toml::Value::as_table)
+        .map(|t| {
+            let mut v: Vec<String> = t.keys().cloned().collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default()
 }
 
 /// Return the names of all named profiles in the config file.

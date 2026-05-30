@@ -12,7 +12,12 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet._
+### Added — `proxxx init --profile <name>` (append) + smarter profile-only config loading (#142)
+
+- **`proxxx init --profile <name>`** now **appends** a `[profiles.<name>]` block to the existing `config.toml`, preserving every other profile, comment, and formatting (format-preserving via `toml_edit`). Creates the file if absent; refuses to overwrite a same-named profile without `--force` (other profiles are always preserved). This is the multi-cluster setup path: `proxxx init --profile prod` then `proxxx init --profile lab`, … — bare `proxxx init` still writes the flat starter template. (The interactive wizard still writes the flat config; `--interactive --profile` points you at the non-interactive append.)
+- **Smarter `load_config` when no profile is selected.** A profile-only config (no flat top-level `url`) now: (1) honors a top-level `default = "<name>"` key; (2) auto-uses the sole profile when exactly one is defined; (3) otherwise fails with an **actionable** error listing the available profiles and suggesting `--profile <name>` / `proxxx fleet` — instead of the opaque serde `missing field \`url\``. An explicit `--profile` always wins; flat configs are unchanged.
+- **New `PROXXX_CONFIG` env override** for the config path (mirrors `PROXXX_FREEZE_PATH`) — enables hermetic tests and operators juggling multiple config files.
+- Tested: 10 integration tests (`tests/init_multiprofile_test.rs`) covering append/create/duplicate-refuse, single-profile auto-default, `default` key, multi-profile actionable error, explicit-profile-wins, and flat-config backward-compat.
 
 ## [0.8.1] — 2026-05-30
 

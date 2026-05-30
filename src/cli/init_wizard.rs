@@ -27,7 +27,19 @@ const VERIFY_TLS_DEFAULT: bool = true;
 /// Run the interactive wizard. Returns the same shape as the
 /// non-interactive `execute_init` so the calling dispatcher doesn't
 /// have to special-case it.
-pub async fn run() -> Result<(serde_json::Value, i32)> {
+pub async fn run(profile_name: Option<&str>) -> Result<(serde_json::Value, i32)> {
+    // The interactive wizard writes the flat top-level config. Appending a
+    // *named* profile interactively is a larger flow (it would have to read
+    // + merge the existing document); until that lands, point `--profile`
+    // users at the non-interactive append, which is format-preserving and
+    // multi-profile-safe.
+    if let Some(name) = profile_name {
+        anyhow::bail!(
+            "the interactive wizard writes the flat top-level config; it can't yet append \
+             a named profile. Use `proxxx init --profile {name}` (non-interactive) to add \
+             [profiles.{name}] without touching your other profiles, then edit the values."
+        );
+    }
     print_header();
 
     let config_dir = resolve_config_dir()?;
