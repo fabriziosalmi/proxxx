@@ -213,6 +213,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 
 | Command | What it does |
 | :--- | :--- |
+| `proxxx fleet` | Read-only full-screen TUI aggregating **every** configured profile (clusters + standalone, mixed) into one screen: per-cluster health summary + aggregated guest table. Keys: `↑↓` select cluster, `Tab` toggle guest pane (selected cluster vs whole fleet), `Enter` drill into the selected cluster's full TUI, `q`/`Esc` quit. Ignores `--profile` (aggregates all); strictly read-only (no mutation path is reachable). |
 | `proxxx ls <kind> --all-profiles` / `-A` | Fan a read-only `ls` (nodes/guests/storage) across every named profile in `config.toml`. Per-cluster failures surface as `error` rows. |
 | `proxxx find <vmid>` (alias `where`) | Find a VMID across every cluster. Exit 5 if no profile owns it. |
 | `proxxx describe [--output text\|md\|json\|llm-context] [--include events\|rbac\|all]` | Structured cluster digest. `llm-context` format is token-compact for paste-into-LLM. |

@@ -33,6 +33,10 @@ password      = "..."                 # only if auth = "password"
 password_file = "..."
 verify_tls    = false
 rate_limit    = 10                    # max API requests/second (default 10)
+read_only     = false                 # true → refuse all mutations on this
+                                      # profile client-side (reads still work);
+                                      # exit code 8. Default false. Pair with a
+                                      # PVEAuditor PVE token for server-side lock.
 ```
 
 ## `[ssh]` (top-level default)
