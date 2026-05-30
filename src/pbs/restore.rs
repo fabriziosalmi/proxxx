@@ -171,10 +171,14 @@ where
         // explicit Ctrl+C handler below.
         .kill_on_drop(true);
 
-    if !cfg.verify_tls {
-        // The client honours this env var to skip TLS verification.
-        // We reuse the same opt-in the user already set in PbsConfig.
-        cmd.env("PBS_FINGERPRINT", "");
+    if let Some(fp) = cfg.fingerprint.as_deref().filter(|s| !s.is_empty()) {
+        // `proxmox-backup-client` trusts a self-signed PBS cert only when
+        // given its exact SHA-256 fingerprint here (there is no "insecure"
+        // flag). This is the one knob that makes restore work against the
+        // typical homelab self-signed PBS. NOTE: an *empty* PBS_FINGERPRINT
+        // does NOT disable verification — a previous version set it to ""
+        // under verify_tls=false and restore still failed cert validation.
+        cmd.env("PBS_FINGERPRINT", fp);
     }
 
     let mut child = cmd.spawn().context("spawning proxmox-backup-client")?;
@@ -310,6 +314,7 @@ mod tests {
             token_secret: Some(zeroize::Zeroizing::new("test".into())),
             token_secret_file: None,
             verify_tls: true,
+            fingerprint: None,
             rate_limit: None,
         }
     }

@@ -12,7 +12,14 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet._
+### Fixed
+
+- **PBS datastore/snapshot listing crashed on `null` string fields.** PBS 4.x returns an explicit JSON `null` (not an absent key) for an unset datastore `comment` — and likewise for a snapshot's `owner`/`comment` and an archive's `crypt-mode`. `#[serde(default)]` only covers a *missing* key, so `proxxx pbs datastores` aborted with `Fatal Error: response parse error from /admin/datastore: invalid type: null, expected a string`. These fields now map `null` → default via a `null_to_default` deserializer. Caught by live e2e against PBS 4.2 (the #140 coverage work).
+
+### Added
+
+- **`pbs.fingerprint` config field** — SHA-256 cert fingerprint for the PBS server, passed to `proxmox-backup-client` as `PBS_FINGERPRINT` so `proxxx pbs restore` can trust a self-signed PBS cert. Without it, restore against the typical homelab self-signed PBS failed with `certificate fingerprint was not confirmed` (the client has no "insecure" switch). Also fixes a latent bug: the old code set `PBS_FINGERPRINT=""` under `verify_tls = false`, which does **not** disable verification — restore still failed. Now an empty/unset fingerprint is simply not passed.
+- **`tests/live/test_pbs_backup_restore.sh`** — profile-based PBS backup → list → restore → verify live e2e (RAII snapshot-forget), closing the #140 coverage gap. See `tests/live/env.local.example` for the one-time setup (incl. the PBS privilege-separation ACL gotcha).
 
 ## [0.8.3] — 2026-05-30
 

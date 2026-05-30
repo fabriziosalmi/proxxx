@@ -31,6 +31,7 @@ mod tests {
             token_secret: Some(zeroize::Zeroizing::new("s3cret".into())),
             token_secret_file: None,
             verify_tls: false,
+            fingerprint: None,
             rate_limit: Some(100),
         };
         PbsClient::new(cfg, None).await.expect("client builds")

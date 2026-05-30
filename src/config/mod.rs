@@ -162,6 +162,16 @@ pub struct PbsConfig {
     /// self-signed certs but we never silently disable verification.
     #[serde(default = "default_verify_tls_pbs")]
     pub verify_tls: bool,
+    /// SHA-256 certificate fingerprint of the PBS server, e.g.
+    /// `"AB:CD:…:23"`. Needed by `proxmox-backup-client` (the restore
+    /// shell-out) to trust a self-signed PBS cert: the client has no
+    /// "insecure" switch — it verifies against the system trust store
+    /// OR an explicit `PBS_FINGERPRINT`. Without it, restore against a
+    /// self-signed PBS fails with "certificate fingerprint was not
+    /// confirmed". Get it from the PBS UI (Certificates) or
+    /// `proxmox-backup-manager cert info`.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
     /// Optional API rate limit (req/s). Default 10.
     pub rate_limit: Option<u32>,
 }
