@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 650
+assertion_line: 659
 expression: dump
 ---
  Fleet  3 clusters  2 reachable  1 down
@@ -26,4 +26,4 @@ expression: dump
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit · ↑↓ select cluster · Tab: all-fleet guests · read-only
+ q quit · ↑↓ select · Enter open cluster · Tab: all-fleet guests · read-only
