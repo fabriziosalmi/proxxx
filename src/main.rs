@@ -109,8 +109,22 @@ fn main() -> Result<()> {
             // command — intercept it before `cli::execute` (mirrors the
             // Completions early-exit). It aggregates ALL profiles, so it
             // ignores `--profile`; `--secure` is irrelevant (no writes).
+            // Drill-in loop: pressing Enter on a cluster returns its
+            // profile name; we open that profile's full single-profile
+            // TUI, then re-enter the fleet view when the user quits it.
             if matches!(cmd, cli::Command::Fleet) {
-                rt.block_on(tui::fleet::run_fleet(cli.token_secret.as_deref()))?;
+                rt.block_on(async {
+                    while let Some(profile) =
+                        tui::fleet::run_fleet(cli.token_secret.as_deref()).await?
+                    {
+                        // Open the selected cluster's full TUI. Its own
+                        // profile-switch return value is ignored — on exit
+                        // we always come back to the fleet overview.
+                        let _ = tui::run(Some(&profile), cli.token_secret.as_deref(), cli.secure)
+                            .await?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })?;
                 return Ok(());
             }
 

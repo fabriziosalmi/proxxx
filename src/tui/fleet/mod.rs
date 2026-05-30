@@ -252,7 +252,13 @@ pub fn apply(state: &mut FleetState, msg: FleetDataMsg) {
 /// `tui::run`: terminal guard + a poll worker + a tiny event loop with
 /// a navigation-only keymap. No `SideEffect`, no HITL, no SSH, no cache
 /// writes — there is no code path from a keystroke to a mutation.
-pub async fn run_fleet(cli_secret: Option<&str>) -> Result<()> {
+///
+/// Returns `Ok(Some(profile))` when the user pressed Enter on a cluster
+/// to drill in — the caller (`main.rs`) opens that profile's full
+/// single-profile TUI and then re-enters the fleet view. `Ok(None)` on
+/// quit. The terminal is torn down before returning either way so the
+/// next runner can install its own.
+pub async fn run_fleet(cli_secret: Option<&str>) -> Result<Option<String>> {
     let mut guard = TerminalGuard::install()?;
     guard.terminal_mut().clear()?;
 
@@ -286,37 +292,59 @@ pub async fn run_fleet(cli_secret: Option<&str>) -> Result<()> {
             .terminal_mut()
             .draw(|f| view::draw(f, f.area(), &state))?;
 
+        let mut open_profile: Option<String> = None;
         match events.recv().await {
-            Some(AppEvent::Key(key)) => {
-                if handle_key(&mut state, key) {
-                    break;
+            Some(AppEvent::Key(key)) => match handle_key(&mut state, key) {
+                FleetAction::Continue => {}
+                FleetAction::Quit => break,
+                FleetAction::Open => {
+                    open_profile = state
+                        .clusters
+                        .get(state.selected_index)
+                        .map(|c| c.profile.clone());
                 }
-            }
+            },
             Some(AppEvent::Resize(..) | AppEvent::Tick) => {}
             None => break,
+        }
+        if let Some(profile) = open_profile {
+            // Tear down the fleet terminal so the full single-profile TUI
+            // can install its own; the caller re-enters the fleet after.
+            worker.abort();
+            guard.restore()?;
+            return Ok(Some(profile));
         }
     }
 
     worker.abort();
     guard.restore()?;
-    Ok(())
+    Ok(None)
 }
 
-/// Navigation-only keymap. Returns `true` when the user wants to quit.
-/// Deliberately NOT `event::map_key` — that maps `s`/`S`/`d` to
-/// destructive actions. Every key here is read-only.
-fn handle_key(state: &mut FleetState, key: KeyEvent) -> bool {
+/// What a keystroke means in fleet mode.
+enum FleetAction {
+    Continue,
+    Quit,
+    /// Enter on the selected cluster — drill into its full TUI.
+    Open,
+}
+
+/// Navigation-only keymap. Deliberately NOT `event::map_key` — that maps
+/// `s`/`S`/`d` to destructive actions. Every key here is read-only;
+/// `Enter` only hands off to the (separately-gated) single-profile TUI.
+fn handle_key(state: &mut FleetState, key: KeyEvent) -> FleetAction {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return true;
+        return FleetAction::Quit;
     }
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('q') | KeyCode::Esc => return FleetAction::Quit,
+        KeyCode::Enter => return FleetAction::Open,
         KeyCode::Char('j') | KeyCode::Down => state.select_next(),
         KeyCode::Char('k') | KeyCode::Up => state.select_prev(),
         KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
         _ => {}
     }
-    false
+    FleetAction::Continue
 }
 
 #[cfg(test)]

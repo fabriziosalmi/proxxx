@@ -27,6 +27,26 @@ ratatui over crossterm; the terminal is restored on every exit path
 |     | Approvals (HITL)        | `src/tui/views/approval.rs` |
 |     | SSH session             | `src/tui/views/ssh_session.rs` |
 
+## Fleet view (read-only, multi-cluster)
+
+`proxxx fleet` launches a separate full-screen TUI that aggregates
+**every** configured profile (clusters + standalone hosts, mixed) into
+one read-only screen — a per-cluster health summary plus an aggregated
+guest table. It's a distinct runner from the views above: no mutation
+path is reachable, and its keymap is navigation-only.
+
+| Key | Action |
+| :--- | :--- |
+| `↑` / `↓` or `j` / `k` | Select a cluster |
+| `Tab` | Toggle the guest pane: selected cluster ↔ whole fleet |
+| `Enter` | Drill into the selected cluster's full single-profile TUI (returns to the fleet on quit) |
+| `q` / `Esc` | Quit |
+
+An unreachable cluster keeps its last-known data (flagged stale) instead
+of flickering empty. Production profiles with `read_only = true` stay
+read-only even after drilling in. `proxxx fleet` ignores `--profile` —
+it always aggregates all profiles.
+
 ## Keymap
 
 Press `?` inside the TUI for the live keymap reference. Generated

@@ -103,6 +103,62 @@ Switch with `proxxx --profile prod ls nodes`. The flat top-level
 profile (no `[profiles.X]`) is treated as the default if no `default`
 key is set.
 
+### Read-only profiles (`read_only`)
+
+Set `read_only = true` on a profile to make proxxx refuse **every**
+mutation (POST/PUT/DELETE) on it — enforced client-side, at the single
+API write chokepoint, before the request leaves the process. Reads (GET)
+are unaffected. The refusal is a typed error with exit code `8` (the same
+"mutation refused by a local lock" family as `incident freeze`).
+
+It's declarative (lives in config, version-controllable, always on) —
+unlike `[[policies]]` (which only *request* approval) or `incident freeze`
+(a runtime lock you have to remember to set). Pair it with a read-only
+PVE API token (`PVEAuditor` role on `/`) for defence in depth:
+
+- **`read_only = true`** → client-enforced: proxxx never sends the write.
+- **`PVEAuditor` token** → server-enforced: PVE returns `403` on any write.
+
+Either alone blocks writes; together they're belt-and-suspenders for the
+production clusters you only ever observe.
+
+### Multi-Proxmox pattern (prod read-only + writable test)
+
+The intended fleet layout: production hosts get a `PVEAuditor` token
+**and** `read_only = true`; the one writable test cluster gets a
+privileged token and no flag.
+
+```toml
+# Production — observe only (client lock + server lock)
+[profiles.prod-a]
+url = "https://10.0.0.10:8006"
+user = "proxxx@pve"            # token bound to PVEAuditor on /
+token_id = "auto"
+token_secret_file = "/etc/proxxx/prod-a.token"
+verify_tls = true
+read_only = true
+
+# Test cluster — full read+write
+[profiles.lab]
+url = "https://10.0.0.120:8006"
+user = "proxxx@pve"
+token_id = "auto"
+token_secret_file = "/etc/proxxx/lab.token"
+verify_tls = false
+```
+
+Mint the read-only token on each production node:
+
+```bash
+pveum user add proxxx@pve
+pveum acl modify / --user proxxx@pve --role PVEAuditor
+pveum user token add proxxx@pve auto --privsep 0   # prints the secret once
+```
+
+View the whole fleet (read-only) in one screen with `proxxx fleet` —
+see the [TUI reference](../reference/tui.md). `proxxx fleet` ignores
+`--profile`: it always aggregates every configured profile.
+
 ## SSH
 
 For `proxxx ssh <vmid>`, `proxxx perms`, and the patching orchestrator:

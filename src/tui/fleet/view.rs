@@ -229,7 +229,7 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &FleetState) {
         FleetFocus::AllGuests => "all-fleet guests",
     };
     let line = Line::from(Span::styled(
-        format!(" q quit · ↑↓ select cluster · Tab: {focus} · read-only "),
+        format!(" q quit · ↑↓ select · Enter open cluster · Tab: {focus} · read-only "),
         Theme::dim(),
     ));
     f.render_widget(Paragraph::new(line), area);
