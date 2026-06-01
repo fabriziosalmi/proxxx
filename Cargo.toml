@@ -67,7 +67,7 @@ keyring = { version = "3", optional = true }
 async-trait = "0.1"
 nucleo-matcher = "0.3.1"
 dirs = "6.0.0"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 
 # SSH layer
 russh = "0.61"
