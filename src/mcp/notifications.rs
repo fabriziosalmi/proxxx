@@ -67,6 +67,11 @@ const TASK_POLL_INTERVAL_SECS: u64 = 2;
 /// freeze transitions are rare; we just need "within 5s" detection.
 const INCIDENT_POLL_INTERVAL_SECS: u64 = 5;
 
+/// Tick rate for the reconcile drift-state watcher. It reads a `SQLite`
+/// store the daemon writes on its own (≥30 s) cadence, so a 5 s poll is
+/// plenty to surface a transition promptly.
+const RECONCILE_POLL_INTERVAL_SECS: u64 = 5;
+
 /// One MCP notification. Serialised as the `params` of a
 /// JSON-RPC `notifications/cluster-event` message.
 ///
@@ -100,6 +105,18 @@ pub enum McpNotification {
         /// Operator-supplied reason (`""` for `thawed` when the
         /// lock was already gone).
         reason: String,
+    },
+    /// The reconcile drift-state changed — a `reconcile watch` reported a
+    /// new sync↔drift transition or an updated drift result for a profile.
+    Reconciliation {
+        /// "drifted" or "in_sync".
+        event: &'static str,
+        /// Profile whose drift state changed.
+        profile: String,
+        /// Total drifted resources (0 when `in_sync`).
+        drift_total: u32,
+        /// One-line human summary (same text the daemon logs / alerts).
+        summary: String,
     },
 }
 
@@ -258,6 +275,53 @@ pub fn spawn_incident_watcher(broker: Broker) -> tokio::task::JoinHandle<()> {
     })
 }
 
+/// Decide whether a drift observation warrants a notification: on the FIRST
+/// observation only if drifted, on any sync↔drift flip, and on a fresh drift
+/// result (new timestamp while still drifted) — never on an unchanged in-sync
+/// poll. `last` is the prior `(in_sync, last_check_ts)`.
+fn should_publish_reconcile(last: Option<(bool, u64)>, in_sync: bool, ts: u64) -> bool {
+    match last {
+        None => !in_sync,
+        Some((prev_sync, prev_ts)) => prev_sync != in_sync || (!in_sync && ts != prev_ts),
+    }
+}
+
+/// Spawn the reconcile drift-state watcher. Polls the shared per-profile
+/// `SQLite` drift-state store (written by the `reconcile watch` daemon —
+/// possibly a different process) every 5 s and publishes a `Reconciliation`
+/// notification on a sync↔drift transition or a fresh drift result. Stays
+/// quiet while nothing changes, and silent until the watch first reports.
+#[must_use = "spawning a watcher without holding the handle leaks the background task"]
+pub fn spawn_reconcile_watcher(
+    profile: Option<String>,
+    broker: Broker,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(RECONCILE_POLL_INTERVAL_SECS);
+        let mut last: Option<(bool, u64)> = None;
+        loop {
+            tokio::time::sleep(interval).await;
+            let status = match crate::app::cache::load_reconcile_status(profile.as_deref()) {
+                Ok(Some(s)) => s,
+                Ok(None) => continue, // watch hasn't reported yet
+                Err(e) => {
+                    tracing::warn!("mcp notifications: reconcile poll failed: {e:#}");
+                    continue;
+                }
+            };
+            if should_publish_reconcile(last, status.in_sync, status.last_check_ts) {
+                broker.publish(McpNotification::Reconciliation {
+                    event: if status.in_sync { "in_sync" } else { "drifted" },
+                    profile: profile.as_deref().unwrap_or("default").to_owned(),
+                    drift_total: status.total_changes,
+                    summary: status.summary.clone(),
+                });
+            }
+            last = Some((status.in_sync, status.last_check_ts));
+        }
+    })
+}
+
 /// `"completed"` for OK exitstatus, `"failed"` for anything else.
 fn task_outcome(t: &crate::api::types::TaskInfo) -> &'static str {
     match t.status.as_deref() {
@@ -329,6 +393,36 @@ mod tests {
         assert_eq!(v["kind"], "incident");
         assert_eq!(v["event"], "frozen");
         assert_eq!(v["reason"], "token leaked");
+    }
+
+    #[test]
+    fn reconciliation_notification_serialises_flat() {
+        let n = McpNotification::Reconciliation {
+            event: "drifted",
+            profile: "prod".into(),
+            drift_total: 3,
+            summary: "3 change(s) across 2 families".into(),
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["kind"], "reconciliation");
+        assert_eq!(v["event"], "drifted");
+        assert_eq!(v["profile"], "prod");
+        assert_eq!(v["drift_total"], 3);
+    }
+
+    #[test]
+    fn should_publish_reconcile_only_on_change() {
+        // First observation: announce drift, stay quiet on in-sync.
+        assert!(should_publish_reconcile(None, false, 100));
+        assert!(!should_publish_reconcile(None, true, 100));
+        // A sync↔drift flip always publishes.
+        assert!(should_publish_reconcile(Some((true, 100)), false, 200));
+        assert!(should_publish_reconcile(Some((false, 100)), true, 200));
+        // Still drifted but a newer check → updated drift, publish.
+        assert!(should_publish_reconcile(Some((false, 100)), false, 200));
+        // No change (in-sync stays in-sync, or identical drift) → quiet.
+        assert!(!should_publish_reconcile(Some((true, 100)), true, 200));
+        assert!(!should_publish_reconcile(Some((false, 100)), false, 100));
     }
 
     #[test]
