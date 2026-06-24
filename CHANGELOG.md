@@ -12,7 +12,9 @@ SemVer contract:
 
 ## [Unreleased]
 
-_no entries yet._
+### Added
+
+- **`proxxx reconcile run` — GitOps drift detection (continuous reconciliation, layer 1).** A one-shot, CI-gateable drift check: resolve a desired-state *source* (a local file, a local directory, or a git repo — shallow-cloned via the system `git`, **no new dependency**), export live cluster state across every state family, diff, and print a structured **per-family drift report** (`--json` for the full machine-readable envelope). Exit code follows the `diff(1)` / CI convention: **0 = in sync, 2 = drift** — drop it in a pipeline to fail the build when production drifts from git, or point it at a teammate's fat-fingered cluster to see what moved. Strictly **read-only**: detection only, no mutation, no audit-log write (the HMAC chain records mutations; a drift check changes nothing). This is the foundation the planned `reconcile watch` daemon pillar will call on a timer to fan drift out to alerts / metrics / MCP events. Composes entirely over the stable `state::{export,diff}` surfaces; 4 new unit tests.
 
 ## [0.8.5] — 2026-06-24
 
