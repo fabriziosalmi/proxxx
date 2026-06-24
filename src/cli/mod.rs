@@ -30,6 +30,7 @@ mod migrate_progress;
 mod monitoring;
 mod node;
 mod patch;
+mod reconcile;
 mod schedule;
 mod state;
 mod storage;
@@ -907,6 +908,14 @@ pub enum Command {
         #[command(subcommand)]
         action: state::StateCommand,
     },
+    /// `GitOps` continuous reconciliation. `reconcile run` is a one-shot,
+    /// CI-gateable drift check: diff a desired-state source (a local
+    /// file, a directory, or a git repo) against live cluster state.
+    /// Exit 0 = in sync, 2 = drift detected. Strictly read-only.
+    Reconcile {
+        #[command(subcommand)]
+        action: reconcile::ReconcileCommand,
+    },
     /// QEMU VM hardware/options/cloud-init management. The typed
     /// subcommands (`set`, `cloudinit`) cover the well-trodden config
     /// keys with parse-time validation; `raw-set` is the documented
@@ -1767,6 +1776,9 @@ pub async fn execute(
         Command::Doctor => Ok((serde_json::json!({}), 0)),
         Command::Audit { .. } => Ok((serde_json::json!({}), 0)),
         Command::State { action } => state::execute_state(&client, profile, action).await,
+        Command::Reconcile { action } => {
+            reconcile::execute_reconcile(&client, profile, action).await
+        }
         Command::Vm { action } => vm::execute_vm(&client, action).await,
         Command::Ct { action } => ct::execute(&client, action).await,
         Command::Firewall { scope } => firewall::execute_firewall(&client, scope).await,
