@@ -22,6 +22,7 @@ SemVer contract:
 ### Packaging
 
 - **Debian `.deb` packages — signed, attached to every release.** `cargo deb` now builds a `.deb` for **amd64** and **arm64** as part of the release workflow, alongside the tarballs. Because the binary is static-musl, the package declares **no runtime dependencies** — `sudo apt install ./proxxx_X.Y.Z-1_amd64.deb` drops it straight onto a Proxmox VE node (Debian) with no glibc/lib resolution. Each `.deb` ships its own SHA-256 and the same keyless **sigstore cosign bundle** as the tarball, so it carries the identical supply-chain guarantee. (A hosted apt repository is a separate follow-up; for now the `.deb` is a release asset, verifiable offline.)
+- **Homebrew tap — `brew install fabriziosalmi/proxxx/proxxx`.** A new [`fabriziosalmi/homebrew-proxxx`](https://github.com/fabriziosalmi/homebrew-proxxx) tap installs the pre-built static binary on macOS (Apple Silicon) and Linux (x86_64 / aarch64). The formula's version + per-target SHA-256 are bumped automatically on each release by a new `bump-homebrew` job in the release workflow (requires a `HOMEBREW_TAP_TOKEN` repo secret with write access to the tap). Verified end-to-end against the v0.8.5 release: `brew install` → `proxxx --version` → `proxxx 0.8.5`.
 
 ## [0.8.5] — 2026-06-24
 

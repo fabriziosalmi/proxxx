@@ -87,7 +87,13 @@ proxxx is designed for operators who need auditability, data sovereignty, and su
 
 Pre-built binaries for **macOS Apple Silicon**, **Linux x86_64-musl**, and **Linux aarch64-musl** (Pi 4/5, Ampere, Graviton, Oracle Free Tier) are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases). All Linux artefacts are statically linked — no glibc, drops onto Alpine through RHEL.
 
-Download + verify the full supply-chain trio:
+### Homebrew (macOS & Linux)
+
+```bash
+brew install fabriziosalmi/proxxx/proxxx
+```
+
+The fastest path on a workstation. For a Proxmox VE node (Debian) use the [`.deb`](#debian--ubuntu--proxmox-ve--deb) below; for air-gapped installs or full supply-chain verification, download + verify the trio manually:
 
 ```bash
 TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin

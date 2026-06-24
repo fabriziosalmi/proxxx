@@ -450,3 +450,59 @@ jobs:
           # which hid the latest stable from the releases page.
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
+
+  # ──────────────────────────────────────────────────────────
+  # Bump the Homebrew tap formula to the new version + sha256.
+  # Runs after the release is published. Requires a HOMEBREW_TAP_TOKEN
+  # repo secret — a PAT (classic: `repo`, or fine-grained: `contents:
+  # write` on fabriziosalmi/homebrew-proxxx). Without it this job fails,
+  # but the release itself is unaffected (separate, dependent job).
+  # ──────────────────────────────────────────────────────────
+  bump-homebrew:
+    name: Bump Homebrew formula
+    needs: release
+    runs-on: ubuntu-latest
+    # Stable tags only — the tap tracks releases, not rc/beta/alpha.
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the tap repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: fabriziosalmi/homebrew-proxxx
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Bump formula (version + per-target sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          dl() { gh release download "$GITHUB_REF_NAME" --repo fabriziosalmi/proxxx --pattern "$1" -O - | awk '{print $1}'; }
+          SHA_DARWIN=$(dl "proxxx-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
+          SHA_LINUX_X64=$(dl "proxxx-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256")
+          SHA_LINUX_ARM=$(dl "proxxx-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256")
+          test -n "$SHA_DARWIN" && test -n "$SHA_LINUX_X64" && test -n "$SHA_LINUX_ARM"
+
+          F=Formula/proxxx.rb
+          sed -i -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$F"
+          perl -0pi -e "s/(aarch64-apple-darwin\.tar\.gz\"\s*\n\s*sha256 \")[a-f0-9]{64}/\${1}${SHA_DARWIN}/" "$F"
+          perl -0pi -e "s/(x86_64-unknown-linux-musl\.tar\.gz\"\s*\n\s*sha256 \")[a-f0-9]{64}/\${1}${SHA_LINUX_X64}/" "$F"
+          perl -0pi -e "s/(aarch64-unknown-linux-musl\.tar\.gz\"\s*\n\s*sha256 \")[a-f0-9]{64}/\${1}${SHA_LINUX_ARM}/" "$F"
+
+          echo "── updated formula ──"
+          grep -E '^  version|sha256' "$F"
+
+      - name: Commit + push to the tap
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Formula already current — nothing to bump."
+            exit 0
+          fi
+          git add Formula/proxxx.rb
+          git commit -m "proxxx ${GITHUB_REF_NAME}: bump formula (automated)"
+          git push
