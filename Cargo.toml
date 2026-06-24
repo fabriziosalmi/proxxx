@@ -351,3 +351,29 @@ missing_panics_doc = "allow"
 # auto-applied where possible; the remainder appear inside macros
 # clippy can't reach. Allowing avoids periodic noise.
 uninlined_format_args = "allow"
+
+# ── Debian package (.deb) — `cargo deb` ──────────────────────────────
+# Built in CI for the two linux-musl targets (release.yml) and attached to
+# each GitHub release. The release binary is statically linked against musl,
+# so the package declares NO runtime dependencies — it installs cleanly on
+# any Debian/Ubuntu, including a Proxmox VE node, without pulling shared libs.
+[package.metadata.deb]
+maintainer = "Fabrizio Salmi <fabrizio.salmi@gmail.com>"
+copyright = "2026, Fabrizio Salmi <fabrizio.salmi@gmail.com>"
+license-file = ["LICENSE", "0"]
+section = "admin"
+priority = "optional"
+# Static musl binary — no shared-library dependencies to resolve.
+depends = ""
+extended-description = """\
+proxxx is a fast, secure, single-binary Proxmox VE manager: CLI, TUI, MCP \
+server, and a unified daemon (alerts, HITL, schedule, and GitOps reconcile) \
+in one executable. GitOps state across eight families with pre-flight risk \
+gates, an HMAC-chained audit log, and signed, SBOM-shipped releases. No \
+telemetry — it talks only to the PVE/PBS endpoints you configure."""
+assets = [
+    ["target/release/proxxx", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/proxxx/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/proxxx/CHANGELOG.md", "644"],
+    ["SECURITY.md", "usr/share/doc/proxxx/SECURITY.md", "644"],
+]

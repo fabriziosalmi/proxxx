@@ -174,6 +174,27 @@ jobs:
           echo "sha256=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
           echo "bundle=dist/${NAME}.tar.gz.cosign.bundle" >> "$GITHUB_OUTPUT"
 
+      - name: Build .deb package (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        id: deb
+        # Wrap the already-built, already-stripped static binary in a .deb.
+        # `--no-build` reuses target/<target>/release/proxxx; `--no-strip`
+        # because the Strip step already ran (and the x86 host `strip` can't
+        # touch the cross-built aarch64 binary). cargo-deb maps the target
+        # triple to the Debian arch (amd64 / arm64). The static musl binary
+        # means the package declares no runtime deps — installs on any Debian.
+        run: |
+          set -e
+          cargo install cargo-deb --locked --version 3.7.0
+          cargo deb --no-build --no-strip --target ${{ matrix.target }}
+          DEB=$(ls target/${{ matrix.target }}/debian/*.deb)
+          cp "$DEB" dist/
+          DEB_NAME=$(basename "$DEB")
+          ( cd dist && shasum -a 256 "$DEB_NAME" > "$DEB_NAME.sha256" )
+          echo "deb=dist/$DEB_NAME" >> "$GITHUB_OUTPUT"
+          echo "deb_bundle=dist/$DEB_NAME.cosign.bundle" >> "$GITHUB_OUTPUT"
+          ls -lh dist/
+
       - name: Install cosign (sigstore)
         # Pinned action; sigstore-managed. ~5 MiB download, runs in <2s.
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
@@ -193,6 +214,17 @@ jobs:
             "${{ steps.pack.outputs.archive }}"
           ls -lh "${{ steps.pack.outputs.bundle }}"
 
+      - name: Sign .deb with cosign (Linux, keyless via OIDC)
+        if: contains(matrix.target, 'linux-musl')
+        # Same keyless, transparency-logged signature as the tarball, so the
+        # .deb carries the identical supply-chain guarantee.
+        run: |
+          set -e
+          cosign sign-blob --yes \
+            --bundle "${{ steps.deb.outputs.deb_bundle }}" \
+            "${{ steps.deb.outputs.deb }}"
+          ls -lh "${{ steps.deb.outputs.deb_bundle }}"
+
       - name: Upload artifact for the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -201,6 +233,9 @@ jobs:
             ${{ steps.pack.outputs.archive }}
             ${{ steps.pack.outputs.sha256 }}
             ${{ steps.pack.outputs.bundle }}
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.deb.cosign.bundle
           retention-days: 7
 
   # ──────────────────────────────────────────────────────────
@@ -239,6 +274,9 @@ jobs:
           find artifacts -name 'proxxx-*.tar.gz' -exec cp {} dist/ \;
           find artifacts -name 'proxxx-*.tar.gz.sha256' -exec cp {} dist/ \;
           find artifacts -name 'proxxx-*.tar.gz.cosign.bundle' -exec cp {} dist/ \;
+          find artifacts -name 'proxxx_*.deb' -exec cp {} dist/ \;
+          find artifacts -name 'proxxx_*.deb.sha256' -exec cp {} dist/ \;
+          find artifacts -name 'proxxx_*.deb.cosign.bundle' -exec cp {} dist/ \;
           ls -lh dist/
 
       - name: Generate CycloneDX SBOM
@@ -399,6 +437,8 @@ jobs:
             dist/*.cosign.bundle
             dist/*.cdx.json
             dist/*.cdx.json.sha256
+            dist/*.deb
+            dist/*.deb.sha256
           # `draft: false` publishes immediately; flip to true if you
           # want to review before announcing.
           draft: false
