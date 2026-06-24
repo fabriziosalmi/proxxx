@@ -1925,6 +1925,7 @@ async fn run_demo() -> Result<Option<String>> {
         pbs: None,
         alerts: None,
         mcp_token: None,
+        reconcile: None,
         profile_name: None,
     });
 

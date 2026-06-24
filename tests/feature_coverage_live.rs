@@ -112,6 +112,7 @@ impl CoverageEnv {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            reconcile: None,
             profile_name: None,
         };
         Ok(Arc::new(PxClient::new(cfg, Some(secret)).await?))

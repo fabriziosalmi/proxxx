@@ -853,6 +853,7 @@ mod enforce_preflight_tests {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            reconcile: None,
             profile_name: None,
         };
         let client = crate::api::PxClient::new(cfg, Some("fake-secret"))

@@ -10,9 +10,10 @@
 //! It is strictly **read-only** — detection only. No mutation, and no
 //! audit-log write: the HMAC audit chain records *mutations*, and a
 //! drift check changes nothing. Auto-converge (which mutates, and so
-//! does audit) is a later layer. A future `reconcile watch` will call
-//! this same core on a timer and fan drift out to alerts / metrics /
-//! MCP events — every change here composes over the stable
+//! does audit) is a later layer. The `reconcile watch` daemon pillar (see
+//! [`crate::cli::daemon`]) calls this same `compute_drift` core on a timer
+//! and fans drift out to logs + Telegram (Prometheus metrics / MCP events
+//! follow). Every change here composes over the stable
 //! `state::{export,diff}` surfaces.
 
 use std::collections::BTreeMap;
@@ -70,27 +71,8 @@ async fn run(
     path: &Path,
     json: bool,
 ) -> Result<(Value, i32)> {
-    // Resolve + read the desired-state TOML. A git source is cloned to a
-    // temp dir that is read then discarded inside `load_desired_toml`.
-    let toml_str = load_desired_toml(source, path).await?;
-    let declared: state::model::ClusterState = toml::from_str(&toml_str).with_context(|| {
-        format!(
-            "parsing desired state from `{source}` — is it the output of `proxxx state export`?"
-        )
-    })?;
-
-    // Export live across every family — `Resource::all()` is the single
-    // source of truth, so a newly-added family is never silently omitted
-    // (which would make its declared entries diff as perpetual creates).
     let profile_label = profile.unwrap_or("default");
-    let live = state::export::export_state(
-        client.as_ref(),
-        &state::export::Resource::all(),
-        profile_label,
-    )
-    .await?;
-
-    let changes = state::diff::diff(&declared, &live);
+    let changes = compute_drift(client.as_ref(), profile_label, source, path).await?;
 
     if json {
         println!(
@@ -104,6 +86,62 @@ async fn run(
     // 0 = in sync, 2 = drift (diff(1) / CI convention; 1 = error via `?`).
     let exit = i32::from(!changes.is_empty()) * 2;
     Ok((Value::Null, exit))
+}
+
+/// Core drift computation, shared by the one-shot CLI (`reconcile run`) and
+/// the `reconcile watch` daemon pillar: resolve + read the desired-state
+/// source, export live state across every family, and diff. Read-only.
+pub(crate) async fn compute_drift(
+    client: &PxClient,
+    profile: &str,
+    source: &str,
+    path: &Path,
+) -> Result<Vec<Change>> {
+    let toml_str = load_desired_toml(source, path).await?;
+    let declared: state::model::ClusterState = toml::from_str(&toml_str).with_context(|| {
+        format!(
+            "parsing desired state from `{source}` — is it the output of `proxxx state export`?"
+        )
+    })?;
+
+    // `Resource::all()` is the single source of truth, so a newly-added
+    // family is never silently omitted (which would diff as perpetual creates).
+    let live =
+        state::export::export_state(client, &state::export::Resource::all(), profile).await?;
+
+    Ok(state::diff::diff(&declared, &live))
+}
+
+/// One-line human summary of drift, for daemon logs + Telegram alerts.
+/// `"in sync"` when empty; otherwise a per-family tally.
+pub(crate) fn drift_summary(changes: &[Change]) -> String {
+    if changes.is_empty() {
+        return "in sync".to_string();
+    }
+    let families = by_family(changes);
+    let per: Vec<String> = families
+        .iter()
+        .map(|(fam, d)| {
+            let mut parts = Vec::new();
+            if d.create > 0 {
+                parts.push(format!("{} create", d.create));
+            }
+            if d.update > 0 {
+                parts.push(format!("{} update", d.update));
+            }
+            if d.delete > 0 {
+                parts.push(format!("{} delete", d.delete));
+            }
+            format!("{fam}: {}", parts.join(", "))
+        })
+        .collect();
+    format!(
+        "{} change(s) across {} famil{} — {}",
+        changes.len(),
+        families.len(),
+        if families.len() == 1 { "y" } else { "ies" },
+        per.join("; ")
+    )
 }
 
 /// True when `source` should be treated as a git remote (cloned) rather
@@ -345,5 +383,20 @@ mod tests {
         assert_eq!(drift["by_family"]["pool"]["update"], serde_json::json!(1));
         assert!(drift["changes"].is_array());
         assert_eq!(drift["changes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn drift_summary_reads_clean_and_grouped() {
+        assert_eq!(drift_summary(&[]), "in sync");
+
+        let changes = vec![
+            ch(ChangeKind::Create, "pool", "a"),
+            ch(ChangeKind::Update, "pool", "b"),
+            ch(ChangeKind::Delete, "storage", "c"),
+        ];
+        let s = drift_summary(&changes);
+        assert!(s.starts_with("3 change(s) across 2 families"), "{s}");
+        assert!(s.contains("pool: 1 create, 1 update"), "{s}");
+        assert!(s.contains("storage: 1 delete"), "{s}");
     }
 }
