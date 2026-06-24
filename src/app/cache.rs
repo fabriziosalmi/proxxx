@@ -41,7 +41,7 @@ use crate::api::types::{Guest, Node, StoragePool};
 ///    `PersistedQueueEntry` is independently backward-compatible
 ///    because every nullable field carries `#[serde(default)]` —
 ///    old JSON loads cleanly into a new struct shape.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 fn open_db(path: &Path) -> anyhow::Result<Connection> {
     // Ensure the parent directory exists before SQLite tries to open the file.
@@ -162,6 +162,12 @@ fn migrate_schema(conn: &Connection) -> anyhow::Result<()> {
                     )",
                     [],
                 )?;
+            }
+            // 2 → 3: persist the `reconcile watch` drift-state so the
+            // separate `metrics serve` / `mcp serve` processes can surface
+            // the daemon's latest drift result. Idempotent.
+            2 => {
+                init_reconcile_tables(conn)?;
             }
             // Future migration arms go here, one per version step.
             _ => anyhow::bail!("no migration path from schema version {step}"),
@@ -545,6 +551,146 @@ pub fn load_alert_dedup(profile_name: Option<&str>) -> anyhow::Result<Vec<(Strin
         out.push(r?);
     }
     Ok(out)
+}
+
+// ── Reconcile drift-state ──────────────────────────────────────────────
+//
+// The `reconcile watch` daemon pillar writes its latest drift result here
+// so the SEPARATE `metrics serve` and `mcp serve` processes can read it.
+// Single per-profile DB file (`{profile}_state.db`), WAL mode → a reader
+// never blocks the writer. `reconcile_status` holds one summary row;
+// `reconcile_drift` holds the per-family counts for `proxxx_drift_resources`.
+
+/// Latest reconcile drift result, persisted by the watch loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileStatus {
+    /// Unix seconds of the check that produced this result.
+    pub last_check_ts: u64,
+    /// `true` when live matched declared (no changes).
+    pub in_sync: bool,
+    /// Total drifted resources across all families.
+    pub total_changes: u32,
+    /// One-line human summary (the same string the daemon logs / alerts).
+    pub summary: String,
+    /// Per-family drifted-resource counts, sorted by family.
+    pub by_family: Vec<(String, u32)>,
+}
+
+fn init_reconcile_tables(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reconcile_status (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+            last_check_ts INTEGER NOT NULL,
+            in_sync INTEGER NOT NULL,
+            total_changes INTEGER NOT NULL,
+            summary TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reconcile_drift (
+            family TEXT PRIMARY KEY,
+            count INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Async wrapper — the watch loop is on the Tokio runtime, and `SQLite`
+/// I/O can block (busy_timeout). Mirrors [`save_alert_dedup_async`].
+pub async fn save_reconcile_status_async(
+    profile_name: Option<String>,
+    status: ReconcileStatus,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || save_reconcile_status(profile_name.as_deref(), &status))
+        .await
+        .map_err(|e| anyhow::anyhow!("save_reconcile_status spawn_blocking join error: {e}"))?
+}
+
+pub fn save_reconcile_status(
+    profile_name: Option<&str>,
+    status: &ReconcileStatus,
+) -> anyhow::Result<()> {
+    let mut conn = open_db(&get_db_path(profile_name))?;
+    write_reconcile_status(&mut conn, status)
+}
+
+/// Connection-level write — split from the path wrapper so tests can drive
+/// it against a temp DB without touching the real cache dir.
+fn write_reconcile_status(conn: &mut Connection, status: &ReconcileStatus) -> anyhow::Result<()> {
+    init_reconcile_tables(conn)?;
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM reconcile_status", [])?;
+    tx.execute(
+        "INSERT INTO reconcile_status (singleton, last_check_ts, in_sync, total_changes, summary)
+         VALUES (0, ?1, ?2, ?3, ?4)",
+        params![
+            status.last_check_ts as i64,
+            i64::from(status.in_sync),
+            i64::from(status.total_changes),
+            status.summary,
+        ],
+    )?;
+    tx.execute("DELETE FROM reconcile_drift", [])?;
+    for (family, count) in &status.by_family {
+        tx.execute(
+            "INSERT INTO reconcile_drift (family, count) VALUES (?1, ?2)",
+            params![family, i64::from(*count)],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Load the latest reconcile drift result. `Ok(None)` when the watch has
+/// never reported (table empty / DB absent) — readers show no series, which
+/// is correct: a drift gauge should appear only once a check has run.
+pub fn load_reconcile_status(
+    profile_name: Option<&str>,
+) -> anyhow::Result<Option<ReconcileStatus>> {
+    let conn = open_db(&get_db_path(profile_name))?;
+    read_reconcile_status(&conn)
+}
+
+/// Connection-level read — split from the path wrapper for testing.
+fn read_reconcile_status(conn: &Connection) -> anyhow::Result<Option<ReconcileStatus>> {
+    init_reconcile_tables(conn)?;
+    let row = conn.query_row(
+        "SELECT last_check_ts, in_sync, total_changes, summary
+         FROM reconcile_status WHERE singleton = 0",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
+    );
+    let (ts, in_sync, total, summary) = match row {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut stmt = conn.prepare("SELECT family, count FROM reconcile_drift ORDER BY family")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+    })?;
+    let mut by_family = Vec::new();
+    for r in rows {
+        by_family.push(r?);
+    }
+
+    Ok(Some(ReconcileStatus {
+        last_check_ts: ts as u64,
+        in_sync: in_sync != 0,
+        total_changes: total as u32,
+        summary,
+        by_family,
+    }))
 }
 
 pub fn get_all_snapshots(profile_name: Option<&str>) -> anyhow::Result<Vec<u64>> {
@@ -1023,5 +1169,44 @@ mod concurrency_tests {
 
         cleanup_profile(&root_profile);
         cleanup_profile(&auditor_profile);
+    }
+
+    #[test]
+    fn reconcile_status_round_trips_and_overwrites() {
+        let profile = format!("test-reconcile-{}", std::process::id());
+        cleanup_profile(&profile);
+
+        // Never reported → None (no series until the watch runs once).
+        assert!(load_reconcile_status(Some(&profile)).unwrap().is_none());
+
+        // A drift result persists with its per-family counts.
+        let drift = ReconcileStatus {
+            last_check_ts: 1_700_000_000,
+            in_sync: false,
+            total_changes: 3,
+            summary: "3 change(s) across 2 families".into(),
+            by_family: vec![("pool".into(), 2), ("storage".into(), 1)],
+        };
+        save_reconcile_status(Some(&profile), &drift).unwrap();
+        assert_eq!(
+            load_reconcile_status(Some(&profile)).unwrap().unwrap(),
+            drift
+        );
+
+        // A later in-sync check overwrites the single status row AND clears
+        // the per-family drift rows — no stale `proxxx_drift_resources` gauges.
+        let synced = ReconcileStatus {
+            last_check_ts: 1_700_000_100,
+            in_sync: true,
+            total_changes: 0,
+            summary: "in sync".into(),
+            by_family: vec![],
+        };
+        save_reconcile_status(Some(&profile), &synced).unwrap();
+        let got = load_reconcile_status(Some(&profile)).unwrap().unwrap();
+        assert_eq!(got, synced);
+        assert!(got.by_family.is_empty(), "drift rows must be cleared");
+
+        cleanup_profile(&profile);
     }
 }

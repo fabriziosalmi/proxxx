@@ -144,6 +144,15 @@ pub(crate) fn drift_summary(changes: &[Change]) -> String {
     )
 }
 
+/// Per-family drift counts (create + update + delete summed per family), for
+/// the daemon's shared drift-state store. Stable order via `by_family`.
+pub(crate) fn family_counts(changes: &[Change]) -> Vec<(String, u32)> {
+    by_family(changes)
+        .into_iter()
+        .map(|(fam, d)| (fam, (d.create + d.update + d.delete) as u32))
+        .collect()
+}
+
 /// True when `source` should be treated as a git remote (cloned) rather
 /// than a filesystem path.
 //
@@ -398,5 +407,19 @@ mod tests {
         assert!(s.starts_with("3 change(s) across 2 families"), "{s}");
         assert!(s.contains("pool: 1 create, 1 update"), "{s}");
         assert!(s.contains("storage: 1 delete"), "{s}");
+    }
+
+    #[test]
+    fn family_counts_sums_kinds_per_family() {
+        let changes = vec![
+            ch(ChangeKind::Create, "pool", "a"),
+            ch(ChangeKind::Update, "pool", "b"),
+            ch(ChangeKind::Delete, "storage", "c"),
+        ];
+        // pool: create + update = 2; storage: delete = 1; sorted by family.
+        assert_eq!(
+            family_counts(&changes),
+            vec![("pool".to_string(), 2), ("storage".to_string(), 1)]
+        );
     }
 }
