@@ -14,6 +14,23 @@ SemVer contract:
 
 _no entries yet._
 
+## [0.8.5] — 2026-06-24
+
+Headline: **Supply-chain refresh — clears RUSTSEC-2026-0185 and drains the dependency backlog.** Maintenance release. The daily `cargo audit` gate (a *required* status check) went red on 2026-06-23 when RUSTSEC-2026-0185 landed against `quinn-proto`; with branch protection in `strict` mode this transitively blocked **every** pending dependency PR from merging (each merge must re-run the now-failing audit). A `cargo update` refresh clears the advisory, drops the yanked `crypto-bigint`, and folds in the queued Dependabot bumps in one motion. No source changes — the test suite is unchanged.
+
+### Security
+
+- **RUSTSEC-2026-0185 (`quinn-proto`) cleared** — "remote memory exhaustion from unbounded out-of-order stream reassembly", `quinn-proto 0.11.14 → 0.11.15`. Note: `quinn-proto` is a transitive **lockfile-only** entry, not present in proxxx's active build graph (`cargo tree -i quinn-proto --target all` is empty), so no shipped binary was ever vulnerable — but `cargo audit` scans `Cargo.lock`, and the gate was correctly red.
+- **Yanked `crypto-bigint 0.7.3 → 0.7.5`** (pulled transitively via the `russh` → `rsa` / `crypto-primes` RustCrypto stack).
+
+### Changed
+
+- **Dependency refresh** (supersedes the queued Dependabot PRs #153–#156, #160): `russh 0.61.1 → 0.61.2`, `ratatui 0.30.0 → 0.30.2`, `rusqlite 0.39.0 → 0.40.1`, `toml_edit 0.22 → 0.25.12`, plus the patch-and-minor group (`getrandom 0.4.3`, `zeroize 1.9.0`, `insta 1.48.0`, `serial_test 3.5.0`) and a broader in-range `cargo update`.
+
+### Docs
+
+- **Corrected an "Honest non-goals" entry the product had outgrown.** The README claimed "No multi-cluster aggregation in the TUI", but the read-only `proxxx fleet` view (v0.8.0+) does exactly that. Reworded to the real boundary: no multi-cluster *writes* from one TUI — `fleet` aggregates strictly read-only and drills into a single-profile TUI to act.
+
 ## [0.8.4] — 2026-05-30
 
 Headline: **PBS on Proxmox Backup Server 4.x — `pbs datastores` no longer crashes, and `pbs restore` works against a self-signed PBS.** Patch release closing the #140 backup/restore coverage gap. A live end-to-end run against a real PBS 4.2 (homelab `pve-pbs` + datastore `test-store`) immediately caught two real bugs that the mocked unit tests missed — the recurring "live e2e catches what mocks can't" lesson. Both are fixed and verified through proxxx: a full `backup → list → restore` round-trip of a throwaway alpine LXC restored 313 files (incl. `/etc/alpine-release`) on the PBS host via `proxxx pbs restore`.
