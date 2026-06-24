@@ -97,7 +97,7 @@ The fastest path on a workstation. For a Proxmox VE node (Debian) use the [`.deb
 
 ```bash
 TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin
-VERSION=0.2.0                        # latest at time of writing
+VERSION=$(gh release view --repo fabriziosalmi/proxxx --json tagName -q .tagName | sed 's/^v//')
 
 gh release download v${VERSION} --repo fabriziosalmi/proxxx \
   --pattern "*-${TARGET}.tar.gz" \
@@ -141,7 +141,7 @@ The Linux musl artifact is statically linked — runs on every distro from RHEL 
 Each release also ships a `.deb` for **amd64** and **arm64**, signed with the same sigstore bundle. The binary is static-musl, so the package declares **no runtime dependencies** — drop it straight onto a Proxmox VE node (which is Debian):
 
 ```bash
-VERSION=0.8.5
+VERSION=$(gh release view --repo fabriziosalmi/proxxx --json tagName -q .tagName | sed 's/^v//')
 gh release download v${VERSION} --repo fabriziosalmi/proxxx \
   --pattern "proxxx_${VERSION}-1_amd64.deb"      # or _arm64.deb
 sudo apt install ./proxxx_${VERSION}-1_amd64.deb # or: sudo dpkg -i proxxx_*.deb
