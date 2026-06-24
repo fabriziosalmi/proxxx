@@ -52,6 +52,7 @@ mod tests {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            reconcile: None,
             profile_name: None,
         };
         PxClient::new(cfg, Some("fake-secret"))
@@ -6148,6 +6149,7 @@ mod tests {
             pbs: None,
             alerts: None,
             mcp_token: None,
+            reconcile: None,
             profile_name: Some("prod".into()),
         };
         let c = PxClient::new(cfg, Some("fake-secret"))

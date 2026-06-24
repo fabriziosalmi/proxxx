@@ -10,6 +10,11 @@
 //! 3. **schedule** — interval-based `run-due` for the recurring-
 //!    op store. Lives in [`crate::cli::schedule::run_due`].
 //!
+//! A 4th pillar, **reconcile** (GitOps drift watch), was added later and
+//! only ever runs unified: opt-in via `[profiles.X.reconcile]`, it diffs a
+//! declared source against live state on an interval (detect-only). Lives
+//! in [`reconcile_loop`].
+//!
 //! Each was invoked as its own `proxxx <verb> <serve>` and each
 //! ran its own process with its own SIGTERM handler. Operators
 //! had to run three systemd units (or scripts) to cover the full
@@ -100,6 +105,12 @@ pub enum DaemonCommand {
         /// HITL listener process.
         #[arg(long)]
         no_hitl: bool,
+
+        /// Skip the reconcile task (GitOps drift watch). It only runs
+        /// when a `[profiles.X.reconcile]` section is configured; this
+        /// flag force-disables it regardless.
+        #[arg(long)]
+        no_reconcile: bool,
     },
 }
 
@@ -117,6 +128,7 @@ pub async fn execute_daemon(
             no_schedule,
             no_alerts,
             no_hitl,
+            no_reconcile,
         } => {
             run_unified(
                 client,
@@ -128,6 +140,7 @@ pub async fn execute_daemon(
                 !no_schedule,
                 !no_alerts,
                 !no_hitl,
+                !no_reconcile,
             )
             .await
         }
@@ -152,6 +165,7 @@ async fn run_unified(
     enable_schedule: bool,
     enable_alerts: bool,
     enable_hitl: bool,
+    enable_reconcile: bool,
 ) -> Result<(Value, i32)> {
     let mut components: Vec<Component> = Vec::new();
 
@@ -181,6 +195,34 @@ async fn run_unified(
             name: "hitl",
             handle: tokio::spawn(crate::cli::hitl_serve(client, cfg)),
         });
+    }
+
+    // GitOps drift watch — the 4th pillar. Opt-in: only spawns when the
+    // profile carries a `[reconcile]` section (and `--no-reconcile` isn't set).
+    if enable_reconcile {
+        if let Some(rec) = config.reconcile.clone() {
+            let client = Arc::clone(client);
+            let profile = profile.map(str::to_owned);
+            // One shared Telegram gateway for drift alerts, if configured. A
+            // failure here disables the alert channel but never the loop —
+            // drift still hits the logs (and, later, metrics).
+            let telegram = match &config.telegram {
+                Some(tg_cfg) => {
+                    match crate::hitl::telegram::TelegramGateway::from_config(tg_cfg).await {
+                        Ok(g) => Some(Arc::new(g)),
+                        Err(e) => {
+                            eprintln!("proxxx daemon: reconcile Telegram alerts disabled — {e:#}");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            components.push(Component {
+                name: "reconcile",
+                handle: tokio::spawn(reconcile_loop(client, profile, rec, telegram)),
+            });
+        }
     }
 
     if components.is_empty() {
@@ -268,6 +310,54 @@ async fn alerts_loop(
     // wait_for_shutdown_signal directly.
     let _ =
         crate::cli::monitoring::execute_alerts(&client, config, profile.as_deref(), action).await?;
+    Ok(())
+}
+
+/// Reconcile loop (GitOps drift watch) — the 4th pillar. Every
+/// `interval_secs` (floored at 30), recompute drift between the declared
+/// `source` and live state via the shared `reconcile::compute_drift` core.
+/// **Detect-only**: drift is logged at WARN and, when Telegram is
+/// configured, pushed as an alert — it never mutates. A tick that errors
+/// (e.g. git fetch failed, cluster unreachable) is logged and the loop
+/// continues; a transient failure must not kill the watch. Prometheus
+/// metrics + MCP event fan-out land in a follow-up (both are cross-process
+/// and need a shared drift-state store).
+async fn reconcile_loop(
+    client: Arc<PxClient>,
+    profile: Option<String>,
+    rec: crate::config::ReconcileConfig,
+    telegram: Option<Arc<crate::hitl::telegram::TelegramGateway>>,
+) -> Result<()> {
+    let interval = rec.interval_secs.max(30);
+    let path = std::path::PathBuf::from(&rec.path);
+    let profile_label = profile.as_deref().unwrap_or("default").to_owned();
+    loop {
+        tokio::select! {
+            biased;
+            () = crate::util::shutdown::wait_for_shutdown_signal() => break,
+            () = tokio::time::sleep(Duration::from_secs(interval)) => {
+                match super::reconcile::compute_drift(&client, &profile_label, &rec.source, &path).await {
+                    Ok(changes) if changes.is_empty() => {
+                        tracing::info!(profile = %profile_label, "reconcile: in sync");
+                    }
+                    Ok(changes) => {
+                        let summary = super::reconcile::drift_summary(&changes);
+                        tracing::warn!(profile = %profile_label, "reconcile DRIFT — {summary}");
+                        if let Some(tg) = &telegram {
+                            let msg =
+                                format!("⚠️ proxxx reconcile — drift on `{profile_label}`\n{summary}");
+                            if let Err(e) = tg.send_message(&msg).await {
+                                tracing::warn!("reconcile: Telegram send failed: {e:#}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(profile = %profile_label, "reconcile tick failed: {e:#}");
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

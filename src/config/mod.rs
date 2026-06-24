@@ -49,6 +49,12 @@ pub struct ProfileConfig {
     /// on a trusted network or behind a reverse proxy that enforces auth.
     pub mcp_token: Option<String>,
 
+    /// Continuous-reconciliation (`reconcile watch`) config. When present,
+    /// `proxxx daemon serve` runs a 4th pillar that periodically diffs the
+    /// declared `source` against live state and reports drift (detect-only).
+    /// Absent = no reconcile loop.
+    pub reconcile: Option<ReconcileConfig>,
+
     /// The profile name this config was loaded under (`None` for the flat /
     /// default top-level config). Not part of the TOML — `load_config` stamps
     /// it after deserialising so the rest of the code (notably the per-profile
@@ -56,6 +62,31 @@ pub struct ProfileConfig {
     /// keeps it out of the wire format entirely.
     #[serde(skip)]
     pub profile_name: Option<String>,
+}
+
+/// Continuous-reconciliation config (`[profiles.X.reconcile]`). Drives the
+/// `reconcile watch` daemon pillar; same source semantics as the one-shot
+/// `reconcile run`. Strictly detect-only — no mutation is configured here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconcileConfig {
+    /// Desired-state source: a local file, a local directory, or a git URL
+    /// (shallow-cloned each tick).
+    pub source: String,
+    /// State file path within a directory / git-repo source. The output of
+    /// `proxxx state export`. Default `state.toml`.
+    #[serde(default = "default_reconcile_path")]
+    pub path: String,
+    /// Poll interval in seconds (floored at 30 by the loop). Default 300.
+    #[serde(default = "default_reconcile_interval")]
+    pub interval_secs: u64,
+}
+
+fn default_reconcile_path() -> String {
+    "state.toml".to_string()
+}
+
+const fn default_reconcile_interval() -> u64 {
+    300
 }
 
 /// Refusal returned by the API write helpers when the active profile is
@@ -1030,6 +1061,44 @@ mod read_only_tests {
         let msg = format!("{e}");
         assert!(msg.contains("read-only"), "got: {msg}");
         assert!(msg.contains("prod"), "names the profile: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod reconcile_config_tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_absent_is_none() {
+        let cfg: ProfileConfig =
+            toml::from_str("url = \"https://x:8006\"\nuser = \"root@pam\"\n").unwrap();
+        assert!(cfg.reconcile.is_none());
+    }
+
+    #[test]
+    fn reconcile_section_parses_with_defaults() {
+        let cfg: ProfileConfig = toml::from_str(
+            "url = \"https://x:8006\"\nuser = \"root@pam\"\n\
+             [reconcile]\nsource = \"https://github.com/o/r.git\"\n",
+        )
+        .unwrap();
+        let rec = cfg.reconcile.expect("reconcile section present");
+        assert_eq!(rec.source, "https://github.com/o/r.git");
+        assert_eq!(rec.path, "state.toml"); // default
+        assert_eq!(rec.interval_secs, 300); // default
+    }
+
+    #[test]
+    fn reconcile_overrides_take_effect() {
+        let cfg: ProfileConfig = toml::from_str(
+            "url = \"https://x:8006\"\nuser = \"root@pam\"\n\
+             [reconcile]\nsource = \"/etc/proxxx/state.toml\"\n\
+             path = \"clusters/prod.toml\"\ninterval_secs = 60\n",
+        )
+        .unwrap();
+        let rec = cfg.reconcile.unwrap();
+        assert_eq!(rec.path, "clusters/prod.toml");
+        assert_eq!(rec.interval_secs, 60);
     }
 }
 
