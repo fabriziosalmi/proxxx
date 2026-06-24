@@ -72,6 +72,10 @@ pub async fn run_server(client: Arc<PxClient>, config: ConfigHandle) -> Result<(
     let broker = notifications::Broker::new();
     let _task_poller = notifications::spawn_task_poller(Arc::clone(&client), broker.clone());
     let _incident_watcher = notifications::spawn_incident_watcher(broker.clone());
+    let _reconcile_watcher = notifications::spawn_reconcile_watcher(
+        client.profile_config().profile_name.clone(),
+        broker.clone(),
+    );
     let mut notification_rx = broker.subscribe();
 
     // Stdin reader runs as a separate task because `read_until`

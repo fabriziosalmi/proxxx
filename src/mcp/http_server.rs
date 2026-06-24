@@ -233,6 +233,10 @@ pub async fn run_http_server(
         crate::mcp::notifications::spawn_task_poller(Arc::clone(&client), notifications.clone());
     let _incident_watcher =
         crate::mcp::notifications::spawn_incident_watcher(notifications.clone());
+    let _reconcile_watcher = crate::mcp::notifications::spawn_reconcile_watcher(
+        client.profile_config().profile_name.clone(),
+        notifications.clone(),
+    );
 
     let state = McpState::new(client, config, notifications);
     let addr = format!("{bind}:{port}");
