@@ -212,6 +212,54 @@ pub async fn scrape(client: &PxClient) -> String {
     );
     w.gauge("proxxx_up", &[], scrape_ok);
 
+    // Reconcile drift-state, written by the `reconcile watch` daemon pillar
+    // to a shared per-profile SQLite store. Absent (no watch / never run) →
+    // no series, which is correct: drift gauges appear only once a check has
+    // reported. Read failures degrade silently — these metrics are best-effort
+    // and must never fail an otherwise-healthy scrape.
+    let profile = client.profile_config().profile_name.as_deref();
+    if let Ok(Some(drift)) = crate::app::cache::load_reconcile_status(profile) {
+        let prof = profile.unwrap_or("default");
+        w.help(
+            "proxxx_reconcile_in_sync",
+            "1 if live state matched declared at the last reconcile check, else 0",
+        );
+        w.gauge(
+            "proxxx_reconcile_in_sync",
+            &[("profile", prof)],
+            if drift.in_sync { 1.0 } else { 0.0 },
+        );
+        w.help(
+            "proxxx_reconcile_drift_total",
+            "Total drifted resources at the last reconcile check",
+        );
+        w.gauge(
+            "proxxx_reconcile_drift_total",
+            &[("profile", prof)],
+            f64::from(drift.total_changes),
+        );
+        w.help(
+            "proxxx_reconcile_last_check_timestamp",
+            "Unix seconds of the last reconcile check (staleness = now - this)",
+        );
+        w.gauge(
+            "proxxx_reconcile_last_check_timestamp",
+            &[("profile", prof)],
+            drift.last_check_ts as f64,
+        );
+        w.help(
+            "proxxx_drift_resources",
+            "Drifted resources by state family at the last reconcile check",
+        );
+        for (family, count) in &drift.by_family {
+            w.gauge(
+                "proxxx_drift_resources",
+                &[("family", family.as_str()), ("profile", prof)],
+                f64::from(*count),
+            );
+        }
+    }
+
     w.finish()
 }
 

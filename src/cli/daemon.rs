@@ -313,6 +313,13 @@ async fn alerts_loop(
     Ok(())
 }
 
+/// Current Unix time in seconds (0 on the impossible pre-epoch error).
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Reconcile loop (GitOps drift watch) — the 4th pillar. Every
 /// `interval_secs` (floored at 30), recompute drift between the declared
 /// `source` and live state via the shared `reconcile::compute_drift` core.
@@ -337,17 +344,39 @@ async fn reconcile_loop(
             () = crate::util::shutdown::wait_for_shutdown_signal() => break,
             () = tokio::time::sleep(Duration::from_secs(interval)) => {
                 match super::reconcile::compute_drift(&client, &profile_label, &rec.source, &path).await {
-                    Ok(changes) if changes.is_empty() => {
-                        tracing::info!(profile = %profile_label, "reconcile: in sync");
-                    }
                     Ok(changes) => {
+                        let in_sync = changes.is_empty();
                         let summary = super::reconcile::drift_summary(&changes);
-                        tracing::warn!(profile = %profile_label, "reconcile DRIFT — {summary}");
-                        if let Some(tg) = &telegram {
-                            let msg =
-                                format!("⚠️ proxxx reconcile — drift on `{profile_label}`\n{summary}");
-                            if let Err(e) = tg.send_message(&msg).await {
-                                tracing::warn!("reconcile: Telegram send failed: {e:#}");
+                        // Persist the latest result to the shared drift-state
+                        // store so `metrics serve` / `mcp serve` (separate
+                        // processes) can surface it. A persist failure is
+                        // logged, never fatal to the watch.
+                        let status = crate::app::cache::ReconcileStatus {
+                            last_check_ts: unix_secs(),
+                            in_sync,
+                            total_changes: changes.len() as u32,
+                            summary: summary.clone(),
+                            by_family: super::reconcile::family_counts(&changes),
+                        };
+                        if let Err(e) = crate::app::cache::save_reconcile_status_async(
+                            Some(profile_label.clone()),
+                            status,
+                        )
+                        .await
+                        {
+                            tracing::warn!("reconcile: drift-state persist failed: {e:#}");
+                        }
+                        if in_sync {
+                            tracing::info!(profile = %profile_label, "reconcile: in sync");
+                        } else {
+                            tracing::warn!(profile = %profile_label, "reconcile DRIFT — {summary}");
+                            if let Some(tg) = &telegram {
+                                let msg = format!(
+                                    "⚠️ proxxx reconcile — drift on `{profile_label}`\n{summary}"
+                                );
+                                if let Err(e) = tg.send_message(&msg).await {
+                                    tracing::warn!("reconcile: Telegram send failed: {e:#}");
+                                }
                             }
                         }
                     }
