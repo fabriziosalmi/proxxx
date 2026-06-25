@@ -568,6 +568,54 @@ impl PxClient {
     }
 }
 
+/// Raw deserialization shape for `GET /nodes/{node}/disks/zfs/{name}` — PVE
+/// returns the pool with a NESTED vdev `children` tree, flattened depth-first
+/// into the public [`crate::api::types::ZfsPoolDetail`].
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct RawZfsDetail {
+    name: String,
+    state: String,
+    scan: String,
+    errors: String,
+    children: Vec<RawZfsNode>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct RawZfsNode {
+    name: String,
+    state: String,
+    // PVE may send these as numbers OR strings; accept either defensively.
+    read: serde_json::Value,
+    write: serde_json::Value,
+    cksum: serde_json::Value,
+    msg: Option<String>,
+    children: Vec<Self>,
+}
+
+/// Coerce a PVE numeric-or-string JSON value to `u64` (0 on anything else).
+fn zfs_count_to_u64(v: &serde_json::Value) -> u64 {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0)
+}
+
+/// Flatten the nested vdev tree depth-first into the public flat Vec.
+fn flatten_zfs_children(nodes: &[RawZfsNode], out: &mut Vec<crate::api::types::ZfsVdev>) {
+    for n in nodes {
+        out.push(crate::api::types::ZfsVdev {
+            name: n.name.clone(),
+            state: n.state.clone(),
+            read: zfs_count_to_u64(&n.read),
+            write: zfs_count_to_u64(&n.write),
+            cksum: zfs_count_to_u64(&n.cksum),
+            msg: n.msg.clone(),
+        });
+        flatten_zfs_children(&n.children, out);
+    }
+}
+
 #[async_trait::async_trait]
 impl ProxmoxGateway for PxClient {
     async fn get_nodes(&self) -> Result<Vec<Node>> {
@@ -2499,6 +2547,81 @@ impl ProxmoxGateway for PxClient {
         Ok(resp.data)
     }
 
+    async fn get_node_zfs_detail(
+        &self,
+        node: &str,
+        name: &str,
+    ) -> Result<crate::api::types::ZfsPoolDetail> {
+        let resp: ApiResponse<RawZfsDetail> =
+            self.get(&format!("/nodes/{node}/disks/zfs/{name}")).await?;
+        let raw = resp.data;
+        let mut children = Vec::new();
+        flatten_zfs_children(&raw.children, &mut children);
+        Ok(crate::api::types::ZfsPoolDetail {
+            name: raw.name,
+            state: raw.state,
+            scan: raw.scan,
+            errors: raw.errors,
+            children,
+        })
+    }
+
+    async fn guest_serial_devices(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: &crate::api::types::GuestType,
+    ) -> Result<Vec<crate::api::types::SerialDevice>> {
+        // LXC has no serial-device concept — it's /dev/console via lxc-console.
+        if matches!(guest_type, crate::api::types::GuestType::Lxc) {
+            return Ok(vec![]);
+        }
+        let cfg = self.get_guest_config(node, vmid, guest_type).await?;
+        let mut out: Vec<crate::api::types::SerialDevice> = cfg
+            .iter()
+            .filter_map(|(k, v)| {
+                // serial0..serial3 only (not "serialfoo" or "serial10").
+                let index: u8 = k.strip_prefix("serial")?.parse().ok()?;
+                (index <= 3).then(|| crate::api::types::SerialDevice {
+                    index,
+                    target: v.clone(),
+                })
+            })
+            .collect();
+        out.sort_by_key(|s| s.index);
+        Ok(out)
+    }
+
+    async fn guest_disk_io_rate(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: &crate::api::types::GuestType,
+    ) -> Result<Option<crate::api::types::DiskIoRate>> {
+        use crate::api::types::{RrdCf, RrdTimeframe};
+        let points = self
+            .get_guest_rrddata(node, vmid, *guest_type, RrdTimeframe::Hour, RrdCf::Average)
+            .await?;
+        // PVE RRD stores diskread/diskwrite as a RATE (bytes/sec) — verified
+        // live: rrddata reads 0 on an idle guest whose /cluster/resources
+        // diskread counter is non-zero. So the most recent point carrying IO
+        // data IS the current rate; no counter diffing.
+        let Some(p) = points
+            .iter()
+            .rev()
+            .find(|p| p.diskread.is_some() || p.diskwrite.is_some())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::api::types::DiskIoRate {
+            read_bps: p.diskread.unwrap_or(0.0),
+            write_bps: p.diskwrite.unwrap_or(0.0),
+            read_iops: None,
+            write_iops: None,
+            sampled_at: p.time,
+        }))
+    }
+
     async fn list_ha_groups(&self) -> Result<Vec<crate::api::types::HaGroup>> {
         // PVE 9 migrated `/cluster/ha/groups` → `/cluster/ha/rules`. The old
         // path now returns a 500 with a deprecation message. Until the type
@@ -3239,5 +3362,62 @@ impl ProxmoxGateway for PxClient {
     async fn create_lxc(&self, node: &str, params: &[(&str, &str)]) -> Result<String> {
         let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/lxc"), params).await?;
         Ok(resp.data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zfs_count_to_u64_accepts_number_or_string() {
+        // PVE may send zpool-status counters as numbers OR strings.
+        assert_eq!(zfs_count_to_u64(&serde_json::json!(42)), 42);
+        assert_eq!(zfs_count_to_u64(&serde_json::json!("7")), 7);
+        assert_eq!(zfs_count_to_u64(&serde_json::json!("oops")), 0);
+        assert_eq!(zfs_count_to_u64(&serde_json::Value::Null), 0);
+    }
+
+    #[test]
+    fn flatten_zfs_children_walks_the_tree_depth_first() {
+        // A mirror group with two leaf disks, the second with a cksum error.
+        let tree = vec![RawZfsNode {
+            name: "mirror-0".into(),
+            state: "ONLINE".into(),
+            read: serde_json::json!(0),
+            write: serde_json::json!(0),
+            cksum: serde_json::json!(0),
+            msg: None,
+            children: vec![
+                RawZfsNode {
+                    name: "/dev/sda".into(),
+                    state: "ONLINE".into(),
+                    read: serde_json::json!(0),
+                    write: serde_json::json!(0),
+                    cksum: serde_json::json!("0"), // string form
+                    msg: None,
+                    children: vec![],
+                },
+                RawZfsNode {
+                    name: "/dev/sdb".into(),
+                    state: "DEGRADED".into(),
+                    read: serde_json::json!(0),
+                    write: serde_json::json!(0),
+                    cksum: serde_json::json!(3),
+                    msg: Some("too many errors".into()),
+                    children: vec![],
+                },
+            ],
+        }];
+        let mut out = Vec::new();
+        flatten_zfs_children(&tree, &mut out);
+        // group + 2 leaves, depth-first.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].name, "mirror-0");
+        assert_eq!(out[1].name, "/dev/sda");
+        assert_eq!(out[2].name, "/dev/sdb");
+        assert_eq!(out[2].cksum, 3);
+        assert_eq!(out[2].state, "DEGRADED");
+        assert_eq!(out[2].msg.as_deref(), Some("too many errors"));
     }
 }

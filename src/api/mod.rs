@@ -1018,6 +1018,36 @@ pub trait ProxmoxGateway: Send + Sync {
     /// Read-only — `GET /nodes/{node}/disks/zfs`.
     async fn list_node_zfs(&self, node: &str) -> Result<Vec<crate::api::types::ZfsPool>>;
 
+    /// Per-pool ZFS detail — `GET /nodes/{node}/disks/zfs/{name}`. Reads the
+    /// `scan` field (scrub progress / last-scrub epoch / error counters) and
+    /// flattens PVE's nested vdev tree into a single `Vec<ZfsVdev>`.
+    async fn get_node_zfs_detail(
+        &self,
+        node: &str,
+        name: &str,
+    ) -> Result<crate::api::types::ZfsPoolDetail>;
+
+    /// Serial devices configured on a guest. QEMU: the `serial0..3` config
+    /// keys; LXC: always empty (LXC uses `/dev/console` via `lxc-console`, not
+    /// a serial device). Callers check `is_empty()` for console pre-flight.
+    async fn guest_serial_devices(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: &crate::api::types::GuestType,
+    ) -> Result<Vec<crate::api::types::SerialDevice>>;
+
+    /// Best-effort instantaneous disk-IO rate for a guest, from the most recent
+    /// RRD point (`rrddata?timeframe=hour`). PVE's RRD already stores
+    /// `diskread`/`diskwrite` as bytes/second, so this is the latest sample.
+    /// `None` when RRD has no point carrying IO data. Resolution ~60 s.
+    async fn guest_disk_io_rate(
+        &self,
+        node: &str,
+        vmid: u32,
+        guest_type: &crate::api::types::GuestType,
+    ) -> Result<Option<crate::api::types::DiskIoRate>>;
+
     // ── HA + replication console (feature #5) ───────────
 
     /// List HA groups (configured failover priority sets).

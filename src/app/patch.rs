@@ -1153,6 +1153,29 @@ mod tests {
         async fn list_node_zfs(&self, _: &str) -> Result<Vec<crate::api::types::ZfsPool>> {
             Ok(vec![])
         }
+        async fn get_node_zfs_detail(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::api::types::ZfsPoolDetail> {
+            Ok(crate::api::types::ZfsPoolDetail::default())
+        }
+        async fn guest_serial_devices(
+            &self,
+            _: &str,
+            _: u32,
+            _: &crate::api::types::GuestType,
+        ) -> Result<Vec<crate::api::types::SerialDevice>> {
+            Ok(vec![])
+        }
+        async fn guest_disk_io_rate(
+            &self,
+            _: &str,
+            _: u32,
+            _: &crate::api::types::GuestType,
+        ) -> Result<Option<crate::api::types::DiskIoRate>> {
+            Ok(None)
+        }
         async fn list_cluster_firewall_rules(
             &self,
         ) -> Result<Vec<crate::api::types::FirewallRule>> {

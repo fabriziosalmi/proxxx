@@ -12,6 +12,18 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-25
+
+Headline: **Three additive `ProxmoxGateway` methods for the proxima desktop UI — ZFS pool detail, guest serial-device pre-flight, and guest disk-IO rate.** Library-API additions only — **no CLI / MCP / config change** (the user-facing contract is untouched). They let the proxima UI drop three direct-`reqwest` workarounds and route through proxxx's rate-limiter, TLS pinning, and auth-refresh instead.
+
+### Added (library API — `ProxmoxGateway`)
+
+- **`get_node_zfs_detail(node, name)`** — `GET /nodes/{node}/disks/zfs/{name}`: the per-pool `scan` line (scrub progress / last-scrub epoch / error counters) plus the vdev tree, flattened depth-first from PVE's nested shape into `Vec<ZfsVdev>` (`read`/`write`/`cksum` coerced defensively from PVE's number-or-string).
+- **`guest_serial_devices(node, vmid, kind)`** — the `serial0..3` devices configured on a QEMU guest (empty for LXC, which uses `/dev/console` via `lxc-console`). Lets a console pre-flight refuse to open a `termproxy` session that would attach to nothing (no `serial0: socket` → a permanently black terminal).
+- **`guest_disk_io_rate(node, vmid, kind)`** — best-effort read/write bytes-per-second for a guest, from the most recent RRD point. **Verified live:** PVE's RRD already stores `diskread`/`diskwrite` as a *rate* (an idle guest reads 0 while its cumulative `/cluster/resources` counter is non-zero), so this is the latest sample, not a counter delta. `read_iops`/`write_iops` are `None` (PVE guest RRD carries no per-op counts).
+
+New types: `ZfsPoolDetail`, `ZfsVdev`, `SerialDevice`, `DiskIoRate` (all in `proxxx::api::types`). 2 new unit tests (ZFS tree flatten + number-or-string coercion).
+
 ## [0.9.1] — 2026-06-25
 
 Headline: **Hardening patch — `state apply` now leaves an audit trail, and the audit chain's key handling is tightened.** A code-health / security pass after the v0.9.0 GitOps-controller release. No CLI-contract changes (commands, exit codes, and `--format json` shapes are unchanged); the tamper-evident trail and a handful of robustness edges get firmer.

@@ -123,6 +123,35 @@ pub enum GuestType {
     Lxc,
 }
 
+/// A serial device configured on a guest (QEMU `serial0..3`). Used for console
+/// pre-flight: `termproxy` only attaches if a `serial0: socket` exists, so a
+/// caller can refuse to open a console that would attach to nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialDevice {
+    /// `0..3` for QEMU (`serial0`..`serial3`).
+    pub index: u8,
+    /// The device value: `"socket"` / `"/dev/ttyS0"` / `"/host/path"`. A
+    /// non-`socket` target means `termproxy` console likely won't work.
+    pub target: String,
+}
+
+/// Best-effort instantaneous disk-IO rate for a guest, read from the most
+/// recent RRD point. NOTE: PVE's RRD stores `diskread`/`diskwrite` as a rate
+/// already (bytes/second), so this is the latest sample, NOT a counter delta.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIoRate {
+    /// Bytes/second, averaged over the last RRD step (~60 s).
+    pub read_bps: f64,
+    pub write_bps: f64,
+    /// `IOps` when PVE exposes them. PVE guest RRD does not carry per-op counts,
+    /// so this is currently always `None` (kept for forward-compat).
+    pub read_iops: Option<f64>,
+    pub write_iops: Option<f64>,
+    /// Unix seconds of the RRD point this is derived from (so a consumer can
+    /// flag "stale > 2 min").
+    pub sampled_at: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PendingConfigEntry {

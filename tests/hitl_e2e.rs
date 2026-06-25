@@ -901,6 +901,29 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn list_node_zfs(&self, _: &str) -> Result<Vec<proxxx::api::types::ZfsPool>> {
         Ok(vec![])
     }
+    async fn get_node_zfs_detail(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<proxxx::api::types::ZfsPoolDetail> {
+        Ok(proxxx::api::types::ZfsPoolDetail::default())
+    }
+    async fn guest_serial_devices(
+        &self,
+        _: &str,
+        _: u32,
+        _: &proxxx::api::types::GuestType,
+    ) -> Result<Vec<proxxx::api::types::SerialDevice>> {
+        Ok(vec![])
+    }
+    async fn guest_disk_io_rate(
+        &self,
+        _: &str,
+        _: u32,
+        _: &proxxx::api::types::GuestType,
+    ) -> Result<Option<proxxx::api::types::DiskIoRate>> {
+        Ok(None)
+    }
     async fn list_ha_groups(&self) -> Result<Vec<proxxx::api::types::HaGroup>> {
         Ok(vec![])
     }
