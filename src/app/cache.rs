@@ -598,7 +598,7 @@ fn init_reconcile_tables(conn: &Connection) -> anyhow::Result<()> {
 }
 
 /// Async wrapper — the watch loop is on the Tokio runtime, and `SQLite`
-/// I/O can block (busy_timeout). Mirrors [`save_alert_dedup_async`].
+/// I/O can block (`busy_timeout`). Mirrors [`save_alert_dedup_async`].
 pub async fn save_reconcile_status_async(
     profile_name: Option<String>,
     status: ReconcileStatus,

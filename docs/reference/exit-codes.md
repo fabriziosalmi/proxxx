@@ -7,11 +7,11 @@ instead of grepping stderr.
 | :--- | :--- | :--- |
 | `0` | Success | Operation completed |
 | `1` | Generic failure | Catch-all; check stderr for the message |
-| `2` | Usage error / diff present | clap rejected the arguments **OR** `proxxx state diff` found drift |
+| `2` | Usage error / diff present | clap rejected the arguments **OR** a read-only check found drift (`state diff`, `reconcile run`) **OR** a mutation had a failed change (`state apply`, `reconcile converge`) |
 | `3` | Configuration error | TOML invalid, required field missing, profile not found |
 | `4` | Authentication / authorization | `Unauthorized` (401) or `Forbidden` (403) — see [errors](/reference/errors) |
 | `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc. Also `proxxx find <vmid>` when no profile owns the VMID. |
-| `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from both per-guest pre-flight (running guest, etc.) and state-apply pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). |
+| `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from per-guest pre-flight (running guest, etc.) and state-apply / `reconcile converge` pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). The unmanned daemon `auto_converge` always runs as if `--allow-risk` were absent, so a Severe drift is left for a human (no exit code — it alerts + skips). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
 | `8` | Mutation refused by a local lock | A mutation was refused by a proxxx-side lock before reaching PVE. Either `proxxx incident freeze` is in effect (run `proxxx incident thaw` first, or wait for the TTL), or the active profile is configured `read_only = true` (point at a writable profile, or remove the flag from `config.toml`). |
 

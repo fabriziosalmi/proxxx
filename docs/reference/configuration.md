@@ -39,6 +39,33 @@ read_only     = false                 # true → refuse all mutations on this
                                       # PVEAuditor PVE token for server-side lock.
 ```
 
+## `[profiles.<name>.reconcile]` (GitOps controller)
+
+Opt-in continuous reconciliation. When present, `proxxx daemon serve` runs the
+drift-watch pillar for this profile; absent → no watch. The one-shot
+`reconcile run` / `reconcile converge` commands take `--source`/`--path` on the
+CLI instead and don't read this block.
+
+```toml
+[profiles.homelab.reconcile]
+source        = "git@github.com:me/cluster.git"  # file, dir, or git URL (shallow-cloned each tick)
+path          = "state.toml"          # state file within a dir/git source (default "state.toml")
+interval_secs = 300                   # drift-watch poll interval, floored at 30 (default 300)
+
+# ── Layer 3: auto-converge (unmanned mutation) — default OFF ──
+auto_converge  = false                # true → after detecting drift each tick, apply it.
+                                      # ALWAYS force=false: a Severe-risk drift is NEVER
+                                      # auto-applied — it alerts for human review and
+                                      # mutates nothing. Respects read_only + incident
+                                      # freeze (skips quietly, no alert storm). Disable
+                                      # per-process with the `--no-converge` flag or the
+                                      # PROXXX_NO_CONVERGE env var.
+converge_prune = false                # true → auto-converge also executes deletes (maps to
+                                      # `state apply --prune`). Default false: deletes are
+                                      # previewed but held. Enable only against a repo with
+                                      # branch protection / atomic pushes.
+```
+
 ## `[ssh]` (top-level default)
 
 ```toml

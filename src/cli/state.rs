@@ -389,7 +389,7 @@ pub async fn execute_state(
 ///
 /// On EOF / unreadable stdin we treat the answer as "no" (refuse).
 /// That matches the spirit of HITL: silence = no consent.
-fn interactive_hitl_filter(
+pub(crate) fn interactive_hitl_filter(
     changes: &[state::diff::Change],
     live_state: &state::model::ClusterState,
 ) -> Vec<state::diff::Change> {
@@ -454,7 +454,7 @@ fn interactive_hitl_filter(
 /// diff line with the apply line that acted on it. The trailing
 /// status word is the discriminant of [`state::apply::ApplyResult`]
 /// — `applied` / `skipped (<reason>)` / `failed: <error>`.
-fn apply_summary_line(o: &state::apply::ApplyOutcome) -> String {
+pub(crate) fn apply_summary_line(o: &state::apply::ApplyOutcome) -> String {
     let diff_line = state::diff::summary_line(&o.change);
     match &o.result {
         state::apply::ApplyResult::Applied => format!("{diff_line} — applied"),

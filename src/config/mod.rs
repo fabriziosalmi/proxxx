@@ -66,7 +66,8 @@ pub struct ProfileConfig {
 
 /// Continuous-reconciliation config (`[profiles.X.reconcile]`). Drives the
 /// `reconcile watch` daemon pillar; same source semantics as the one-shot
-/// `reconcile run`. Strictly detect-only — no mutation is configured here.
+/// `reconcile run`. Detect-only by default; `auto_converge = true` opts the
+/// daemon into the converge (write) half — see [`ReconcileConfig::auto_converge`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReconcileConfig {
     /// Desired-state source: a local file, a local directory, or a git URL
@@ -79,6 +80,25 @@ pub struct ReconcileConfig {
     /// Poll interval in seconds (floored at 30 by the loop). Default 300.
     #[serde(default = "default_reconcile_interval")]
     pub interval_secs: u64,
+
+    /// Opt-in to Layer 3 auto-converge: when `true`, after detecting drift each
+    /// tick the daemon runs the converge (apply) core to mutate the live cluster
+    /// toward the declared state. **Default `false`** — the watch stays strictly
+    /// detect-only unless this is explicitly set. The unmanned converge always
+    /// runs with `force = false`, so a Severe-risk change (see
+    /// [`crate::state::preflight`]) is never auto-applied — it raises a "needs
+    /// human review" alert and mutates nothing.
+    #[serde(default)]
+    pub auto_converge: bool,
+
+    /// When auto-converging, also execute `Delete` changes (maps to
+    /// [`crate::state::apply::ApplyOptions::prune`]). **Default `false`** — deletes
+    /// are previewed as `Skipped { PrunePolicy }` but not executed, matching
+    /// `state apply` without `--prune`. Enable only against a desired-state repo
+    /// with branch protection / atomic pushes: a half-pushed tree could otherwise
+    /// present spurious deletes (the bulk-change Severe gate is the backstop).
+    #[serde(default)]
+    pub converge_prune: bool,
 }
 
 fn default_reconcile_path() -> String {
@@ -1086,6 +1106,11 @@ mod reconcile_config_tests {
         assert_eq!(rec.source, "https://github.com/o/r.git");
         assert_eq!(rec.path, "state.toml"); // default
         assert_eq!(rec.interval_secs, 300); // default
+
+        // Layer 3 is opt-in: both converge knobs default OFF so an existing
+        // detect-only `[reconcile]` section keeps mutating nothing.
+        assert!(!rec.auto_converge, "auto_converge must default false");
+        assert!(!rec.converge_prune, "converge_prune must default false");
     }
 
     #[test]
@@ -1099,6 +1124,21 @@ mod reconcile_config_tests {
         let rec = cfg.reconcile.unwrap();
         assert_eq!(rec.path, "clusters/prod.toml");
         assert_eq!(rec.interval_secs, 60);
+    }
+
+    #[test]
+    fn reconcile_auto_converge_opt_in() {
+        // Layer 3: the converge knobs are explicit opt-ins; once set they
+        // must round-trip so the daemon can read them.
+        let cfg: ProfileConfig = toml::from_str(
+            "url = \"https://x:8006\"\nuser = \"root@pam\"\n\
+             [reconcile]\nsource = \"https://github.com/o/r.git\"\n\
+             auto_converge = true\nconverge_prune = true\n",
+        )
+        .unwrap();
+        let rec = cfg.reconcile.unwrap();
+        assert!(rec.auto_converge);
+        assert!(rec.converge_prune);
     }
 }
 

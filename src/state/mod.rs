@@ -52,7 +52,13 @@
 //! cares about wire-stable identity and TOML readability).
 
 pub mod apply;
+pub mod converge;
 pub mod diff;
 pub mod export;
 pub mod model;
 pub mod preflight;
+
+/// Shared `#[cfg(test)]` helpers (e.g. the `RecordingClient` mock) used by
+/// multiple `state` submodules' tests.
+#[cfg(test)]
+pub(crate) mod test_support;
