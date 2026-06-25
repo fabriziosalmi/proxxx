@@ -1411,6 +1411,15 @@ mod tests {
         ) -> Result<()> {
             anyhow::bail!("unused")
         }
+        async fn create_role(&self, _: &str, _: &str) -> Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn update_role(&self, _: &str, _: &str, _: bool) -> Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn delete_role(&self, _: &str) -> Result<()> {
+            anyhow::bail!("unused")
+        }
         async fn list_users(&self) -> Result<Vec<crate::api::types::User>> {
             Ok(vec![])
         }

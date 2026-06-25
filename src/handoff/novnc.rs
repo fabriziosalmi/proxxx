@@ -17,6 +17,18 @@ use crate::api::types::GuestType;
 /// `"https://pve1.lan:8006"`). The web UI shares the host:port — the
 /// query keys (`console`, `novnc`, `vmid`, `node`) match what the
 /// PVE web UI's "Console" button sets in its address bar.
+/// Extract `host:port` from a REST base URL — strip the scheme and any
+/// trailing path, keep the authority. The PVE web UI shares host:port
+/// with the API, so both deep-link builders below reuse this.
+fn host_port_of(api_base_url: &str) -> &str {
+    let after_scheme = api_base_url
+        .split_once("://")
+        .map_or(api_base_url, |(_, rest)| rest);
+    after_scheme
+        .split_once('/')
+        .map_or(after_scheme, |(h, _)| h)
+}
+
 #[must_use]
 pub fn build_novnc_url(api_base_url: &str, node: &str, vmid: u32, guest_type: GuestType) -> String {
     // For QEMU the console kind is `kvm`; for LXC it's `lxc`.
@@ -24,17 +36,24 @@ pub fn build_novnc_url(api_base_url: &str, node: &str, vmid: u32, guest_type: Gu
         GuestType::Qemu => "kvm",
         GuestType::Lxc => "lxc",
     };
-    // Host:port from the base URL. Same logic as wsterm — strip scheme
-    // + path, keep authority.
-    let after_scheme = api_base_url
-        .split_once("://")
-        .map_or(api_base_url, |(_, rest)| rest);
-    let host_port = after_scheme
-        .split_once('/')
-        .map_or(after_scheme, |(h, _)| h);
+    let host_port = host_port_of(api_base_url);
     format!(
         "https://{host_port}/?console={console_kind}&novnc=1&vmid={vmid}&node={node}&resize=scale"
     )
+}
+
+/// Build a deep-link into the PVE web UI's API-token panel
+/// (Datacenter → Permissions → API Tokens).
+///
+/// `api_base_url` is the same URL the REST client uses (e.g.
+/// `"https://pve1.lan:8006"`); the web UI shares host:port. The
+/// `#v1:0:18:...` fragment is PVE's internal tree-route for that view —
+/// version-specific, so it lives here (one place to fix if a future PVE
+/// renumbers the route) rather than hard-coded in every consumer.
+#[must_use]
+pub fn token_page_url(api_base_url: &str) -> String {
+    let host_port = host_port_of(api_base_url);
+    format!("https://{host_port}/#v1:0:18:4:::::::")
 }
 
 #[cfg(test)]
@@ -77,5 +96,19 @@ mod tests {
         // window — better than the default which can be tiny.
         let url = build_novnc_url("https://x:8006", "n", 1, GuestType::Qemu);
         assert!(url.contains("resize=scale"));
+    }
+
+    #[test]
+    fn token_page_url_shares_host_port_with_api() {
+        let url = token_page_url("https://pve1.lan:8006");
+        assert!(url.starts_with("https://pve1.lan:8006/#"));
+        assert!(url.contains("#v1:"));
+    }
+
+    #[test]
+    fn token_page_url_strips_scheme_and_trailing_path() {
+        let url = token_page_url("https://pve.local:8006/api2/json");
+        assert!(url.starts_with("https://pve.local:8006/#"));
+        assert!(!url.contains("/api2/json"));
     }
 }

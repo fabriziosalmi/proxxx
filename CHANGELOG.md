@@ -12,6 +12,26 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-26
+
+Headline: **Consumer-driven gateway + helpers — the gaps the proxima desktop UI hit, closed.** A batch of additive library-API surface driven by real proxima usage: role-management write methods, a shared-storage flag, and three helpers proxima had reimplemented. **No CLI / MCP / config contract change** (one additive `--format json` field on storage status); these let proxima drop hand-rolled workarounds and route through proxxx's rate-limiter, TLS pinning, and auth instead.
+
+### Added (library API — `ProxmoxGateway`)
+
+- **Role CRUD** — `create_role(roleid, privs)` (`POST /access/roles`), `update_role(roleid, privs, append)` (`PUT /access/roles/{roleid}`; `append` toggles replace-vs-extend of the privilege set), and `delete_role(roleid)` (`DELETE`). Completes the access-control write surface — `create/update/delete_user`, `modify_acl`, and token create/revoke already shipped, so realms are now the only read-only access family left. Built-in roles and ACL-referenced roles are refused PVE-side.
+
+### Added (library API — helpers)
+
+- **`wsterm::humanize_error(raw)` / `humanize_error_hint(raw)`** — map raw termproxy / websocket / vncproxy failures (LXC-console attach, connection-reset, TLS-handshake, ticket-rejection, timeout) to sysadmin-facing hints. proxxx generates these errors, so proxxx decorates them — one mapping shared across CLI, TUI, and embedding consumers instead of each re-deriving it.
+- **`config::write_token_secret(profile, secret)` + `config::token_secret_path(profile)` / `config::secrets_dir()`** — an atomic, `0600` writer for a profile's token-secret file (`<config_dir>/secrets/<profile>.token`, honoring `PROXXX_CONFIG`), completing the read/write symmetry with `resolve_token_secret` (which already enforced `0600` on read). Perms are set before the rename so the secret is never briefly world-readable.
+- **`handoff::token_page_url(api_base)`** — deep-link builder into the PVE web-UI API-token panel, alongside the existing `build_novnc_url` (host:port extraction is now shared between them). The PVE-version-specific `#v1:…` route lives in proxxx so consumers don't hard-code it.
+
+### Added (`--format json`, additive)
+
+- **`shared` on storage status** (`StoragePool`) — surfaces PVE's per-node `shared` flag (NFS/Ceph/PBS = `1`) from `/nodes/{node}/storage` and `/cluster/resources`, so consumers dedup cluster-wide pools exactly instead of guessing from identical per-node usage totals.
+
+All changes are additive (no breaking CLI/JSON/config/MCP change). 13 new unit tests: storage `shared` deserialization (present + absent), role `POST`/`PUT`(`append=1`)/`DELETE` wire-paths, the five humanize patterns + passthrough, the token-secret `0600` round-trip + path convention, and the token-page URL builder.
+
 ## [0.10.0] — 2026-06-25
 
 Headline: **PCI + USB passthrough-as-code — cluster resource mappings (`/cluster/mapping`) are now a writable GitOps state family.** Declare which physical GPU / NIC / USB device a guest may bind to, version it in git, and converge it like any other state. New `--resource` tokens `mappings` / `mappings-pci` / `mappings-usb` join the loop as the **ninth and tenth** state families. This is the epic-#74 economic pattern applied to a PVE surface that already shipped full CRUD — no new HTTP, all the leverage.

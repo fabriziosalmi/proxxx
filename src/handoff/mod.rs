@@ -18,5 +18,5 @@ pub mod novnc;
 pub mod spice;
 
 pub use launcher::{open_spice_vv, open_with_default, which};
-pub use novnc::build_novnc_url;
+pub use novnc::{build_novnc_url, token_page_url};
 pub use spice::{write_vv_at, write_vv_file};

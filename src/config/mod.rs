@@ -1,7 +1,7 @@
 pub mod watcher;
 pub use watcher::ConfigHandle;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// Profile configuration loaded from TOML
@@ -887,6 +887,59 @@ pub fn resolved_config_path() -> std::path::PathBuf {
     config_path()
 }
 
+/// Directory holding per-profile secret files: `<config_dir>/secrets/`.
+/// Honors the `PROXXX_CONFIG` override (its parent is the config dir).
+#[must_use]
+pub fn secrets_dir() -> std::path::PathBuf {
+    let mut dir = resolved_config_path()
+        .parent()
+        .map_or_else(dirs_fallback, std::path::Path::to_path_buf);
+    dir.push("secrets");
+    dir
+}
+
+/// Canonical path for a profile's token-secret file:
+/// `<config_dir>/secrets/<profile>.token`. Point a profile's
+/// `token_secret_file = "..."` here so [`Config::resolve_token_secret`]
+/// (which enforces 0600) reads it back.
+#[must_use]
+pub fn token_secret_path(profile: &str) -> std::path::PathBuf {
+    secrets_dir().join(format!("{profile}.token"))
+}
+
+/// Write a profile's token secret to [`token_secret_path`] with `0600`
+/// perms on Unix, atomically (temp file + rename; perms set BEFORE the
+/// rename so the secret is never briefly group/world-readable). Returns
+/// the path so the caller can record it as `token_secret_file`. The
+/// companion reader is [`Config::resolve_token_secret`], which refuses
+/// anything looser than 0600.
+pub fn write_token_secret(profile: &str, secret: &str) -> Result<std::path::PathBuf> {
+    write_secret_file(&token_secret_path(profile), secret)
+}
+
+/// Inner writer, split out so tests can exercise the atomic-write + 0600
+/// mechanics against an explicit path without touching the global
+/// `PROXXX_CONFIG`-derived location.
+fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<std::path::PathBuf> {
+    let dir = path
+        .parent()
+        .context("token-secret path has no parent directory")?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating secrets dir {}", dir.display()))?;
+    let tmp = path.with_extension("token.tmp");
+    std::fs::write(&tmp, secret.as_bytes())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting 0600 on {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    Ok(path.to_path_buf())
+}
+
 /// Load configuration from TOML file. Errors carry a typed
 /// [`ConfigError`] through anyhow so main.rs can map them to exit
 /// code `3` ("Configuration error") instead of the generic `1`.
@@ -1211,5 +1264,43 @@ mod config_error_tests {
         let msg = format!("{e}");
         assert!(msg.contains("Run `proxxx init`"), "got: {msg}");
         assert!(msg.contains("/var/empty/config.toml"));
+    }
+}
+
+#[cfg(test)]
+mod secret_file_tests {
+    use super::*;
+
+    #[test]
+    fn token_secret_path_uses_secrets_subdir_and_profile() {
+        let p = token_secret_path("pve");
+        assert!(
+            p.ends_with("secrets/pve.token"),
+            "unexpected path: {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn write_secret_file_round_trips_with_0600_and_no_temp_left() {
+        let dir = std::env::temp_dir().join(format!("proxxx-secret-test-{}", std::process::id()));
+        let path = dir.join("pve.token");
+        let written = write_secret_file(&path, "s3cr3t-token-value").expect("write secret");
+        assert_eq!(written, path);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "s3cr3t-token-value"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "secret file must be 0600");
+        }
+        assert!(
+            !path.with_extension("token.tmp").exists(),
+            "temp file leaked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

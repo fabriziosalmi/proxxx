@@ -979,6 +979,22 @@ pub trait ProxmoxGateway: Send + Sync {
         delete: bool,
     ) -> Result<()>;
 
+    /// Create a role. `privs` is a comma-separated privilege list
+    /// (e.g. `"VM.Audit,VM.PowerMgmt"`). PVE rejects an empty `privs`,
+    /// so pass at least one privilege.
+    async fn create_role(&self, roleid: &str, privs: &str) -> Result<()>;
+
+    /// Modify a role's privileges. PVE REPLACES the set by default;
+    /// pass `append = true` to add to the existing privileges instead.
+    /// Built-in roles (`Administrator`, `PVEAuditor`, …) can't be
+    /// modified — PVE refuses.
+    async fn update_role(&self, roleid: &str, privs: &str, append: bool) -> Result<()>;
+
+    /// Delete a role. PVE refuses if the role is built-in or still
+    /// referenced by an ACL entry — revoke those grants first via
+    /// `modify_acl` with `delete = true`.
+    async fn delete_role(&self, roleid: &str) -> Result<()>;
+
     // ── Hardware inventory (feature #4) ─────────────────
     /// List PCI devices visible to a node, including IOMMU group ids.
     /// Read-only — `GET /nodes/{node}/hardware/pci`.

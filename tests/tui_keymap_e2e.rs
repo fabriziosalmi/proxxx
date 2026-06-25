@@ -111,6 +111,7 @@ fn local_storage() -> StoragePool {
         active: true,
         storage_type: "dir".to_string(),
         content: "iso,vztmpl,backup".to_string(),
+        shared: false,
     }
 }
 

@@ -14,6 +14,12 @@ pub struct StoragePool {
     #[serde(deserialize_with = "deserialize_bool_from_int")]
     pub active: bool,
     pub content: String,
+    /// 1 = storage visible to every node (shared NFS/Ceph/PBS). PVE
+    /// returns this in `/nodes/{node}/storage` and `/cluster/resources`;
+    /// consumers dedup cluster-wide pools with it instead of guessing
+    /// from identical per-node usage totals.
+    #[serde(default, deserialize_with = "deserialize_bool_from_int")]
+    pub shared: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,5 +103,31 @@ impl StorageContent {
     #[must_use]
     pub fn filename(&self) -> &str {
         self.volid.rsplit('/').next().unwrap_or(&self.volid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_pool_reads_shared_flag_from_int() {
+        // PVE returns `shared` as 0/1 in storage status; a shared NFS/
+        // Ceph mount is 1, a node-local `dir`/`lvm` is 0.
+        let shared: StoragePool =
+            serde_json::from_str(r#"{"storage":"cephfs","type":"cephfs","shared":1}"#).unwrap();
+        assert!(shared.shared);
+        let local: StoragePool =
+            serde_json::from_str(r#"{"storage":"local","type":"dir","shared":0}"#).unwrap();
+        assert!(!local.shared);
+    }
+
+    #[test]
+    fn storage_pool_shared_defaults_false_when_absent() {
+        // Some PVE endpoints omit `shared` for purely local storages —
+        // a missing key must deserialize to false, not error.
+        let pool: StoragePool =
+            serde_json::from_str(r#"{"storage":"local","type":"dir"}"#).unwrap();
+        assert!(!pool.shared);
     }
 }
