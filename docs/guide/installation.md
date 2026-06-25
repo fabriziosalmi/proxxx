@@ -20,7 +20,7 @@ ships **three layers of artifact verification** for every tarball:
 
 ```sh
 TARGET=x86_64-unknown-linux-musl     # or aarch64-apple-darwin
-VERSION=0.1.7
+VERSION=$(gh release view --repo fabriziosalmi/proxxx --json tagName -q .tagName | sed 's/^v//')
 
 gh release download v${VERSION} --repo fabriziosalmi/proxxx \
   --pattern "*-${TARGET}.tar.gz" \

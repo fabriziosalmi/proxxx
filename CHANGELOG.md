@@ -12,6 +12,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-25
+
+Headline: **The GitOps controller, complete — `reconcile {run,converge}` + an unmanned drift-watch that self-heals.** Continuous reconciliation closes end to end: drift *detection* (Layers 1–2 — `reconcile run`, the `watch` daemon pillar, drift → Prometheus + MCP) and drift *convergence* (Layer 3 — `reconcile converge` + the opt-in unmanned `auto_converge` daemon) ship together, making "GitOps for Proxmox" a first-class workflow: `git push` → production converges, behind the same Severe-risk pre-flight gate that guards `state apply` — which the unmanned loop **never** overrides. Also the first release built + distributed through the new signed Debian `.deb` packages and the Homebrew tap.
+
 ### Added
 
 - **`reconcile converge` + unmanned `auto_converge` — the GitOps controller's WRITE half (continuous reconciliation, Layer 3).** Closes the loop: detection (Layers 1–2) now has a converge counterpart that mutates live state toward the declared source. Two surfaces over one shared core (`state::converge`):
