@@ -18,7 +18,7 @@ material; we link to it but don't restate it.
 
 ```bash
 TARGET=x86_64-unknown-linux-musl   # or aarch64-apple-darwin
-VERSION=0.1.6                      # check the latest at /releases
+VERSION=$(gh release view --repo fabriziosalmi/proxxx --json tagName -q .tagName | sed 's/^v//')  # latest tag
 gh release download v${VERSION} \
   --repo fabriziosalmi/proxxx \
   --pattern "*-${TARGET}.tar.gz" \
