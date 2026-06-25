@@ -117,6 +117,16 @@ pub enum StateRisk {
     /// group-direction rule that references it.
     FirewallGroupDelete { group: String },
 
+    /// Delete of a PCI passthrough resource mapping. Severe UNCONDITIONALLY:
+    /// proxxx doesn't model which guests reference it (`hostpciN: mapping=<id>`),
+    /// so it cannot prove the safe case — a guest bound to it loses its device
+    /// on next start and hard-fails migration.
+    MappingPciDelete { id: String },
+
+    /// Delete of a USB passthrough resource mapping. Severe for the same reason
+    /// as PCI (guests reference it via `usbN: mapping=<id>`, unmodelled here).
+    MappingUsbDelete { id: String },
+
     /// Delete of a notification matcher. Events that matched it stop
     /// being routed to their targets — alerting silently goes quiet
     /// (no error, the notifications just stop arriving).
@@ -175,6 +185,8 @@ impl StateRisk {
             | Self::StorageDeleteShared { .. }
             | Self::FirewallDisabled
             | Self::FirewallGroupDelete { .. }
+            | Self::MappingPciDelete { .. }
+            | Self::MappingUsbDelete { .. }
             | Self::HaRuleStrictChange { .. }
             | Self::HaResourceDelete { .. } => RiskLevel::Severe,
             Self::StoragePropertyChange { .. }
@@ -256,6 +268,16 @@ impl StateRisk {
             Self::FirewallGroupDelete { group } => format!(
                 "delete security group `{group}` — drops its rules \
                  (unrecoverable here) and breaks rules that reference it"
+            ),
+            Self::MappingPciDelete { id } => format!(
+                "delete PCI passthrough mapping `{id}` — any guest with \
+                 `hostpciN: mapping={id}` loses its device on next start and \
+                 hard-fails migration; proxxx cannot see which guests reference it"
+            ),
+            Self::MappingUsbDelete { id } => format!(
+                "delete USB passthrough mapping `{id}` — any guest with \
+                 `usbN: mapping={id}` loses its device; proxxx cannot see which \
+                 guests reference it"
             ),
             Self::NotificationMatcherDelete { name } => format!(
                 "delete notification matcher `{name}` — events it matched \
@@ -447,6 +469,16 @@ fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
         (ChangeKind::Delete, "firewall_group") => {
             out.push(StateRisk::FirewallGroupDelete {
                 group: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Delete, "mapping_pci") => {
+            out.push(StateRisk::MappingPciDelete {
+                id: change.identity.clone(),
+            });
+        }
+        (ChangeKind::Delete, "mapping_usb") => {
+            out.push(StateRisk::MappingUsbDelete {
+                id: change.identity.clone(),
             });
         }
         (ChangeKind::Delete, "notification_matcher") => {
@@ -912,6 +944,26 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].level(), RiskLevel::Severe);
         assert!(matches!(&g[0], StateRisk::FirewallGroupDelete { group } if group == "web-tier"));
+    }
+
+    #[test]
+    fn mapping_pci_delete_is_severe() {
+        // proxxx can't see which guests reference a mapping, so delete is
+        // unconditionally Severe (a bound guest loses its device on next start).
+        let live = sample_live();
+        let r = assess(&[delete_change("mapping_pci", "gpu-rtx")], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Severe);
+        assert!(matches!(&r[0], StateRisk::MappingPciDelete { id } if id == "gpu-rtx"));
+    }
+
+    #[test]
+    fn mapping_usb_delete_is_severe() {
+        let live = sample_live();
+        let r = assess(&[delete_change("mapping_usb", "yubikey")], &live);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].level(), RiskLevel::Severe);
+        assert!(matches!(&r[0], StateRisk::MappingUsbDelete { id } if id == "yubikey"));
     }
 
     #[test]

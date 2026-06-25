@@ -26,7 +26,7 @@ use crate::api::types::{
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl,
     FirewallIpsetCidrDecl, FirewallIpsetDecl, FirewallOptionsDecl, HaResourceDecl, HaRuleDecl,
-    NotificationMatcherDecl, PoolDecl, StateMeta, StorageDecl,
+    MappingPciDecl, MappingUsbDecl, NotificationMatcherDecl, PoolDecl, StateMeta, StorageDecl,
 };
 
 /// Which resource families to export. Parsed from the CLI `--resource`
@@ -63,6 +63,10 @@ pub enum Resource {
     /// migrated it to rules, and we don't ship two parallel families for
     /// the same desired-state surface.
     HaRules,
+    /// PCI passthrough resource mappings (`/cluster/mapping/pci`).
+    MappingsPci,
+    /// USB passthrough resource mappings (`/cluster/mapping/usb`).
+    MappingsUsb,
 }
 
 impl Resource {
@@ -80,9 +84,13 @@ impl Resource {
             "notifications" => Ok(vec![Self::Notifications]),
             "ha-resources" => Ok(vec![Self::HaResources]),
             "ha-rules" => Ok(vec![Self::HaRules]),
+            "mappings-pci" => Ok(vec![Self::MappingsPci]),
+            "mappings-usb" => Ok(vec![Self::MappingsUsb]),
+            // Umbrella selector: both passthrough-mapping families.
+            "mappings" => Ok(vec![Self::MappingsPci, Self::MappingsUsb]),
             "all" => Ok(Self::all()),
             other => anyhow::bail!(
-                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | notifications | ha-resources | ha-rules | all)"
+                "unknown resource '{other}' (valid: pools | acl | storage | backup-jobs | firewall-cluster | notifications | ha-resources | ha-rules | mappings | mappings-pci | mappings-usb | all)"
             ),
         }
     }
@@ -107,6 +115,10 @@ impl Resource {
             // resource SIDs, so creates flow resources-then-rules.
             Self::HaResources,
             Self::HaRules,
+            // Mappings reference nothing and are referenced only by guests (not
+            // a state family here), so order is free — newest families last.
+            Self::MappingsPci,
+            Self::MappingsUsb,
         ]
     }
 
@@ -122,6 +134,8 @@ impl Resource {
             Self::Notifications => "notifications",
             Self::HaResources => "ha-resources",
             Self::HaRules => "ha-rules",
+            Self::MappingsPci => "mappings-pci",
+            Self::MappingsUsb => "mappings-usb",
         }
     }
 }
@@ -152,6 +166,12 @@ pub trait StateReadView: Send + Sync {
     async fn list_notification_matchers_view(&self) -> Result<Vec<NotificationMatcher>>;
     async fn list_ha_resources_view(&self) -> Result<Vec<HaResource>>;
     async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>>;
+    async fn list_cluster_mapping_pci_view(
+        &self,
+    ) -> Result<Vec<crate::api::types::ClusterMappingPci>>;
+    async fn list_cluster_mapping_usb_view(
+        &self,
+    ) -> Result<Vec<crate::api::types::ClusterMappingUsb>>;
     async fn get_api_version_view(&self) -> Result<ApiVersion>;
 }
 
@@ -202,6 +222,16 @@ where
     async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>> {
         crate::api::ProxmoxGateway::list_ha_rules(self).await
     }
+    async fn list_cluster_mapping_pci_view(
+        &self,
+    ) -> Result<Vec<crate::api::types::ClusterMappingPci>> {
+        crate::api::ProxmoxGateway::list_cluster_mapping_pci(self).await
+    }
+    async fn list_cluster_mapping_usb_view(
+        &self,
+    ) -> Result<Vec<crate::api::types::ClusterMappingUsb>> {
+        crate::api::ProxmoxGateway::list_cluster_mapping_usb(self).await
+    }
     async fn get_api_version_view(&self) -> Result<ApiVersion> {
         crate::api::ProxmoxGateway::get_api_version(self).await
     }
@@ -239,6 +269,8 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         notification_matchers: Vec::new(),
         ha_resources: Vec::new(),
         ha_rules: Vec::new(),
+        mappings_pci: Vec::new(),
+        mappings_usb: Vec::new(),
     };
 
     for r in resources {
@@ -291,6 +323,16 @@ pub async fn export_state<C: StateReadView + ?Sized>(
                 state.ha_rules = export_ha_rules(client)
                     .await
                     .with_context(|| "exporting HA rules")?;
+            }
+            Resource::MappingsPci => {
+                state.mappings_pci = export_mappings_pci(client)
+                    .await
+                    .with_context(|| "exporting PCI mappings")?;
+            }
+            Resource::MappingsUsb => {
+                state.mappings_usb = export_mappings_usb(client)
+                    .await
+                    .with_context(|| "exporting USB mappings")?;
             }
         }
     }
@@ -480,6 +522,49 @@ async fn export_firewall_aliases<C: StateReadView + ?Sized>(
             name: a.name,
             cidr: a.cidr,
             comment: a.comment,
+        })
+        .collect())
+}
+
+/// Read PCI passthrough mappings → `Vec<MappingPciDecl>`. Sorted by `id`, each
+/// `map` entry list sorted, `digest` dropped — all for diff-stability.
+async fn export_mappings_pci<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<MappingPciDecl>> {
+    let mut m = client
+        .list_cluster_mapping_pci_view()
+        .await
+        .context("listing PCI mappings")?;
+    m.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(m.into_iter()
+        .map(|p| {
+            let mut map = p.map;
+            map.sort();
+            MappingPciDecl {
+                id: p.id,
+                description: p.description,
+                mdev: p.mdev,
+                map,
+            }
+        })
+        .collect())
+}
+
+/// Read USB passthrough mappings → `Vec<MappingUsbDecl>`. Sorted by `id`, `map`
+/// sorted, `digest` dropped.
+async fn export_mappings_usb<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<MappingUsbDecl>> {
+    let mut m = client
+        .list_cluster_mapping_usb_view()
+        .await
+        .context("listing USB mappings")?;
+    m.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(m.into_iter()
+        .map(|u| {
+            let mut map = u.map;
+            map.sort();
+            MappingUsbDecl {
+                id: u.id,
+                description: u.description,
+                map,
+            }
         })
         .collect())
 }
@@ -826,6 +911,8 @@ mod tests {
                 Resource::Notifications,
                 Resource::HaResources,
                 Resource::HaRules,
+                Resource::MappingsPci,
+                Resource::MappingsUsb,
             ]
         );
         // `parse("all")` and `Resource::all()` must stay in lockstep —
@@ -851,6 +938,8 @@ mod tests {
             Resource::Notifications,
             Resource::HaResources,
             Resource::HaRules,
+            Resource::MappingsPci,
+            Resource::MappingsUsb,
         ] {
             assert!(all.contains(&r), "Resource::all() is missing {r:?}");
         }
@@ -915,6 +1004,8 @@ mod tests {
         notif_matchers: Vec<NotificationMatcher>,
         ha_resources: Vec<HaResource>,
         ha_rules: Vec<HaRule>,
+        mapping_pci: Vec<crate::api::types::ClusterMappingPci>,
+        mapping_usb: Vec<crate::api::types::ClusterMappingUsb>,
     }
 
     #[async_trait]
@@ -963,6 +1054,16 @@ mod tests {
         }
         async fn list_ha_rules_view(&self) -> Result<Vec<HaRule>> {
             Ok(self.ha_rules.clone())
+        }
+        async fn list_cluster_mapping_pci_view(
+            &self,
+        ) -> Result<Vec<crate::api::types::ClusterMappingPci>> {
+            Ok(self.mapping_pci.clone())
+        }
+        async fn list_cluster_mapping_usb_view(
+            &self,
+        ) -> Result<Vec<crate::api::types::ClusterMappingUsb>> {
+            Ok(self.mapping_usb.clone())
         }
         async fn get_api_version_view(&self) -> Result<ApiVersion> {
             Ok(ApiVersion {

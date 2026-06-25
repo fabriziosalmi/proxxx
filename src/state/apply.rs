@@ -46,8 +46,8 @@ use crate::api::types::{Pool, PoolDetails};
 use crate::state::diff::{Change, ChangeKind};
 use crate::state::model::{
     AclDecl, BackupJobDecl, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetCidrDecl,
-    FirewallIpsetDecl, FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, NotificationMatcherDecl,
-    PoolDecl, StorageDecl,
+    FirewallIpsetDecl, FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, MappingPciDecl,
+    MappingUsbDecl, NotificationMatcherDecl, PoolDecl, StorageDecl,
 };
 
 /// Options controlling apply behaviour.
@@ -182,6 +182,14 @@ pub trait StateWriteView: Send + Sync {
     async fn create_ha_resource_view(&self, params: &[(&str, &str)]) -> Result<()>;
     async fn update_ha_resource_view(&self, sid: &str, params: &[(&str, &str)]) -> Result<()>;
     async fn delete_ha_resource_view(&self, sid: &str) -> Result<()>;
+
+    // ── Resource mappings (PCI / USB passthrough, /cluster/mapping) ──
+    async fn create_mapping_pci_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_mapping_pci_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_mapping_pci_view(&self, id: &str) -> Result<()>;
+    async fn create_mapping_usb_view(&self, params: &[(&str, &str)]) -> Result<()>;
+    async fn update_mapping_usb_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()>;
+    async fn delete_mapping_usb_view(&self, id: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -317,6 +325,25 @@ where
     async fn delete_ha_resource_view(&self, sid: &str) -> Result<()> {
         crate::api::ProxmoxGateway::delete_ha_resource(self, sid).await
     }
+
+    async fn create_mapping_pci_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_cluster_mapping_pci(self, params).await
+    }
+    async fn update_mapping_pci_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_cluster_mapping_pci(self, id, params).await
+    }
+    async fn delete_mapping_pci_view(&self, id: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_cluster_mapping_pci(self, id).await
+    }
+    async fn create_mapping_usb_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::create_cluster_mapping_usb(self, params).await
+    }
+    async fn update_mapping_usb_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+        crate::api::ProxmoxGateway::update_cluster_mapping_usb(self, id, params).await
+    }
+    async fn delete_mapping_usb_view(&self, id: &str) -> Result<()> {
+        crate::api::ProxmoxGateway::delete_cluster_mapping_usb(self, id).await
+    }
 }
 
 /// Apply a list of changes, in order, against a live cluster.
@@ -390,6 +417,12 @@ async fn apply_one<C: StateWriteView + ?Sized>(client: &C, change: &Change) -> A
         ("firewall_alias", ChangeKind::Create) => apply_fw_alias_create(client, change).await,
         ("firewall_alias", ChangeKind::Update) => apply_fw_alias_update(client, change).await,
         ("firewall_alias", ChangeKind::Delete) => apply_fw_alias_delete(client, change).await,
+        ("mapping_pci", ChangeKind::Create) => apply_mapping_pci_create(client, change).await,
+        ("mapping_pci", ChangeKind::Update) => apply_mapping_pci_update(client, change).await,
+        ("mapping_pci", ChangeKind::Delete) => apply_mapping_pci_delete(client, change).await,
+        ("mapping_usb", ChangeKind::Create) => apply_mapping_usb_create(client, change).await,
+        ("mapping_usb", ChangeKind::Update) => apply_mapping_usb_update(client, change).await,
+        ("mapping_usb", ChangeKind::Delete) => apply_mapping_usb_delete(client, change).await,
         ("firewall_ipset", ChangeKind::Create) => apply_fw_ipset_create(client, change).await,
         ("firewall_ipset", ChangeKind::Update) => apply_fw_ipset_update(client, change).await,
         ("firewall_ipset", ChangeKind::Delete) => apply_fw_ipset_delete(client, change).await,
@@ -905,6 +938,99 @@ async fn apply_fw_alias_delete<C: StateWriteView + ?Sized>(
 ) -> Result<()> {
     let decl: FirewallAliasDecl = decode(change.before.as_ref(), "firewall alias")?;
     client.delete_cluster_firewall_alias_view(&decl.name).await
+}
+
+// ── Resource mappings (PCI / USB passthrough) ──────────────────────
+// Two SEPARATE param builders so the PCI-only `mdev` field can never leak into
+// a USB mapping (the rule-type-aware lesson from epic #74's HA rules). `id` is
+// the URL segment on update, never a body param; this family has no `type`
+// discriminator so the HA `type`-on-PUT trap does not apply.
+
+fn mapping_pci_params(decl: &MappingPciDecl, include_id: bool) -> Vec<(String, String)> {
+    let mut p: Vec<(String, String)> = Vec::new();
+    if include_id {
+        p.push(("id".to_string(), decl.id.clone()));
+    }
+    // Always send `description` (empty clears it on update) and `mdev` (so a
+    // true→false flip converges — PVE PUT keeps unspecified fields otherwise).
+    p.push(("description".to_string(), decl.description.clone()));
+    p.push((
+        "mdev".to_string(),
+        if decl.mdev { "1" } else { "0" }.to_string(),
+    ));
+    // `map` is a REPEATED form key (`map=…&map=…`), not a CSV.
+    for m in &decl.map {
+        p.push(("map".to_string(), m.clone()));
+    }
+    p
+}
+
+fn mapping_usb_params(decl: &MappingUsbDecl, include_id: bool) -> Vec<(String, String)> {
+    let mut p: Vec<(String, String)> = Vec::new();
+    if include_id {
+        p.push(("id".to_string(), decl.id.clone()));
+    }
+    p.push(("description".to_string(), decl.description.clone()));
+    for m in &decl.map {
+        p.push(("map".to_string(), m.clone()));
+    }
+    p
+}
+
+async fn apply_mapping_pci_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: MappingPciDecl = decode(change.after.as_ref(), "PCI mapping")?;
+    let params = mapping_pci_params(&decl, true);
+    client.create_mapping_pci_view(&borrow(&params)).await
+}
+
+async fn apply_mapping_pci_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: MappingPciDecl = decode(change.after.as_ref(), "PCI mapping")?;
+    let params = mapping_pci_params(&after, false);
+    client
+        .update_mapping_pci_view(&after.id, &borrow(&params))
+        .await
+}
+
+async fn apply_mapping_pci_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: MappingPciDecl = decode(change.before.as_ref(), "PCI mapping")?;
+    client.delete_mapping_pci_view(&decl.id).await
+}
+
+async fn apply_mapping_usb_create<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: MappingUsbDecl = decode(change.after.as_ref(), "USB mapping")?;
+    let params = mapping_usb_params(&decl, true);
+    client.create_mapping_usb_view(&borrow(&params)).await
+}
+
+async fn apply_mapping_usb_update<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let after: MappingUsbDecl = decode(change.after.as_ref(), "USB mapping")?;
+    let params = mapping_usb_params(&after, false);
+    client
+        .update_mapping_usb_view(&after.id, &borrow(&params))
+        .await
+}
+
+async fn apply_mapping_usb_delete<C: StateWriteView + ?Sized>(
+    client: &C,
+    change: &Change,
+) -> Result<()> {
+    let decl: MappingUsbDecl = decode(change.before.as_ref(), "USB mapping")?;
+    client.delete_mapping_usb_view(&decl.id).await
 }
 
 fn fw_cidr_params(c: &FirewallIpsetCidrDecl) -> Vec<(String, String)> {
@@ -2201,6 +2327,60 @@ mod tests {
         // resource-affinity rule.
         assert!(!line.contains("\"nodes\""), "leak: {line}");
         assert!(!line.contains("\"strict\""), "leak: {line}");
+    }
+
+    #[tokio::test]
+    async fn mapping_pci_create_emits_mdev_and_repeated_map_usb_omits_mdev() {
+        // PCI create emits `mdev` + a REPEATED `map` key; USB create must NOT
+        // emit `mdev` (the PCI-only field can't leak into a USB mapping).
+        let pci = MappingPciDecl {
+            id: "gpu".into(),
+            description: "RTX".into(),
+            mdev: true,
+            map: vec![
+                "node=n1,path=0000:01:00.0,id=10de:2684".into(),
+                "node=n2,path=0000:02:00.0,id=10de:2684".into(),
+            ],
+        };
+        let c = RecordingClient::default();
+        let change = Change {
+            kind: ChangeKind::Create,
+            resource: "mapping_pci",
+            identity: "gpu".into(),
+            before: None,
+            after: Some(serde_json::to_value(&pci).unwrap()),
+        };
+        let out = apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(matches!(out[0].result, ApplyResult::Applied));
+        let line = &c.lines().await[0];
+        assert!(line.starts_with("create_mapping_pci"));
+        assert!(line.contains("\"mdev\""), "PCI must emit mdev: {line}");
+        assert!(
+            line.contains("0000:01:00.0") && line.contains("0000:02:00.0"),
+            "both map entries (repeated key) must be present: {line}"
+        );
+
+        let usb = MappingUsbDecl {
+            id: "yk".into(),
+            description: String::new(),
+            map: vec!["node=n1,path=1-2,id=1050:0407".into()],
+        };
+        let c2 = RecordingClient::default();
+        let change2 = Change {
+            kind: ChangeKind::Create,
+            resource: "mapping_usb",
+            identity: "yk".into(),
+            before: None,
+            after: Some(serde_json::to_value(&usb).unwrap()),
+        };
+        let out2 = apply(&c2, vec![change2], ApplyOptions::default()).await;
+        assert!(matches!(out2[0].result, ApplyResult::Applied));
+        let line2 = &c2.lines().await[0];
+        assert!(line2.starts_with("create_mapping_usb"));
+        assert!(
+            !line2.contains("\"mdev\""),
+            "leak: USB must not emit mdev: {line2}"
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,18 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-25
+
+Headline: **PCI + USB passthrough-as-code — cluster resource mappings (`/cluster/mapping`) are now a writable GitOps state family.** Declare which physical GPU / NIC / USB device a guest may bind to, version it in git, and converge it like any other state. New `--resource` tokens `mappings` / `mappings-pci` / `mappings-usb` join the loop as the **ninth and tenth** state families. This is the epic-#74 economic pattern applied to a PVE surface that already shipped full CRUD — no new HTTP, all the leverage.
+
+### Added (GitOps state family — cluster resource mappings)
+
+- **`mappings-pci`** (`/cluster/mapping/pci`) and **`mappings-usb`** (`/cluster/mapping/usb`), plus the **`mappings`** umbrella selector — full `state export` → `diff` → `apply` lifecycle. A mapping declares an `id`, an optional `description`, and a `map` list (one `node=<n>,path=<addr>,id=<vendor:device>` entry per node the device lives on); PCI mappings additionally carry `mdev` (mediated-device / vGPU). `map` is emitted as repeated form keys (PVE's array shape) and is byte-stable on round-trip.
+- **Pre-flight: a mapping delete is `Severe`** (`MappingPciDelete` / `MappingUsbDelete`), unconditionally — proxxx does not model which guests reference a mapping (`hostpciN: mapping=<id>` / `usbN: mapping=<id>`), so it cannot prove the safe case. A guest bound to a deleted mapping loses its device on next start and hard-fails migration; the gate refuses unmanned (the `auto_converge` daemon alerts for human review) and requires `--allow-risk` from a present operator.
+- **Rule-type-aware param builders** keep the PCI-only `mdev` field from ever leaking into a USB mapping (the field-leak lesson from epic #74's HA rules).
+
+Validated end-to-end against a live PVE 9.1.1 cluster (`tests/live/test_state_mappings.sh`, 7/7): create → export round-trip → `mdev`-leak guard → update → Severe-delete gate (exit 6, mappings intact) → operator override → in-sync. 3 new unit tests (the `mdev` leak guard + both Severe-delete assertions); the full suite is 1159 tests.
+
 ## [0.9.2] — 2026-06-25
 
 Headline: **Three additive `ProxmoxGateway` methods for the proxima desktop UI — ZFS pool detail, guest serial-device pre-flight, and guest disk-IO rate.** Library-API additions only — **no CLI / MCP / config change** (the user-facing contract is untouched). They let the proxima UI drop three direct-`reqwest` workarounds and route through proxxx's rate-limiter, TLS pinning, and auth-refresh instead.
