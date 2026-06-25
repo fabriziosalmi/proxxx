@@ -308,6 +308,37 @@ pub struct ZfsPool {
     pub health: String,
 }
 
+/// Per-pool ZFS detail (`GET /nodes/{node}/disks/zfs/{name}`). Carries the
+/// free-form `scan:` line (scrub progress / last-scrub epoch / error counters)
+/// and a FLATTENED vdev tree (PVE returns it nested; the gateway flattens it
+/// depth-first for ease of consumption).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZfsPoolDetail {
+    pub name: String,
+    /// `ONLINE` / `DEGRADED` / `FAULTED` / `UNAVAIL`.
+    pub state: String,
+    /// The full `scan:` line — parse scrub progress / last-scrub epoch out of
+    /// this; the structured `children` below are a bonus.
+    pub scan: String,
+    pub errors: String,
+    /// Every vdev group and leaf device, flattened from PVE's nested tree.
+    pub children: Vec<ZfsVdev>,
+}
+
+/// One node in a ZFS pool's device tree — a vdev group (mirror/raidz) or a
+/// leaf device. `read`/`write`/`cksum` are the `zpool status` error counters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZfsVdev {
+    pub name: String,
+    pub state: String,
+    pub read: u64,
+    pub write: u64,
+    pub cksum: u64,
+    pub msg: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AptInstalledPackage {
