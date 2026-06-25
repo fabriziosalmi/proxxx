@@ -178,4 +178,24 @@ impl StateWriteView for RecordingClient {
     async fn delete_ha_resource_view(&self, sid: &str) -> Result<()> {
         self.record(format!("delete_ha_resource({sid})")).await
     }
+    async fn create_mapping_pci_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        self.record(format!("create_mapping_pci {params:?}")).await
+    }
+    async fn update_mapping_pci_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+        self.record(format!("update_mapping_pci({id}) {params:?}"))
+            .await
+    }
+    async fn delete_mapping_pci_view(&self, id: &str) -> Result<()> {
+        self.record(format!("delete_mapping_pci({id})")).await
+    }
+    async fn create_mapping_usb_view(&self, params: &[(&str, &str)]) -> Result<()> {
+        self.record(format!("create_mapping_usb {params:?}")).await
+    }
+    async fn update_mapping_usb_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
+        self.record(format!("update_mapping_usb({id}) {params:?}"))
+            .await
+    }
+    async fn delete_mapping_usb_view(&self, id: &str) -> Result<()> {
+        self.record(format!("delete_mapping_usb({id})")).await
+    }
 }

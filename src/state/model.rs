@@ -146,6 +146,16 @@ pub struct ClusterState {
     /// deliberately NOT exported (would churn the TOML on every read).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ha_rules: Vec<HaRuleDecl>,
+
+    /// PCI passthrough resource mappings (`/cluster/mapping/pci`). Identity is
+    /// `id`. Declaring a GPU/device map in git lets `state apply` replicate it
+    /// identically across nodes and detect drift (a device whose path moved).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mappings_pci: Vec<MappingPciDecl>,
+
+    /// USB passthrough resource mappings (`/cluster/mapping/usb`). Identity `id`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mappings_usb: Vec<MappingUsbDecl>,
 }
 
 /// Metadata header emitted by the export layer. Captures *which*
@@ -348,6 +358,43 @@ pub struct FirewallAliasDecl {
     /// Free-text comment.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub comment: String,
+}
+
+/// One PCI passthrough resource mapping (`/cluster/mapping/pci`). `id` is the
+/// identity. `map` is the per-node device list — each entry a literal PVE CSV
+/// `node=…,path=…,id=…[,iommugroup=…,subsystem-id=…]`. NOTE: `iommugroup` inside
+/// a map entry is host-DERIVED — a diff there means the hardware moved, not
+/// config drift. `mdev` is the only PCI-specific top-level field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MappingPciDecl {
+    /// Mapping id — referenced from a guest as `hostpciN: mapping=<id>`. Identity.
+    pub id: String,
+    /// Free-text description.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Whether the mapped device(s) are mediated (mdev / vGPU).
+    #[serde(skip_serializing_if = "is_false")]
+    pub mdev: bool,
+    /// Per-node device entries (PVE CSV). Sorted on export for diff-stability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub map: Vec<String>,
+}
+
+/// One USB passthrough resource mapping (`/cluster/mapping/usb`). `id` is the
+/// identity; `map` is the per-node device list (`node=…,path=…,id=…`). No `mdev`
+/// (USB has no mediated-device concept).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MappingUsbDecl {
+    /// Mapping id — referenced from a guest as `usbN: mapping=<id>`. Identity.
+    pub id: String,
+    /// Free-text description.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Per-node device entries (PVE CSV). Sorted on export for diff-stability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub map: Vec<String>,
 }
 
 /// One cluster firewall IP set: a named collection of CIDRs.

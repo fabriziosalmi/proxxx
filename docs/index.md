@@ -33,7 +33,7 @@ features:
   - title: Pre-flight risk gate plus HITL
     details: 11 risk variants — running, long-uptime, locked, HA-managed, tagged prod, active net traffic, listening on service, many snapshots, backup age warning, no backup found, deep-check skipped — refuse destructive operations on guests that look like production unless overridden explicitly. Above that, a real Telegram round-trip with deny-on-timeout for any op marked destructive by policy. The same gate fires on `state apply` for non-empty pool deletes, root-role ACL deletes, shared-storage removal, and batches ≥ 50.
   - title: GitOps loop for Proxmox
-    details: '`proxxx state export` → `proxxx state diff` → `proxxx state apply` over eight state families — pools, ACL grants, cluster storage definitions, backup jobs, cluster firewall (options + aliases + IP sets + security groups), notification matchers, HA rules, and HA resources. Byte-stable TOML snapshots, structural diff with exit code 2 on drift (CI-gateable), and a converge step with `--dry-run`, `--prune`, `--continue-on-error`, `--allow-risk`, and `--interactive` per-Severe stdin prompts.'
+    details: '`proxxx state export` → `proxxx state diff` → `proxxx state apply` over ten state families — pools, ACL grants, cluster storage definitions, backup jobs, cluster firewall (options + aliases + IP sets + security groups), notification matchers, HA rules, HA resources, and PCI + USB passthrough device mappings. Byte-stable TOML snapshots, structural diff with exit code 2 on drift (CI-gateable), and a converge step with `--dry-run`, `--prune`, `--continue-on-error`, `--allow-risk`, and `--interactive` per-Severe stdin prompts.'
   - title: Incident lockdown
     details: '`proxxx incident freeze` raises a cluster-wide write kill-switch with TTL + audit log. Every `POST`/`PUT`/`DELETE` is refused with typed `FreezeRefusal` → exit code 8 until `proxxx incident thaw` or the TTL fires. Reads keep working. Designed for the "stop the bleeding" minute.'
 ---
@@ -144,8 +144,8 @@ proxxx serial 100 --node pve1           # raw termproxy WebSocket
 proxxx spice  100 --node pve1           # writes .vv (0600), launches remote-viewer
 proxxx novnc  100 --node pve1           # opens browser to web UI's noVNC
 
-# GitOps loop over 8 state families
-# (pools / ACL / storage / backup-jobs / firewall-cluster / notifications / ha-rules / ha-resources)
+# GitOps loop over 10 state families
+# (pools / ACL / storage / backup-jobs / firewall-cluster / notifications / ha-rules / ha-resources / mappings-pci / mappings-usb)
 proxxx state export > cluster.toml      # byte-stable TOML snapshot
 proxxx state diff cluster.toml          # exit 2 if drift (CI-gateable)
 proxxx state apply cluster.toml --dry-run

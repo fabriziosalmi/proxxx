@@ -40,8 +40,8 @@ use serde::Serialize;
 
 use crate::state::model::{
     AclDecl, BackupJobDecl, ClusterState, FirewallAliasDecl, FirewallGroupDecl, FirewallIpsetDecl,
-    FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, NotificationMatcherDecl, PoolDecl,
-    StorageDecl,
+    FirewallOptionsDecl, HaResourceDecl, HaRuleDecl, MappingPciDecl, MappingUsbDecl,
+    NotificationMatcherDecl, PoolDecl, StorageDecl,
 };
 
 /// Kind of mutation a change represents. `Create` + `Delete` are
@@ -118,6 +118,8 @@ pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     // tolerates 404 to keep the cleanup idempotent.
     diff_ha_resources(&declared.ha_resources, &live.ha_resources, &mut out);
     diff_ha_rules(&declared.ha_rules, &live.ha_rules, &mut out);
+    diff_mappings_pci(&declared.mappings_pci, &live.mappings_pci, &mut out);
+    diff_mappings_usb(&declared.mappings_usb, &live.mappings_usb, &mut out);
     out
 }
 
@@ -379,6 +381,106 @@ fn diff_firewall_options(
         before: live.and_then(|l| serde_json::to_value(l).ok()),
         after: serde_json::to_value(decl).ok(),
     });
+}
+
+fn diff_mappings_pci(declared: &[MappingPciDecl], live: &[MappingPciDecl], out: &mut Vec<Change>) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &MappingPciDecl> = live.iter().map(|m| (m.id.as_str(), m)).collect();
+    let decl_by: HashMap<&str, &MappingPciDecl> =
+        declared.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "mapping_pci",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "mapping_pci",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "mapping_pci",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+}
+
+fn diff_mappings_usb(declared: &[MappingUsbDecl], live: &[MappingUsbDecl], out: &mut Vec<Change>) {
+    use std::collections::HashMap;
+    let live_by: HashMap<&str, &MappingUsbDecl> = live.iter().map(|m| (m.id.as_str(), m)).collect();
+    let decl_by: HashMap<&str, &MappingUsbDecl> =
+        declared.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let mut deletes: Vec<_> = live_by
+        .keys()
+        .filter(|k| !decl_by.contains_key(*k))
+        .collect();
+    deletes.sort_unstable();
+    for k in deletes {
+        out.push(Change {
+            kind: ChangeKind::Delete,
+            resource: "mapping_usb",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: None,
+        });
+    }
+    let mut updates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| live_by.get(*k).is_some_and(|l| *l != decl_by[*k]))
+        .collect();
+    updates.sort_unstable();
+    for k in updates {
+        out.push(Change {
+            kind: ChangeKind::Update,
+            resource: "mapping_usb",
+            identity: (*k).to_string(),
+            before: serde_json::to_value(live_by[k]).ok(),
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
+    let mut creates: Vec<_> = decl_by
+        .keys()
+        .filter(|k| !live_by.contains_key(*k))
+        .collect();
+    creates.sort_unstable();
+    for k in creates {
+        out.push(Change {
+            kind: ChangeKind::Create,
+            resource: "mapping_usb",
+            identity: (*k).to_string(),
+            before: None,
+            after: serde_json::to_value(decl_by[k]).ok(),
+        });
+    }
 }
 
 fn diff_firewall_aliases(
