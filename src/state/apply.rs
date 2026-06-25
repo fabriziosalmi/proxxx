@@ -1430,6 +1430,7 @@ fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: &str) {
 mod tests {
     use super::*;
     use crate::state::diff::ChangeKind;
+    use crate::state::test_support::RecordingClient;
 
     #[test]
     fn split_pool_members_partitions_qemu_lxc_storage() {
@@ -1459,169 +1460,6 @@ mod tests {
         let b = vec!["qemu/100".to_string()];
         assert_eq!(members_diff(&a, &b), vec!["qemu/101".to_string()]);
         assert!(members_diff(&b, &a).is_empty());
-    }
-
-    /// In-process implementation of `StateWriteView` that records
-    /// every method call. Used by the dispatch tests below to verify
-    /// `apply` translates `Change` → API calls correctly.
-    #[derive(Default)]
-    struct RecordingClient {
-        log: tokio::sync::Mutex<Vec<String>>,
-        fail_on: Option<String>,
-    }
-
-    impl RecordingClient {
-        async fn record(&self, entry: String) -> Result<()> {
-            if let Some(fail) = &self.fail_on {
-                if entry.contains(fail) {
-                    return Err(anyhow::anyhow!("synthetic failure on {entry}"));
-                }
-            }
-            self.log.lock().await.push(entry);
-            Ok(())
-        }
-        async fn lines(&self) -> Vec<String> {
-            self.log.lock().await.clone()
-        }
-    }
-
-    #[async_trait]
-    impl StateWriteView for RecordingClient {
-        async fn list_pools_view(&self) -> Result<Vec<Pool>> {
-            Ok(vec![])
-        }
-        async fn get_pool_view(&self, _: &str) -> Result<PoolDetails> {
-            Ok(PoolDetails::default())
-        }
-        async fn create_pool_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_pool {params:?}")).await
-        }
-        async fn update_pool_view(&self, poolid: &str, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("update_pool({poolid}) {params:?}"))
-                .await
-        }
-        async fn delete_pool_view(&self, poolid: &str) -> Result<()> {
-            self.record(format!("delete_pool({poolid})")).await
-        }
-        async fn modify_acl_view(
-            &self,
-            path: &str,
-            roles: &str,
-            users: Option<&str>,
-            groups: Option<&str>,
-            tokens: Option<&str>,
-            propagate: bool,
-            delete: bool,
-        ) -> Result<()> {
-            self.record(format!(
-                "modify_acl path={path} roles={roles} users={users:?} groups={groups:?} tokens={tokens:?} propagate={propagate} delete={delete}"
-            ))
-            .await
-        }
-        async fn create_cluster_storage_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_storage {params:?}")).await
-        }
-        async fn update_cluster_storage_view(
-            &self,
-            storage: &str,
-            params: &[(&str, &str)],
-        ) -> Result<()> {
-            self.record(format!("update_storage({storage}) {params:?}"))
-                .await
-        }
-        async fn delete_cluster_storage_view(&self, storage: &str) -> Result<()> {
-            self.record(format!("delete_storage({storage})")).await
-        }
-        async fn create_backup_job_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_backup_job {params:?}")).await
-        }
-        async fn update_backup_job_view(&self, id: &str, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("update_backup_job({id}) {params:?}"))
-                .await
-        }
-        async fn delete_backup_job_view(&self, id: &str) -> Result<()> {
-            self.record(format!("delete_backup_job({id})")).await
-        }
-        async fn update_cluster_firewall_options_view(
-            &self,
-            params: &[(&str, &str)],
-        ) -> Result<()> {
-            self.record(format!("update_fw_options {params:?}")).await
-        }
-        async fn create_cluster_firewall_alias_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_fw_alias {params:?}")).await
-        }
-        async fn update_cluster_firewall_alias_view(
-            &self,
-            name: &str,
-            params: &[(&str, &str)],
-        ) -> Result<()> {
-            self.record(format!("update_fw_alias({name}) {params:?}"))
-                .await
-        }
-        async fn delete_cluster_firewall_alias_view(&self, name: &str) -> Result<()> {
-            self.record(format!("delete_fw_alias({name})")).await
-        }
-        async fn create_cluster_firewall_ipset_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_fw_ipset {params:?}")).await
-        }
-        async fn delete_cluster_firewall_ipset_view(&self, name: &str) -> Result<()> {
-            self.record(format!("delete_fw_ipset({name})")).await
-        }
-        async fn add_cluster_firewall_ipset_cidr_view(
-            &self,
-            name: &str,
-            params: &[(&str, &str)],
-        ) -> Result<()> {
-            self.record(format!("add_fw_cidr({name}) {params:?}")).await
-        }
-        async fn remove_cluster_firewall_ipset_cidr_view(
-            &self,
-            name: &str,
-            cidr: &str,
-        ) -> Result<()> {
-            self.record(format!("remove_fw_cidr({name}, {cidr})")).await
-        }
-        async fn create_cluster_firewall_group_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_fw_group {params:?}")).await
-        }
-        async fn delete_cluster_firewall_group_view(&self, group: &str) -> Result<()> {
-            self.record(format!("delete_fw_group({group})")).await
-        }
-        async fn create_notification_matcher_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_matcher {params:?}")).await
-        }
-        async fn update_notification_matcher_view(
-            &self,
-            name: &str,
-            params: &[(&str, &str)],
-        ) -> Result<()> {
-            self.record(format!("update_matcher({name}) {params:?}"))
-                .await
-        }
-        async fn delete_notification_matcher_view(&self, name: &str) -> Result<()> {
-            self.record(format!("delete_matcher({name})")).await
-        }
-        async fn create_ha_rule_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_ha_rule {params:?}")).await
-        }
-        async fn update_ha_rule_view(&self, rule: &str, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("update_ha_rule({rule}) {params:?}"))
-                .await
-        }
-        async fn delete_ha_rule_view(&self, rule: &str) -> Result<()> {
-            self.record(format!("delete_ha_rule({rule})")).await
-        }
-        async fn create_ha_resource_view(&self, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("create_ha_resource {params:?}")).await
-        }
-        async fn update_ha_resource_view(&self, sid: &str, params: &[(&str, &str)]) -> Result<()> {
-            self.record(format!("update_ha_resource({sid}) {params:?}"))
-                .await
-        }
-        async fn delete_ha_resource_view(&self, sid: &str) -> Result<()> {
-            self.record(format!("delete_ha_resource({sid})")).await
-        }
     }
 
     fn pool_create_change(poolid: &str, members: Vec<&str>) -> Change {
@@ -1727,10 +1565,7 @@ mod tests {
 
     #[tokio::test]
     async fn fail_fast_aborts_remaining_changes() {
-        let c = RecordingClient {
-            fail_on: Some("create_pool".into()),
-            ..Default::default()
-        };
+        let c = RecordingClient::failing_on("create_pool");
         let changes = vec![
             pool_create_change("p1", vec![]),
             pool_create_change("p2", vec![]),
@@ -1755,10 +1590,7 @@ mod tests {
 
     #[tokio::test]
     async fn continue_on_error_processes_every_change() {
-        let c = RecordingClient {
-            fail_on: Some("\"poolid\", \"p2\"".into()),
-            ..Default::default()
-        };
+        let c = RecordingClient::failing_on("\"poolid\", \"p2\"");
         let changes = vec![
             pool_create_change("p1", vec![]),
             pool_create_change("p2", vec![]),

@@ -50,6 +50,58 @@ pub enum ReconcileCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Converge the live cluster toward a desired-state source — the WRITE
+    /// half of reconcile. Resolves drift exactly like `reconcile run`, then
+    /// applies it with the same pre-flight safety gate as `state apply`.
+    /// Always rehearse with `--dry-run` first.
+    ///
+    /// Examples:
+    ///   proxxx reconcile converge --source ./state.toml --dry-run       # preview
+    ///   proxxx reconcile converge --source git@host:cluster.git          # apply, no deletes
+    ///   proxxx reconcile converge --source <src> --prune                 # apply + delete drift
+    ///   proxxx reconcile converge --source <src> --prune --interactive   # prompt per Severe
+    ///   proxxx reconcile converge --source <src> --prune --allow-risk    # bypass gate (CI)
+    Converge {
+        /// Desired-state source: a local file, a local directory, or a git URL
+        /// (shallow-cloned each run). Same semantics as `reconcile run`.
+        #[arg(long)]
+        source: String,
+
+        /// State file path within a directory / git-repo source. Ignored when
+        /// `--source` points directly at a file.
+        #[arg(long, default_value = "state.toml")]
+        path: PathBuf,
+
+        /// Preview only — never mutates. Every change reports as
+        /// `skipped (dry_run)`. Run this first on any new source.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Required to execute `delete` changes. Without it, deletes report as
+        /// `skipped (prune_policy)` — a safety interlock, opt in deliberately.
+        #[arg(long)]
+        prune: bool,
+
+        /// Don't halt on the first failure; attempt every change in order.
+        /// Risky if changes have ordering dependencies.
+        #[arg(long)]
+        continue_on_error: bool,
+
+        /// Override the pre-flight Severe-risk gate (exit 6 otherwise). Pass
+        /// only when the operator has reviewed the diff.
+        #[arg(long)]
+        allow_risk: bool,
+
+        /// Prompt `[y/N]` on stdin for every Severe-risk change. Pair with
+        /// `--allow-risk`. No stdin in CI — don't use it there.
+        #[arg(long)]
+        interactive: bool,
+
+        /// Emit the apply outcomes as a JSON array instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn execute_reconcile(
@@ -60,6 +112,30 @@ pub async fn execute_reconcile(
     match action {
         ReconcileCommand::Run { source, path, json } => {
             run(client, profile, &source, &path, json).await
+        }
+        ReconcileCommand::Converge {
+            source,
+            path,
+            dry_run,
+            prune,
+            continue_on_error,
+            allow_risk,
+            interactive,
+            json,
+        } => {
+            converge_cmd(
+                client,
+                profile,
+                &source,
+                &path,
+                dry_run,
+                prune,
+                continue_on_error,
+                allow_risk,
+                interactive,
+                json,
+            )
+            .await
         }
     }
 }
@@ -88,15 +164,122 @@ async fn run(
     Ok((Value::Null, exit))
 }
 
+/// `reconcile converge` — the WRITE half. Resolve drift from `source` exactly
+/// like `reconcile run`, then apply it through the shared converge core (same
+/// pre-flight safety gate as `state apply`). Exit codes mirror `state apply`:
+/// 0 ok, 2 any change Failed, 6 Severe-risk refusal, 8 read-only / freeze lock.
+// The six flag args mirror the `state apply` CLI surface 1:1 (dry_run / prune /
+// continue_on_error / allow_risk / interactive / json); bundling them into a
+// struct only to satisfy the lint would obscure that deliberate parallel.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+async fn converge_cmd(
+    client: &Arc<PxClient>,
+    profile: Option<&str>,
+    source: &str,
+    path: &Path,
+    dry_run: bool,
+    prune: bool,
+    continue_on_error: bool,
+    allow_risk: bool,
+    interactive: bool,
+    json: bool,
+) -> Result<(Value, i32)> {
+    let profile_label = profile.unwrap_or("default");
+    let audit_user = client.profile_config().user.clone();
+    let opts = state::apply::ApplyOptions {
+        dry_run,
+        prune,
+        continue_on_error,
+    };
+
+    let report = if interactive && !dry_run {
+        // Mirror `state apply`'s interactive flow: gate the FULL change set
+        // first (a Severe change without --allow-risk refuses here, exit 6),
+        // then prompt per-Severe, then apply the approved subset WITHOUT
+        // re-gating (`apply_and_audit`). Keeps stdin out of the shared core.
+        let (changes, live) =
+            compute_drift_with_live(client.as_ref(), profile_label, source, path).await?;
+        state::preflight::enforce_state_preflight(&changes, &live, allow_risk)?;
+        let approved = super::state::interactive_hitl_filter(&changes, &live);
+        state::converge::apply_and_audit(
+            client.as_ref(),
+            profile_label,
+            source,
+            approved,
+            opts,
+            &audit_user,
+        )
+        .await
+    } else {
+        state::converge::converge(
+            client.as_ref(),
+            profile_label,
+            source,
+            path,
+            opts,
+            allow_risk,
+            &audit_user,
+        )
+        .await?
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report.outcomes)?);
+    } else {
+        print_converge_text(source, profile_label, &report);
+    }
+
+    Ok((Value::Null, report.exit_code()))
+}
+
+/// Human-readable converge output: a per-outcome line (reusing `state apply`'s
+/// renderer so the eye correlates a diff line with the action) plus a tally.
+fn print_converge_text(source: &str, profile: &str, report: &state::converge::ConvergeReport) {
+    println!("reconcile converge — source {source} (profile {profile})");
+    println!();
+    if report.outcomes.is_empty() {
+        println!("  ✓ IN SYNC — live matches desired (0 changes)");
+        return;
+    }
+    for o in &report.outcomes {
+        println!("  {}", super::state::apply_summary_line(o));
+    }
+    println!();
+    println!(
+        "  → applied {} / failed {} / skipped {}",
+        report.applied, report.failed, report.skipped
+    );
+}
+
 /// Core drift computation, shared by the one-shot CLI (`reconcile run`) and
 /// the `reconcile watch` daemon pillar: resolve + read the desired-state
 /// source, export live state across every family, and diff. Read-only.
+///
+/// A thin wrapper over [`compute_drift_with_live`] that drops the live state —
+/// the detect-only callers don't need it. The converge core uses the tuple
+/// form so it can run the pre-flight risk gate without a second export.
 pub(crate) async fn compute_drift(
     client: &PxClient,
     profile: &str,
     source: &str,
     path: &Path,
 ) -> Result<Vec<Change>> {
+    Ok(compute_drift_with_live(client, profile, source, path)
+        .await?
+        .0)
+}
+
+/// Like [`compute_drift`] but also hands back the live [`state::model::ClusterState`]
+/// it exported. The converge core ([`crate::state::converge`]) needs `live` for the
+/// pre-flight risk assessment ([`crate::state::preflight::assess`]), and re-exporting
+/// it would double the cluster round-trips on every converge. Still read-only — this
+/// only *reads* live state; the caller decides whether to mutate.
+pub(crate) async fn compute_drift_with_live(
+    client: &PxClient,
+    profile: &str,
+    source: &str,
+    path: &Path,
+) -> Result<(Vec<Change>, state::model::ClusterState)> {
     let toml_str = load_desired_toml(source, path).await?;
     let declared: state::model::ClusterState = toml::from_str(&toml_str).with_context(|| {
         format!(
@@ -109,7 +292,8 @@ pub(crate) async fn compute_drift(
     let live =
         state::export::export_state(client, &state::export::Resource::all(), profile).await?;
 
-    Ok(state::diff::diff(&declared, &live))
+    let changes = state::diff::diff(&declared, &live);
+    Ok((changes, live))
 }
 
 /// One-line human summary of drift, for daemon logs + Telegram alerts.

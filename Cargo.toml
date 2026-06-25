@@ -283,6 +283,15 @@ match_wildcard_for_single_variants = "allow"
 format_push_string = "allow"
 significant_drop_tightening = "allow"
 
+# Visibility convention: proxxx marks crate-internal items `pub(crate)`
+# deliberately — as an intent signal ("this is a crate-internal API
+# surface") — even inside private modules where module privacy already
+# bounds them. `redundant_pub_crate` fights that convention, firing on
+# every such item (the shared `state::test_support` mock, the reconcile
+# drift helpers reused by `state::converge`, the state-apply renderers
+# reused by `reconcile converge`, …). We keep the explicit marker.
+redundant_pub_crate = "allow"
+
 # More taste-level lints. Each one I evaluated and decided the lint
 # isn't load-bearing for proxxx's domain.
 #

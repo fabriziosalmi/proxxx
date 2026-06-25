@@ -109,7 +109,7 @@ pub enum McpNotification {
     /// The reconcile drift-state changed — a `reconcile watch` reported a
     /// new sync↔drift transition or an updated drift result for a profile.
     Reconciliation {
-        /// "drifted" or "in_sync".
+        /// "drifted" or "`in_sync`".
         event: &'static str,
         /// Profile whose drift state changed.
         profile: String,
@@ -279,7 +279,7 @@ pub fn spawn_incident_watcher(broker: Broker) -> tokio::task::JoinHandle<()> {
 /// observation only if drifted, on any sync↔drift flip, and on a fresh drift
 /// result (new timestamp while still drifted) — never on an unchanged in-sync
 /// poll. `last` is the prior `(in_sync, last_check_ts)`.
-fn should_publish_reconcile(last: Option<(bool, u64)>, in_sync: bool, ts: u64) -> bool {
+const fn should_publish_reconcile(last: Option<(bool, u64)>, in_sync: bool, ts: u64) -> bool {
     match last {
         None => !in_sync,
         Some((prev_sync, prev_ts)) => prev_sync != in_sync || (!in_sync && ts != prev_ts),

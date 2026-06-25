@@ -216,18 +216,30 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     Ok(key)
 }
 
-fn audit_db_path() -> Result<PathBuf> {
+/// Directory holding the audit DB + key. Honors `PROXXX_AUDIT_DIR` (for
+/// hermetic tests, and for relocating the trail onto a dedicated volume in
+/// ops); otherwise the platform data-local dir. Mirrors the `PROXXX_CONFIG` /
+/// `PROXXX_FREEZE_PATH` override convention. The directory is created if absent.
+fn audit_data_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create PROXXX_AUDIT_DIR {}", dir.display()))?;
+        return Ok(dir);
+    }
     let base = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
         .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?;
     let dir = base.data_local_dir().to_path_buf();
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("audit.db"))
+    Ok(dir)
+}
+
+fn audit_db_path() -> Result<PathBuf> {
+    Ok(audit_data_dir()?.join("audit.db"))
 }
 
 fn audit_key_path() -> Result<PathBuf> {
-    let base = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?;
-    Ok(base.data_local_dir().join("audit.key"))
+    Ok(audit_data_dir()?.join("audit.key"))
 }
 
 fn chrono_now() -> String {

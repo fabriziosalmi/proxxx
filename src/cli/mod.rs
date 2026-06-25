@@ -30,7 +30,10 @@ mod migrate_progress;
 mod monitoring;
 mod node;
 mod patch;
-mod reconcile;
+// `pub(crate)` so the converge core in `state::converge` can reuse the shared
+// drift helpers (`compute_drift_with_live`, `drift_summary`) without a second
+// copy. The items themselves stay `pub(crate)`.
+pub(crate) mod reconcile;
 mod schedule;
 mod state;
 mod storage;

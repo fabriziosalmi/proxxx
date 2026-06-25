@@ -47,7 +47,7 @@ Pick the row that matches you and jump straight to the right page.
 
 - **One binary** — `proxxx`. CLI, TUI, MCP server, unified daemon (alerts + HITL + schedule) all in the same executable.
 - **Cluster-wide read in a second** — `proxxx ls nodes`, `proxxx ls guests`, fuzzy search across the whole cluster from `/`. `--all-profiles` fans the read across every configured cluster in parallel.
-- **GitOps for Proxmox** — `proxxx state {export,diff,apply}` produces a byte-stable TOML across **eight state families** (pools, ACL grants, storage definitions, backup jobs, cluster firewall, notification matchers, HA rules, HA resources), diffs against live, converges via dispatched API calls. Pre-flight risk gates refuse Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete, HA-rule strict-flip) unless `--allow-risk`; `--interactive` adds per-Severe `[y/N]` stdin prompts.
+- **GitOps for Proxmox** — `proxxx state {export,diff,apply}` produces a byte-stable TOML across **eight state families** (pools, ACL grants, storage definitions, backup jobs, cluster firewall, notification matchers, HA rules, HA resources), diffs against live, converges via dispatched API calls. Pre-flight risk gates refuse Severe changes (non-empty pool delete, root-role ACL delete, shared-storage delete, HA-rule strict-flip) unless `--allow-risk`; `--interactive` adds per-Severe `[y/N]` stdin prompts. The **`reconcile` controller** runs that loop continuously: `reconcile run` (CI-gateable drift check) and `reconcile converge` (push-mode apply, same safety gate), plus an opt-in **unmanned `auto_converge`** daemon that self-heals drift on a timer — and **never** auto-applies a Severe change (it alerts for human review instead).
 - **Pipeline writes** — start, stop, migrate, snapshot, clone, backup, patch, disk-move, with `--format json` for jq. `migrate --stream` shows live per-disk progress.
 - **Pre-flight risk gate** — both per-guest (Locked/Running/LongUptime/TaggedProd/ActiveNetTraffic/HaManaged + 5 more) and state-change (PoolDeleteNonEmpty/AclDeleteRootRole/StorageDeleteShared/BackupJobDelete/NotificationMatcherDelete/HaRuleDelete/HaRuleStrictChange/HaResourceDelete/HaResourceStateChange/BulkChangeCount) — refuses destructive ops without explicit override.
 - **HITL** — Telegram-mediated human approval gate, deny-on-timeout (120 s), policy-driven by tag / vmid / wildcard.
@@ -224,6 +224,12 @@ proxxx state diff state.toml                      # preview drift, exit 2 if any
 proxxx state apply state.toml --dry-run           # rehearse, never mutates
 proxxx state apply state.toml --prune             # pre-flight refuses Severe (exit 6)
 proxxx state apply state.toml --prune --interactive  # per-Severe [y/N] prompt
+
+# Continuous reconciliation — the GitOps controller (Layers 1–3)
+proxxx reconcile run --source git@host:cluster.git              # CI drift gate, exit 2 on drift
+proxxx reconcile converge --source git@host:cluster.git --dry-run  # rehearse the converge
+proxxx reconcile converge --source git@host:cluster.git --prune    # push-mode: converge prod
+# Unmanned: set `auto_converge = true` under [profiles.X.reconcile] + run `proxxx daemon serve`
 ```
 
 ```bash

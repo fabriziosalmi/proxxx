@@ -198,7 +198,7 @@ pub fn integrate_rrd(points: &[RrdPoint]) -> WindowedTotals {
         let maxcpu = p.maxcpu.unwrap_or(1.0);
         t.cpu_hours += cpu * maxcpu * dt_secs / 3600.0;
         let mem = p.mem.unwrap_or(0.0);
-        t.mem_gib_hours += (mem / GIB) * (dt_secs / 3600.0);
+        t.mem_gib_hours = (mem / GIB).mul_add(dt_secs / 3600.0, t.mem_gib_hours);
         let netin = p.netin.unwrap_or(0.0);
         t.net_in_gib += (netin * dt_secs) / GIB;
         let netout = p.netout.unwrap_or(0.0);
