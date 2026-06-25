@@ -271,6 +271,7 @@ mod tests {
                 total: 1000,
                 active: true,
                 content: String::new(),
+                shared: false,
             }],
             ..Default::default()
         };
@@ -294,6 +295,7 @@ mod tests {
                     total: 1000,
                     active: true,
                     content: String::new(),
+                    shared: false,
                 },
                 StoragePool {
                     storage: "ceph".into(),
@@ -303,6 +305,7 @@ mod tests {
                     total: 1000,
                     active: true,
                     content: String::new(),
+                    shared: false,
                 },
             ],
             ..Default::default()
@@ -326,6 +329,7 @@ mod tests {
                 total: 0,
                 active: false,
                 content: String::new(),
+                shared: false,
             }],
             ..Default::default()
         };

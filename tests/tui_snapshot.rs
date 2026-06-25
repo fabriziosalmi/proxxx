@@ -145,6 +145,7 @@ fn storage_pool(name: &str, used: u64, total: u64) -> StoragePool {
         active: true,
         storage_type: "lvm".to_string(),
         content: "images,rootdir".to_string(),
+        shared: false,
     }
 }
 

@@ -317,6 +317,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_role_posts_to_access_roles_with_privs() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api2/json/access/roles"))
+            .and(body_string_contains("roleid=Deployer"))
+            .and(body_string_contains("privs=VM.Audit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        c.create_role("Deployer", "VM.Audit,VM.PowerMgmt")
+            .await
+            .expect("create_role");
+    }
+
+    #[tokio::test]
+    async fn update_role_puts_append_flag() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api2/json/access/roles/Deployer"))
+            .and(body_string_contains("append=1"))
+            .and(body_string_contains("privs=VM.Console"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        c.update_role("Deployer", "VM.Console", true)
+            .await
+            .expect("update_role");
+    }
+
+    #[tokio::test]
+    async fn delete_role_deletes_access_roles_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api2/json/access/roles/Deployer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        c.delete_role("Deployer").await.expect("delete_role");
+    }
+
+    #[tokio::test]
     async fn delete_user_uses_url_encoded_userid() {
         // GAP guard: `@` in userid MUST be URL-encoded for the path
         // segment — otherwise some PVE versions misroute. The

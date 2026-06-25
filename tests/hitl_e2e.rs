@@ -880,6 +880,15 @@ impl ProxmoxGateway for HitlMockGateway {
     ) -> Result<()> {
         anyhow::bail!("unused")
     }
+    async fn create_role(&self, _: &str, _: &str) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+    async fn update_role(&self, _: &str, _: &str, _: bool) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+    async fn delete_role(&self, _: &str) -> Result<()> {
+        anyhow::bail!("unused")
+    }
     async fn list_pci(&self, _: &str) -> Result<Vec<proxxx::api::types::PciDevice>> {
         Ok(vec![])
     }

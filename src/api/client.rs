@@ -1990,6 +1990,26 @@ impl ProxmoxGateway for PxClient {
         Ok(())
     }
 
+    async fn create_role(&self, roleid: &str, privs: &str) -> Result<()> {
+        let params: Vec<(&str, &str)> = vec![("roleid", roleid), ("privs", privs)];
+        let _resp: ApiResponse<Option<String>> = self.post("/access/roles", &params).await?;
+        Ok(())
+    }
+
+    async fn update_role(&self, roleid: &str, privs: &str, append: bool) -> Result<()> {
+        let params: Vec<(&str, &str)> =
+            vec![("privs", privs), ("append", if append { "1" } else { "0" })];
+        let path = format!("/access/roles/{}", urlenc(roleid));
+        let _resp: ApiResponse<Option<String>> = self.put(&path, &params).await?;
+        Ok(())
+    }
+
+    async fn delete_role(&self, roleid: &str) -> Result<()> {
+        let path = format!("/access/roles/{}", urlenc(roleid));
+        let _resp: ApiResponse<Option<String>> = self.delete(&path).await?;
+        Ok(())
+    }
+
     async fn modify_acl(
         &self,
         path: &str,

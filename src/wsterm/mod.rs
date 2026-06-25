@@ -204,6 +204,64 @@ pub fn decode_data_frame(payload: &[u8]) -> Option<&[u8]> {
     Some(&payload[body_start..body_start + len])
 }
 
+/// Map a raw termproxy / websocket / vncproxy error into a
+/// sysadmin-friendly hint. Returns `Some(hint)` when a known failure
+/// pattern is recognised, `None` otherwise (the caller should then show
+/// the raw error). proxxx generates these errors, so proxxx owns the
+/// decoration — CLI, TUI and embedding consumers (e.g. proxima) share
+/// one mapping instead of each re-deriving it.
+///
+/// Matching is substring-based and case-insensitive; order is
+/// most-specific-first.
+#[must_use]
+pub fn humanize_error_hint(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("lxc-console") || (lower.contains("vncproxy") && lower.contains("exit code"))
+    {
+        return Some(
+            "couldn't attach to the container console — the guest may still be initialising \
+             or shutting down; wait a few seconds and reconnect",
+        );
+    }
+    if lower.contains("reset without closing handshake") || lower.contains("connection reset") {
+        return Some(
+            "the console session was reset by PVE — the underlying console process exited \
+             (guest stopping, session reused, or the subprocess died); reconnect to retry",
+        );
+    }
+    if lower.contains("handshake")
+        && (lower.contains("tls") || lower.contains("certificate") || lower.contains("cert"))
+    {
+        return Some(
+            "TLS handshake failed — the node certificate may have rotated or a pinned \
+             fingerprint changed; re-check the endpoint's certificate",
+        );
+    }
+    if lower.contains("401")
+        || lower.contains("authentication failure")
+        || lower.contains("permission denied")
+    {
+        return Some(
+            "the console ticket was rejected — it may have expired, or the token lacks console \
+             privileges (needs VM.Console / Sys.Console)",
+        );
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return Some(
+            "the console connection timed out — the node may be unreachable or overloaded; \
+             check connectivity to the API port (usually 8006)",
+        );
+    }
+    None
+}
+
+/// Convenience over [`humanize_error_hint`]: the friendly hint when a
+/// pattern is recognised, otherwise the raw error string unchanged.
+#[must_use]
+pub fn humanize_error(raw: &str) -> String {
+    humanize_error_hint(raw).map_or_else(|| raw.to_string(), str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +292,32 @@ mod tests {
         // No usize::from_str("abc") — second_colon found but parse fails
         // → return None? Actually the code returns None on parse fail.
         assert!(decode_data_frame(frame).is_none());
+    }
+
+    #[test]
+    fn humanize_maps_lxc_console_failure() {
+        let h = humanize_error_hint("Task failed: [vncproxy] ... lxc-console exit code 1");
+        assert!(h.unwrap().contains("container console"));
+    }
+
+    #[test]
+    fn humanize_maps_ws_reset() {
+        let h = humanize_error_hint("ws error: Connection reset without closing handshake");
+        assert!(h.unwrap().contains("reset by PVE"));
+    }
+
+    #[test]
+    fn humanize_maps_tls_handshake() {
+        let h = humanize_error_hint("TLS handshake failed: certificate verify failed");
+        assert!(h.unwrap().contains("certificate"));
+    }
+
+    #[test]
+    fn humanize_unknown_returns_none_and_passes_raw_through() {
+        assert!(humanize_error_hint("some totally novel error").is_none());
+        assert_eq!(
+            humanize_error("some totally novel error"),
+            "some totally novel error"
+        );
     }
 }
