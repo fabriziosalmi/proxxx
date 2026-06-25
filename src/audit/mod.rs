@@ -139,13 +139,22 @@ impl AuditLogger {
     }
 
     fn last_chain_hmac(&self) -> String {
-        self.conn
-            .query_row(
-                "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap_or_default()
+        match self.conn.query_row(
+            "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(h) => h,
+            // Empty log — this is the first entry; an empty prev-hmac is correct.
+            Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+            // A real read error must not silently start a fresh chain segment.
+            Err(e) => {
+                tracing::warn!(
+                    "audit: could not read last chain hmac ({e}) — starting a new chain segment"
+                );
+                String::new()
+            }
+        }
     }
 }
 
@@ -171,10 +180,11 @@ fn compute_hmac(
     vmid: &str,
     result: &str,
 ) -> String {
-    // new_from_slice only fails if key is empty; we always pass a 32-byte key.
-    // Fall back to a zeroed key rather than propagating an error through a non-Result fn.
-    let key_used: &[u8] = if key.is_empty() { &[0u8; 32] } else { key };
-    let Ok(mut mac) = HmacSha256::new_from_slice(key_used) else {
+    // The key is validated to be exactly 32 bytes at load time
+    // (`load_or_create_key`), so `new_from_slice` won't fail here. If it somehow
+    // does, return an EMPTY MAC — which makes `audit verify` fail loudly — rather
+    // than silently falling back to a known all-zeros key that anyone could forge.
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
         return String::new();
     };
     mac.update(prev.as_bytes());
@@ -193,6 +203,18 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     if path.exists() {
         let bytes =
             std::fs::read(path).with_context(|| format!("read audit key {}", path.display()))?;
+        // The HMAC chain is only as trustworthy as its key. A truncated or empty
+        // key (e.g. an interrupted first write, or a `touch`'d file) MUST fail
+        // loudly — an empty key would otherwise degrade to a forgeable all-zeros
+        // MAC, and a wrong-length key produces a chain that won't re-derive.
+        anyhow::ensure!(
+            bytes.len() == 32,
+            "audit key {} is {} bytes, expected 32 — refusing to use a malformed key. \
+             Delete the file to regenerate (this starts a new chain; prior entries \
+             will no longer verify under the new key).",
+            path.display(),
+            bytes.len()
+        );
         return Ok(bytes);
     }
     let mut key = vec![0u8; 32];
@@ -510,5 +532,26 @@ mod proptests {
                 col, fail, ok
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn load_or_create_key_rejects_malformed_length() {
+        // A wrong-length key must be refused — an empty/truncated key would
+        // otherwise degrade the HMAC chain to a forgeable all-zeros MAC.
+        let bad = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(bad.path(), b"short").unwrap(); // 5 bytes, not 32
+        let err = load_or_create_key(&bad.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("expected 32"), "got: {err}");
+
+        // A correct 32-byte key loads fine.
+        let good = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(good.path(), [7u8; 32]).unwrap();
+        let key = load_or_create_key(&good.path().to_path_buf()).unwrap();
+        assert_eq!(key.len(), 32);
     }
 }

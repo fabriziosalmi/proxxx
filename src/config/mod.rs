@@ -47,7 +47,7 @@ pub struct ProfileConfig {
     /// GET /mcp requests must carry `Authorization: Bearer <token>`. Leave
     /// unset (the default) to run the HTTP server without auth — only do this
     /// on a trusted network or behind a reverse proxy that enforces auth.
-    pub mcp_token: Option<String>,
+    pub mcp_token: Option<zeroize::Zeroizing<String>>,
 
     /// Continuous-reconciliation (`reconcile watch`) config. When present,
     /// `proxxx daemon serve` runs a 4th pillar that periodically diffs the

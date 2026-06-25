@@ -147,15 +147,26 @@ pub async fn converge_with_changes<C: StateWriteView + ?Sized>(
     if !opts.dry_run {
         enforce_state_preflight(&changes, live, force)?;
     }
-    Ok(apply_and_audit(client, profile, source, changes, opts, audit_user).await)
+    Ok(apply_and_audit(
+        client,
+        profile,
+        source,
+        changes,
+        opts,
+        audit_user,
+        "reconcile_converge",
+    )
+    .await)
 }
 
-/// Apply a **pre-gated** change set and write the converge audit entry. Does NOT
-/// run the pre-flight gate itself — the caller is responsible for gating. The
-/// daemon and the non-interactive CLI reach this via [`converge_with_changes`]
-/// (which gates first); the CLI's `--interactive` path calls it directly after
-/// gating the *full* set and then filtering to the operator-approved subset (so
-/// the approved subset isn't re-gated and double-printed).
+/// Apply a **pre-gated** change set and write ONE HMAC audit entry per dispatched
+/// run. Does NOT run the pre-flight gate itself — the caller is responsible for
+/// gating. Shared by every state-mutating path so each gets a tamper-evident
+/// trail: `reconcile converge` / the unmanned daemon reach it via
+/// [`converge_with_changes`] (which gates first) and the CLI `--interactive`
+/// path calls it directly after gating+filtering; `state apply` calls it with
+/// `action = "state_apply"`. `action` is the audit verb recorded.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_and_audit<C: StateWriteView + ?Sized>(
     client: &C,
     profile: &str,
@@ -163,6 +174,7 @@ pub async fn apply_and_audit<C: StateWriteView + ?Sized>(
     changes: Vec<Change>,
     opts: ApplyOptions,
     audit_user: &str,
+    action: &str,
 ) -> ConvergeReport {
     if changes.is_empty() {
         return ConvergeReport::in_sync();
@@ -175,9 +187,9 @@ pub async fn apply_and_audit<C: StateWriteView + ?Sized>(
     let report = ConvergeReport::from_outcomes(outcomes);
 
     // One audit entry per run that actually dispatched (not a dry-run, and
-    // something hit PVE). Best-effort — a logging failure never fails converge.
+    // something hit PVE). Best-effort — a logging failure never fails the apply.
     if !opts.dry_run && report.dispatched() {
-        write_converge_audit(audit_user, profile, source, &summary, &report);
+        write_apply_audit(action, audit_user, profile, source, &summary, &report);
     }
 
     report
@@ -196,12 +208,14 @@ fn converge_audit_params(profile: &str, source: &str, summary: &str, total: usiz
     .to_string()
 }
 
-/// Append one HMAC-chained audit entry for a converge run. Best-effort: state
-/// mutations aren't otherwise on the (guest-centric) audit chain, and an
-/// *unmanned* mutation especially deserves a tamper-evident trail. A failure
-/// here is logged and swallowed — the PVE mutation already happened; failing the
-/// run because we couldn't *log* it would be worse.
-fn write_converge_audit(
+/// Append one HMAC-chained audit entry for an apply run (`action` = the verb,
+/// e.g. `reconcile_converge` or `state_apply`). Best-effort: state mutations
+/// aren't otherwise on the (guest-centric) audit chain, and especially an
+/// *unmanned* mutation deserves a tamper-evident trail. A failure here is logged
+/// and swallowed — the PVE mutation already happened; failing the run because we
+/// couldn't *log* it would be worse.
+fn write_apply_audit(
+    action: &str,
     user: &str,
     profile: &str,
     source: &str,
@@ -212,7 +226,7 @@ fn write_converge_audit(
     let write = (|| -> Result<()> {
         let mut logger = crate::audit::AuditLogger::open()?;
         logger.log(
-            "reconcile_converge",
+            action,
             user,
             None,
             None,
@@ -221,7 +235,7 @@ fn write_converge_audit(
         )
     })();
     if let Err(e) = write {
-        tracing::warn!("converge: audit write failed (non-fatal): {e:#}");
+        tracing::warn!("{action}: audit write failed (non-fatal): {e:#}");
     }
 }
 
