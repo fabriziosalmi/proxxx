@@ -1000,8 +1000,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<crate::api::types::GuestExecResult> {
         use crate::api::types::{AgentExecResponse, AgentExecStatusResponse, GuestExecResult};
 
-        // Broadcast "sh -c command"
-        let cmds = format!("[\"sh\", \"-c\", \"{}\"]", command.replace('"', "\\\""));
+        // Broadcast "sh -c command" — build the argv as proper JSON so any
+        // characters in `command` (quotes, backslashes, newlines, tabs) are
+        // escaped correctly rather than producing malformed JSON.
+        let cmds = serde_json::json!(["sh", "-c", command]).to_string();
 
         // (audit) — QEMU agent exec has its own failure mode:
         // if the guest's QGA daemon is wedged (Linux kernel hang,
@@ -1146,8 +1148,12 @@ impl ProxmoxGateway for PxClient {
             .get("result")
             .cloned()
             .unwrap_or(serde_json::Value::Array(vec![]));
+        // Surface a malformed payload as a typed Parse error rather than
+        // silently returning an empty list (indistinguishable from a guest that
+        // genuinely has no interfaces). Both callers already handle the Err.
         let ifaces: Vec<crate::api::types::GuestAgentNetworkInterface> =
-            serde_json::from_value(result).unwrap_or_default();
+            serde_json::from_value(result)
+                .map_err(|source| crate::api::ApiError::Parse { path, source })?;
         Ok(ifaces)
     }
 

@@ -208,6 +208,7 @@ async fn converge_cmd(
             approved,
             opts,
             &audit_user,
+            "reconcile_converge",
         )
         .await
     } else {

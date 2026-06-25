@@ -12,6 +12,26 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-25
+
+Headline: **Hardening patch — `state apply` now leaves an audit trail, and the audit chain's key handling is tightened.** A code-health / security pass after the v0.9.0 GitOps-controller release. No CLI-contract changes (commands, exit codes, and `--format json` shapes are unchanged); the tamper-evident trail and a handful of robustness edges get firmer.
+
+### Security
+
+- **`state apply` now writes an HMAC audit entry**, closing the asymmetry where only the unmanned `reconcile converge` left a tamper-evident trail while the operator-driven `state apply` — issuing the *identical* mutations through the same `apply()` code — recorded nothing. Both now log one entry per dispatched run (`state_apply` / `reconcile_converge`) through the shared `apply_and_audit` core.
+- **The audit key is length-validated.** A truncated or empty `audit.key` (e.g. an interrupted first write) is now rejected with an actionable error instead of silently degrading to a forgeable all-zeros HMAC key; the zeroed-key fallback in `compute_hmac` is removed. `last_chain_hmac` now distinguishes an empty log (correct) from a real read error (which warns).
+- **`mcp_token` is held as `Zeroizing<String>`**, matching every other config secret.
+
+### Fixed
+
+- **QGA `network-get-interfaces` no longer swallows a malformed payload** into an empty interface list (indistinguishable from a guest that genuinely has none) — a deserialize failure now surfaces as a typed `Parse` error. Both call sites (`vm qga net`, console IP discovery) already handle it.
+- **QGA `guest-exec` builds its command argv as proper JSON** (`serde_json::json!`) instead of hand-rolled `"`-only escaping, so a command containing backslashes / newlines / tabs is no longer malformed.
+- **The Telegram HTTP client sets a 30 s request timeout** so `send` / `edit` / `approve` can't hang forever on a wedged connection (the long-poll keeps its own longer per-request timeout).
+
+### Deferred (tracked)
+
+- Folding `user` + `params_json` into the audit chain ([#173](https://github.com/fabriziosalmi/proxxx/issues/173) — needs a chain-format version so existing DBs still verify) and a test net for the destructive `--yes` gates ([#172](https://github.com/fabriziosalmi/proxxx/issues/172) — a focused refactor). New GitOps state families + node-level ZFS pool create are v0.10.0 feature work (a patch can't add CLI surface).
+
 ## [0.9.0] — 2026-06-25
 
 Headline: **The GitOps controller, complete — `reconcile {run,converge}` + an unmanned drift-watch that self-heals.** Continuous reconciliation closes end to end: drift *detection* (Layers 1–2 — `reconcile run`, the `watch` daemon pillar, drift → Prometheus + MCP) and drift *convergence* (Layer 3 — `reconcile converge` + the opt-in unmanned `auto_converge` daemon) ship together, making "GitOps for Proxmox" a first-class workflow: `git push` → production converges, behind the same Severe-risk pre-flight gate that guards `state apply` — which the unmanned loop **never** overrides. Also the first release built + distributed through the new signed Debian `.deb` packages and the Homebrew tap.

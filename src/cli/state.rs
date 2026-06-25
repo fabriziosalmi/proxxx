@@ -350,32 +350,43 @@ pub async fn execute_state(
                 prune,
                 continue_on_error,
             };
-            let outcomes = state::apply::apply(client.as_ref(), changes, opts).await;
+            // Apply via the shared converge core so `state apply` writes one
+            // HMAC `state_apply` audit entry per dispatched run — the same
+            // tamper-evident trail `reconcile converge` gets (the gate +
+            // interactive filter already ran above; this only applies + audits).
+            let audit_user = client.profile_config().user.clone();
+            let source = declared.display().to_string();
+            let report = state::converge::apply_and_audit(
+                client.as_ref(),
+                profile_label,
+                &source,
+                changes,
+                opts,
+                &audit_user,
+                "state_apply",
+            )
+            .await;
+            let outcomes = &report.outcomes;
 
             match output {
                 ApplyOutputFormat::Text => {
                     if outcomes.is_empty() {
                         println!("(no changes — live state matches declared)");
                     } else {
-                        for o in &outcomes {
+                        for o in outcomes {
                             println!("{}", apply_summary_line(o));
                         }
                     }
                 }
                 ApplyOutputFormat::Json => {
-                    let json = serde_json::to_string_pretty(&outcomes)?;
+                    let json = serde_json::to_string_pretty(outcomes)?;
                     println!("{json}");
                 }
             }
 
-            // Exit code: 2 if any outcome failed, else 0. 1 is
-            // reserved for hard errors (file unreadable, PVE
-            // unreachable) — those flow through `?` above.
-            let any_failed = outcomes
-                .iter()
-                .any(|o| matches!(o.result, state::apply::ApplyResult::Failed { .. }));
-            let exit = i32::from(any_failed) * 2;
-            Ok((Value::Null, exit))
+            // Exit code: 2 if any outcome failed, else 0. 1 is reserved for hard
+            // errors (file unreadable, PVE unreachable) — those flow through `?`.
+            Ok((Value::Null, report.exit_code()))
         }
     }
 }

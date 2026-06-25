@@ -147,7 +147,10 @@ impl TelegramGateway {
     pub fn new(bot_token: String, chat_id: String) -> Result<Self> {
         let hmac_key = crate::hitl::hmac_key::load_or_generate_hmac_key()?;
         Ok(Self {
-            http: Client::new(),
+            // A request timeout so send/edit/approve can't hang forever on a
+            // wedged connection. The long-poll path sets its own (longer)
+            // per-request timeout, which overrides this client default.
+            http: Client::builder().timeout(Duration::from_secs(30)).build()?,
             bot_token,
             chat_id,
             base_url: DEFAULT_TG_API.to_string(),

@@ -1613,8 +1613,8 @@ pub async fn execute(
             McpCommand::ServeHttp { bind, port, token } => {
                 let mut cfg = config;
                 // CLI --token overrides the profile's mcp_token.
-                if token.is_some() {
-                    cfg.mcp_token = token;
+                if let Some(t) = token {
+                    cfg.mcp_token = Some(zeroize::Zeroizing::new(t));
                 }
                 let handle = crate::config::watcher::new_handle(cfg);
                 crate::config::watcher::spawn_reload_on_sighup(
