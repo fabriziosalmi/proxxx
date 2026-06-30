@@ -170,6 +170,12 @@ proxxx version --json                   # build + capability metadata.
 
 The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → 0600 file → OS keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
 
+<p align="center">
+  <img src="assets/demo-homelab.svg" alt="proxxx describe — one command prints the whole cluster: nodes (online, CPU, memory, uptime), guests (vmid, kind, node, status), and storages (type, usage, shared) — for a live 3-node Proxmox VE 9.1 cluster" width="820">
+  <br>
+  <em>No agent on the cluster — one static binary, and <code>proxxx describe</code> hands back the whole thing. Output verbatim from a live Proxmox VE 9.1 cluster.</em>
+</p>
+
 ## Daily-driver TUI
 
 Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command palette (`:`), quick-open palette (`Ctrl+K`). 18 views over the same Elm-pattern reducer:
@@ -232,6 +238,12 @@ proxxx reconcile converge --source git@host:cluster.git --prune    # push-mode: 
 # Unmanned: set `auto_converge = true` under [profiles.X.reconcile] + run `proxxx daemon serve`
 ```
 
+<p align="center">
+  <img src="assets/demo-gitops.svg" alt="proxxx GitOps loop — `reconcile run` flags drift against the desired state in git (a hand-made pool that should be pruned, a pool git declares that's missing), `reconcile converge` applies the create while holding the delete behind --prune, an explicit --prune removes the stray pool, and a final `reconcile run` reports IN SYNC" width="850">
+  <br>
+  <em>The reconcile loop, end-to-end against a live Proxmox VE 9.1 cluster: drift detected → converged (safe by default) → back in sync. Every output line is verbatim.</em>
+</p>
+
 ```bash
 # Cross-cluster fanout + cluster digest
 proxxx find 100                                   # which profile owns VMID 100?
@@ -253,6 +265,12 @@ proxxx upgrade-check --target 9.x                 # exits 1 on any block-severit
 proxxx explain freeze-refusal                     # bundled error knowledge base
 ```
 
+<p align="center">
+  <img src="assets/demo-incident.svg" alt="proxxx incident lockdown — `incident freeze` halts every write fleet-wide; a `stop 7777` is then refused with 'the fleet is FROZEN' before it ever reaches PVE; `incident thaw` lifts it" width="820">
+  <br>
+  <em>Freeze the fleet and every mutation is refused — before it touches Proxmox — until you thaw. Output verbatim from a live Proxmox VE 9.1 cluster.</em>
+</p>
+
 ```bash
 # Console handoff + session recording
 proxxx ssh    100                                 # interactive ssh into guest (auto-discovery)
@@ -273,6 +291,12 @@ proxxx mcp serve                                  # stdio + interleaved server-s
 proxxx mcp serve-http --bind 0.0.0.0:8080         # HTTP/SSE transport
 proxxx mcp tools --checksum                       # registry SHA-256 for audit pinning
 ```
+
+<p align="center">
+  <img src="assets/demo-mcp.svg" alt="proxxx MCP server — `proxxx mcp tools` reports 25 typed tools (8 flagged destructive); an MCP tools/call list_guests returns live guest data to the agent" width="820">
+  <br>
+  <em>Any MCP client (Claude, Cursor) gets 25 typed, audited tools over your cluster. Output verbatim from a live Proxmox VE 9.1 cluster.</em>
+</p>
 
 Exit codes are stable contract — see [`docs/reference/exit-codes.md`](docs/reference/exit-codes.md) for the full table.
 

@@ -1,0 +1,159 @@
+# proxxx — incident lockdown demo storyboard.
+#
+# One story for the on-call SRE: a maintenance window opens, so you FREEZE
+# every write across the fleet; any mutation — yours or a teammate's — is
+# then refused BEFORE it ever reaches Proxmox; when you're done you THAW.
+#
+# Every machine-output line is VERBATIM from a real run of `proxxx incident`
+# + `proxxx stop` against a live Proxmox VE 9.1 cluster (pve-test-1),
+# captured 2026-06-30. Only the leading `#` lines are narration. The long
+# refusal sentence is wrapped across rows for width — wording unchanged.
+# (The `operator` host in the freeze JSON is shown as a representative
+# `fab@laptop`; the capture host couldn't resolve its own hostname.)
+#
+# Render:  cd ../firstframe && cargo run --release -- build \
+#            ../proxxx/assets/demo-incident.toml -o ../proxxx/assets/demo-incident.svg
+
+[meta]
+name        = "proxxx"
+tagline     = "proxxx — incident lockdown · freeze every write, fleet-wide"
+theme       = "mocha"
+width       = 900
+height      = 664
+seed        = 0x5A1E10C5
+end_hold_ms = 2400
+
+# ── act 1: open a maintenance window — freeze the fleet ──
+[[beat]]
+kind        = "silence"
+duration_ms = 1100
+
+[[beat]]
+kind       = "output"
+stagger_ms = 0
+lines = [
+  { text = "# maintenance window — freeze every write across the fleet, then work safely", accent = "dim" },
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 700
+
+[[beat]]
+kind = "prompt"
+text = "$ "
+
+[[beat]]
+kind   = "type"
+text   = "proxxx incident freeze --reason \"rotating cluster API tokens\" --ttl 4h"
+cps    = 16
+jitter = 0.30
+
+[[beat]]
+kind        = "silence"
+duration_ms = 650
+
+[[beat]]
+kind       = "output"
+stagger_ms = 90
+lines = [
+  '{',
+  '  "frozen_at": 1782851646,',
+  '  "operator": "fab@laptop",',
+  { text = '  "reason": "rotating cluster API tokens",', accent = "yellow" },
+  '  "ttl_secs": 14400',
+  '}',
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 1500
+
+# ── act 2: a mutation is attempted — and refused before touching PVE ──
+[[beat]]
+kind       = "output"
+stagger_ms = 0
+lines = [
+  { text = "# any mutation now — yours or a teammate's — is refused at the door", accent = "dim" },
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 500
+
+[[beat]]
+kind = "prompt"
+text = "$ "
+
+[[beat]]
+kind   = "type"
+text   = "proxxx stop 7777"
+cps    = 16
+jitter = 0.30
+
+[[beat]]
+kind        = "silence"
+duration_ms = 650
+
+[[beat]]
+kind       = "output"
+stagger_ms = 160
+lines = [
+  "PRE-FLIGHT for stop vmid=7777 (alpine-existing-lxc@pve-test-1):",
+  { text = "  [WARN] guest is running (uptime 12d 7h)", accent = "yellow" },
+  "",
+  { text = "refusing mutation — the fleet is FROZEN (reason:", accent = "red" },
+  { text = "  rotating cluster API tokens, since 1782851646). Run", accent = "red" },
+  { text = "  `proxxx incident thaw --reason '...'` to lift the", accent = "red" },
+  { text = "  freeze, or wait for the TTL to expire.", accent = "red" },
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 1600
+
+# ── act 3: window closes — thaw ──
+[[beat]]
+kind       = "output"
+stagger_ms = 0
+lines = [
+  { text = "# maintenance done — lift the freeze, writes flow again", accent = "dim" },
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 500
+
+[[beat]]
+kind = "prompt"
+text = "$ "
+
+[[beat]]
+kind   = "type"
+text   = "proxxx incident thaw --reason \"rotation complete\""
+cps    = 16
+jitter = 0.30
+
+[[beat]]
+kind        = "silence"
+duration_ms = 600
+
+[[beat]]
+kind       = "output"
+stagger_ms = 0
+lines = [
+  { text = "  \"thawed\": true", accent = "green" },
+]
+
+# ── outro ──
+[[beat]]
+kind        = "silence"
+duration_ms = 700
+
+[[beat]]
+kind    = "outro"
+url     = "github.com/fabriziosalmi/proxxx"
+label   = "PROXXX"
+dim_ms  = 550
+url_cps = 42
+hold_ms = 1900
