@@ -10,6 +10,13 @@ start at [Production checklist](/guide/production-checklist)
 instead — it's stricter on TLS, secret storage, and HITL.
 :::
 
+<p align="center">
+  <img src="/demo-homelab.svg" alt="proxxx describe — one command prints the whole cluster: nodes, guests, and storages, for a live Proxmox VE 9.1 cluster" width="760">
+</p>
+
+> One static binary, no agent on the cluster — by the end of this page,
+> `proxxx describe` above is showing *your* cluster.
+
 ## 1. Install the binary (1 min)
 
 ```bash

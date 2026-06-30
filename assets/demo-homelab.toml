@@ -1,0 +1,88 @@
+# proxxx — homelab "whole cluster at a glance" demo storyboard.
+#
+# One story for the homelab solo: no agent to install, no daemon to run —
+# a single static binary talks straight to the PVE API and hands back the
+# whole cluster in one command.
+#
+# The entire `proxxx describe` block is VERBATIM from a real run against a
+# live Proxmox VE 9.1 cluster (pve-test-1), captured 2026-06-30. Note the
+# `#` / `##` lines are proxxx's own section headers (not narration); the one
+# narration line here is prefixed `·`.
+#
+# Render:  cd ../firstframe && cargo run --release -- build \
+#            ../proxxx/assets/demo-homelab.toml -o ../proxxx/assets/demo-homelab.svg
+
+[meta]
+name        = "proxxx"
+tagline     = "proxxx — one static binary, your whole cluster at a glance"
+theme       = "mocha"
+width       = 900
+height      = 600
+seed        = 0x40BE1AB
+end_hold_ms = 2600
+
+# ── act 1: no agent, one binary — ask the cluster what it is ──
+[[beat]]
+kind        = "silence"
+duration_ms = 1100
+
+[[beat]]
+kind       = "output"
+stagger_ms = 0
+lines = [
+  { text = "· no agent on the cluster — one static binary, straight to the PVE API", accent = "dim" },
+]
+
+[[beat]]
+kind        = "silence"
+duration_ms = 750
+
+[[beat]]
+kind = "prompt"
+text = "$ "
+
+[[beat]]
+kind   = "type"
+text   = "proxxx describe"
+cps    = 15
+jitter = 0.32
+
+[[beat]]
+kind        = "silence"
+duration_ms = 700
+
+[[beat]]
+kind       = "output"
+stagger_ms = 130
+lines = [
+  { text = '# Cluster (9.1.1)', accent = "cyan" },
+  { text = '  3 nodes  /  2 guests  /  4 storages', accent = "dim" },
+  '',
+  { text = '## Nodes', accent = "blue" },
+  '  pve-test-1     online    cpu=  3.8%  mem=1.6 GiB / 3.8 GiB  up=26d1h',
+  '  pve-test-3     online    cpu=  3.3%  mem=1.6 GiB / 3.8 GiB  up=26d1h',
+  '  pve-test-2     online    cpu=  3.3%  mem=1.6 GiB / 3.8 GiB  up=26d1h',
+  '',
+  { text = '## Guests', accent = "blue" },
+  { text = '  8888   qemu  alpine-existing-vm   on pve-test-1 stopped  1c/512MB', accent = "dim" },
+  { text = '  7777   lxc   alpine-existing-lxc  on pve-test-1 running  1c/512MB', accent = "green" },
+  '',
+  { text = '## Storages', accent = "blue" },
+  '  local          dir         10.4%  on 3 nodes  (shared)',
+  '  local-lvm      lvmthin     25.9%  on 3 nodes  (shared)',
+  '  pbs-e2e        pbs          2.9%  on 3 nodes  (shared)',
+  '  storage        nfs         25.3%  on 3 nodes  (shared)',
+]
+
+# ── outro ──
+[[beat]]
+kind        = "silence"
+duration_ms = 900
+
+[[beat]]
+kind    = "outro"
+url     = "github.com/fabriziosalmi/proxxx"
+label   = "PROXXX"
+dim_ms  = 550
+url_cps = 42
+hold_ms = 1900

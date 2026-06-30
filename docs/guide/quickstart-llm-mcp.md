@@ -15,6 +15,10 @@ attacks can't extend the tool registry at runtime. The registry
 is **append-only** across SemVer releases.
 :::
 
+<p align="center">
+  <img src="/demo-mcp.svg" alt="proxxx MCP server — 25 typed tools, 8 flagged destructive; an MCP tools/call list_guests returns live guest data to the agent" width="760">
+</p>
+
 ## 1. Configure proxxx itself
 
 You need a working `config.toml` first. Quickest path: run
