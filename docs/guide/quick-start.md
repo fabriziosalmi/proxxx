@@ -133,6 +133,15 @@ See [HITL via Telegram](/integrations/hitl).
 Every CLI command is `--format json` capable. Exit codes are stable —
 see [Exit codes](/reference/exit-codes) for the full table.
 
+`proxxx reconcile run --source <git>` is the GitOps drift gate: exit **2**
+when the live cluster has drifted from the desired state declared in git,
+**0** when in sync — drop it in a pipeline step. `reconcile converge`
+applies the fix, safe by default (deletes need an explicit `--prune`).
+
+<p align="center">
+  <img src="/demo-gitops.svg" alt="proxxx reconcile loop — detect drift against the desired state in git, converge (safe by default), then back in sync, against a live Proxmox VE 9.1 cluster" width="760">
+</p>
+
 ## Next steps
 
 - [Configuration](/guide/configuration) — profiles, secrets, TLS, HITL
