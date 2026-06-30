@@ -12,6 +12,14 @@ ring, firewall rules, certificate rotation) is upstream Proxmox
 material; we link to it but don't restate it.
 :::
 
+<p align="center">
+  <img src="/demo-incident.svg" alt="proxxx incident lockdown — freeze halts every write fleet-wide; a stop is refused 'the fleet is FROZEN' before reaching PVE; thaw lifts it" width="760">
+</p>
+
+> On-call essential: `incident freeze` is a fleet-wide write kill-switch —
+> during a maintenance window or a suspected compromise, every mutation is
+> refused before it reaches Proxmox until you `thaw`.
+
 ## 1. Verify the binary
 
 ### `[ ]` Download from a tagged release, not `main`
