@@ -449,9 +449,7 @@ pub async fn execute_firewall_cluster(
                     Ok((serde_json::json!({"updated": name}), 0))
                 }
                 FirewallAliasCommand::Delete { name, yes } => {
-                    if !yes {
-                        anyhow::bail!("destructive — pass --yes to confirm");
-                    }
+                    crate::cli::common::require_yes(yes, "firewall alias delete")?;
                     client.delete_cluster_firewall_alias(&name).await?;
                     Ok((serde_json::json!({"deleted": name}), 0))
                 }
@@ -478,9 +476,7 @@ pub async fn execute_firewall_cluster(
                 Ok((serde_json::json!({"created": true}), 0))
             }
             FirewallGroupCommand::Delete { group, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "firewall group delete")?;
                 client.delete_cluster_firewall_group(&group).await?;
                 Ok((serde_json::json!({"deleted": group}), 0))
             }
@@ -506,9 +502,7 @@ pub async fn execute_firewall_cluster(
                 Ok((serde_json::json!({"created": true}), 0))
             }
             FirewallIpsetCommand::Delete { name, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "firewall ipset delete")?;
                 client.delete_cluster_firewall_ipset(&name).await?;
                 Ok((serde_json::json!({"deleted": name}), 0))
             }
@@ -537,9 +531,7 @@ pub async fn execute_firewall_cluster(
                 Ok((serde_json::json!({"added": true}), 0))
             }
             FirewallIpsetCommand::RemoveCidr { name, cidr, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "firewall ipset CIDR removal")?;
                 client
                     .remove_cluster_firewall_ipset_cidr(&name, &cidr)
                     .await?;
@@ -670,9 +662,7 @@ pub async fn execute_firewall_guest(
                 Ok((serde_json::json!({"updated": name}), 0))
             }
             GuestFirewallAliasCommand::Delete { name, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "guest firewall alias delete")?;
                 client
                     .delete_guest_firewall_alias(&node, vmid, gt, &name)
                     .await?;
@@ -833,9 +823,7 @@ pub async fn execute_cluster_mapping(
                 Ok((serde_json::json!({"updated": id}), 0))
             }
             ClusterMappingPciCommand::Delete { id, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "PCI mapping delete")?;
                 client.delete_cluster_mapping_pci(&id).await?;
                 Ok((serde_json::json!({"deleted": id}), 0))
             }
@@ -881,9 +869,7 @@ pub async fn execute_cluster_mapping(
                 Ok((serde_json::json!({"updated": id}), 0))
             }
             ClusterMappingUsbCommand::Delete { id, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "USB mapping delete")?;
                 client.delete_cluster_mapping_usb(&id).await?;
                 Ok((serde_json::json!({"deleted": id}), 0))
             }

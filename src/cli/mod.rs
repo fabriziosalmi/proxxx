@@ -40,6 +40,8 @@ mod storage;
 mod upgrade_check;
 pub mod vm;
 mod watch;
+#[cfg(test)]
+mod yes_gate_net;
 
 pub use audit_cmd::AuditAction;
 
@@ -1215,9 +1217,7 @@ pub async fn execute(
             strict,
             allow_risk,
         } => {
-            if !yes {
-                anyhow::bail!("`proxxx delete` is destructive — re-run with --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "guest delete")?;
             for &vmid in &vmids {
                 let g = find_guest_full(&client, vmid).await?;
                 // Delete is the only op where backup-recency matters —
@@ -1249,9 +1249,7 @@ pub async fn execute(
             wait,
             stream,
         } => {
-            if !yes {
-                anyhow::bail!("`proxxx migrate` is potentially disruptive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "guest migration")?;
             let g = find_guest_full(&client, vmid).await?;
             if g.node == target {
                 anyhow::bail!("guest {vmid} is already on {target}");
@@ -1424,9 +1422,7 @@ pub async fn execute(
             Ok((serde_json::to_value(tasks)?, 0))
         }
         Command::TaskStop { node, upid, yes } => {
-            if !yes {
-                anyhow::bail!("destructive — pass --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "task stop")?;
             client.stop_node_task(&node, &upid).await?;
             Ok((serde_json::json!({"stopped": upid, "node": node}), 0))
         }
@@ -1506,9 +1502,7 @@ pub async fn execute(
             }
         }
         Command::Template { vmid, yes } => {
-            if !yes {
-                anyhow::bail!("`proxxx template` is irreversible — re-run with --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "template conversion")?;
             let (node, gt) = find_guest(&client, vmid).await?;
             let _ = client.convert_to_template(&node, vmid, gt).await?;
             Ok((

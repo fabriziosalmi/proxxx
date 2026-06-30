@@ -397,9 +397,7 @@ pub async fn execute_system(
                 Ok((serde_json::json!({"refreshed": true}), 0))
             }
             NodeSubscriptionCommand::Delete { yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "node subscription delete")?;
                 client.delete_node_subscription(node).await?;
                 Ok((serde_json::json!({"deleted": true}), 0))
             }
@@ -427,9 +425,7 @@ pub async fn execute_system(
                 ))
             }
             NodeCertCommand::Delete { restart, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "node certificate delete")?;
                 client.delete_node_custom_certificate(node, restart).await?;
                 Ok((
                     serde_json::json!({"deleted": true, "restarted": restart}),

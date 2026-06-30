@@ -1007,9 +1007,7 @@ pub async fn execute_metric_servers(
             Ok((serde_json::json!({"updated": id}), 0))
         }
         MetricServersCommand::Delete { id, yes } => {
-            if !yes {
-                anyhow::bail!("destructive — pass --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "metric-server delete")?;
             client.delete_metric_server(&id).await?;
             Ok((serde_json::json!({"deleted": id}), 0))
         }
@@ -1104,9 +1102,7 @@ pub async fn execute_notifications(
                 name,
                 yes,
             } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "notification endpoint delete")?;
                 client
                     .delete_notification_endpoint(&endpoint_type, &name)
                     .await?;
@@ -1182,9 +1178,7 @@ pub async fn execute_notifications(
                 Ok((serde_json::json!({"updated": name}), 0))
             }
             NotificationMatcherCommand::Delete { name, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "notification matcher delete")?;
                 client.delete_notification_matcher(&name).await?;
                 Ok((serde_json::json!({"deleted": name}), 0))
             }
@@ -1300,9 +1294,7 @@ pub async fn execute_ha(
             Ok((serde_json::json!({"updated": group}), 0))
         }
         HaCommand::GroupDelete { group, yes } => {
-            if !yes {
-                anyhow::bail!("destructive — pass --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "HA group delete")?;
             client.delete_ha_group(&group).await?;
             Ok((serde_json::json!({"deleted": group}), 0))
         }

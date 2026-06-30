@@ -296,9 +296,7 @@ pub async fn execute_access(
             ))
         }
         AccessCommand::UserDelete { userid, yes } => {
-            if !yes {
-                anyhow::bail!("`access user-delete` is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "user delete")?;
             client.delete_user(&userid).await?;
             Ok((
                 serde_json::json!({"userid": userid, "status": "deleted"}),
@@ -313,9 +311,7 @@ pub async fn execute_access(
             ))
         }
         AccessCommand::GroupDelete { groupid, yes } => {
-            if !yes {
-                anyhow::bail!("`access group-delete` is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "group delete")?;
             client.delete_group(&groupid).await?;
             Ok((
                 serde_json::json!({"groupid": groupid, "status": "deleted"}),
@@ -367,9 +363,7 @@ pub async fn execute_access(
             token,
             yes,
         } => {
-            if !yes {
-                anyhow::bail!("`access acl-unset` is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "ACL unset")?;
             if user.is_none() && group.is_none() && token.is_none() {
                 anyhow::bail!(
                     "`access acl-unset` requires exactly one of --user, --group, or --token"
@@ -457,9 +451,7 @@ pub async fn execute_token(
             tokenid,
             yes,
         } => {
-            if !yes {
-                anyhow::bail!("token revoke is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "token revoke")?;
             client.revoke_token(&userid, &tokenid).await?;
             Ok((
                 serde_json::json!({

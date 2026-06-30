@@ -513,9 +513,7 @@ pub async fn execute_storage(
             yes,
             wait,
         } => {
-            if !yes {
-                anyhow::bail!("storage delete is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "storage volume delete")?;
             // Volid form: `<storage>:<type>/<file>`. Extract the
             // storage portion to feed into the URL path. PVE wants
             // BOTH the storage name in the URL AND the full volid
@@ -683,11 +681,7 @@ pub async fn execute_backup_jobs(
             Ok((serde_json::json!({"status": "updated", "id": id}), 0))
         }
         BackupJobsCommand::Delete { id, yes } => {
-            if !yes {
-                anyhow::bail!(
-                    "`backup-jobs delete {id}` is destructive — re-run with --yes to confirm"
-                );
-            }
+            crate::cli::common::require_yes(yes, "backup job delete")?;
             client.delete_backup_job(&id).await?;
             Ok((serde_json::json!({"status": "deleted", "id": id}), 0))
         }
@@ -823,9 +817,7 @@ pub async fn execute_storage_defs(
             Ok((serde_json::json!({"updated": storage}), 0))
         }
         StorageDefsCommand::Delete { storage, yes } => {
-            if !yes {
-                anyhow::bail!("destructive — pass --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "storage definition delete")?;
             client.delete_cluster_storage(&storage).await?;
             Ok((serde_json::json!({"deleted": storage}), 0))
         }
@@ -909,9 +901,7 @@ pub async fn execute_acme(
                 Ok((serde_json::json!({"upid": upid, "updated": name}), 0))
             }
             AcmeAccountCommand::Delete { name, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "ACME account delete")?;
                 let upid = client.delete_acme_account(&name).await?;
                 Ok((serde_json::json!({"upid": upid, "deleted": name}), 0))
             }
@@ -982,9 +972,7 @@ pub async fn execute_acme(
                 Ok((serde_json::json!({"updated": plugin_id}), 0))
             }
             AcmePluginCommand::Delete { plugin_id, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "ACME plugin delete")?;
                 client.delete_acme_plugin(&plugin_id).await?;
                 Ok((serde_json::json!({"deleted": plugin_id}), 0))
             }
@@ -1101,9 +1089,7 @@ pub async fn execute_pbs(
             pattern,
             yes,
         } => {
-            if !yes {
-                anyhow::bail!("`pbs restore` writes to the local filesystem — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "PBS restore")?;
             crate::pbs::restore::validate_target(&target)?;
             // Pre-flight: surface a clean error if the binary is missing
             // before we start streaming.

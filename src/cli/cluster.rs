@@ -296,9 +296,7 @@ pub async fn execute_pool(
             Ok((serde_json::json!({"updated": poolid}), 0))
         }
         PoolCommand::Delete { poolid, yes } => {
-            if !yes {
-                anyhow::bail!("destructive — pass --yes to confirm");
-            }
+            crate::cli::common::require_yes(yes, "pool delete")?;
             client.delete_pool(&poolid).await?;
             Ok((serde_json::json!({"deleted": poolid}), 0))
         }
@@ -484,9 +482,7 @@ pub async fn execute_bootstrap(
                 Ok((serde_json::json!({"added": node}), 0))
             }
             CorosyncNodesCommand::Remove { node, yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "corosync node removal")?;
                 client.remove_cluster_corosync_node(&node).await?;
                 Ok((serde_json::json!({"removed": node}), 0))
             }
@@ -580,9 +576,7 @@ pub async fn execute_bootstrap(
                 Ok((serde_json::json!({"upid": upid}), 0))
             }
             ClusterQdeviceCommand::Delete { yes } => {
-                if !yes {
-                    anyhow::bail!("destructive — pass --yes to confirm");
-                }
+                crate::cli::common::require_yes(yes, "QDevice delete")?;
                 let upid = client.remove_cluster_qdevice().await?;
                 Ok((serde_json::json!({"upid": upid}), 0))
             }
