@@ -12,6 +12,30 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **Audit HMAC chain now binds WHO and WHAT (#173).** The chain was
+  `HMAC(key, prev || ts || action || vmid || result)` — `user`, `node`, and
+  `params_json` were stored but left *outside* the MAC, so a local attacker
+  with write access to `audit.db` could rewrite the actor or the parameters
+  of a logged action without breaking the chain (and for `state_apply` /
+  `reconcile_converge` entries the meaningful "what" lives in `params_json`).
+  A new **v2** format folds those columns in: `HMAC(key, "v2" || prev || ts ||
+  action || user || vmid || node || params_json || result)`. A `chain_version`
+  column lets `audit verify` recompute each row under its own format, so an
+  existing `audit.db` migrates transparently and its rows keep verifying as
+  v1. `THREAT_MODEL.md` updated; proptests pin the extended coverage and the
+  v1↔v2 migration contract.
+
+### Changed
+
+- **Destructive-confirmation gates centralised and tested (#172).** The ~30
+  copy-pasted `if !yes { bail!(…) }` checks across the CLI now route through a
+  single, unit-tested `require_yes(yes, what)` chokepoint. A behavioural test
+  net drives the real command handlers with `--yes` absent against a
+  dead-endpoint client and asserts they refuse *before* any API call — so a
+  silently-dropped safety gate now turns CI red instead of passing unnoticed.
+
 ## [0.11.0] — 2026-06-26
 
 Headline: **Consumer-driven gateway + helpers — the gaps the proxima desktop UI hit, closed.** A batch of additive library-API surface driven by real proxima usage: role-management write methods, a shared-storage flag, and three helpers proxima had reimplemented. **No CLI / MCP / config contract change** (one additive `--format json` field on storage status); these let proxima drop hand-rolled workarounds and route through proxxx's rate-limiter, TLS pinning, and auth instead.

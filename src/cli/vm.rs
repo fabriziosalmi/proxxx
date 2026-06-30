@@ -669,9 +669,7 @@ pub async fn execute_disk(
             allow_risk,
             wait,
         } => {
-            if !yes {
-                anyhow::bail!("disk move is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "disk move")?;
             // GAP 1 fix: pre-flight read of `lock` (and other risks)
             // catches a concurrent move/clone/backup before we eat a
             // 30-second PVE timeout. The lock check is zero extra
@@ -717,9 +715,7 @@ pub async fn execute_disk(
             yes,
             allow_risk,
         } => {
-            if !yes {
-                anyhow::bail!("disk resize is destructive — re-run with --yes");
-            }
+            crate::cli::common::require_yes(yes, "disk resize")?;
             let g = find_guest_full(client, vmid).await?;
             enforce_preflight(
                 client,

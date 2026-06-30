@@ -10,6 +10,22 @@
 use anyhow::Result;
 use serde_json::Value;
 
+/// The single confirmation gate for every destructive CLI command.
+///
+/// Before this existed the check was a copy-pasted `if !yes { bail!(…) }`
+/// idiom scattered across ~30 call sites — each one its own opportunity to
+/// drift, weaken, or be silently dropped (and a dropped gate passed CI with
+/// zero coverage). Routing every gate through one function makes the safety
+/// invariant a single, unit-tested chokepoint (#172).
+///
+/// `what` names the operation (e.g. `"pool delete"`); the standard suffix is
+/// appended. Returns the `PreflightRefusal`-flavoured error so `main`'s
+/// typed-exit mapper renders it consistently.
+pub(crate) fn require_yes(yes: bool, what: &str) -> Result<()> {
+    anyhow::ensure!(yes, "{what} is destructive — re-run with --yes to confirm");
+    Ok(())
+}
+
 /// Locate which node owns a given VMID and which guest type it is.
 /// Walks `get_nodes()` then `get_guests(node)` per node — O(N nodes)
 /// network calls. Used by every per-vmid command (migrate, exec, config,
@@ -1112,5 +1128,30 @@ mod batch_policy_proptests {
                 "padded {:?} vs base {:?} disagreed on Ok/Err",
                 padded, base);
         }
+    }
+}
+
+#[cfg(test)]
+mod require_yes_tests {
+    use super::require_yes;
+
+    #[test]
+    fn refuses_without_yes() {
+        let err = require_yes(false, "pool delete").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--yes"),
+            "must tell the operator how to proceed: {msg}"
+        );
+        assert!(
+            msg.contains("pool delete"),
+            "must name the operation: {msg}"
+        );
+        assert!(msg.contains("destructive"), "must flag the risk: {msg}");
+    }
+
+    #[test]
+    fn allows_with_yes() {
+        assert!(require_yes(true, "pool delete").is_ok());
     }
 }

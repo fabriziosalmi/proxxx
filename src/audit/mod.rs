@@ -1,7 +1,15 @@
 //! Append-only audit log backed by `SQLite`.
-//! Each entry is HMAC-SHA256 signed using a chained scheme:
-//! `chain_hmac = HMAC(key, prev_chain_hmac || ts || action || vmid_str || result)`
-//! The chain is verifiable offline via `proxxx audit verify`.
+//! Each entry is HMAC-SHA256 signed using a chained scheme. Two chain
+//! formats coexist, selected per-row by the `chain_version` column:
+//!   * **v1** (legacy): `HMAC(key, prev || ts || action || vmid || result)`
+//!   * **v2** (current): `HMAC(key, "v2" || prev || ts || action || user ||
+//!     vmid || node || params_json || result)` — additionally folds in WHO
+//!     (`user`) and WHAT (`node`, `params_json`), closing the gap where a
+//!     local tamperer could rewrite the actor/parameters of a record without
+//!     breaking the chain (#173).
+//! Rows written before the migration are kept as v1 and still verify under
+//! the v1 formula; every new entry is written as v2. The chain is verifiable
+//! offline via `proxxx audit verify`.
 
 use anyhow::{Context, Result};
 // hmac 0.13: `new_from_slice` lives on the `KeyInit` trait which is no
@@ -50,9 +58,11 @@ impl AuditLogger {
                 node       TEXT,
                 params_json TEXT,
                 result     TEXT    NOT NULL DEFAULT '',
-                chain_hmac TEXT    NOT NULL
+                chain_hmac TEXT    NOT NULL,
+                chain_version INTEGER NOT NULL DEFAULT 1
             );",
         )?;
+        migrate_chain_version(&conn)?;
         Ok(Self { conn, key })
     }
 
@@ -68,10 +78,23 @@ impl AuditLogger {
         let prev_hmac = self.last_chain_hmac();
         let ts = chrono_now();
         let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
-        let chain_hmac = compute_hmac(&self.key, &prev_hmac, &ts, action, &vmid_str, result);
+        // v2: the actor (`user`) and the parameters (`node`, `params_json`)
+        // are now bound into the MAC, not just stored alongside it.
+        let chain_hmac = compute_hmac_v2(
+            &self.key,
+            &prev_hmac,
+            &ts,
+            action,
+            user,
+            &vmid_str,
+            node.unwrap_or(""),
+            params_json.unwrap_or(""),
+            result,
+        );
         self.conn.execute(
-            "INSERT INTO audit_log (ts, action, user, vmid, node, params_json, result, chain_hmac)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO audit_log
+                (ts, action, user, vmid, node, params_json, result, chain_hmac, chain_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 ts,
                 action,
@@ -81,6 +104,7 @@ impl AuditLogger {
                 params_json,
                 result,
                 chain_hmac,
+                CHAIN_V2,
             ],
         )?;
         info!(action, vmid, result, "audit");
@@ -108,26 +132,47 @@ impl AuditLogger {
     }
 
     pub fn verify(&self) -> Result<(usize, usize)> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id,ts,action,vmid,result,chain_hmac FROM audit_log ORDER BY id ASC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT ts,action,user,vmid,node,params_json,result,chain_hmac,chain_version
+             FROM audit_log ORDER BY id ASC",
+        )?;
         let mut prev = String::new();
         let mut ok = 0usize;
         let mut fail = 0usize;
         let rows = stmt.query_map([], |r| {
             Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
+                r.get::<_, String>(0)?,         // ts
+                r.get::<_, String>(1)?,         // action
+                r.get::<_, String>(2)?,         // user
+                r.get::<_, Option<i64>>(3)?,    // vmid
+                r.get::<_, Option<String>>(4)?, // node
+                r.get::<_, Option<String>>(5)?, // params_json
+                r.get::<_, String>(6)?,         // result
+                r.get::<_, String>(7)?,         // chain_hmac
+                r.get::<_, i64>(8)?,            // chain_version
             ))
         })?;
         for row in rows {
-            let (_, ts, action, vmid, result, stored_hmac) = row?;
+            let (ts, action, user, vmid, node, params, result, stored_hmac, version) = row?;
             let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
-            let expected = compute_hmac(&self.key, &prev, &ts, &action, &vmid_str, &result);
+            // Recompute under each row's OWN chain format, so legacy v1 rows
+            // keep verifying after the migration while new v2 rows get the
+            // stronger who/what coverage.
+            let expected = if version == CHAIN_V2 {
+                compute_hmac_v2(
+                    &self.key,
+                    &prev,
+                    &ts,
+                    &action,
+                    &user,
+                    &vmid_str,
+                    node.as_deref().unwrap_or(""),
+                    params.as_deref().unwrap_or(""),
+                    &result,
+                )
+            } else {
+                compute_hmac(&self.key, &prev, &ts, &action, &vmid_str, &result)
+            };
             if expected == stored_hmac {
                 ok += 1;
             } else {
@@ -197,6 +242,66 @@ fn compute_hmac(
     mac.update(b"|");
     mac.update(result.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// Current chain format. Folds the actor + parameters into the MAC.
+const CHAIN_V2: i64 = 2;
+
+/// v2 chain MAC. On top of v1's `(ts, action, vmid, result)` it binds in
+/// `user` (WHO), `node` and `params_json` (WHAT) — so a local tamperer can no
+/// longer rewrite the actor or the parameters of a record without breaking the
+/// chain (#173). The `"v2"` prefix is domain separation: a v1 and a v2 row can
+/// never collide on a MAC even with otherwise-identical fields.
+#[allow(clippy::too_many_arguments)]
+fn compute_hmac_v2(
+    key: &[u8],
+    prev: &str,
+    ts: &str,
+    action: &str,
+    user: &str,
+    vmid: &str,
+    node: &str,
+    params_json: &str,
+    result: &str,
+) -> String {
+    // Same all-zeros-key avoidance as `compute_hmac`: an unusable key yields an
+    // empty MAC that fails `verify` loudly rather than a forgeable constant.
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+        return String::new();
+    };
+    for field in [
+        b"v2".as_slice(),
+        prev.as_bytes(),
+        ts.as_bytes(),
+        action.as_bytes(),
+        user.as_bytes(),
+        vmid.as_bytes(),
+        node.as_bytes(),
+        params_json.as_bytes(),
+    ] {
+        mac.update(field);
+        mac.update(b"|");
+    }
+    mac.update(result.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Add the `chain_version` column to an `audit_log` written before v2 (#173).
+/// Pre-existing rows default to v1 and keep verifying under the v1 formula;
+/// no-op once migrated (fresh DBs already carry the column).
+fn migrate_chain_version(conn: &Connection) -> Result<()> {
+    let has_col: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('audit_log') WHERE name = 'chain_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_col == 0 {
+        conn.execute(
+            "ALTER TABLE audit_log ADD COLUMN chain_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
@@ -332,7 +437,8 @@ impl AuditLogger {
                 node       TEXT,
                 params_json TEXT,
                 result     TEXT    NOT NULL DEFAULT '',
-                chain_hmac TEXT    NOT NULL
+                chain_hmac TEXT    NOT NULL,
+                chain_version INTEGER NOT NULL DEFAULT 1
             );",
         )
         .expect("create audit_log");
@@ -346,12 +452,12 @@ impl AuditLogger {
 /// sequence of log calls and ANY single-byte mutation.
 ///
 /// The chain is the load-bearing security primitive of the audit log:
-/// `proxxx audit verify` walks every entry and recomputes
-/// `chain_hmac = HMAC(key, prev_chain_hmac || ts || action || vmid || result)`.
-/// Any 1-byte mutation in any non-key column of any row MUST break the
-/// chain at that row (and cascade to every following row). Without
-/// this, a tamperer could swap a `delete` for a `start` and walk away
-/// clean.
+/// `proxxx audit verify` walks every entry and recomputes its MAC under the
+/// row's own chain format (v2 for anything `for_test`/`log` writes, which
+/// covers `prev || ts || action || user || vmid || node || params_json ||
+/// result`). Any 1-byte mutation in any covered column of any row MUST break
+/// the chain at that row. Without this, a tamperer could swap a `delete` for
+/// a `start`, or rewrite WHO ran it, and walk away clean.
 ///
 /// `proptest` exercises 256 random sequences per property; failures
 /// shrink to the minimal mutation that breaks the contract.
@@ -408,16 +514,16 @@ mod proptests {
         /// non-repudiation contract: a tamperer cannot edit the log
         /// without leaving a forensic trail.
         ///
-        /// The four columns we test are exactly the ones folded into
-        /// the HMAC: ts, action, vmid (as i64), result, and the stored
-        /// chain_hmac itself. (`user`, `node`, `params_json` are stored
-        /// but intentionally NOT part of the chain — see compute_hmac.
-        /// Mutating those does NOT break the chain by design.)
+        /// The columns we test are exactly the ones folded into the v2
+        /// HMAC: ts, action, user, vmid, node, params_json, result, and the
+        /// stored chain_hmac itself. `for_test` writes v2 rows, so the actor
+        /// (`user`) and parameters (`node`, `params_json`) are now in scope —
+        /// see compute_hmac_v2 / #173.
         #[test]
         fn single_column_mutation_breaks_chain(
             entries in vec(arb_entry(), 1..15),
             target_idx in 0usize..15,
-            field_idx in 0usize..5,
+            field_idx in 0usize..8,
         ) {
             let mut logger = AuditLogger::for_test();
             for (action, user, vmid, node, params, result) in &entries {
@@ -431,7 +537,9 @@ mod proptests {
             // Pick a column from the in-chain set. Each mutation is a
             // straight UPDATE to a sentinel value that's syntactically
             // valid SQL but byte-different from whatever was stored.
-            let column = ["ts", "action", "vmid", "result", "chain_hmac"][field_idx % 5];
+            let column = [
+                "ts", "action", "user", "vmid", "node", "params_json", "result", "chain_hmac",
+            ][field_idx % 8];
             let sql = if column == "vmid" {
                 "UPDATE audit_log SET vmid = COALESCE(vmid, 0) + 1 WHERE id = ?1".to_string()
             } else {
@@ -499,17 +607,16 @@ mod proptests {
             );
         }
 
-        /// Out-of-chain columns (`user`, `node`, `params_json`) are
-        /// stored but NOT folded into the HMAC — that's intentional
-        /// per `compute_hmac` which only mixes in (ts, action, vmid,
-        /// result). Verify pins this DESIGN BOUNDARY: mutating
-        /// `user` / `node` / `params_json` MUST NOT break the chain.
+        /// #173 regression. `user` (WHO), `node` and `params_json` (WHAT)
+        /// ARE folded into the v2 chain. Mutating any of them MUST break at
+        /// least one link — a local tamperer can no longer rewrite the actor
+        /// or the parameters of a logged action and walk away clean.
         ///
-        /// If this changes (and we extend chain coverage to those
-        /// columns), this property fails loudly and the doc-comment
-        /// at the top of the file needs updating in lockstep.
+        /// This is the inverse of the old `..._does_not_break_chain` property
+        /// (pre-v2): if it ever flips back, the chain has silently regressed
+        /// to leaving who/what unprotected.
         #[test]
-        fn user_node_params_mutation_does_not_break_chain(
+        fn user_node_params_mutation_breaks_chain(
             entries in vec(arb_entry(), 1..10),
             target_idx in 0usize..10,
             col_idx in 0usize..3,
@@ -525,13 +632,72 @@ mod proptests {
             let col = ["user", "node", "params_json"][col_idx % 3];
             let sql = format!("UPDATE audit_log SET {col} = 'TAMPERED' WHERE id = ?1");
             logger.conn.execute(&sql, [id as i64]).expect("mutate");
-            let (ok, fail) = logger.verify().expect("verify");
-            prop_assert_eq!(
-                fail, 0,
-                "{} is not part of the chain — mutating it MUST NOT trigger fail, got fail={} ok={}",
-                col, fail, ok
+            let (_ok, fail) = logger.verify().expect("verify");
+            prop_assert!(
+                fail >= 1,
+                "{} is part of the v2 chain — mutating it MUST break ≥1 link, got fail=0",
+                col
             );
         }
+    }
+
+    /// Backward-compatibility for the v1→v2 migration (#173): a hand-written
+    /// legacy v1 row keeps verifying under the v1 formula even when v2 rows
+    /// are appended on top, AND retains v1 semantics (its `user` is NOT
+    /// chain-covered), while new v2 rows DO cover `user`. This is the exact
+    /// contract that lets an existing `audit.db` survive the upgrade.
+    #[test]
+    fn legacy_v1_row_verifies_alongside_v2_and_keeps_v1_semantics() {
+        let mut logger = AuditLogger::for_test();
+
+        // Insert a legacy v1 row exactly as the pre-#173 code would have:
+        // chain_version = 1, hmac over (prev="" || ts || action || vmid || result).
+        let ts = "2026-01-01T00:00:00Z";
+        let v1_hmac = compute_hmac(&logger.key, "", ts, "delete", "100", "ok");
+        logger
+            .conn
+            .execute(
+                "INSERT INTO audit_log
+                    (ts, action, user, vmid, node, params_json, result, chain_hmac, chain_version)
+                 VALUES (?1, 'delete', 'alice', 100, NULL, '{\"k\":1}', 'ok', ?2, 1)",
+                params![ts, v1_hmac],
+            )
+            .expect("insert v1");
+
+        // Append a v2 row; it chains onto the v1 row's stored hmac.
+        logger
+            .log(
+                "apply",
+                "bob",
+                Some(200),
+                Some("pve1"),
+                Some("{\"k\":2}"),
+                "ok",
+            )
+            .expect("log v2");
+
+        let (ok, fail) = logger.verify().expect("verify");
+        assert_eq!((ok, fail), (2, 0), "mixed v1+v2 chain must verify clean");
+
+        // v1 semantics preserved: the legacy row does NOT cover `user`, so
+        // rewriting its actor must NOT break the chain (it predates #173).
+        logger
+            .conn
+            .execute("UPDATE audit_log SET user = 'mallory' WHERE id = 1", [])
+            .unwrap();
+        let (_ok, fail) = logger.verify().expect("verify");
+        assert_eq!(fail, 0, "v1 row predates user coverage — must still verify");
+
+        // But the v2 row DOES cover `user` — rewriting its actor must break it.
+        logger
+            .conn
+            .execute("UPDATE audit_log SET user = 'mallory' WHERE id = 2", [])
+            .unwrap();
+        let (_ok, fail) = logger.verify().expect("verify");
+        assert!(
+            fail >= 1,
+            "v2 row covers user — mutation must break the chain"
+        );
     }
 }
 
