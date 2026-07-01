@@ -12,6 +12,20 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Added
+
+- **Unmanned auto-converge guardrails (#171).** Two opt-in restrictions on the
+  daemon's Layer-3 `auto_converge` — both only ever *narrow* the unmanned blast
+  radius, default = exact current behaviour. `[reconcile] allowed_families =
+  ["pool", "acl"]` limits which state families the unmanned daemon may
+  auto-apply (graduated trust — keep storage / HA / firewall human-only); the
+  manual `reconcile converge` stays unrestricted. `[reconcile]
+  max_unmanned_changes = 20` caps changes-per-tick (after family filtering),
+  refusing with a "needs human review" alert above the cap — catching a
+  Warning-tier flood (e.g. a partial git revert) that the Severe bulk-change
+  circuit-breaker (≥50) would miss. Pure, unit-tested filter + cap; documented
+  under `[profiles.<name>.reconcile]`.
+
 ### Security
 
 - **Audit HMAC chain now binds WHO and WHAT (#173).** The chain was

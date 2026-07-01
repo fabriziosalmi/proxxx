@@ -481,6 +481,33 @@ const fn converge_decision(
     }
 }
 
+/// Restrict an unmanned change set to the whitelisted state families
+/// (`[reconcile] allowed_families`). `None`/empty keeps everything — the
+/// default. Pure so the family policy is unit-tested without a cluster. Only
+/// ever narrows the set; the manual `reconcile converge` path never calls this.
+fn retain_allowed_families(
+    changes: Vec<crate::state::diff::Change>,
+    allowed: Option<&[String]>,
+) -> Vec<crate::state::diff::Change> {
+    match allowed {
+        Some(list) if !list.is_empty() => changes
+            .into_iter()
+            .filter(|c| list.iter().any(|f| f.as_str() == c.resource))
+            .collect(),
+        _ => changes,
+    }
+}
+
+/// True when an unmanned change count exceeds the configured per-tick cap
+/// (`[reconcile] max_unmanned_changes`). `None` = no cap (default). The cap is
+/// applied AFTER family filtering, so it bounds exactly what would be applied.
+const fn exceeds_unmanned_cap(count: usize, cap: Option<u32>) -> bool {
+    match cap {
+        Some(max) => count > max as usize,
+        None => false,
+    }
+}
+
 /// True if an incident freeze is active for `profile`. Fails SAFE: if the freeze
 /// state can't be read, treat as frozen (skip the unmanned converge) rather than
 /// risk mutating during an incident.
@@ -509,11 +536,53 @@ async fn run_auto_converge(
         continue_on_error: false,
     };
     let audit_user = client.profile_config().user.clone();
-    match crate::state::converge::converge(
-        client,
+    let c = client.as_ref();
+
+    // Resolve drift once, then apply the UNMANNED-ONLY restrictions before any
+    // mutation: (1) the per-family whitelist, then (2) the change-count cap.
+    // Both only narrow the blast radius. The manual `reconcile converge` path
+    // uses the unrestricted `converge()` and is unaffected.
+    let (changes, live) = match crate::cli::reconcile::compute_drift_with_live(
+        c,
         profile_label,
         &rec.source,
         path,
+    )
+    .await
+    {
+        Ok(cl) => cl,
+        Err(e) => {
+            tracing::warn!(profile = %profile_label, "auto_converge tick failed (non-fatal): {e:#}");
+            return;
+        }
+    };
+
+    let filtered = retain_allowed_families(changes, rec.allowed_families.as_deref());
+
+    if exceeds_unmanned_cap(filtered.len(), rec.max_unmanned_changes) {
+        let n = filtered.len();
+        let cap = rec.max_unmanned_changes.unwrap_or(0);
+        tracing::warn!(
+            profile = %profile_label,
+            "auto_converge: {n} change(s) exceed max_unmanned_changes={cap} — needs HUMAN REVIEW, left for operator"
+        );
+        tg_alert(
+            telegram,
+            &format!(
+                "🛑 proxxx `{profile_label}`: {n} changes exceed max_unmanned_changes={cap} — \
+                 auto-converge refused, needs human review."
+            ),
+        )
+        .await;
+        return;
+    }
+
+    match crate::state::converge::converge_with_changes(
+        c,
+        profile_label,
+        &rec.source,
+        filtered,
+        &live,
         opts,
         false,
         &audit_user,
@@ -643,6 +712,68 @@ mod tests {
         );
         // All clear → proceed with the unmanned converge.
         assert_eq!(converge_decision(true, true, false, false, false), Proceed);
+    }
+
+    fn ch(resource: &'static str) -> crate::state::diff::Change {
+        crate::state::diff::Change {
+            kind: crate::state::diff::ChangeKind::Delete,
+            resource,
+            identity: "x".into(),
+            before: None,
+            after: None,
+        }
+    }
+
+    #[test]
+    fn family_whitelist_none_or_empty_keeps_everything() {
+        let changes = || vec![ch("pool"), ch("storage"), ch("acl")];
+        // Absent whitelist = current behaviour: keep all.
+        assert_eq!(retain_allowed_families(changes(), None).len(), 3);
+        // Empty whitelist is treated the same as absent (keep all), NOT
+        // "converge nothing" — matches the documented default.
+        let empty: Vec<String> = vec![];
+        assert_eq!(retain_allowed_families(changes(), Some(&empty)).len(), 3);
+    }
+
+    #[test]
+    fn family_whitelist_retains_only_listed_families() {
+        let allowed = vec!["pool".to_string(), "acl".to_string()];
+        let kept = retain_allowed_families(
+            vec![ch("pool"), ch("storage"), ch("acl"), ch("firewall-cluster")],
+            Some(&allowed),
+        );
+        let fams: Vec<&str> = kept.iter().map(|c| c.resource).collect();
+        assert_eq!(
+            fams,
+            vec!["pool", "acl"],
+            "storage + firewall must be filtered out"
+        );
+    }
+
+    #[test]
+    fn family_whitelist_unknown_name_filters_all() {
+        // A typo'd family never matches → converges nothing (safe: a too-tight
+        // config just applies less, never more).
+        let allowed = vec!["poool".to_string()];
+        assert!(retain_allowed_families(vec![ch("pool")], Some(&allowed)).is_empty());
+    }
+
+    #[test]
+    fn unmanned_cap_boundary() {
+        assert!(!exceeds_unmanned_cap(20, None), "no cap → never exceeds");
+        assert!(
+            !exceeds_unmanned_cap(20, Some(20)),
+            "exactly at cap is allowed"
+        );
+        assert!(
+            exceeds_unmanned_cap(21, Some(20)),
+            "one over the cap is refused"
+        );
+        assert!(
+            !exceeds_unmanned_cap(0, Some(0)),
+            "cap 0 with 0 changes is a no-op, not a breach"
+        );
+        assert!(exceeds_unmanned_cap(1, Some(0)), "cap 0 refuses any change");
     }
 
     /// The unified daemon is mostly a wiring layer; the per-component
