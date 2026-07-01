@@ -64,6 +64,23 @@ converge_prune = false                # true → auto-converge also executes del
                                       # `state apply --prune`). Default false: deletes are
                                       # previewed but held. Enable only against a repo with
                                       # branch protection / atomic pushes.
+
+# ── Unmanned-converge guardrails (both narrow the blast radius; default = none) ──
+allowed_families = ["pool", "acl"]    # restrict the UNMANNED converge to these state
+                                      # families (matched against a change's resource:
+                                      # pool, acl, storage, backup-job, firewall-*, ha-*,
+                                      # notification-matcher, mappings-pci/usb, …). Absent
+                                      # or empty = every family (current behaviour). Lets
+                                      # you auto-converge low-stakes families while keeping
+                                      # high-stakes ones human-only. The manual
+                                      # `reconcile converge` command is NOT restricted.
+max_unmanned_changes = 20             # hard cap on changes-per-tick for the UNMANNED path,
+                                      # counted AFTER allowed_families filtering, regardless
+                                      # of severity. Absent = no cap. Above it → the daemon
+                                      # refuses and alerts "needs human review (too many
+                                      # changes)". Catches a Warning-tier flood (e.g. a
+                                      # partial git revert) that the Severe bulk-change
+                                      # circuit-breaker (≥50) would miss.
 ```
 
 ## `[ssh]` (top-level default)

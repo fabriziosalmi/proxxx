@@ -99,6 +99,25 @@ pub struct ReconcileConfig {
     /// present spurious deletes (the bulk-change Severe gate is the backstop).
     #[serde(default)]
     pub converge_prune: bool,
+
+    /// Per-family whitelist for the **unmanned** daemon converge. Empty/absent
+    /// = every family (current behaviour). When set, the unmanned auto-converge
+    /// only touches these state families (matched against `Change::resource`,
+    /// e.g. `"pool"`, `"acl"`, `"storage"`); high-blast-radius families left off
+    /// the list stay human-only — graduated trust. The manual `reconcile
+    /// converge` command is NOT restricted. Only ever narrows the blast radius.
+    #[serde(default)]
+    pub allowed_families: Option<Vec<String>>,
+
+    /// Hard cap on the number of changes the **unmanned** daemon will apply in a
+    /// single tick (counted AFTER `allowed_families` filtering), regardless of
+    /// severity. Absent = no cap (current behaviour). Above the cap the daemon
+    /// refuses and raises a "needs human review (too many changes)" alert
+    /// instead of applying. Complements the Severe bulk-change circuit-breaker
+    /// (which only trips on Severe-tier floods) by also catching a flood of
+    /// Warning-tier changes — e.g. 40 deletes from a partial git revert.
+    #[serde(default)]
+    pub max_unmanned_changes: Option<u32>,
 }
 
 fn default_reconcile_path() -> String {
