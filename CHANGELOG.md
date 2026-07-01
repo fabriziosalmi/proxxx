@@ -12,6 +12,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-01
+
+Headline: **Security hardening — tamper-evident audit that now covers WHO/WHAT, tested destructive-confirmation gates, and guardrails on the unmanned converge.** No CLI / config / MCP contract change; an existing `audit.db` migrates in place.
+
 ### Added
 
 - **Unmanned auto-converge guardrails (#171).** Two opt-in restrictions on the
