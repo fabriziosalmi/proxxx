@@ -982,6 +982,12 @@ pub enum McpCommand {
         /// Bearer token for auth (overrides `mcp_token` in config)
         #[arg(long)]
         token: Option<String>,
+        /// DANGEROUS: allow binding to a non-loopback address WITHOUT auth.
+        /// By default proxxx refuses to expose the MCP server on the network
+        /// unless `mcp_token` (or --token) is set. Only pass this on a trusted
+        /// network or behind an auth-enforcing reverse proxy.
+        #[arg(long)]
+        insecure_bind: bool,
     },
     /// List available tools
     Tools {
@@ -1604,7 +1610,12 @@ pub async fn execute(
                 crate::mcp::server::run_server(std::sync::Arc::clone(&client), handle).await?;
                 Ok((serde_json::json!({"status": "MCP server stopped"}), 0))
             }
-            McpCommand::ServeHttp { bind, port, token } => {
+            McpCommand::ServeHttp {
+                bind,
+                port,
+                token,
+                insecure_bind,
+            } => {
                 let mut cfg = config;
                 // CLI --token overrides the profile's mcp_token.
                 if let Some(t) = token {
@@ -1620,6 +1631,7 @@ pub async fn execute(
                     handle,
                     &bind,
                     port,
+                    insecure_bind,
                 )
                 .await?;
                 Ok((serde_json::json!({"status": "MCP HTTP server stopped"}), 0))

@@ -213,16 +213,48 @@ async fn health() -> Json<Value> {
     }))
 }
 
+/// Returns `true` if `bind` targets only the loopback interface.
+///
+/// Anything that is not a parseable loopback IP — `0.0.0.0`, `::`, a LAN
+/// address, a hostname, or the empty string — is treated as network-exposed,
+/// i.e. NOT loopback. Fail-closed: when in doubt, assume exposed.
+fn is_loopback_bind(bind: &str) -> bool {
+    if bind.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    bind.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Start the MCP HTTP server.
 ///
 /// Binds to `bind:port` and serves until the process receives SIGTERM/SIGINT.
 /// If `config.mcp_token` is set, all MCP endpoints require Bearer auth.
+///
+/// SECURITY preflight (fail-closed): refuses to start on a non-loopback bind
+/// when no `mcp_token` is configured, unless `allow_insecure_bind` is set. An
+/// unauthenticated MCP endpoint reachable from the network hands any caller
+/// the profile's PVE credentials — the `--insecure-bind` flag is the explicit,
+/// conscious opt-out for a trusted network / reverse-proxy-authenticated setup.
 pub async fn run_http_server(
     client: Arc<PxClient>,
     config: ConfigHandle,
     bind: &str,
     port: u16,
+    allow_insecure_bind: bool,
 ) -> Result<()> {
+    if !is_loopback_bind(bind) && !allow_insecure_bind {
+        let has_token = config.read().await.mcp_token.is_some();
+        if !has_token {
+            anyhow::bail!(
+                "Refusing to start the MCP HTTP server on non-loopback bind '{bind}' without auth. \
+                 Set `mcp_token` (or pass --token), bind to 127.0.0.1, or pass --insecure-bind to \
+                 override consciously."
+            );
+        }
+    }
+
     // Spin up the notification broker + pollers BEFORE the HTTP
     // server starts. The pollers run for the process lifetime;
     // when no SSE clients are connected the broker drops messages
@@ -281,4 +313,31 @@ async fn shutdown_signal() {
         () = terminate => {},
     }
     tracing::info!("MCP HTTP server shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_bind;
+
+    #[test]
+    fn loopback_binds_are_recognised() {
+        assert!(is_loopback_bind("127.0.0.1"));
+        assert!(is_loopback_bind("127.0.0.5")); // whole 127.0.0.0/8 is loopback
+        assert!(is_loopback_bind("::1"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(is_loopback_bind("LOCALHOST")); // case-insensitive
+    }
+
+    #[test]
+    fn exposed_binds_are_rejected_as_non_loopback() {
+        // The dangerous ones — all-interfaces wildcards.
+        assert!(!is_loopback_bind("0.0.0.0"));
+        assert!(!is_loopback_bind("::"));
+        // LAN / routable addresses.
+        assert!(!is_loopback_bind("192.168.1.10"));
+        assert!(!is_loopback_bind("10.0.0.1"));
+        // Hostnames and junk — fail-closed: treated as exposed.
+        assert!(!is_loopback_bind("mcp.example.com"));
+        assert!(!is_loopback_bind(""));
+    }
 }
