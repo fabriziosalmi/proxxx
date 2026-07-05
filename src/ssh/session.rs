@@ -210,14 +210,21 @@ impl SshSession {
         })?
         .with_context(|| format!("ssh connect {host}:{port}"))?;
 
-        // russh 0.60: `authenticate_publickey` now takes a
-        // `PrivateKeyWithHashAlg` (the hash-alg pin lets the client
-        // negotiate rsa-sha2-256/512 instead of the deprecated
-        // ssh-rsa-sha1). Passing `None` lets russh choose the
-        // strongest mutually-supported algorithm — for ed25519 keys
-        // (our only supported type per known_hosts policy) the hash
-        // alg is irrelevant.
-        let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
+        // russh 0.60: `authenticate_publickey` takes a `PrivateKeyWithHashAlg`.
+        // For an RSA key we MUST pin rsa-sha2 (SHA-512) — passing `None` makes
+        // russh sign with the key's default algorithm, which for RSA is the
+        // deprecated `ssh-rsa` (SHA-1). Modern OpenSSH sshd (PVE 9 / Debian 13)
+        // has ssh-rsa out of `PubkeyAcceptedAlgorithms` by default, so a `None`
+        // RSA signature is rejected and RSA keys become unusable — even though
+        // the same key works fine over the OpenSSH client (which negotiates
+        // rsa-sha2 automatically). Ed25519 / ECDSA ignore the hash alg → `None`.
+        let key_pair = Arc::new(key_pair);
+        let hash_alg = if matches!(key_pair.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
+            Some(russh::keys::HashAlg::Sha512)
+        } else {
+            None
+        };
+        let key_with_alg = PrivateKeyWithHashAlg::new(key_pair, hash_alg);
         let auth_result = handle
             .authenticate_publickey(user.clone(), key_with_alg)
             .await
