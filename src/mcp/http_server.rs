@@ -42,6 +42,13 @@ struct McpState {
     /// only the broadcast sender). Cloned per `GET /mcp` SSE
     /// connection to derive a fresh receiver.
     notifications: crate::mcp::notifications::Broker,
+    /// True when the server is bound to a non-loopback interface WITHOUT an
+    /// explicit `--insecure-bind` opt-in. In that mode a missing `mcp_token`
+    /// means FAIL CLOSED (deny every request) — not open. Computed once at
+    /// start; it closes the SIGHUP hole where clearing `mcp_token` on a live
+    /// exposed server would otherwise silently drop all auth (the start-time
+    /// bind preflight does not re-run on reload).
+    require_token: bool,
 }
 
 impl McpState {
@@ -49,38 +56,63 @@ impl McpState {
         client: Arc<PxClient>,
         config: ConfigHandle,
         notifications: crate::mcp::notifications::Broker,
+        require_token: bool,
     ) -> Self {
         Self {
             client,
             config,
             notifications,
+            require_token,
         }
     }
 
-    /// Returns `true` if the request carries a valid bearer token (or if no
-    /// token is configured). Constant-time comparison via XOR fold prevents
-    /// timing side-channels leaking token length or prefix.
-    ///
-    /// Reads `mcp_token` from the live config so a SIGHUP token rotation
-    /// takes effect on the next request without a restart.
+    /// Returns `true` if the request is authorized. Reads `mcp_token` from the
+    /// live config so a SIGHUP token rotation takes effect on the next request.
+    /// When `require_token` is set (exposed bind, no `--insecure-bind`), a
+    /// missing token denies every request instead of opening — see
+    /// [`token_gate`].
     async fn auth_ok(&self, headers: &HeaderMap) -> bool {
         let expected = self.config.read().await.mcp_token.clone();
-        let Some(expected) = expected else {
-            return true; // no token configured → open
-        };
-        let expected_hash = sha256_bytes(&expected);
         let bearer = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        let got_hash = sha256_bytes(bearer);
-        // Constant-time comparison: fold XOR of all bytes, reject if any differ.
-        let diff: u8 = expected_hash
-            .iter()
-            .zip(got_hash.iter())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b));
-        diff == 0
+        token_gate(
+            expected.as_ref().map(|z| z.as_str()),
+            bearer,
+            self.require_token,
+        )
+    }
+}
+
+/// Pure authorization decision, split out so the fail-closed logic is unit-
+/// testable without spinning a server.
+///
+/// * `expected = Some(tok)` → constant-time compare of the presented bearer
+///   (XOR fold over SHA-256, no length/prefix timing leak).
+/// * `expected = None` → OPEN only when `require_token` is false (loopback bind
+///   or explicit `--insecure-bind`). When `require_token` is true the server is
+///   network-exposed and an absent token FAILS CLOSED — this is what prevents a
+///   SIGHUP that clears `mcp_token` from silently unauthenticating the server.
+fn token_gate(expected: Option<&str>, bearer: &str, require_token: bool) -> bool {
+    // An empty / whitespace-only token counts as ABSENT — mirrors the
+    // `!is_empty()` guards on token_secret/password (config/mod.rs) and closes
+    // the bypass where `--token ""` (an unset env var) or a SIGHUP that sets
+    // `mcp_token = ""` would otherwise be a real `Some("")` that authorizes a
+    // header-less request on an exposed bind (sha256("") == sha256("")).
+    let effective = expected.filter(|t| !t.trim().is_empty());
+    match effective {
+        None => !require_token,
+        Some(tok) => {
+            let expected_hash = sha256_bytes(tok);
+            let got_hash = sha256_bytes(bearer);
+            let diff: u8 = expected_hash
+                .iter()
+                .zip(got_hash.iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+            diff == 0
+        }
     }
 }
 
@@ -244,8 +276,19 @@ pub async fn run_http_server(
     port: u16,
     allow_insecure_bind: bool,
 ) -> Result<()> {
-    if !is_loopback_bind(bind) && !allow_insecure_bind {
-        let has_token = config.read().await.mcp_token.is_some();
+    // Exposed = network-reachable without a conscious --insecure-bind opt-in.
+    // Drives BOTH the start-time refusal below AND the per-request fail-closed
+    // gate in `auth_ok` (so a later SIGHUP that clears the token can't reopen).
+    let require_token = !is_loopback_bind(bind) && !allow_insecure_bind;
+    if require_token {
+        // Non-empty, mirroring token_gate: `--token ""` must NOT be treated as
+        // "authenticated" and start an exposed, effectively-open server.
+        let has_token = config
+            .read()
+            .await
+            .mcp_token
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty());
         if !has_token {
             anyhow::bail!(
                 "Refusing to start the MCP HTTP server on non-loopback bind '{bind}' without auth. \
@@ -270,7 +313,7 @@ pub async fn run_http_server(
         notifications.clone(),
     );
 
-    let state = McpState::new(client, config, notifications);
+    let state = McpState::new(client, config, notifications, require_token);
     let addr = format!("{bind}:{port}");
 
     let app = Router::new()
@@ -317,7 +360,67 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback_bind;
+    use super::{is_loopback_bind, token_gate};
+
+    #[test]
+    fn token_gate_fails_closed_on_exposed_bind_without_token() {
+        // The SIGHUP hole: server exposed (require_token=true), token cleared
+        // → every request must be DENIED, not opened.
+        assert!(
+            !token_gate(None, "", true),
+            "exposed bind + no token → deny (fail-closed)"
+        );
+        assert!(
+            !token_gate(None, "anything", true),
+            "exposed bind + no token → deny even with a presented bearer"
+        );
+        // An empty / whitespace-only configured token counts as absent — the
+        // `--token ""` / SIGHUP-clear-to-"" bypass must also fail closed.
+        assert!(
+            !token_gate(Some(""), "", true),
+            "empty token on exposed bind → deny (not a real credential)"
+        );
+        assert!(
+            !token_gate(Some("   "), "", true),
+            "whitespace-only token on exposed bind → deny"
+        );
+        assert!(
+            !token_gate(Some(""), "", true) && token_gate(Some(""), "", false),
+            "empty token is treated as absent in both exposure modes"
+        );
+    }
+
+    #[test]
+    fn token_gate_opens_only_when_not_exposed() {
+        // Loopback / --insecure-bind (require_token=false) with no token → open,
+        // matching the documented default.
+        assert!(token_gate(None, "", false));
+        assert!(token_gate(None, "ignored", false));
+    }
+
+    #[test]
+    fn token_gate_matches_and_rejects_bearer() {
+        assert!(
+            token_gate(Some("s3cret-token"), "s3cret-token", true),
+            "exact match authorizes"
+        );
+        assert!(
+            token_gate(Some("s3cret-token"), "s3cret-token", false),
+            "match works regardless of exposure"
+        );
+        assert!(
+            !token_gate(Some("s3cret-token"), "wrong", true),
+            "wrong token denied"
+        );
+        assert!(
+            !token_gate(Some("s3cret-token"), "", true),
+            "empty bearer denied when a token is set"
+        );
+        assert!(
+            !token_gate(Some("s3cret-token"), "s3cret-toke", true),
+            "prefix is not a match"
+        );
+    }
 
     #[test]
     fn loopback_binds_are_recognised() {

@@ -158,3 +158,81 @@ async fn mcp_http_nonloopback_without_token_refuses_start() {
         "error must name the fail-closed reason, got: {msg}"
     );
 }
+
+/// Registry contract: the destructive-tool set is an explicit whitelist. Every
+/// entry here is fail-closed (policy-gated) on the MCP path, so a silent flag
+/// flip in either direction changes the security posture — this test forces the
+/// change to be conscious. `suspend_guest` is included (it pauses a running VM).
+#[test]
+fn destructive_tool_set_matches_expected_whitelist() {
+    let mut got: Vec<&str> = proxxx::mcp::tools::TOOLS
+        .iter()
+        .filter(|t| t.destructive)
+        .map(|t| t.name)
+        .collect();
+    got.sort_unstable();
+    let mut want = vec![
+        "clone_guest",
+        "clone_with_cloudinit",
+        "create_guest",
+        "create_snapshot",
+        "delete_guest",
+        "delete_snapshot",
+        "migrate_guest",
+        "restart_guest",
+        "stop_guest",
+        "suspend_guest",
+    ];
+    want.sort_unstable();
+    assert_eq!(
+        got, want,
+        "destructive-tool set changed — update the whitelist consciously (each entry is \
+         policy-gated / fail-closed on MCP)"
+    );
+}
+
+/// The fail-closed gate is uniform (`tool_def.destructive`), not delete-specific.
+/// Prove it for representatives spanning the required-param shapes; the registry
+/// contract above covers the multi-param remainder (create/clone) that share the
+/// identical gate branch.
+#[tokio::test]
+async fn every_destructive_tool_refuses_without_policy() {
+    let client = offline_client().await;
+    let cfg = base_cfg(None); // no policies → the gate must refuse
+
+    let cases: &[(&str, serde_json::Value)] = &[
+        ("stop_guest", json!({ "guest_id": 100 })),
+        ("restart_guest", json!({ "guest_id": 100 })),
+        ("delete_guest", json!({ "guest_id": 100 })),
+        ("suspend_guest", json!({ "guest_id": 100 })),
+        (
+            "migrate_guest",
+            json!({ "guest_id": 100, "target_node": "pve2" }),
+        ),
+        (
+            "delete_snapshot",
+            json!({ "guest_id": 100, "name": "snap1" }),
+        ),
+        (
+            "create_snapshot",
+            json!({ "guest_id": 100, "name": "snap1" }),
+        ),
+        // Highest-blast multi-param tools — proven behaviorally, not just via
+        // the registry flag. create_guest has no guest_id (it mints one), so it
+        // exercises the vmid-absent gate path.
+        ("create_guest", json!({ "node": "pve1", "type": "lxc" })),
+        ("clone_guest", json!({ "guest_id": 100 })),
+        ("clone_with_cloudinit", json!({ "guest_id": 100 })),
+    ];
+
+    for (tool, args) in cases {
+        let out = proxxx::mcp::dispatch::handle_tool_call(&client, &cfg, tool, args)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: dispatch should return an envelope, got err: {e}"));
+        assert_eq!(
+            out.get("isError").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "{tool}: a destructive tool with no policy MUST refuse (isError=true), got: {out}"
+        );
+    }
+}

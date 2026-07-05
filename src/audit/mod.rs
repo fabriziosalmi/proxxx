@@ -313,25 +313,47 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
         // `telegram.bot_token_file` 0600 enforcement. (The key we *create*
         // below is already 0600; this catches one restored from a backup, an
         // over-permissive umask, or a hand-placed key on a separate volume.)
+        let bytes;
         #[cfg(unix)]
         {
+            use std::io::Read as _;
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(path) {
-                let mode = meta.permissions().mode();
-                if mode & 0o077 != 0 {
-                    anyhow::bail!(
-                        "audit key {} has unsafe permissions {:o} — must be 0600 (owner-only). A \
-                         group/world-readable HMAC key lets another local user forge the audit \
-                         chain. Run: chmod 600 {}",
-                        path.display(),
-                        mode & 0o777,
-                        path.display(),
-                    );
-                }
+            // Open ONCE, then fstat the open fd — not a fresh path stat — so the
+            // mode we check and the bytes we read come from the SAME inode. This
+            // closes the TOCTOU / symlink-swap window between a path-based check
+            // and a path-based read.
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("open audit key {}", path.display()))?;
+            // FAIL CLOSED: a stat error must REFUSE the key, not skip the check
+            // and read it anyway. Custody we cannot verify is custody we do not
+            // trust. (Was previously `if let Ok(meta)` — silently fail-open.)
+            let mode = file
+                .metadata()
+                .with_context(|| format!("stat audit key {}", path.display()))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                anyhow::bail!(
+                    "audit key {} has unsafe permissions {:o} — must be 0600 (owner-only). A \
+                     group/world-readable HMAC key lets another local user forge the audit \
+                     chain. Run: chmod 600 {}",
+                    path.display(),
+                    mode & 0o777,
+                    path.display(),
+                );
             }
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)
+                .with_context(|| format!("read audit key {}", path.display()))?;
+            bytes = buf;
         }
-        let bytes =
-            std::fs::read(path).with_context(|| format!("read audit key {}", path.display()))?;
+        #[cfg(not(unix))]
+        {
+            // No POSIX mode to enforce custody here. AR-5 scopes the tamper-
+            // evidence guarantee to unix; release targets are darwin + linux-musl.
+            bytes = std::fs::read(path)
+                .with_context(|| format!("read audit key {}", path.display()))?;
+        }
         // The HMAC chain is only as trustworthy as its key. A truncated or empty
         // key (e.g. an interrupted first write, or a `touch`'d file) MUST fail
         // loudly — an empty key would otherwise degrade to a forgeable all-zeros
@@ -371,17 +393,36 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
 /// hermetic tests, and for relocating the trail onto a dedicated volume in
 /// ops); otherwise the platform data-local dir. Mirrors the `PROXXX_CONFIG` /
 /// `PROXXX_FREEZE_PATH` override convention. The directory is created if absent.
+///
+/// Custody: on unix the dir is created `0700`. Dir-write is the precondition for
+/// *replacing* the HMAC key with an attacker-owned `0600` key (which the
+/// mode-only load check would otherwise accept), so denying other users write
+/// access to the dir closes that swap vector. Only tightens an existing dir's
+/// perms is out of scope — `create_dir_all` no-ops if it exists; operators who
+/// pre-create a lax `PROXXX_AUDIT_DIR` own that choice (see ACCEPTED-RISKS AR-5).
 fn audit_data_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
-        let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create PROXXX_AUDIT_DIR {}", dir.display()))?;
-        return Ok(dir);
+    let dir = if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
+        PathBuf::from(dir)
+    } else {
+        directories::ProjectDirs::from("dev", "proxxx", "proxxx")
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?
+            .data_local_dir()
+            .to_path_buf()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| format!("create audit dir {}", dir.display()))?;
     }
-    let base = directories::ProjectDirs::from("dev", "proxxx", "proxxx")
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?;
-    let dir = base.data_local_dir().to_path_buf();
-    std::fs::create_dir_all(&dir)?;
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create audit dir {}", dir.display()))?;
+    }
     Ok(dir)
 }
 
