@@ -61,7 +61,7 @@ Pick the row that matches you and jump straight to the right page.
 - **Upgrade pre-flight** — `proxxx upgrade-check --target 9.x` scans cluster + config against bundled rules; exit code 1 on any block-severity finding (CI-gateable).
 - **Bundled error knowledge base** — `proxxx explain <error-id>` for every typed error proxxx can emit (15 entries; ships with the binary, no network needed).
 - **Cluster digest for LLMs** — `proxxx describe --output llm-context` emits a token-compact prose+key:value paste-pronto for AI chats.
-- **MCP server** — stdio JSON-RPC + HTTP/SSE for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned. Server-sent `notifications/cluster-event` on both transports (task lifecycle + freeze/thaw events).
+- **MCP server** — stdio JSON-RPC + HTTP/SSE for LLM agents, compile-time-fixed tool registry, surface SHA-256 pinned. Server-sent `notifications/cluster-event` on both transports (task lifecycle + freeze/thaw events). **Security defaults:** destructive tools are fail-closed — refused unless a matching `[[policies]]` entry routes them through HITL approval — and `serve-http` binds loopback-only, refusing a non-loopback bind unless `mcp_token` is set.
 - **Verifiable releases** — every tarball ships with three layers: SHA-256 sidecar, sigstore keyless cosign signature pinned to this exact workflow path (offline-verifiable; transparency-log inclusion proof embedded), and a CycloneDX SBOM generated from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`.
 
 ## EU & compliance
@@ -393,7 +393,8 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
     [`01-feature-coverage.md`](pre-commit/01-feature-coverage.md) ·
     [`02-error-handling.md`](pre-commit/02-error-handling.md) ·
     [`03-security-invariants.md`](pre-commit/03-security-invariants.md) ·
-    [`04-resiliency-and-chaos.md`](pre-commit/04-resiliency-and-chaos.md)
+    [`04-resiliency-and-chaos.md`](pre-commit/04-resiliency-and-chaos.md) ·
+    [`ACCEPTED-RISKS.md`](pre-commit/ACCEPTED-RISKS.md) (AR-1..AR-6 residual risks)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — one-page module map + data flow + reducer/side-effect bus + process model.
 - [`THREAT_MODEL.md`](THREAT_MODEL.md) — attack surfaces, mitigations, accepted risks, verification ladder.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting policy + scope + hardening snapshot.

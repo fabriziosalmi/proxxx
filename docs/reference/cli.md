@@ -176,7 +176,7 @@ within a major version.
 | :--- | :--- |
 | `proxxx daemon serve [--no-alerts] [--no-hitl] [--no-schedule] [--schedule-interval-secs N] [--alerts-interval-secs N]` | Unified background-task graph — alerts watcher + HITL Telegram listener + schedule run-due tick under one process with one SIGTERM. Each opt-out individually. |
 | `proxxx mcp serve`                  | Stdio JSON-RPC MCP server for LLM agents — interleaves server-sent `notifications/cluster-event` with the request/response stream. |
-| `proxxx mcp serve-http --bind 0.0.0.0:PORT` | Streamable HTTP MCP transport (spec 2025-03-26). SSE channel at `GET /mcp` emits the same notifications. |
+| `proxxx mcp serve-http --bind 127.0.0.1:PORT [--token T] [--insecure-bind]` | Streamable HTTP MCP transport (spec 2025-03-26). SSE channel at `GET /mcp` emits the same notifications. **Refuses to start on a non-loopback bind (e.g. `0.0.0.0:PORT`) unless `mcp_token` is set** — supply it via `--token T` (or the `mcp_token` profile field) or pass `--insecure-bind` to override consciously. An empty/whitespace token counts as absent. When the server is network-exposed and the token is absent, every request is denied (fail-closed). |
 | `proxxx mcp tools [--checksum]`     | Introspect the tool registry; `--checksum` prints SHA-256 |
 | `proxxx hitl serve`                 | Long-poll Telegram for HITL approval callbacks (also available under `proxxx daemon serve`). |
 | `proxxx alerts watch [--interval N]`| Rule-driven alerting daemon (also available under `proxxx daemon serve`). |
@@ -297,7 +297,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 | :--- | :--- |
 | `proxxx audit log [--limit N] [--since T]`        | Show recent audit entries (SQLite, append-only) |
 | `proxxx audit export --format {json\|csv}`        | Dump entries for SIEM ingestion |
-| `proxxx audit verify`                             | Walk the full HMAC-SHA256 chain — NIS2/ISO 27001 evidence |
+| `proxxx audit verify`                             | Walk the full HMAC-SHA256 chain — NIS2/ISO 27001 evidence. Exits non-zero on tamper |
 
 ## Guest lifecycle (additional)
 
