@@ -43,6 +43,11 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref so rapid pushes don't stack CodeQL.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: Analyse (rust)
