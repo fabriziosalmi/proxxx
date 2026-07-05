@@ -1,6 +1,6 @@
 [package]
 name = "proxxx"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 authors = ["Fabrizio Salmi <fabrizio.salmi@gmail.com>"]
 description = "The ultimate Proxmox TUI — fast, secure, uncompromising"
