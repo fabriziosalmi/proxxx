@@ -226,7 +226,12 @@ pub const TOOLS: &[ToolDef] = &[
             },
         ],
         action: ToolAction::CreateSnapshot,
-        destructive: false,
+        // Storage-mutating: an unauthenticated caller could loop snapshot
+        // creation to exhaust the storage pool (a DoS on every guest sharing
+        // it), and it is inconsistent to gate create_guest / delete_snapshot
+        // but not this. Gated. (start_guest / resume_guest stay inline: pure
+        // power-on / restore, no new persistent object.)
+        destructive: true,
         timeout_secs: 120,
     },
     ToolDef {
@@ -322,7 +327,12 @@ pub const TOOLS: &[ToolDef] = &[
             required: true,
         }],
         action: ToolAction::SuspendGuest,
-        destructive: false,
+        // Availability-affecting: pausing a running VM freezes it (unresponsive
+        // to users/network) until resumed — a real production impact, so it goes
+        // through the same fail-closed policy gate as stop/delete. (start_guest,
+        // resume_guest, create_snapshot stay inline: additive / restoring /
+        // reversible-low-blast.)
+        destructive: true,
         timeout_secs: 60,
     },
     ToolDef {

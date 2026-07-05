@@ -104,6 +104,11 @@ one HMAC-chained audit entry + a Telegram summary).
 **Operator's responsibility:**
 - Set `max_unmanned_changes` to bound every unmanned tick (creates/updates
   included), not only to unlock prune. Recommended for any production profile.
+- **Size it small.** The cap should be the smallest count a legitimate tick
+  would ever apply (single digits for most profiles). A generously-large cap
+  (e.g. `49`) satisfies the gate but re-opens the exact 10–49 unmanned-delete
+  band the guard exists to bound — the cap *unlocks* prune, it does not by
+  itself make a flood safe.
 - Use `allowed_families` for graduated trust — let the daemon converge low-risk
   families unmanned, keep high-blast-radius ones (`acl`, `storage`) human-only.
 - Protect the desired-state repo (branch protection, atomic pushes) so a
@@ -129,11 +134,21 @@ MAC, and produce a chain that `audit verify` accepts.
 the same host — root can read process memory, the keychain, any file. Genuine
 non-repudiation requires the key and/or the log to leave the host's trust domain.
 Refusing to run without that would break the common single-host homelab install.
+The load-path custody check *is* hardened: it fails **closed** (a `stat` error
+refuses the key rather than skipping the check) and fstat's the open fd (no
+TOCTOU / symlink-swap window). It is **unix-only** — non-unix has no POSIX mode
+to enforce; the only supported release targets are darwin + linux-musl.
 
 **Operator's responsibility (defense in depth, pick per threat model):**
-- **Separate the key's trust domain:** set `PROXXX_AUDIT_KEY` to a path on a
-  volume owned by a *different* principal than the proxxx user (e.g. a root-owned
-  `0600` key on a mount the proxxx user can't read), so DB-write ≠ key-read.
+- **Relocate the key — with a caveat.** `PROXXX_AUDIT_KEY` moves the key off the
+  DB's volume, but proxxx must still *read* it on every `AuditLogger::open()`,
+  and the `0o077` check enforces owner-only *access mode* (not *ownership* — a
+  `0600` key owned by another uid still passes the mode check; the audit dir is
+  created `0700` so a different user cannot swap the key in, but a same-uid/root
+  attacker with dir-write can). So a "root-owned key the proxxx
+  user can't read" only helps if proxxx itself runs as that principal;
+  co-location on a single-user host buys little on its own. Prefer log
+  externalisation for real cross-domain separation.
 - **Externalise the log:** ship audit entries to an append-only sink outside the
   host (remote syslog / SIEM / WORM store). A local forge then diverges from the
   external copy — the divergence is the evidence.
@@ -171,5 +186,14 @@ queue. Fail-safe direction: the code errs toward NOT re-dispatching (a stuck
   move-disk with delete-source).
 - This surface is TUI-only: unattended automation uses the daemon/CLI paths,
   which do not carry the op_queue.
+- **The command palette is a present-operator fast path.** Guest-list
+  keypresses (stop/delete/restart/start) *enqueue* — they flow through the queue
+  and its write-ahead persist. The one path that runs a destructive op *outside*
+  the queue is the fuzzy search / command palette (`/`, then e.g. `Delete VM
+  100` → Enter): it dispatches the action immediately with only the HA/lock
+  guard — no queue entry, no write-ahead, and no confirm modal. A crash mid-op
+  there leaves nothing to reconcile. For the durable crash-recovery guarantee,
+  drive destructive intent through the guest list (which enqueues) rather than
+  the palette.
 
 *Accepted by Fabrizio Salmi — 2026-07-05.*
