@@ -57,53 +57,102 @@ pub async fn handle_tool_call(
     let mut is_hitl_pending = false;
     let mut hitl_msg = String::new();
 
+    // SECURITY — fail-closed gate for destructive MCP tools.
+    //
+    // The MCP transport is reachable by any caller who can talk to the
+    // server (over HTTP, potentially unauthenticated; see the bind
+    // preflight in `http_server::run_http_server`). A destructive tool
+    // (stop/restart/delete/migrate/clone/create) must therefore NEVER
+    // execute inline off the MCP path. The only sanctioned route is:
+    //
+    //   a matching `[[policies]]` entry → HITL approval requested here,
+    //   op executed later by the HITL daemon on human approval.
+    //
+    // If NO policy governs the call, we REFUSE — we do not fall through
+    // to execution. This closes the prior fail-open where an operator
+    // who never wrote a policy (or left `mcp_token` unset on a
+    // network-exposed server) let an unauthenticated caller delete a
+    // guest. There is intentionally no "ungated inline" escape hatch:
+    // to permit a destructive MCP op, declare a policy for it.
     if tool_def.destructive {
-        if let Some(guest_id) = args.get("guest_id").and_then(serde_json::Value::as_u64) {
-            let vmid = guest_id as u32;
-            let action_str = name;
+        let policies = config.policies.as_deref().unwrap_or_default();
+        let vmid = args
+            .get("guest_id")
+            .and_then(serde_json::Value::as_u64)
+            .map(|g| g as u32);
 
-            let tags: Vec<String> = client
-                .find_guest(vmid)
-                .await?
-                .map(|g| {
-                    g.tag_list()
-                        .into_iter()
-                        .map(std::string::ToString::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let policies = config.policies.as_deref().unwrap_or_default();
+        // Tag-targeted policies need the guest's live tags; only fetch
+        // them when there are policies to evaluate AND the call carries a
+        // guest_id. `create_guest` / `clone_*` have no pre-existing
+        // guest_id — they can only ever match a wildcard/action policy.
+        let matched = if policies.is_empty() {
+            None
+        } else {
+            // Only pay the `find_guest` round-trip when a policy actually
+            // targets tags — action/vmid/wildcard policies decide offline.
+            let needs_tags = policies.iter().any(|p| p.target.starts_with("tag:"));
+            let tags: Vec<String> = if needs_tags {
+                if let Some(v) = vmid {
+                    client
+                        .find_guest(v)
+                        .await?
+                        .map(|g| {
+                            g.tag_list()
+                                .into_iter()
+                                .map(std::string::ToString::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            let target = vmid.map(|v| v.to_string()).unwrap_or_default();
             let tags_ref: Vec<&str> = tags.iter().map(std::string::String::as_str).collect();
+            crate::hitl::policy::check_policies(policies, name, &target, &tags_ref)
+        };
 
-            if let Some(policy) = crate::hitl::policy::check_policies(
-                policies,
-                action_str,
-                &vmid.to_string(),
-                &tags_ref,
-            ) {
-                is_hitl_pending = true;
-                let txn_id = format!("{action_str}:{vmid}");
+        if let Some(policy) = matched {
+            is_hitl_pending = true;
+            let target = vmid.map(|v| v.to_string()).unwrap_or_default();
+            let txn_id = match vmid {
+                Some(v) => format!("{name}:{v}"),
+                None => name.to_string(),
+            };
 
-                if let Some(ref tg) = config.telegram {
-                    match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
-                        Ok(tg_gateway) => {
-                            let reason = format!("MCP requested action: {name}");
-                            let _ = tg_gateway
-                                .request_approval(action_str, &vmid.to_string(), &reason, &txn_id)
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
-                        }
+            if let Some(ref tg) = config.telegram {
+                match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
+                    Ok(tg_gateway) => {
+                        let reason = format!("MCP requested action: {name}");
+                        let _ = tg_gateway
+                            .request_approval(name, &target, &reason, &txn_id)
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
                     }
                 }
-
-                hitl_msg = format!(
-                    "Action intercepted by HITL policy. Requires {} approval(s) via {}. Transaction: {}",
-                    policy.require, policy.channel, txn_id
-                );
             }
+
+            hitl_msg = format!(
+                "Action intercepted by HITL policy. Requires {} approval(s) via {}. Transaction: {}",
+                policy.require, policy.channel, txn_id
+            );
+        } else {
+            // FAIL-CLOSED: destructive tool with no governing policy.
+            tracing::warn!(
+                "Refused ungated destructive MCP call '{name}' (no matching HITL policy)"
+            );
+            return Ok(json!({
+                "content": [{"type": "text", "text": format!(
+                    "Refused: '{name}' is a destructive operation and no HITL policy governs it. \
+                     proxxx does not execute ungated destructive MCP calls. Declare a matching \
+                     [[policies]] entry to route this operation through approval."
+                )}],
+                "isError": true
+            }));
         }
     }
 

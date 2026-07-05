@@ -306,6 +306,30 @@ fn migrate_chain_version(conn: &Connection) -> Result<()> {
 
 fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     if path.exists() {
+        // Custody check: the HMAC key is the ONLY thing standing between a
+        // local tamperer and a forged audit chain. A group/world-readable key
+        // lets any other user on the host read it and recompute every MAC —
+        // silently defeating tamper-evidence. Refuse it, mirroring the
+        // `telegram.bot_token_file` 0600 enforcement. (The key we *create*
+        // below is already 0600; this catches one restored from a backup, an
+        // over-permissive umask, or a hand-placed key on a separate volume.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.permissions().mode();
+                if mode & 0o077 != 0 {
+                    anyhow::bail!(
+                        "audit key {} has unsafe permissions {:o} — must be 0600 (owner-only). A \
+                         group/world-readable HMAC key lets another local user forge the audit \
+                         chain. Run: chmod 600 {}",
+                        path.display(),
+                        mode & 0o777,
+                        path.display(),
+                    );
+                }
+            }
+        }
         let bytes =
             std::fs::read(path).with_context(|| format!("read audit key {}", path.display()))?;
         // The HMAC chain is only as trustworthy as its key. A truncated or empty
@@ -365,8 +389,24 @@ fn audit_db_path() -> Result<PathBuf> {
     Ok(audit_data_dir()?.join("audit.db"))
 }
 
+/// Resolve the audit-key path. `PROXXX_AUDIT_KEY` (an explicit file path) wins
+/// so an operator can relocate the key OFF the audit DB's volume — e.g. a
+/// root-owned key on a separate mount, so an attacker with write access to
+/// `audit.db` does not also get read access to the key. Absent = co-located
+/// `audit.key` next to the DB (the default; see ACCEPTED-RISKS AR-5). Pure over
+/// its inputs so the precedence is unit-tested without touching the environment.
+fn resolve_audit_key_path(key_env: Option<String>, data_dir: &std::path::Path) -> PathBuf {
+    match key_env {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => data_dir.join("audit.key"),
+    }
+}
+
 fn audit_key_path() -> Result<PathBuf> {
-    Ok(audit_data_dir()?.join("audit.key"))
+    Ok(resolve_audit_key_path(
+        std::env::var("PROXXX_AUDIT_KEY").ok(),
+        &audit_data_dir()?,
+    ))
 }
 
 fn chrono_now() -> String {
@@ -717,7 +757,52 @@ mod key_tests {
         // A correct 32-byte key loads fine.
         let good = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(good.path(), [7u8; 32]).unwrap();
+        // NamedTempFile is 0600 by default, so this exercises the happy path.
         let key = load_or_create_key(&good.path().to_path_buf()).unwrap();
         assert_eq!(key.len(), 32);
+    }
+
+    /// Custody: a group/world-readable audit key must be refused on load — a
+    /// key another local user can read defeats the whole tamper-evidence
+    /// scheme (they can recompute every MAC). Mirrors `bot_token_file` 0600.
+    #[cfg(unix)]
+    #[test]
+    fn load_key_rejects_group_or_world_readable_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), [3u8; 32]).unwrap(); // valid length…
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = load_or_create_key(&f.path().to_path_buf()).unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe permissions") && err.to_string().contains("0600"),
+            "lax-perms key must be refused with an actionable message, got: {err}"
+        );
+
+        // Tightening to 0600 makes the same key load.
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            load_or_create_key(&f.path().to_path_buf()).unwrap().len(),
+            32
+        );
+    }
+
+    #[test]
+    fn audit_key_path_override_takes_precedence() {
+        let data_dir = std::path::Path::new("/var/lib/proxxx");
+        // Default: co-located next to the DB.
+        assert_eq!(
+            resolve_audit_key_path(None, data_dir),
+            data_dir.join("audit.key")
+        );
+        assert_eq!(
+            resolve_audit_key_path(Some(String::new()), data_dir),
+            data_dir.join("audit.key"),
+            "empty override is ignored"
+        );
+        // Override relocates the key off the DB's volume.
+        assert_eq!(
+            resolve_audit_key_path(Some("/secure/mnt/proxxx.key".into()), data_dir),
+            PathBuf::from("/secure/mnt/proxxx.key")
+        );
     }
 }
