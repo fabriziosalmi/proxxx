@@ -596,6 +596,7 @@ pub async fn run(
                                             false,
                                             tg_gateway.as_ref(),
                                             &hitl_coord,
+                                            profile_name.as_deref(),
                                         ).await;
                                     }
                                     None => {}
@@ -671,6 +672,7 @@ pub async fn run(
                                     true,
                                     tg_gateway.as_ref(),
                                     &hitl_coord,
+                                    profile_name.as_deref(),
                                 ).await;
                             }
                         }
@@ -985,6 +987,7 @@ async fn dispatch_side_effect(
     skip_hitl: bool,
     tg_gateway: Option<&Arc<crate::hitl::telegram::TelegramGateway>>,
     hitl_coord: &Arc<HitlCoordinator>,
+    profile_name: Option<&str>,
 ) {
     let get_node = |vmid: u32| -> Option<String> {
         state
@@ -1348,6 +1351,31 @@ async fn dispatch_side_effect(
             });
         }
         SideEffect::ExecuteQueue(ops) => {
+            // WRITE-AHEAD (fail-safe idempotency): the reducer has already
+            // flipped these ops to `Running` in `state.op_queue`. Persist that
+            // durably BEFORE any PVE call goes out, so a crash mid-dispatch
+            // leaves the op recorded as `Running` — which `ExecuteQueue` never
+            // re-dispatches (it only picks `Pending`). Without this, the status
+            // save races the spawned dispatch below: a crash after the PVE call
+            // but before the periodic save would persist the op as `Pending`,
+            // and a user re-running the queue would double-execute a
+            // non-idempotent op (migrate / delete / move-disk delete-source).
+            let entries: Vec<crate::app::cache::PersistedQueueEntry> = state
+                .op_queue
+                .iter()
+                .filter_map(super::app::queue::QueuedOp::to_persisted)
+                .collect();
+            if let Err(e) =
+                crate::app::cache::save_queue_async(profile_name.map(str::to_owned), entries).await
+            {
+                // Fail CLOSED: if we can't durably record intent-to-dispatch, do
+                // NOT dispatch — a silent double-execute risk is worse than not
+                // running the batch. The ops stay `Running` in memory; the user
+                // sees them un-progressed and can retry once persistence is back.
+                warn!("execute_queue: write-ahead persist failed ({e:#}) — refusing to dispatch this batch");
+                return;
+            }
+
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
 
