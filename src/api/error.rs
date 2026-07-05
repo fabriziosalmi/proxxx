@@ -31,7 +31,7 @@ pub enum ApiError {
     /// Server returned 401. Token wrong, password expired, ticket
     /// expired post-suspend (V11). Caller may force re-auth and
     /// retry, OR surface "credentials rejected" to the user.
-    #[error("Proxmox rejected our credentials: {0}")]
+    #[error("Proxmox rejected our credentials (HTTP 401 Unauthorized): {0}")]
     Unauthorized(String),
 
     /// Server returned 403. The caller's token is valid but lacks
