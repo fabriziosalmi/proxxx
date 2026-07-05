@@ -141,3 +141,35 @@ Refusing to run without that would break the common single-host homelab install.
   a cron on a different account) rather than trusting the host to check itself.
 
 *Accepted by Fabrizio Salmi — 2026-07-05.*
+
+---
+
+## AR-6 · Operation-queue recovery reconciles against PVE, not a distributed log
+
+**Context:** [invariant 03 — "Operation-queue crash recovery is idempotent"](03-security-invariants.md), [tui/mod.rs](../src/tui/mod.rs)
+
+The op_queue is a **TUI-local** convenience. Crash-recovery idempotency is
+enforced by: (a) restart re-renders the queue, never auto-runs it; (b) only
+`Pending` ops dispatch, so a restored `Running` op is never re-executed; (c) a
+write-ahead persist records `Running` durably before any PVE call. What is NOT
+guaranteed: a globally-consistent view of whether a `Running` op actually
+completed on PVE.
+
+**Why not closed in code:** proxxx is a client; PVE owns task truth. An op saved
+as `Running` may, after a crash, have (i) never reached PVE, (ii) be still
+running as a PVE task, or (iii) have completed. proxxx does not persist the PVE
+UPID transactionally with the status, so it cannot always distinguish these on
+its own — and inventing a two-phase commit against PVE is out of scope for a TUI
+queue. Fail-safe direction: the code errs toward NOT re-dispatching (a stuck
+`Running` needing manual attention) rather than double-executing.
+
+**Operator's responsibility:**
+- After a crash, treat any restored `Running` op as *unknown* — check the guest's
+  actual state / the PVE task log before dismissing or retrying it.
+- The queue never re-runs a `Running` op automatically; a retry is always an
+  explicit user action, so verify first for non-idempotent ops (migrate, delete,
+  move-disk with delete-source).
+- This surface is TUI-only: unattended automation uses the daemon/CLI paths,
+  which do not carry the op_queue.
+
+*Accepted by Fabrizio Salmi — 2026-07-05.*
