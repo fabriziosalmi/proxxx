@@ -17,9 +17,10 @@ on:
   push:
     branches: [main]
 
+# Least-privilege at the top; the write scopes live on the one job that needs
+# them (OpenSSF Scorecard Token-Permissions flags top-level write as high-sev).
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: automerge-update-branch
@@ -28,6 +29,9 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # `gh pr update-branch` merges main into the PR head
+      pull-requests: write # read auto-merge PRs + update their branches
     steps:
       - name: Update branches of auto-merge PRs
         env:
