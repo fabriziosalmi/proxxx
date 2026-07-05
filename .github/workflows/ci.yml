@@ -37,6 +37,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Cancel superseded runs on the same ref (rapid pushes to a PR) so we don't
+# burn runners on stale commits or race the required-check status.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     name: Build · test · clippy · fmt
