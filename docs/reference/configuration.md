@@ -37,6 +37,16 @@ read_only     = false                 # true → refuse all mutations on this
                                       # profile client-side (reads still work);
                                       # exit code 8. Default false. Pair with a
                                       # PVEAuditor PVE token for server-side lock.
+mcp_token     = "..."                 # bearer token for `proxxx mcp serve-http`.
+                                      # Optional; an empty/whitespace value counts as
+                                      # ABSENT. serve-http binds loopback by default; on
+                                      # a non-loopback bind (e.g. 0.0.0.0) it REFUSES to
+                                      # start unless this is set — override consciously
+                                      # with --insecure-bind, in which case a network-
+                                      # exposed server with no token denies every request
+                                      # (fail-closed, and this survives a SIGHUP that
+                                      # clears the token). The --token CLI flag overrides
+                                      # this field.
 ```
 
 ## `[profiles.<name>.reconcile]` (GitOps controller)
@@ -60,10 +70,13 @@ auto_converge  = false                # true → after detecting drift each tick
                                       # freeze (skips quietly, no alert storm). Disable
                                       # per-process with the `--no-converge` flag or the
                                       # PROXXX_NO_CONVERGE env var.
-converge_prune = false                # true → auto-converge also executes deletes (maps to
-                                      # `state apply --prune`). Default false: deletes are
-                                      # previewed but held. Enable only against a repo with
-                                      # branch protection / atomic pushes.
+converge_prune = false                # true → auto-converge MAY execute deletes (maps to
+                                      # `state apply --prune`) — but ONLY when
+                                      # `max_unmanned_changes` is also set. converge_prune=true
+                                      # on its own HOLDS every unmanned delete: creates/updates
+                                      # converge while deletes stay previewed-but-held. Default
+                                      # false: deletes are previewed and held. Enable only
+                                      # against a repo with branch protection / atomic pushes.
 
 # ── Unmanned-converge guardrails (both narrow the blast radius; default = none) ──
 allowed_families = ["pool", "acl"]    # restrict the UNMANNED converge to these state
@@ -74,13 +87,17 @@ allowed_families = ["pool", "acl"]    # restrict the UNMANNED converge to these 
                                       # you auto-converge low-stakes families while keeping
                                       # high-stakes ones human-only. The manual
                                       # `reconcile converge` command is NOT restricted.
-max_unmanned_changes = 20             # hard cap on changes-per-tick for the UNMANNED path,
+max_unmanned_changes = 5              # hard cap on changes-per-tick for the UNMANNED path,
                                       # counted AFTER allowed_families filtering, regardless
                                       # of severity. Absent = no cap. Above it → the daemon
                                       # refuses and alerts "needs human review (too many
                                       # changes)". Catches a Warning-tier flood (e.g. a
                                       # partial git revert) that the Severe bulk-change
-                                      # circuit-breaker (≥50) would miss.
+                                      # circuit-breaker (≥50) would miss. ALSO the gate that
+                                      # unlocks unmanned prune: converge_prune only deletes
+                                      # while this cap is set. Size it SMALL (single digits) —
+                                      # a large cap (e.g. 49) re-opens the 10–49
+                                      # unmanned-delete band.
 ```
 
 ## `[ssh]` (top-level default)
@@ -199,6 +216,17 @@ For each of `token_secret`, `password`, `pbs.token_secret`:
 
 The first one that resolves wins. Loaded values live in
 `Zeroizing<String>` and are wiped from the heap on Drop.
+
+## Environment variables
+
+Beyond the secret env vars above and `PROXXX_CONFIG` (see [File
+location](#file-location)), these tune runtime behaviour:
+
+| Variable | Effect |
+| :--- | :--- |
+| `PROXXX_NO_CONVERGE` | Disable auto-converge for this process (same as `--no-converge`): the drift-watch still detects and alerts, but mutates nothing. |
+| `PROXXX_AUDIT_DIR` | Relocate the audit DB **and** its HMAC key off the default path (e.g. onto a separate volume). The directory is created `0700`. |
+| `PROXXX_AUDIT_KEY` | Relocate only the HMAC key, off the DB volume. A group/world-readable `audit.key` is refused on load (unix); `proxxx audit verify` exits non-zero on tamper. |
 
 ## Defaults summary
 

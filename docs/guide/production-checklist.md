@@ -344,6 +344,109 @@ proxxx ls nodes   # expect: HTTP 401 No ticket
 If it doesn't 401, the token wasn't actually scoped — re-issue
 with `--privsep=1` and grant the role to the **token** path.
 
+## 8. Harden the MCP server (if you expose proxxx over MCP)
+
+### `[ ]` Keep the transport on loopback, or set `mcp_token` before exposing it
+
+`proxxx mcp serve-http` **refuses to start** on a non-loopback bind
+(e.g. `0.0.0.0`) unless `mcp_token` is set:
+
+```bash
+# Local-only (default, safe): binds 127.0.0.1
+proxxx mcp serve-http
+
+# Network-exposed without a token → refused
+proxxx mcp serve-http --bind 0.0.0.0:8080
+# → error: refusing to bind a non-loopback address without a token.
+#    Set `mcp_token` (or pass --token), bind to 127.0.0.1, or pass
+#    --insecure-bind to override.
+```
+
+`mcp_token` is a profile config field (or the `--token` flag). An
+**empty or whitespace token counts as absent** — don't set it to `""`
+and think you're covered. When the server is network-exposed and the
+token is absent, every request is denied (fail-closed), and that denial
+**survives a `SIGHUP`** that clears the token from a live config.
+
+`--insecure-bind` overrides the refusal. **Never pass it on an untrusted
+network** — it exists for consciously-chosen trusted-segment cases only
+(see AR-3 in [ACCEPTED-RISKS.md](https://github.com/fabriziosalmi/proxxx/blob/main/pre-commit/ACCEPTED-RISKS.md)).
+
+### `[ ]` Gate every destructive MCP tool with a `[[policies]]` entry
+
+Over MCP, proxxx is **fail-closed**: a destructive tool with **no
+matching `[[policies]]` entry is refused** (a typed `isError` envelope —
+the PVE gateway is never reached). There is no ungated inline path. The
+only way to run a destructive tool over MCP is a matching policy that
+routes it to HITL approval.
+
+Destructive (policy-gated) tools: `stop_guest`, `restart_guest`,
+`suspend_guest`, `delete_guest`, `create_guest`, `clone_guest`,
+`clone_with_cloudinit`, `migrate_guest`, `create_snapshot`,
+`delete_snapshot`. Non-destructive tools stay inline: `start_guest`,
+`resume_guest`, and every `get_*` / `list_*` read.
+
+```toml
+# Without a matching policy, a destructive tool is simply unavailable
+# to the MCP client. Confirm your rules cover every destructive action
+# you intend a client to perform.
+[[policies]]
+when = { action = "delete" }
+require = "telegram"
+channel = "telegram"
+```
+
+## 9. Guard unmanned auto-converge (if you run `reconcile watch --auto-converge`)
+
+### `[ ]` Set a small `max_unmanned_changes` before enabling `converge_prune`
+
+`converge_prune = true` lets unmanned converge **delete** drifted
+resources — but it **holds all deletes** unless `max_unmanned_changes`
+(a per-tick change cap) is **also** set. With prune on and no cap, deletes
+are held and only create/update operations converge.
+
+```toml
+[reconcile]
+auto_converge = true
+converge_prune = true
+max_unmanned_changes = 3       # keep this single-digit
+allowed_families = ["lxc"]     # whitelist which families converge unmanned
+```
+
+Size the cap **small — single digits**. A large cap (e.g. `49`)
+re-opens the 10–49 unmanned-delete band, which is exactly the blast
+radius the cap exists to close (see AR-4). Use `allowed_families` to
+whitelist which resource families are allowed to converge without a human.
+
+## 10. Protect the audit chain
+
+### `[ ]` Keep `audit.key` at 0600, and consider a separate volume
+
+The audit log is HMAC-signed. proxxx creates the audit dir `0700` and
+**refuses to load a group- or world-readable `audit.key`** (Unix), so
+keep it owner-only:
+
+```bash
+chmod 600 <audit-dir>/audit.key
+ls -l <audit-dir>/audit.key    # → -rw------- (0600)
+```
+
+To keep the signing key off the same volume as the database it signs,
+point `PROXXX_AUDIT_KEY` at a separate volume — a same-user/root attacker
+who can rewrite the DB then can't silently re-sign it (AR-5).
+`PROXXX_AUDIT_DIR` relocates the DB **and** key together if you'd rather
+move the whole directory.
+
+### `[ ]` Run `audit verify` from a separate trust context
+
+```bash
+proxxx audit verify        # exits non-zero if the chain has been tampered with
+```
+
+Run this from a host or account that **can't write** the audit DB — a
+verifier that shares the operator's write access can't prove much. Wire
+the non-zero exit into your monitoring.
+
 ## See also
 
 - [Configuration schema](/reference/configuration) — every TOML
@@ -352,6 +455,9 @@ with `--privsep=1` and grant the role to the **token** path.
   invariants.
 - [Pre-commit gate](/guide/pre-commit-gate) — what every release
   passes before tagging.
+- [`ACCEPTED-RISKS.md`](https://github.com/fabriziosalmi/proxxx/blob/main/pre-commit/ACCEPTED-RISKS.md)
+  — residual risks (AR-1…AR-6) knowingly accepted for this release,
+  with the guardrails above cross-referenced.
 - [Troubleshooting](/guide/troubleshooting) — error message → fix
   index.
 - [`SECURITY.md`](https://github.com/fabriziosalmi/proxxx/blob/main/SECURITY.md)

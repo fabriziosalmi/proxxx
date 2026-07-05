@@ -23,6 +23,8 @@ Plus the human-facing gates:
 | Pre-flight risk | 11 risk variants, per-op weighting, `--allow-risk` override |
 | HITL approval | Real Telegram round-trip, deny-on-timeout (120 s) |
 | MCP tool registry | Compile-time fixed enum, audit-checksummed |
+| MCP fail-closed | Destructive tool with no matching `[[policies]]` entry → typed refusal, never reaches PVE |
+| MCP HTTP bind | Non-loopback bind refused unless `mcp_token` is set (`--insecure-bind` to override) |
 
 ## Zeroizing&lt;String&gt; everywhere 
 
@@ -197,7 +199,8 @@ no silent bypass.
 pub static TOOL_REGISTRY: &[ToolDef] = &[
     ToolDef { name: "list_nodes", destructive: false, ... },
     ToolDef { name: "stop_guest", destructive: true,  ... },
-    /* … 10 entries total … */
+    ToolDef { name: "create_snapshot", destructive: true, ... },
+    /* … ~25 entries total (13 reads + 12 actions) … */
 ];
 ```
 
@@ -214,6 +217,31 @@ $ proxxx mcp tools --checksum
 
 Pin this in your supply-chain tracker. If it changes between builds,
 the tool surface changed.
+
+### Destructive tools are fail-closed
+
+A destructive MCP tool with **no** matching `[[policies]]` entry is
+**refused** — proxxx returns a typed `isError` envelope and the PVE
+gateway is never reached. The only way to run a destructive tool over
+MCP is a matching `[[policies]]` entry, which routes through the HITL
+approval gate above. There is no ungated inline path.
+
+The destructive set (all policy-gated / fail-closed): `stop_guest`,
+`restart_guest`, `delete_guest`, `delete_snapshot`, `migrate_guest`,
+`clone_guest`, `clone_with_cloudinit`, `create_guest`, and — new in
+v0.13.0 — `suspend_guest` and `create_snapshot`. Non-destructive tools
+stay inline: `start_guest`, `resume_guest`, and every `get_*` / `list_*`
+read.
+
+### HTTP transport bind gate
+
+`proxxx mcp serve-http` **refuses to start** on a non-loopback bind
+(e.g. `0.0.0.0`) unless `mcp_token` is set — pass `--insecure-bind` to
+override consciously. An empty or whitespace `mcp_token` counts as
+absent. The token is a profile config field (or the `--token` CLI flag);
+when the server is network-exposed and the token is absent, every
+request is denied (fail-closed), and this survives a `SIGHUP` that
+clears the token.
 
 ## Panic recovery (+ flight recorder)
 
@@ -274,6 +302,19 @@ surface, all with planned upstream-bumps tracked.
 - In CI on every push and PR
 - In CI nightly via cron (catches CVEs disclosed after last commit)
 
+## Audit-log key custody
+
+The audit log is HMAC-chained; the signing key can be relocated off the
+DB volume so a stolen database is not a stolen chain:
+
+- `PROXXX_AUDIT_KEY` relocates just the HMAC key (keep the key and the
+  DB on separate volumes).
+- `PROXXX_AUDIT_DIR` relocates both the DB and the key.
+- The audit directory is created `0700`.
+- A group- or world-readable `audit.key` is **refused on load** (unix) —
+  tighten the mode before proxxx will read it.
+- `proxxx audit verify` exits non-zero on tamper.
+
 ## What's still ❌
 
 The matrix at `pre-commit/03-security-invariants.md` lists 18
@@ -302,3 +343,4 @@ These are the next round's targets.
 - [HITL via Telegram](/integrations/hitl)
 - [MCP server](/integrations/mcp)
 - [Architecture overview](/architecture/overview)
+- Accepted residual risks: `pre-commit/ACCEPTED-RISKS.md` (AR-1..AR-6)

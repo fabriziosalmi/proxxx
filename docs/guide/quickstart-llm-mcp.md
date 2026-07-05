@@ -33,15 +33,15 @@ proxxx mcp tools
 ```
 
 Returns the full registry as JSON: 25 tools across five clusters —
-inventory (`list_nodes`, `list_guests`, `get_guest_status`,
+inventory / reads (`list_nodes`, `list_guests`, `get_guest_status`,
 `get_storage_pools`, `get_node_resources`, `list_snapshots`,
-`get_task_log`), lifecycle (`start_guest`, `stop_guest`,
+`get_task_log`, `get_cluster_status`, `get_node_status`,
+`get_replication_status`, `list_tasks`, `list_backup_jobs`,
+`list_cluster_events`), lifecycle (`start_guest`, `stop_guest`,
 `restart_guest`, `suspend_guest`, `resume_guest`, `delete_guest`),
-snapshots (`create_snapshot`, `delete_snapshot`,
-`rollback_snapshot`), provisioning (`clone_guest`, `create_guest`,
-`mark_template`), backup (`backup_guest`, `restore_guest`),
-storage / migration (`move_disk`, `migrate_guest`,
-`resize_disk`, `attach_iso`). Each with parameters, descriptions,
+snapshots (`create_snapshot`, `delete_snapshot`), provisioning
+(`clone_guest`, `clone_with_cloudinit`, `create_guest`), and
+migration (`migrate_guest`). Each with parameters, descriptions,
 destructive flag, and per-tool execution timeout.
 
 For supply-chain pinning:
@@ -55,10 +55,14 @@ Pin this hash in your CI / agent config. If the deployed binary's
 registry hash drifts, the tool surface changed — review the
 diff before unpinning.
 
-## 3. Configure HITL on destructive tools (recommended)
+## 3. Configure HITL on destructive tools (required)
 
-Without HITL, the agent can `delete_guest` autonomously. With it,
-every destructive call routes through Telegram approval:
+Destructive tools are **fail-closed**: a destructive call with no
+matching `[[policies]]` entry is **refused** before it ever reaches
+the PVE gateway — the agent gets a typed `isError` envelope, not an
+autonomous `delete_guest`. There is no ungated inline path. The
+*only* way to run a destructive tool over MCP is a matching
+`[[policies]]` entry that routes it through HITL approval:
 
 ```toml
 # config.toml
@@ -81,6 +85,13 @@ The 120 s deny-on-timeout is hardcoded — if you don't approve,
 the op is rejected (NOT auto-approved). Replay protection is
 session-local: a stale callback from yesterday's chat history
 won't re-fire.
+
+The tools flagged destructive — and therefore refused without a
+matching policy — are `stop_guest`, `restart_guest`, `suspend_guest`,
+`delete_guest`, `create_snapshot`, `delete_snapshot`, `clone_guest`,
+`clone_with_cloudinit`, `create_guest`, and `migrate_guest`.
+Everything else — `start_guest`, `resume_guest`, and every
+`get_*` / `list_*` read — runs inline, no approval required.
 
 Test the round-trip:
 
@@ -131,11 +142,22 @@ docs for the exact location.
 
 - **Two transports at parity** — `proxxx mcp serve` (stdio
   JSON-RPC, agent runs as subprocess, no port) or
-  `proxxx mcp serve-http --bind 127.0.0.1:8765` (Streamable
-  HTTP/SSE per MCP 2025-03-26). Same tool registry, same HITL,
-  same audit. HTTP is for hosted agents that can't spawn
+  `proxxx mcp serve-http` (Streamable HTTP/SSE per MCP 2025-03-26;
+  defaults to `--bind 127.0.0.1 --port 3000`). Same tool registry,
+  same HITL, same audit. HTTP is for hosted agents that can't spawn
   subprocesses; stdio for local agents (Claude Desktop, Cursor).
   Pick one per deployment.
+
+- **serve-http is fail-closed on the network** — on a non-loopback
+  bind (e.g. `--bind 0.0.0.0`) the server **refuses to start** unless
+  `mcp_token` is set. Configure it in the profile (`mcp_token = "…"`)
+  or pass `--token`; every `POST /mcp` and `GET /mcp` then demands a
+  matching `Authorization: Bearer` header. An empty / whitespace token
+  counts as absent — so a SIGHUP that clears `mcp_token` leaves the
+  exposed server denying every request instead of silently opening
+  up. To expose a public interface *without* a token (trusted network
+  or an auth-enforcing reverse proxy only) you must consciously pass
+  `--insecure-bind`. Loopback binds need no token.
 
 - **Server-sent notifications** — both transports stream
   `notifications/cluster-event` for `task_state_change`

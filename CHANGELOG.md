@@ -12,6 +12,39 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-05
+
+Headline: **Fail-closed by default.** The four declared security-invariant gaps are closed and hardened under adversarial review, and the whole surface was exercised against a live PVE 9.1.1 cluster (which turned up two real bugs, both fixed). No CLI-command, exit-code, `--format json`, or MCP-registry *contract* change — but several runtime **defaults are now stricter**, so read the migration notes.
+
+### ⚠️ Breaking (behavioural — no schema/contract change)
+
+- **Destructive MCP tools now require a policy.** A destructive tool invoked over MCP with **no matching `[[policies]]` entry is REFUSED** (typed `isError`; the PVE gateway is never reached). Previously such a call executed inline. The MCP transport is network-reachable, so this closes the path where an unauthenticated caller could drive a destructive op. **Migration:** add a matching `[[policies]]` entry (which routes the op through HITL approval) for any destructive MCP tool you rely on.
+- **`suspend_guest` and `create_snapshot` are now destructive** (policy-gated over MCP): the first pauses a running VM (availability impact), the second is an unbounded storage write. `start_guest` / `resume_guest` stay inline. **Migration:** as above — add a policy if an agent needs them.
+- **`mcp serve-http` refuses to expose an unauthenticated endpoint.** It will not start on a non-loopback bind (e.g. `0.0.0.0`) unless `mcp_token` is set. **Migration:** set `mcp_token` (or `--token`), bind `127.0.0.1`, or pass the new `--insecure-bind` to override consciously. An empty/whitespace token counts as absent (fail-closed).
+- **Unmanned `converge_prune` holds deletes without a cap.** With `auto_converge = true` and `converge_prune = true` but **no `max_unmanned_changes`**, the daemon now converges creates/updates but **holds all deletes** (a 10–49 delete flood is below the Severe ≥50 breaker and would otherwise auto-apply unmanned). **Migration:** set a *small* `max_unmanned_changes` to re-enable unmanned prune (size it to the smallest count a legit tick applies — a large cap re-opens the band).
+
+### Security
+
+- **MCP dispatch is fail-closed and stays that way (#192, #194).** Destructive tools with no governing policy are refused; the deny is uniform across all 10 destructive tools (registry-contract + parametrized dispatch tests). The HTTP bind preflight and a per-request token gate are **SIGHUP-safe** — clearing (or emptying) `mcp_token` at runtime on an exposed server can no longer silently drop auth.
+- **Audit key custody hardened (#192, #194).** A group/world-readable `audit.key` is refused on load (unix); the check **fails closed** on a stat error and fstat's the open fd (no TOCTOU / symlink-swap); the audit data dir is created `0700`. `PROXXX_AUDIT_KEY` relocates the key off the DB volume. `proxxx audit verify` exits non-zero on any tamper.
+- **Unmanned converge blast radius bounded (#192).** Adversarial tests prove a mass-delete cannot auto-apply; the fail-closed prune guard is above.
+- **Operation-queue crash recovery is idempotent (#193).** A write-ahead persist records intent before any PVE call, so a crash mid-op can't turn into a double-execute of a non-idempotent op on restart.
+- Signed residual risks are catalogued in [`pre-commit/ACCEPTED-RISKS.md`](pre-commit/ACCEPTED-RISKS.md) (AR-1…AR-6).
+
+### Fixed
+
+- **RSA SSH client keys work against a modern sshd (#195).** russh signed RSA keys with the deprecated `ssh-rsa` (SHA-1), which OpenSSH sshd (PVE 9 / Debian 13) rejects — so RSA keys were unusable for the console / `exec` / log-fanout even though the same key works over the OpenSSH client. Now pins `rsa-sha2-512` for RSA keys. Surfaced by the live E2E run.
+- **A 401 now names the status (#195).** `ApiError::Unauthorized` renders as *"Proxmox rejected our credentials (HTTP 401 Unauthorized): …"* — recognizable/greppable as an auth failure.
+
+### Added
+
+- **`--insecure-bind`** flag on `mcp serve-http` — the explicit, conscious opt-out of the non-loopback-without-auth refusal.
+- **`PROXXX_AUDIT_KEY`** env var — relocate the audit HMAC key onto a separate volume/trust domain (complements the existing `PROXXX_AUDIT_DIR`).
+
+### CI / Supply chain
+
+- Least-privilege `automerge` workflow token (top-level → job-level write; OpenSSF Scorecard Token-Permissions) and concurrency guards on `ci` / `codeql` (#196).
+
 ## [0.12.0] — 2026-07-01
 
 Headline: **Security hardening — tamper-evident audit that now covers WHO/WHAT, tested destructive-confirmation gates, and guardrails on the unmanned converge.** No CLI / config / MCP contract change; an existing `audit.db` migrates in place.

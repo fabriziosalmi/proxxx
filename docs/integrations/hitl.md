@@ -83,7 +83,7 @@ TUI / CLI / MCP  ──→  enforce_preflight  ──→  check_hitl
                                        no    yes
                                        │     │
                                        ▼     ▼
-                                   execute   HitlCoordinator.register(txn_id)
+                                  execute*   HitlCoordinator.register(txn_id)
                                                                       │
                                                                       ▼
                                                 Telegram::request_approval(...)
@@ -98,6 +98,12 @@ TUI / CLI / MCP  ──→  enforce_preflight  ──→  check_hitl
                                                                           ▼
                                                        execute  OR  refuse
 ```
+
+> `*` **MCP diverges here — fail-closed.** On the MCP transport a *destructive*
+> tool with **no matching policy is REFUSED**, not executed: the transport is
+> network-reachable, so an unauthenticated caller must never reach a destructive
+> op. TUI / CLI keep the present-operator behaviour above (no policy → execute)
+> because a human is already at the keyboard. (v0.13.0)
 
 Internals:
 

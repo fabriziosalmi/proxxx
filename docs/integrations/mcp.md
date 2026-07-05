@@ -27,13 +27,13 @@ table from your binary with `proxxx mcp tools --json`:
 | `stop_guest` | **yes** | 60 s | Graceful or hard stop |
 | `restart_guest` | **yes** | 60 s | Restart |
 | `delete_guest` | **yes** | 180 s | Permanent delete (cannot be undone) |
-| `suspend_guest` | no | 60 s | Pause a running guest |
+| `suspend_guest` | **yes** | 60 s | Pause a running guest |
 | `resume_guest` | no | 60 s | Resume a suspended guest |
 | `clone_guest` | **yes** | 180 s | Clone a VM/LXC to a new VMID |
 | `clone_with_cloudinit` | **yes** | 300 s | Clone QEMU template + apply cloud-init (user, sshkey, ipconfig0) in one call |
 | `migrate_guest` | **yes** | 300 s | Live-migrate to another node |
 | `create_guest` | **yes** | 120 s | Create new QEMU VM or LXC (node, type, name, memory, cores, disk, …) |
-| `create_snapshot` | no | 120 s | Create snapshot |
+| `create_snapshot` | **yes** | 120 s | Create snapshot |
 | `list_snapshots` | no | 30 s | List snapshots for a guest |
 | `delete_snapshot` | **yes** | 120 s | Delete snapshot |
 | `get_storage_pools` | no | 30 s | Per-node storage list with usage |
@@ -82,6 +82,26 @@ proxxx mcp serve
 Stdio transport. Speaks JSON-RPC 2.0 framed by Content-Length
 headers — the standard MCP envelope. Pipe-it under whatever client
 your agent uses.
+
+### HTTP transport and `mcp_token`
+
+For clients that speak MCP over HTTP:
+
+```sh
+proxxx mcp serve-http
+```
+
+Because an HTTP listener is reachable off the box, it is
+**fail-closed on authentication**. `serve-http` **refuses to start**
+on a non-loopback bind (e.g. `0.0.0.0`) unless an `mcp_token` is set —
+pass `--insecure-bind` to override that consciously.
+
+Set the token as the `mcp_token` profile config field or with the
+`--token` CLI flag. An empty or whitespace-only token counts as
+**absent**. When the server is network-exposed and the token is
+absent, every request is denied — and this fail-closed state survives
+a `SIGHUP` that clears the token, so a reload cannot silently drop
+authentication.
 
 ## Claude Desktop config
 
@@ -152,22 +172,40 @@ invariant so the budget cannot drift below 120 s by accident.
 
 ## HITL on MCP destructive calls
 
-`stop_guest`, `restart_guest`, `delete_guest`, `delete_snapshot`
-route through `enforce_preflight` and `check_hitl` exactly like CLI
-calls. If `[[policies]]` matches, the agent's request is queued and
-a human approval is required before execution.
+The destructive tool set is **fail-closed** over MCP:
 
-The agent sees a `pending_hitl` response and can poll for completion
-via `get_guest_status` or wait. The exact wait-protocol is documented
-in the MCP spec — proxxx returns a transient error code that
+- `stop_guest`, `restart_guest`, `delete_guest`, `delete_snapshot`,
+  `migrate_guest`, `clone_guest`, `clone_with_cloudinit`, `create_guest`,
+  and — new in v0.13.0 — `suspend_guest` and `create_snapshot`.
+
+A destructive tool call with **no matching `[[policies]]` entry is
+REFUSED**. proxxx returns a typed `isError` envelope and the PVE
+gateway is never reached — nothing is queued, nothing executes. There
+is no ungated inline path for a destructive tool.
+
+The **only** way to run a destructive tool over MCP is a matching
+`[[policies]]` entry, which routes the call through `enforce_preflight`
+and `check_hitl` exactly like CLI calls and requires a human approval
+before execution. When a policy matches, the agent sees a
+`pending_hitl` response and can poll for completion via
+`get_guest_status` or wait — proxxx returns a transient error code
 clients are expected to retry on.
 
-## Why no `migrate` or `move_disk` in the MCP surface
+Non-destructive tools (`start_guest`, `resume_guest`, and the
+`get_*` / `list_*` reads) still run inline without a policy.
 
-These are higher-risk: a misplanned migration can leave a guest in a
-half-migrated state on the target node. They are deliberately not
-exposed via MCP. An agent that needs to migrate proxes through a
-human-driven CLI invocation.
+## Why no `move_disk` in the MCP surface
+
+`migrate_guest` **is** in the registry — it is exposed as a
+destructive, policy-gated tool (see the table and the fail-closed
+rules above), so an agent can only trigger it through a matching
+`[[policies]]` entry and a human approval.
+
+`move_disk` is a different story: it is deliberately **not** exposed
+via MCP. A misplanned disk move can leave a guest straddling two
+storages, and the operation has no clean partial-failure recovery. An
+agent that needs to move a disk proxes through a human-driven CLI
+invocation.
 
 ## Vector framework
 
