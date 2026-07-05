@@ -508,6 +508,21 @@ const fn exceeds_unmanned_cap(count: usize, cap: Option<u32>) -> bool {
     }
 }
 
+/// Effective `prune` (execute deletes) for an unmanned tick — fail-closed on
+/// unbounded mass-deletion.
+///
+/// Deletes are the catastrophic half of converge (an emptied / partially-reverted
+/// desired-state repo diffs to "delete everything"). The Severe bulk gate only
+/// trips at ≥ 50 changes, so a flood of 10–49 Warning-tier deletes would slip
+/// through and auto-apply UNMANNED. We therefore execute unmanned deletes only
+/// when the operator has ALSO declared a `max_unmanned_changes` cap — an explicit
+/// blast-radius bound. `converge_prune` without a cap holds deletes this tick
+/// (non-destructive create/update convergence still proceeds); the manual
+/// `reconcile converge` path is unaffected — a human is present there.
+const fn effective_unmanned_prune(converge_prune: bool, cap: Option<u32>) -> bool {
+    converge_prune && cap.is_some()
+}
+
 /// True if an incident freeze is active for `profile`. Fails SAFE: if the freeze
 /// state can't be read, treat as frozen (skip the unmanned converge) rather than
 /// risk mutating during an incident.
@@ -530,9 +545,19 @@ async fn run_auto_converge(
     path: &std::path::Path,
     telegram: Option<&Arc<crate::hitl::telegram::TelegramGateway>>,
 ) {
+    // Fail-closed on unbounded mass-deletion: unmanned deletes execute only when
+    // the operator has declared a `max_unmanned_changes` blast-radius bound.
+    let prune = effective_unmanned_prune(rec.converge_prune, rec.max_unmanned_changes);
+    if rec.converge_prune && !prune {
+        tracing::warn!(
+            profile = %profile_label,
+            "auto_converge: prune enabled without max_unmanned_changes — unmanned deletes HELD this \
+             tick (unbounded mass-delete guard). Set `max_unmanned_changes` to enable unmanned prune."
+        );
+    }
     let opts = crate::state::apply::ApplyOptions {
         dry_run: false,
-        prune: rec.converge_prune,
+        prune,
         continue_on_error: false,
     };
     let audit_user = client.profile_config().user.clone();
@@ -797,5 +822,174 @@ mod tests {
             let result = c.handle.await;
             assert!(result.is_ok());
         });
+    }
+
+    // --- Adversarial blast-radius suite (unmanned converge) ------------------
+    //
+    // Threat: `auto_converge = true`, operator on holiday, someone pushes a bad
+    // commit (an emptied desired-state repo → "delete everything", a partial
+    // revert → a flood of deletes). What is the worst the UNMANNED loop does?
+    //
+    // These play the attacker through the exact pipeline `run_auto_converge`
+    // uses — `retain_allowed_families` → `exceeds_unmanned_cap` →
+    // `effective_unmanned_prune` → `converge_with_changes(force=false)` — and
+    // assert the cluster is not mutated. `RecordingClient::lines()` is empty iff
+    // no PVE write was issued.
+
+    use crate::state::converge::converge_with_changes;
+    use crate::state::diff::{Change, ChangeKind};
+    use crate::state::model::ClusterState;
+    use crate::state::test_support::RecordingClient;
+
+    /// N distinct pool deletes — the shape an emptied/reverted desired-state repo
+    /// diffs to.
+    fn n_pool_deletes(n: usize) -> Vec<Change> {
+        (0..n)
+            .map(|i| Change {
+                kind: ChangeKind::Delete,
+                resource: "pool",
+                identity: format!("pool-{i}"),
+                before: None,
+                after: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn effective_unmanned_prune_requires_a_cap() {
+        // Fail-closed: prune without a declared cap holds deletes.
+        assert!(
+            !effective_unmanned_prune(true, None),
+            "prune + no cap → deletes HELD (unbounded guard)"
+        );
+        assert!(
+            effective_unmanned_prune(true, Some(25)),
+            "prune + explicit cap → deletes execute"
+        );
+        assert!(
+            !effective_unmanned_prune(false, Some(25)),
+            "no prune → never deletes regardless of cap"
+        );
+        assert!(!effective_unmanned_prune(false, None));
+    }
+
+    #[tokio::test]
+    async fn emptied_repo_mass_wipe_refused_even_without_cap_or_whitelist() {
+        // DEFENSE IN DEPTH: with BOTH daemon-specific guardrails absent (no
+        // whitelist, no cap) — the worst-configured holiday scenario — a 60-delete
+        // "wipe everything" is still refused by the innermost Severe bulk gate
+        // (≥50 changes), with ZERO PVE writes.
+        let c = RecordingClient::default();
+        let live = ClusterState::default();
+
+        let changes = retain_allowed_families(n_pool_deletes(60), None);
+        assert_eq!(changes.len(), 60, "no whitelist → nothing filtered");
+        assert!(
+            !exceeds_unmanned_cap(changes.len(), None),
+            "no cap → the cap gate does not catch it; the Severe gate must"
+        );
+
+        let opts = crate::state::apply::ApplyOptions {
+            dry_run: false,
+            // Even with prune intent + a cap present, the bulk gate must refuse.
+            prune: effective_unmanned_prune(true, Some(100)),
+            continue_on_error: false,
+        };
+        let err = converge_with_changes(&c, "prod", "git://x", changes, &live, opts, false, "u")
+            .await
+            .expect_err("a 60-delete mass wipe must be refused unmanned");
+        assert!(
+            err.downcast_ref::<crate::app::preflight::PreflightRefusal>()
+                .is_some(),
+            "must be a typed PreflightRefusal (Severe bulk gate)"
+        );
+        assert!(
+            c.lines().await.is_empty(),
+            "refused mass wipe must not issue a single PVE write"
+        );
+    }
+
+    #[tokio::test]
+    async fn sub_severe_delete_flood_slips_preflight_but_cap_catches_it() {
+        // THE 10–49 BAND — the real reason `max_unmanned_changes` exists. 30
+        // deletes are Warning, NOT Severe, so the preflight gate does NOT refuse
+        // them: without a cap they auto-apply. This test pins BOTH halves.
+        let live = ClusterState::default();
+
+        // (a) The preflight gate does NOT refuse a 30-change flood — it is
+        //     Warning-tier, not Severe. So without a cap the batch is accepted for
+        //     apply (would delete against live pools). Contrast with the 60-case,
+        //     which the Severe bulk gate refuses. This is the exact gap the cap
+        //     fills; asserting "no PreflightRefusal here" guards against a future
+        //     severity-ladder change silently masking the danger.
+        let uncapped = RecordingClient::default();
+        assert!(
+            !exceeds_unmanned_cap(30, None),
+            "no cap → cap gate is inert"
+        );
+        let opts = crate::state::apply::ApplyOptions {
+            dry_run: false,
+            prune: effective_unmanned_prune(true, Some(1000)), // cap present → prune on
+            continue_on_error: false,
+        };
+        let res = converge_with_changes(
+            &uncapped,
+            "prod",
+            "git://x",
+            n_pool_deletes(30),
+            &live,
+            opts,
+            false,
+            "u",
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "30 deletes are Warning-tier — the preflight gate must NOT refuse them (this is why the cap exists)"
+        );
+
+        // (b) With `max_unmanned_changes = 10`, the daemon cap catches the flood
+        //     BEFORE converge is ever called — the run_auto_converge pipeline
+        //     returns at `exceeds_unmanned_cap`, so no converge, no writes.
+        assert!(
+            exceeds_unmanned_cap(30, Some(10)),
+            "cap must refuse a 30-change flood → run_auto_converge returns before converge"
+        );
+    }
+
+    #[tokio::test]
+    async fn unmanned_prune_without_cap_holds_deletes_no_writes() {
+        // THE FIX: prune intent + no cap → `effective_unmanned_prune` is false, so
+        // deletes are held (Skipped by prune policy), zero destructive PVE writes,
+        // even though the batch is below the Severe threshold and would otherwise
+        // apply.
+        let c = RecordingClient::default();
+        let live = ClusterState::default();
+        let prune = effective_unmanned_prune(true, None);
+        assert!(!prune, "prune held: no cap declared");
+
+        let opts = crate::state::apply::ApplyOptions {
+            dry_run: false,
+            prune,
+            continue_on_error: false,
+        };
+        let report = converge_with_changes(
+            &c,
+            "prod",
+            "git://x",
+            n_pool_deletes(5),
+            &live,
+            opts,
+            false,
+            "u",
+        )
+        .await
+        .expect("below Severe threshold — no refusal, deletes simply held");
+        assert_eq!(report.skipped, 5, "all deletes held by prune policy");
+        assert_eq!(report.applied, 0);
+        assert!(
+            c.lines().await.is_empty(),
+            "prune-without-cap must not delete a single resource"
+        );
     }
 }
