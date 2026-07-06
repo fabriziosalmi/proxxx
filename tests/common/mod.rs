@@ -395,20 +395,56 @@ async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
 
 // ── CLI binary contract runner ──────────────────────────
 
+/// Lazily synthesize a proxxx `config.toml` from the E2E env, written once per
+/// test process (0600). The CLI loads a config FILE (`PROXXX_CONFIG` or the
+/// default path) — it does NOT build a connection from `PROXXX_E2E_*` — so
+/// without this every `run_proxxx` subprocess call exits 3 ("Config not found").
+/// Returns `None` on a dev machine where the E2E token env isn't set.
+pub fn e2e_cli_config_path() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let url = std::env::var("PROXXX_E2E_API_URL").ok()?;
+        let user = std::env::var("PROXXX_E2E_USER").ok()?;
+        let token_id = std::env::var("PROXXX_E2E_TOKEN_ID").ok()?;
+        let token_secret = std::env::var("PROXXX_E2E_TOKEN_SECRET").ok()?;
+        let toml = format!(
+            "url = \"{url}\"\nuser = \"{user}\"\nauth = \"token\"\n\
+             token_id = \"{token_id}\"\ntoken_secret = \"{token_secret}\"\nverify_tls = false\n"
+        );
+        let dir = std::env::temp_dir().join("proxxx-e2e");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("cli-config.toml");
+        std::fs::write(&path, toml).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Some(path)
+    })
+    .as_deref()
+}
+
 /// Run the proxxx binary with the given args and return its
 /// `std::process::Output`. `CARGO_BIN_EXE_proxxx` is set by Cargo
 /// for integration tests, so the binary is always built before the
 /// test runs.
 ///
-/// The subprocess inherits PROXXX_* env vars from the test, so the
-/// CLI sees the same E2E credentials as the test process.
+/// The subprocess gets `PROXXX_CONFIG` pointing at a config synthesized from the
+/// E2E env (see [`e2e_cli_config_path`]) so CLI calls are turnkey — unless the
+/// caller already pinned `PROXXX_CONFIG`, which is respected.
 pub fn run_proxxx(args: &[&str]) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_proxxx");
     eprintln!("[cli] {bin} {}", args.join(" "));
-    std::process::Command::new(bin)
-        .args(args)
-        .output()
-        .expect("spawn proxxx binary")
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    if std::env::var_os("PROXXX_CONFIG").is_none() {
+        if let Some(cfg) = e2e_cli_config_path() {
+            cmd.env("PROXXX_CONFIG", cfg);
+        }
+    }
+    cmd.output().expect("spawn proxxx binary")
 }
 
 /// Invoke `proxxx` and return `(stdout_str, stderr_str, exit_code)`.

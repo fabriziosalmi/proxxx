@@ -7,7 +7,7 @@
 use crate::api::types::GuestType;
 
 /// Result of building the WebSocket URL + auth payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WsTarget {
     /// Full `wss://...` URL ready for `connect_async`.
     pub url: String,
@@ -15,6 +15,19 @@ pub struct WsTarget {
     /// (`<user>:<ticket>\n`). Must be a binary frame; the trailing
     /// newline is required by the Proxmox protocol.
     pub auth: String,
+}
+
+// Hand-written Debug so the ticket can NEVER reach a log via `{:?}` — both
+// fields carry the credential (url has `?…&vncticket=…`, auth is
+// `user:ticket`). Redaction is thus a property of the type, not just the
+// three hand-patched log sites in `mod.rs`.
+impl std::fmt::Debug for WsTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsTarget")
+            .field("url", &redact_ticket(&self.url))
+            .field("auth", &"<user>:[REDACTED]")
+            .finish()
+    }
 }
 
 /// Build the WebSocket target from the REST base URL + termproxy reply.
@@ -53,6 +66,30 @@ pub fn build_ws_target(
     );
     let auth = format!("{user}:{ticket}\n");
     WsTarget { url, auth }
+}
+
+/// Redact the `vncticket` value from a WS URL before it reaches a log line or
+/// an error message. The ticket is a short-lived credential; in cleartext logs
+/// it lets anyone who can read the log (or a shipped log) hijack the console
+/// session within the ticket's TTL. Everything else — host, path, port — is
+/// preserved so the log stays diagnostically useful.
+#[must_use]
+pub fn redact_ticket(url: &str) -> String {
+    const KEY: &str = "vncticket=";
+    // Case-insensitive search: a URL is ASCII, so `to_ascii_lowercase` keeps
+    // byte offsets aligned with the original — a future builder emitting a
+    // differently-cased param can't silently defeat redaction.
+    let lower = url.to_ascii_lowercase();
+    match lower.find(KEY) {
+        Some(i) => {
+            let val_start = i + KEY.len();
+            let val_end = url[val_start..]
+                .find('&')
+                .map_or(url.len(), |off| val_start + off);
+            format!("{}[REDACTED]{}", &url[..val_start], &url[val_end..])
+        }
+        None => url.to_string(),
+    }
 }
 
 /// Minimal URL-encode for the ticket query parameter. PVE tickets
@@ -130,6 +167,59 @@ mod tests {
         assert!(t
             .url
             .contains("/api2/json/nodes/pve1/qemu/100/vncwebsocket"));
+    }
+
+    #[test]
+    fn redact_ticket_hides_the_credential_keeps_the_rest() {
+        let t = build_ws_target(
+            "https://pve1.lan:8006",
+            "pve1",
+            100,
+            GuestType::Qemu,
+            5900,
+            "PVE:user@pam:abc/def+xyz",
+            "user@pam",
+        );
+        let red = redact_ticket(&t.url);
+        // The ticket value is gone…
+        assert!(red.contains("vncticket=[REDACTED]"), "got: {red}");
+        assert!(!red.contains("abc"), "ticket residue leaked: {red}");
+        assert!(!red.contains("%2F"), "encoded ticket residue leaked: {red}");
+        // …but the diagnostically-useful parts survive.
+        assert!(red.contains("port=5900"));
+        assert!(red.contains("/qemu/100/vncwebsocket"));
+        // A URL without a ticket passes through unchanged.
+        assert_eq!(redact_ticket("wss://x/y?port=1"), "wss://x/y?port=1");
+        // Case-insensitive: a differently-cased param is still redacted.
+        assert_eq!(
+            redact_ticket("wss://x/y?port=1&VNCTICKET=secretvalue"),
+            "wss://x/y?port=1&VNCTICKET=[REDACTED]"
+        );
+        // A trailing param after the ticket is preserved (value-run stops at &).
+        assert_eq!(
+            redact_ticket("wss://x?vncticket=abc&extra=1"),
+            "wss://x?vncticket=[REDACTED]&extra=1"
+        );
+    }
+
+    #[test]
+    fn wstarget_debug_never_leaks_the_ticket() {
+        let t = build_ws_target(
+            "https://x:8006",
+            "n",
+            1,
+            GuestType::Qemu,
+            5900,
+            "SUPER-SECRET-TICKET",
+            "alice@pve",
+        );
+        let dbg = format!("{t:?}");
+        assert!(
+            !dbg.contains("SUPER-SECRET-TICKET"),
+            "ticket leaked in Debug: {dbg}"
+        );
+        assert!(dbg.contains("vncticket=[REDACTED]"));
+        assert!(dbg.contains("[REDACTED]")); // auth field redacted too
     }
 
     #[test]
