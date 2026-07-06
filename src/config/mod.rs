@@ -276,6 +276,50 @@ async fn keyring_get(
     .map_err(|e| anyhow::anyhow!("keychain spawn_blocking join error: {e}"))?
 }
 
+/// Ordered keychain item names to try for a secret: the per-profile item
+/// `<profile>/<item>` first, then the flat `<item>` as a back-compat fallback.
+///
+/// Two keychain-backed profiles used to collide on the same flat key (both read
+/// `proxxx/token_secret`), so profile B silently resolved profile A's cluster
+/// credential — a cross-cluster isolation gap. Namespacing per profile closes
+/// it; the flat fallback keeps keys stored before this change working. Pure so
+/// the ordering is unit-tested without touching the OS keychain.
+#[must_use]
+fn keyring_candidates(item: &str, profile: Option<&str>) -> Vec<String> {
+    let mut names = Vec::with_capacity(2);
+    if let Some(p) = profile {
+        names.push(format!("{p}/{item}"));
+    }
+    names.push(item.to_string());
+    names
+}
+
+/// Resolve a keychain secret, per-profile-first with a flat fallback (see
+/// [`keyring_candidates`]). The primary cluster credentials (`token_secret`,
+/// `password`) route through here; the shared/secondary bot-token + PBS-token
+/// keychain entries stay flat by design (see ACCEPTED-RISKS AR-8).
+#[cfg(feature = "keychain")]
+async fn keyring_get_scoped(
+    item: &str,
+    profile: Option<&str>,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let candidates = keyring_candidates(item, profile);
+    tokio::task::spawn_blocking(move || -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let mut last: Option<keyring::Error> = None;
+        for name in &candidates {
+            match keyring::Entry::new("proxxx", name).and_then(|e| e.get_password()) {
+                Ok(v) => return Ok(zeroize::Zeroizing::new(v)),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "keychain: no entry among {candidates:?}: {last:?}"
+        ))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("keychain spawn_blocking join error: {e}"))?
+}
+
 /// .10 (audit) — bounded env var read for secrets.
 ///
 /// `std::env::var(name)` returns the entire value as a `String` with
@@ -780,7 +824,8 @@ impl ProfileConfig {
         // call wrapped in spawn_blocking via `keyring_get`.
         #[cfg(feature = "keychain")]
         {
-            if let Ok(val) = keyring_get("proxxx", "token_secret").await {
+            if let Ok(val) = keyring_get_scoped("token_secret", self.profile_name.as_deref()).await
+            {
                 return Ok(val);
             }
         }
@@ -815,7 +860,7 @@ impl ProfileConfig {
 
         #[cfg(feature = "keychain")]
         {
-            if let Ok(val) = keyring_get("proxxx", "password").await {
+            if let Ok(val) = keyring_get_scoped("password", self.profile_name.as_deref()).await {
                 return Ok(val);
             }
         }
@@ -1211,6 +1256,21 @@ mod reconcile_config_tests {
         let rec = cfg.reconcile.unwrap();
         assert!(rec.auto_converge);
         assert!(rec.converge_prune);
+    }
+
+    #[test]
+    fn keyring_candidates_are_profile_first_then_flat() {
+        // A named profile tries `<profile>/<item>` first, then the flat item
+        // (back-compat) — so two keychain-backed profiles no longer collide.
+        assert_eq!(
+            keyring_candidates("token_secret", Some("prod")),
+            vec!["prod/token_secret".to_string(), "token_secret".to_string()],
+        );
+        // No profile (flat/default config) → only the flat key, unchanged.
+        assert_eq!(
+            keyring_candidates("password", None),
+            vec!["password".to_string()],
+        );
     }
 }
 

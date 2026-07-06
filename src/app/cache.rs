@@ -48,14 +48,64 @@ fn open_db(path: &Path) -> anyhow::Result<Connection> {
     // Without this, SQLite returns error code 14 ("unable to open database file")
     // with no indication of the real cause (missing directory vs permissions).
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot create cache directory {}: {e} — check permissions",
-                parent.display()
-            )
-        })?;
+        // Custody: the cache holds a cluster-topology snapshot + the op_queue.
+        // Create the dir 0700 (unix) so it isn't group/world-readable on a
+        // multi-user host. `create_dir_all` no-ops on an existing dir and does
+        // NOT tighten its mode — an operator who pre-created a lax dir owns that
+        // (see ACCEPTED-RISKS AR-8). The 0700 dir is the real guard: it blocks a
+        // different user from reading the db OR its WAL sidecars regardless of
+        // their own file modes.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "cannot create cache directory {}: {e} — check permissions",
+                        parent.display()
+                    )
+                })?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot create cache directory {}: {e} — check permissions",
+                    parent.display()
+                )
+            })?;
+        }
     }
     let conn = Connection::open(path)?;
+    // Tighten the DB file — and its WAL/SHM sidecars — to owner-only (0600).
+    // A fresh SQLite file is created with the process umask (~0644); fresh
+    // sidecars inherit the main db's mode, but a legacy 0644 `-wal` left by a
+    // pre-hardening unclean shutdown would otherwise keep receiving topology +
+    // op_queue writes group/world-readable, so tighten them explicitly too.
+    // Best-effort: a perms error must not fail the cache open. (The 0700 parent
+    // dir is the real guard; this is belt-and-suspenders on the files.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let tighten = |p: &std::path::Path| {
+            if let Ok(meta) = std::fs::metadata(p) {
+                let mut perms = meta.permissions();
+                if perms.mode() & 0o077 != 0 {
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(p, perms);
+                }
+            }
+        };
+        tighten(path);
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_owned();
+            side.push(suffix);
+            tighten(std::path::Path::new(&side));
+        }
+    }
 
     // — `auto_vacuum` is sticky: persisted in the DB header,
     // applied at table-creation time, never changeable afterwards.

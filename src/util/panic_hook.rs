@@ -184,6 +184,10 @@ const KEY_VALUE_MARKERS: &[&str] = &[
     "password=",
     "token_secret=",
     "csrfpreventiontoken=",
+    // Console session credential — if a panic in the wsterm/console path
+    // embeds the WS URL (`?…&vncticket=…`), scrub it here too, so the
+    // defense-in-depth net covers it, not just the 3 hand-redacted log sites.
+    "vncticket=",
 ];
 
 /// `Authorization` style headers use a multi-char separator.
