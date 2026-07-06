@@ -197,3 +197,70 @@ queue. Fail-safe direction: the code errs toward NOT re-dispatching (a stuck
   the palette.
 
 *Accepted by Fabrizio Salmi — 2026-07-05.*
+
+---
+
+## AR-7 · Console session tickets are emitted by design on the explicit CLI paths
+
+**Context:** [wsterm/url.rs](../src/wsterm/url.rs), [cli/console.rs](../src/cli/console.rs), [cli/node.rs](../src/cli/node.rs)
+
+The Proxmox `vncticket` is a short-lived console credential. Two kinds of exposure existed:
+
+- **Unintentional (FIXED):** the WS connect URL — which carries `?vncticket=…` — was logged at INFO and in connect-error messages on every console attach. That leak is closed: `wsterm::url::redact_ticket` replaces the ticket value with `[REDACTED]` at every log/error site (`wsterm/mod.rs`), keeping host/path/port for diagnostics.
+- **Intentional (accepted):** `proxxx vnc <vmid> --ws-url` and the ticket JSON output deliberately print the full ticket / WS URL to stdout — that IS the feature (hand the URL to a browser noVNC client or an external tool). Redacting it would defeat the purpose.
+
+**Why not closed in code:** the emitting commands exist to *export* the ticket for immediate use; a redacted ticket is useless to the caller.
+
+**Operator's responsibility:** treat `--ws-url` / ticket output like a password on the command line — don't pipe it into a log, a shared terminal recording, or shell history you keep. The ticket's short TTL (seconds–minutes) is the backstop: connect immediately, and a captured ticket is dead soon after.
+
+*Accepted by Fabrizio Salmi — 2026-07-06.*
+
+---
+
+## AR-8 · Cache-at-rest is owner-protected, not encrypted
+
+**Context:** [app/cache.rs](../src/app/cache.rs)
+
+The per-profile SQLite cache holds a cluster-topology snapshot (nodes / guests / storage) plus the operation queue (vmids, nodes, disk/storage targets) — not credentials (secrets never reach the cache schema; see the "exec output not cached" invariant). On unix it is now created owner-only: the parent dir `0700`, and the `{profile}_state.db` **plus its `-wal` / `-shm` sidecars** `0600` (fresh sidecars inherit the db's mode; the explicit tighten also retightens a legacy `0644` `-wal` left by a pre-hardening unclean shutdown). The file tighten is **best-effort / fail-open** — a `stat`/`chmod` error is ignored so the cache still opens (unlike the audit key, which fails *closed*: topology is not a forgery key).
+
+**Why not closed further in code:** `create_dir_all` no-ops on a pre-existing directory and does not tighten its mode, so a dir the operator created lax stays lax; and proxxx does not encrypt the cache at rest — topology is low-sensitivity and encryption would need a key-management story the tool doesn't own. The `0700` **directory** is the real guard: a different user can't enter it to read the db or its sidecars regardless of file modes, which also bounds the brief create-then-chmod TOCTOU window on the main db.
+
+**Operator's responsibility:** on a multi-tenant host, ensure the data dir isn't group/world-writable (proxxx creates it `0700`, but a pre-existing one is yours); if the topology snapshot is sensitive in your environment, place the data dir on an encrypted volume.
+
+*Accepted by Fabrizio Salmi — 2026-07-06.*
+
+---
+
+## AR-9 · Keychain per-profile isolation is opt-in (and stored manually); a flat entry stays shared
+
+**Context:** [config/mod.rs](../src/config/mod.rs) — `keyring_candidates` / `keyring_get_scoped`
+
+The OS-keychain lookup for the primary cluster credentials (`token_secret`, `password`) now tries the profile-scoped item `<profile>/<item>` **first**, then the flat `<item>`. So per-profile isolation is *available* — but honestly scoped:
+
+- **It is opt-in.** You get isolation only by *storing* the secret under the profile-scoped item name. proxxx has **no keychain-write command** — the entry is created by hand (see below).
+- **A flat entry stays shared.** A named profile with no per-profile entry falls back to the flat `<item>`, so an un-migrated flat key has the same cross-cluster sharing as before. This fallback is deliberate back-compat.
+- **Telegram bot-token + PBS token stay flat** (resolved on `TelegramConfig` / `PbsConfig`, which don't carry the profile name; typically one shared bot / one PBS).
+
+**Why not closed further in code:** removing the flat fallback (fail-closed per profile) would break every existing keychain deployment overnight — their named profiles would suddenly stop resolving. The scoped-first-then-flat order is the standard non-breaking migration.
+
+**Operator's responsibility:**
+- To isolate a profile's cluster credential in the keychain, store it under the scoped item. macOS: `security add-generic-password -s proxxx -a "prod/token_secret" -w "<secret>"`. Linux (Secret Service): store an entry with service `proxxx`, account `prod/token_secret`. That profile then resolves its own entry; the flat fallback fires only if the scoped one is absent.
+- If you won't manage per-profile keychain entries (or need per-profile Telegram/PBS secrets), prefer per-profile `token_secret_file` / `bot_token_file` (0600) or the `PROXXX_*` env vars — those already resolve unambiguously per profile.
+
+*Accepted by Fabrizio Salmi — 2026-07-06.*
+
+---
+
+## AR-10 · State export carries no *modelled* secret — but free-text fields pass through verbatim
+
+**Context:** [state/model.rs](../src/state/model.rs), [state/export.rs](../src/state/export.rs), GitHub issue #178
+
+`proxxx state export` emits pools / ACLs / storage / backup-jobs / firewall / mappings / HA. **No `Decl` struct has a secret field** — each exporter copies a fixed *whitelist* of named fields (there is no `#[serde(flatten)]` of a raw API response), and the real secrets (`ApiToken.value`; storage credentials PVE masks on `GET`) are never on the export path. The field-whitelist is the safety mechanism (not, as an earlier wording implied, PVE's masking — that's incidental). Notification *targets* (gotify tokens / SMTP passwords) are **deliberately not modelled** — PVE never returns them on `GET`, so they can't round-trip.
+
+**Residual — free-text passthrough:** ~10 free-text fields (`comment`, `description`, `notes_template`) are exported *verbatim*, unredacted. An operator who embeds a secret in a comment (e.g. a gotify/webhook URL with an inline bearer token in a storage `comment` or a notification `notes_template`) will export it in cleartext. proxxx does not scan free text for secrets. So export is secret-free by *structure*, not by *guarantee* against operator-embedded secrets.
+
+**Why this is an accepted risk and not a fix:** there is nothing to elide today — the risk is *future*. The moment a secret-bearing state family is added (issue #180 users/tokens, #181 metric-servers with API keys), naive export would write secrets to disk / git.
+
+**Gate (the operator/maintainer contract):** issue #178 (secret-ref / elide-on-export convention) is the **mandatory prerequisite** before merging ANY secret-bearing state family. #178 stays frozen until that demand appears — but it must land *first*, not alongside. This entry is the tripwire.
+
+*Accepted by Fabrizio Salmi — 2026-07-06.*

@@ -91,7 +91,7 @@ pub async fn connect(
     ws_config.max_frame_size = Some(1 << 20);
     ws_config.max_message_size = Some(4 << 20);
 
-    info!("termproxy WSS connect: {}", target.url);
+    info!("termproxy WSS connect: {}", url::redact_ticket(&target.url));
     // Bound the connect (TCP + TLS + WS handshake). Without this an
     // unreachable / black-holed node leaves the call hanging until the
     // OS TCP timeout (minutes) — and the terminal is already half
@@ -113,10 +113,10 @@ pub async fn connect(
     .map_err(|_| {
         anyhow::anyhow!(
             "WS connect to {} timed out after {WS_CONNECT_TIMEOUT:?} — node unreachable?",
-            target.url
+            url::redact_ticket(&target.url)
         )
     })?
-    .with_context(|| format!("WS connect to {}", target.url))?;
+    .with_context(|| format!("WS connect to {}", url::redact_ticket(&target.url)))?;
 
     // Auth frame — must be a binary frame containing `<user>:<ticket>\n`.
     use futures_util::SinkExt;
