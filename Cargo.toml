@@ -70,7 +70,7 @@ dirs = "6.0.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 
 # SSH layer
-russh = "0.61"
+russh = "0.62"
 # `russh-keys` was folded back into `russh` proper in 0.60 — the
 # functionality lives at `russh::keys::*` now. Removing the separate
 # crate also drops the transitive `rsa 0.9.10` (Marvin Attack,
