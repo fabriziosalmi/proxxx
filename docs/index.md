@@ -4,14 +4,14 @@ layout: home
 hero:
   text: Terminal cockpit for Proxmox VE & PBS.
   tagline: A Rust TUI and CLI that talks to real Proxmox clusters. REST against PVE and PBS, SSH for the rest. No agent on the cluster.
-  # Animated SVG slideshow mirroring the README hero (assets/demo.svg).
+  # Animated SVG mirroring the README hero (assets/demo-homelab.svg — proxxx describe).
   # vitepress's home layout slots `image.src` to the right of the
   # headline + tagline + actions; `base: /proxxx/` from .vitepress/
   # config.ts auto-prefixes the URL at build time, so we write the
   # path as if served from the site root.
   image:
-    src: /demo.svg
-    alt: proxxx animated demo — a destructive command refused by the pre-flight risk gate, approved via Telegram HITL, then executed
+    src: /demo-homelab.svg
+    alt: proxxx describe — one command prints the whole cluster (nodes, guests, storages) for a live 3-node Proxmox VE 9.1 cluster
   actions:
     - theme: brand
       text: Install in 60 s
@@ -25,7 +25,7 @@ hero:
 
 features:
   - title: One binary, four surfaces
-    details: CLI, TUI, MCP server (stdio + Streamable HTTP/SSE with server-sent cluster-event notifications), and a unified `daemon serve` mode in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 25-tool registry for LLM agents; the daemon folds alerts + HITL listener + interval scheduler into one SIGTERM-clean process.
+    details: CLI, TUI, MCP server (stdio + Streamable HTTP/SSE with server-sent cluster-event notifications), and a unified `daemon serve` mode in the same executable. Same risk gate, same HITL gate, same API client. The TUI is for interactive operations; the CLI is the same operations, scriptable, JSON-friendly, and CI-ready; the MCP surface is a deterministic 25-tool registry for LLM agents where destructive tools are fail-closed by default — refused unless a matching policy routes them through the HITL gate — and the HTTP transport binds loopback-only unless an `mcp_token` is set; the daemon folds alerts + HITL listener + interval scheduler into one SIGTERM-clean process.
   - title: No agent on the cluster
     details: Direct REST against PVE (token or password) and PBS (token only), with typed error categories so callers match on the failure shape instead of grepping prose. SSH only for the paths PVE never exposed over REST — patch apply, full effective-permissions, per-guest interactive sessions, per-node journalctl tailing, GPU/IOMMU readiness probing.
   - title: Eight-stage commit gate, no skip flags
@@ -98,7 +98,7 @@ onMounted(() => {
 
 <div class="status-row">
   <span><span class="ok">●</span> <strong>main</strong> · gate green</span>
-  <span><strong>v0.7.4</strong></span>
+  <span><strong>v0.13.1</strong></span>
   <span><strong>full mutation lifecycle</strong> · LXC + cluster + QEMU + QGA</span>
   <span><strong>0</strong> system deps · rustls only</span>
   <span><strong>MIT</strong></span>
@@ -108,7 +108,7 @@ onMounted(() => {
 
 | Surface               | Today                                                    |
 | :-------------------- | :------------------------------------------------------- |
-| Source                | ~66 KLOC Rust · ~16 KLOC tests · 646 lib tests + 447 integration tests (error-handling + resilience-chaos sweeps)           |
+| Source                | ~72 KLOC Rust · ~17 KLOC tests · 646 lib tests + 447 integration tests (error-handling + resilience-chaos sweeps)           |
 | Quality gate          | 8 stages · ~340–480 s wall time (live cluster path)      |
 | Live cluster coverage | 67 read probes + 34 mutation probes per gate run         |
 | Property testing      | ~25 proptest properties × 256 random cases = ~6 400 invariant checks per `cargo test` |
