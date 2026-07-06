@@ -12,6 +12,26 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-06
+
+Patch: security hardening of the residual "yellow" doubts + dependency bumps. No CLI / config / MCP contract change; keychain resolution stays backward compatible.
+
+### Security
+
+- **Console session tickets no longer leak into logs.** The `vncticket` was logged in cleartext on every console attach; it is now redacted at every log/error site, `WsTarget`'s `Debug` redacts it, and the panic-hook scrubber knows `vncticket=`. The intentional `vnc --ws-url` output is unchanged — that is the feature (signed [ACCEPTED-RISKS](pre-commit/ACCEPTED-RISKS.md) AR-7).
+- **Cache-at-rest is owner-protected.** The per-profile SQLite cache dir is created `0700` and the DB plus its `-wal`/`-shm` sidecars `0600` on unix (AR-8).
+- **Keychain per-profile isolation.** OS-keychain lookups for `token_secret` / `password` now try the profile-scoped item `<profile>/<item>` before the flat name, so two keychain-backed profiles no longer resolve the *same* secret. Opt-in and backward compatible via a flat fallback (AR-9).
+- **State export verified secret-free** (no modelled secret field; field-whitelist, no serde-flatten). Issue #178's elide-on-export convention is the signed gate before any secret-bearing state family; free-text fields (`comment`/`notes`) still pass through verbatim (AR-10).
+
+### Dependencies
+
+- `russh` 0.61.2 → 0.62.1 (SSH). The rsa-sha2-512 client-auth fix from v0.13.0 was re-verified against a live PVE 9.1.1 cluster on the new version.
+- `clap_complete` 4.6.5 → 4.6.7; grouped GitHub Actions bumps.
+
+### Internal
+
+- The live E2E harness is turnkey — `run_proxxx` synthesizes the CLI config from the E2E env, and `e2e_beta` is self-contained (no VMID collision with `e2e_alpha`). No change to the shipped binary.
+
 ## [0.13.0] — 2026-07-05
 
 Headline: **Fail-closed by default.** The four declared security-invariant gaps are closed and hardened under adversarial review, and the whole surface was exercised against a live PVE 9.1.1 cluster (which turned up two real bugs, both fixed). No CLI-command, exit-code, `--format json`, or MCP-registry *contract* change — but several runtime **defaults are now stricter**, so read the migration notes.
