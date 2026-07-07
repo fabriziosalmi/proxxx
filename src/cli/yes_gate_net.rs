@@ -29,7 +29,7 @@ async fn offline_client() -> Arc<PxClient> {
         user: "root@pam".into(),
         auth: "token".into(),
         token_id: Some("net".into()),
-        token_secret: Some(zeroize::Zeroizing::new("dummy".into())),
+        token_secret: Some(crate::util::secret::SecretString::from("dummy")),
         token_secret_file: None,
         password: None,
         verify_tls: false,

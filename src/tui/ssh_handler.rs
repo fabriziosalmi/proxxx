@@ -33,7 +33,7 @@ pub struct SshSessionHandler {
     /// runtime by the interactive TUI prompt (see [`Self::needs_passphrase`]
     /// / [`Self::set_passphrase`]). Behind a `Mutex` so the prompt can
     /// set it on the shared `Arc<SshSessionHandler>` without `&mut`.
-    passphrase: Mutex<Option<String>>,
+    passphrase: Mutex<Option<crate::util::secret::SecretString>>,
     active: Mutex<Option<Arc<PtySession>>>,
 }
 
@@ -61,7 +61,9 @@ impl SshSessionHandler {
             (Arc::new(TokioRwLock::new(KnownHosts::default())), v)
         };
 
-        let passphrase = std::env::var("PROXXX_SSH_KEY_PASSPHRASE").ok();
+        let passphrase = std::env::var("PROXXX_SSH_KEY_PASSPHRASE")
+            .ok()
+            .map(crate::util::secret::SecretString::new);
 
         Self {
             profile,
@@ -72,7 +74,7 @@ impl SshSessionHandler {
         }
     }
 
-    fn passphrase(&self) -> Option<String> {
+    fn passphrase(&self) -> Option<crate::util::secret::SecretString> {
         match self.passphrase.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
@@ -84,8 +86,8 @@ impl SshSessionHandler {
     /// prompted at most once.
     pub fn set_passphrase(&self, passphrase: String) {
         match self.passphrase.lock() {
-            Ok(mut g) => *g = Some(passphrase),
-            Err(p) => *p.into_inner() = Some(passphrase),
+            Ok(mut g) => *g = Some(crate::util::secret::SecretString::new(passphrase)),
+            Err(p) => *p.into_inner() = Some(crate::util::secret::SecretString::new(passphrase)),
         }
     }
 

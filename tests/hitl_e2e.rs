@@ -1517,7 +1517,7 @@ async fn fast_op_skips_intermediate_executing_edit() {
 #[serial_test::serial] // env vars are process-global
 async fn env_var_beats_inline_bot_token() {
     let cfg = proxxx::config::TelegramConfig {
-        bot_token: Some("inline-loser".to_string()),
+        bot_token: Some(proxxx::util::secret::SecretString::from("inline-loser")),
         bot_token_file: None,
         chat_id: "12345".to_string(),
     };

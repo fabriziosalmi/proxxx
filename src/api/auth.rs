@@ -2,35 +2,42 @@ use anyhow::{Context, Result};
 use reqwest::header::COOKIE;
 use serde::Deserialize;
 use tracing::debug;
-use zeroize::Zeroizing;
+
+use crate::util::secret::SecretString;
 
 /// Authentication state for a Proxmox connection.
 ///
-/// (macro audit) — secret zeroing. The token secret and the
-/// session ticket are wrapped in `Zeroizing<String>`. When `AuthMethod`
-/// drops (or when the inner `String` is replaced), the heap bytes are
-/// overwritten with zeros via `Zeroize::zeroize()`. A core dump after
-/// the secret has been freed cannot reveal it via `strings core.dump`.
+/// (macro audit) — secret zeroing + redaction. The token secret and the
+/// session ticket are [`SecretString`]s: heap bytes are overwritten with
+/// zeros on drop (a core dump after the secret has been freed cannot
+/// reveal it via `strings core.dump`), AND the derived `Debug` below is
+/// safe — `SecretString` prints `[REDACTED]`, so `{auth:?}` at any
+/// future log site can never leak a live token/ticket/CSRF (v0.13.1
+/// shipped this as a hand-written impl for `WsTarget`; this is the same
+/// property enforced at the type level).
 #[derive(Debug, Clone)]
 pub enum AuthMethod {
     Token {
         user: String,
         token_id: String,
-        token_secret: Zeroizing<String>,
+        token_secret: SecretString,
     },
     Password {
-        ticket: Zeroizing<String>,
-        csrf_token: Zeroizing<String>,
+        ticket: SecretString,
+        csrf_token: SecretString,
         expires_at: std::time::Instant,
     },
 }
 
-#[derive(Debug, Deserialize)]
+// No `Debug` on the ticket envelope: `ticket` / `csrf_token` arrive from
+// serde as plain `String`s and would print verbatim under a derived
+// `{:?}`. They are moved into `SecretString` immediately after parse.
+#[derive(Deserialize)]
 struct TicketResponse {
     data: TicketData,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TicketData {
     ticket: String,
     #[serde(rename = "CSRFPreventionToken")]
@@ -43,7 +50,7 @@ impl AuthMethod {
         Self::Token {
             user: user.to_string(),
             token_id: token_id.to_string(),
-            token_secret: Zeroizing::new(token_secret.to_string()),
+            token_secret: SecretString::from(token_secret),
         }
     }
 
@@ -98,8 +105,8 @@ impl AuthMethod {
         let resp: TicketResponse = resp.json().await.context("Failed to parse auth response")?;
 
         Ok(Self::Password {
-            ticket: Zeroizing::new(resp.data.ticket),
-            csrf_token: Zeroizing::new(resp.data.csrf_token),
+            ticket: SecretString::new(resp.data.ticket),
+            csrf_token: SecretString::new(resp.data.csrf_token),
             expires_at: std::time::Instant::now() + std::time::Duration::from_hours(2), // 2h
         })
     }
@@ -199,10 +206,9 @@ mod tests {
         // state-changing HTTP requests, never on the WS upgrade. A
         // future contributor reading the source should not "fix" the
         // omission by adding it here.
-        use zeroize::Zeroizing;
         let auth = AuthMethod::Password {
-            ticket: Zeroizing::new("PVE:root@pam:6A185B44::ZDPSgsM...".to_string()),
-            csrf_token: Zeroizing::new("6A185B44:4BTds5sVl8Z...".to_string()),
+            ticket: SecretString::from("PVE:root@pam:6A185B44::ZDPSgsM..."),
+            csrf_token: SecretString::from("6A185B44:4BTds5sVl8Z..."),
             expires_at: std::time::Instant::now() + std::time::Duration::from_hours(2),
         };
         let headers = auth.headers();
@@ -243,5 +249,44 @@ mod tests {
             headers[0].1,
             "PVEAPIToken=alice@pve!ops-2026-q2=uuid-secret"
         );
+    }
+
+    #[test]
+    fn debug_redacts_token_variant() {
+        // The derived Debug is safe ONLY because token_secret is a
+        // SecretString — this pins that property (matrix: SecretString
+        // invariant; companion of tests/secret_redaction_test.rs).
+        let auth = AuthMethod::from_token("root@pam", "proxxx-rw", "SENTINEL-token-a7f3");
+        for rendered in [format!("{auth:?}"), format!("{auth:#?}")] {
+            assert!(
+                !rendered.contains("SENTINEL-token-a7f3"),
+                "token secret leaked through Debug: {rendered}"
+            );
+            assert!(rendered.contains("[REDACTED]"));
+            // Identity fields must still print — redaction must not
+            // blind diagnostics.
+            assert!(rendered.contains("root@pam"));
+            assert!(rendered.contains("proxxx-rw"));
+        }
+    }
+
+    #[test]
+    fn debug_redacts_password_variant() {
+        let auth = AuthMethod::Password {
+            ticket: SecretString::from("SENTINEL-ticket-b2e9"),
+            csrf_token: SecretString::from("SENTINEL-csrf-c4d1"),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_hours(2),
+        };
+        for rendered in [format!("{auth:?}"), format!("{auth:#?}")] {
+            assert!(
+                !rendered.contains("SENTINEL-ticket-b2e9"),
+                "ticket leaked through Debug: {rendered}"
+            );
+            assert!(
+                !rendered.contains("SENTINEL-csrf-c4d1"),
+                "csrf token leaked through Debug: {rendered}"
+            );
+            assert!(rendered.contains("[REDACTED]"));
+        }
     }
 }

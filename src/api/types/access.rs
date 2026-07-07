@@ -46,7 +46,7 @@ pub struct User {
     pub expire: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiToken {
     pub tokenid: String,
@@ -61,9 +61,31 @@ pub struct ApiToken {
     pub comment: String,
     #[serde(default)]
     pub expire: u64,
-    /// Only set on creation responses. None on list.
+    /// Only set on creation responses. None on list. This is the token
+    /// SECRET PVE returns exactly once on `token create` — a live
+    /// credential. `Serialize` stays (the `--json` output emits it by
+    /// design), but `Debug` is hand-written to redact it so a `{:?}` at
+    /// any log site can't leak it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+}
+
+impl std::fmt::Debug for ApiToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiToken")
+            .field("tokenid", &self.tokenid)
+            .field("privsep", &self.privsep)
+            .field("comment", &self.comment)
+            .field("expire", &self.expire)
+            .field(
+                "value",
+                match &self.value {
+                    Some(_) => &"Some([REDACTED])",
+                    None => &"None",
+                },
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

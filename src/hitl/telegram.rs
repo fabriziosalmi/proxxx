@@ -4,6 +4,23 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::info;
 
+use crate::util::secret::SecretString;
+
+/// Strip the request URL from a reqwest error before it can reach a log.
+///
+/// The Telegram Bot API embeds the bot token in the request *path*
+/// (`{base}{token}/{method}`), and reqwest's `Error: Display` appends
+/// `for url (…)` — so a bare `{e}` / `{e:#}` on a transport failure (a
+/// DNS blip, a timeout on the long-poll loop, connection refused) would
+/// write the live bot token into the persistent tracing log. The token
+/// never belongs in a diagnostic; callers only need the failure kind, so
+/// every Telegram request funnels its errors through this scrubber. The
+/// panic-hook already covers the crash path; this covers the far more
+/// common non-panic error-log path.
+fn scrub_url(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
+}
+
 /// Default Telegram Bot API base URL. Tests override via
 /// `TelegramGateway::with_base_url()` so they can point at a wiremock
 /// `MockServer::uri()`. Production code goes through `new()`.
@@ -117,13 +134,14 @@ pub struct User {
 /// E2E tests impossible.
 pub struct TelegramGateway {
     http: Client,
-    /// Pre-resolved bot token. Held as a plain `String` because reqwest
-    /// borrows the URL multiple times per request and `Zeroizing<String>`
-    /// would force `Deref` calls on every send. The caller's
-    /// `Zeroizing` wrapper (config layer) covers the credential lifetime
-    /// up to construction; once inside the gateway the token lives as
-    /// long as the gateway itself.
-    bot_token: String,
+    /// Pre-resolved bot token. `SecretString`: redacted-in-Debug and
+    /// wiped on drop. The Telegram API embeds it in every request URL by
+    /// design (`{base}{token}/{method}`) — those are the explicit
+    /// `.expose()` sites below. Two nets keep it out of logs: [`scrub_url`]
+    /// strips the token-bearing URL from every reqwest error before it can
+    /// reach a `tracing` event, and the panic-hook scrubber covers the
+    /// crash path.
+    bot_token: SecretString,
     chat_id: String,
     /// Telegram Bot API base, e.g. `"https://api.telegram.org/bot"`.
     /// MUST end without a trailing slash and without the token —
@@ -144,14 +162,14 @@ impl TelegramGateway {
     /// Loads (or auto-generates) the HMAC key from disk on each call.
     /// File I/O here is fine: HITL gateways are constructed once per
     /// process, not per request.
-    pub fn new(bot_token: String, chat_id: String) -> Result<Self> {
+    pub fn new(bot_token: impl Into<SecretString>, chat_id: String) -> Result<Self> {
         let hmac_key = crate::hitl::hmac_key::load_or_generate_hmac_key()?;
         Ok(Self {
             // A request timeout so send/edit/approve can't hang forever on a
             // wedged connection. The long-poll path sets its own (longer)
             // per-request timeout, which overrides this client default.
             http: Client::builder().timeout(Duration::from_secs(30)).build()?,
-            bot_token,
+            bot_token: bot_token.into(),
             chat_id,
             base_url: DEFAULT_TG_API.to_string(),
             hmac_key,
@@ -167,7 +185,11 @@ impl TelegramGateway {
     /// callback signatures without coordinating on a random secret.
     /// Production code must NEVER take this path.
     #[must_use]
-    pub fn with_base_url(bot_token: String, chat_id: String, base_url: String) -> Self {
+    pub fn with_base_url(
+        bot_token: impl Into<SecretString>,
+        chat_id: String,
+        base_url: String,
+    ) -> Self {
         Self::with_base_url_and_key(bot_token, chat_id, base_url, vec![0u8; 32])
     }
 
@@ -175,14 +197,14 @@ impl TelegramGateway {
     /// HMAC-specific tests that need to verify cross-instance signing.
     #[must_use]
     pub fn with_base_url_and_key(
-        bot_token: String,
+        bot_token: impl Into<SecretString>,
         chat_id: String,
         base_url: String,
         hmac_key: Vec<u8>,
     ) -> Self {
         Self {
             http: Client::new(),
-            bot_token,
+            bot_token: bot_token.into(),
             chat_id,
             base_url,
             hmac_key,
@@ -203,7 +225,7 @@ impl TelegramGateway {
     /// `with_base_url()` and pass an explicit fake token.
     pub async fn from_config(config: &crate::config::TelegramConfig) -> Result<Self> {
         let token = config.resolve_bot_token().await?;
-        Self::new(token.to_string(), config.chat_id.clone())
+        Self::new(token, config.chat_id.clone())
     }
 
     /// Sends a request for approval to the Telegram chat.
@@ -257,9 +279,17 @@ impl TelegramGateway {
             },
         };
 
-        let url = format!("{}{}/sendMessage", self.base_url, self.bot_token);
-        let resp: TgResponse<Message> =
-            self.http.post(&url).json(&req).send().await?.json().await?;
+        let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());
+        let resp: TgResponse<Message> = self
+            .http
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(scrub_url)?
+            .json()
+            .await
+            .map_err(scrub_url)?;
 
         if resp.ok {
             if let Some(m) = resp.result {
@@ -296,9 +326,17 @@ impl TelegramGateway {
             "text": text,
         });
 
-        let url = format!("{}{}/sendMessage", self.base_url, self.bot_token);
-        let resp: TgResponse<Message> =
-            self.http.post(&url).json(&req).send().await?.json().await?;
+        let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());
+        let resp: TgResponse<Message> = self
+            .http
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(scrub_url)?
+            .json()
+            .await
+            .map_err(scrub_url)?;
 
         if resp.ok {
             Ok(())
@@ -314,7 +352,10 @@ impl TelegramGateway {
     pub async fn poll_updates(&self, offset: i64, timeout: u64) -> Result<Vec<Update>> {
         let url = format!(
             "{}{}/getUpdates?offset={}&timeout={}&allowed_updates=[\"callback_query\"]",
-            self.base_url, self.bot_token, offset, timeout
+            self.base_url,
+            self.bot_token.expose(),
+            offset,
+            timeout
         );
 
         let resp = self
@@ -322,9 +363,10 @@ impl TelegramGateway {
             .get(&url)
             .timeout(Duration::from_secs(timeout + 5))
             .send()
-            .await?;
+            .await
+            .map_err(scrub_url)?;
 
-        let tg_resp: TgResponse<Vec<Update>> = resp.json().await?;
+        let tg_resp: TgResponse<Vec<Update>> = resp.json().await.map_err(scrub_url)?;
 
         if tg_resp.ok {
             Ok(tg_resp.result.unwrap_or_default())
@@ -353,7 +395,11 @@ impl TelegramGateway {
     /// `[REDACTED]`, action verbs, error fragments that would trip
     /// `MarkdownV2` parsing if any contained reserved chars.
     pub async fn edit_message_text(&self, message_id: i64, text: &str) -> Result<()> {
-        let url = format!("{}{}/editMessageText", self.base_url, self.bot_token);
+        let url = format!(
+            "{}{}/editMessageText",
+            self.base_url,
+            self.bot_token.expose()
+        );
         let payload = serde_json::json!({
             "chat_id": self.chat_id,
             "message_id": message_id,
@@ -361,7 +407,13 @@ impl TelegramGateway {
             // Empty keyboard = clear the buttons.
             "reply_markup": { "inline_keyboard": Vec::<Vec<()>>::new() },
         });
-        let resp = self.http.post(&url).json(&payload).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(scrub_url)?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -377,13 +429,64 @@ impl TelegramGateway {
 
     /// Answer a callback query to remove the loading state on the button
     pub async fn answer_callback(&self, callback_query_id: &str, text: &str) -> Result<()> {
-        let url = format!("{}{}/answerCallbackQuery", self.base_url, self.bot_token);
+        let url = format!(
+            "{}{}/answerCallbackQuery",
+            self.base_url,
+            self.bot_token.expose()
+        );
         let payload = serde_json::json!({
             "callback_query_id": callback_query_id,
             "text": text
         });
 
-        self.http.post(&url).json(&payload).send().await?;
+        self.http
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(scrub_url)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hermetic proof for the bot-token log-leak fix: a transport failure
+    // (connection refused on a dead port) must NOT carry the token into
+    // the error's Display, because the token lives in the request URL.
+    // Port 1 on loopback refuses fast — no network, no fixture.
+    #[tokio::test]
+    async fn transport_error_does_not_leak_bot_token_in_display() {
+        const SENTINEL: &str = "7654321:AAH-liveBotTokenSENTINEL";
+        let gw = TelegramGateway::with_base_url(
+            SENTINEL,
+            "-100".to_string(),
+            "http://127.0.0.1:1/bot".to_string(),
+        );
+
+        // Every request path funnels errors through scrub_url; hit a few.
+        let errs = [
+            gw.send_message("hi").await.unwrap_err(),
+            gw.poll_updates(0, 0).await.unwrap_err(),
+            gw.answer_callback("cbid", "ok").await.unwrap_err(),
+        ];
+        for e in errs {
+            let display = format!("{e}");
+            let alternate = format!("{e:#}");
+            let debug = format!("{e:?}");
+            for rendered in [&display, &alternate, &debug] {
+                assert!(
+                    !rendered.contains(SENTINEL),
+                    "bot token leaked into a Telegram transport error: {rendered}"
+                );
+                // And the token-bearing URL itself must be gone.
+                assert!(
+                    !rendered.contains("/bot"),
+                    "token-bearing URL survived scrubbing: {rendered}"
+                );
+            }
+        }
     }
 }
