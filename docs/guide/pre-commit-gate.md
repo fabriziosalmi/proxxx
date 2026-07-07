@@ -38,7 +38,7 @@ anything reaches the remote.
 | 2 | `cargo clippy --release --all-targets` | 10–60 s | lint policy: `unwrap_used`, `expect_used`, `panic`, `todo`, `await_holding_lock` are `deny` |
 | 3 | `cargo audit --deny warnings` | 3–5 s | new CVEs in `Cargo.lock`, against a documented advisory ignore policy in `.cargo/audit.toml` |
 | 4 | `cargo deny check` | 2–4 s | license whitelist, banned crates (`openssl`, `native-tls`, etc.), crates.io-only sources, wildcard ban — policy in `deny.toml` |
-| 5 | `cargo test --release --all-targets` | 10–90 s | full unit + integration + wiremock + TUI snapshot suites (646 lib tests + 447 integration tests + ~25 proptest properties × 256 cases each) |
+| 5 | `cargo test --release --all-targets` | 10–90 s | full unit + integration + wiremock + TUI snapshot suites (745 lib tests + 478 integration tests + ~25 proptest properties × 256 cases each) |
 | 6 | `tests/live/test_run.sh` | ~30 s | 67 read-only probes against a live cluster |
 | 7 | `tests/live/test_mutation.sh` | ~60 s | 34 mutation probes covering full lifecycle: LXC 9999 (create → start → snapshot → stop → delete), cluster-level CRUD across 8 of the 10 state families (pools / ACL / storage-defs / backup-jobs / firewall-cluster / notifications / HA rules / HA resources), QEMU 9998 from alpine ISO, opt-in QGA round-trips via `PROXXX_E2E_QGA_VMID=<vmid>` |
 
@@ -50,7 +50,7 @@ the developer's primary workstation where the cluster lives.
 ## Why integration tests in the gate
 
 A previous gate ran `cargo test --release --lib` only. That covered
-the lib tests but missed the 447 tests in `tests/*.rs` that CI catches.
+the lib tests but missed the 478 tests in `tests/*.rs` that CI catches.
 A developer could land a stale-mock regression locally, push, and CI
 would fail in remote — wasting a round trip.
 

@@ -333,7 +333,7 @@ Eight stages, run as both a pre-commit hook and the CI contract in [`.github/wor
 | 2 | `cargo clippy --release --all-targets` | 10–60 s |
 | 3 | `cargo audit --deny warnings` | 3–5 s |
 | 4 | `cargo deny check` (license / banned crates / sources / wildcards) | 2–4 s |
-| 5 | `cargo test --release --all-targets` (646 lib tests + 447 integration tests including ~25 proptest properties × 256 cases each) | 10–90 s |
+| 5 | `cargo test --release --all-targets` (745 lib tests + 478 integration tests including ~25 proptest properties × 256 cases each) | 10–90 s |
 | 6 | `tests/live/test_run.sh` (67 read-only probes against the live cluster) | ~30 s |
 | 7 | `tests/live/test_mutation.sh` (34 mutation probes: LXC + cluster-level CRUD across 8 of the 10 state families + QEMU; opt-in QGA via `PROXXX_E2E_QGA_VMID=<vmid>`) | ~60 s |
 
