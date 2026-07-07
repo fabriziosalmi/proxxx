@@ -6,6 +6,21 @@ use tracing::info;
 
 use crate::util::secret::SecretString;
 
+/// Strip the request URL from a reqwest error before it can reach a log.
+///
+/// The Telegram Bot API embeds the bot token in the request *path*
+/// (`{base}{token}/{method}`), and reqwest's `Error: Display` appends
+/// `for url (…)` — so a bare `{e}` / `{e:#}` on a transport failure (a
+/// DNS blip, a timeout on the long-poll loop, connection refused) would
+/// write the live bot token into the persistent tracing log. The token
+/// never belongs in a diagnostic; callers only need the failure kind, so
+/// every Telegram request funnels its errors through this scrubber. The
+/// panic-hook already covers the crash path; this covers the far more
+/// common non-panic error-log path.
+fn scrub_url(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
+}
+
 /// Default Telegram Bot API base URL. Tests override via
 /// `TelegramGateway::with_base_url()` so they can point at a wiremock
 /// `MockServer::uri()`. Production code goes through `new()`.
@@ -119,11 +134,13 @@ pub struct User {
 /// E2E tests impossible.
 pub struct TelegramGateway {
     http: Client,
-    /// Pre-resolved bot token. `SecretString`: the token lives as long
-    /// as the gateway, so it must be redacted-in-Debug and wiped on
-    /// drop. The Telegram API embeds it in every request URL by design
-    /// (`{base}{token}/{method}`) — those are the explicit `.expose()`
-    /// sites below; the panic-hook scrubber covers the crash path.
+    /// Pre-resolved bot token. `SecretString`: redacted-in-Debug and
+    /// wiped on drop. The Telegram API embeds it in every request URL by
+    /// design (`{base}{token}/{method}`) — those are the explicit
+    /// `.expose()` sites below. Two nets keep it out of logs: [`scrub_url`]
+    /// strips the token-bearing URL from every reqwest error before it can
+    /// reach a `tracing` event, and the panic-hook scrubber covers the
+    /// crash path.
     bot_token: SecretString,
     chat_id: String,
     /// Telegram Bot API base, e.g. `"https://api.telegram.org/bot"`.
@@ -263,8 +280,16 @@ impl TelegramGateway {
         };
 
         let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());
-        let resp: TgResponse<Message> =
-            self.http.post(&url).json(&req).send().await?.json().await?;
+        let resp: TgResponse<Message> = self
+            .http
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(scrub_url)?
+            .json()
+            .await
+            .map_err(scrub_url)?;
 
         if resp.ok {
             if let Some(m) = resp.result {
@@ -302,8 +327,16 @@ impl TelegramGateway {
         });
 
         let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());
-        let resp: TgResponse<Message> =
-            self.http.post(&url).json(&req).send().await?.json().await?;
+        let resp: TgResponse<Message> = self
+            .http
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(scrub_url)?
+            .json()
+            .await
+            .map_err(scrub_url)?;
 
         if resp.ok {
             Ok(())
@@ -330,9 +363,10 @@ impl TelegramGateway {
             .get(&url)
             .timeout(Duration::from_secs(timeout + 5))
             .send()
-            .await?;
+            .await
+            .map_err(scrub_url)?;
 
-        let tg_resp: TgResponse<Vec<Update>> = resp.json().await?;
+        let tg_resp: TgResponse<Vec<Update>> = resp.json().await.map_err(scrub_url)?;
 
         if tg_resp.ok {
             Ok(tg_resp.result.unwrap_or_default())
@@ -373,7 +407,13 @@ impl TelegramGateway {
             // Empty keyboard = clear the buttons.
             "reply_markup": { "inline_keyboard": Vec::<Vec<()>>::new() },
         });
-        let resp = self.http.post(&url).json(&payload).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(scrub_url)?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -399,7 +439,54 @@ impl TelegramGateway {
             "text": text
         });
 
-        self.http.post(&url).json(&payload).send().await?;
+        self.http
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(scrub_url)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hermetic proof for the bot-token log-leak fix: a transport failure
+    // (connection refused on a dead port) must NOT carry the token into
+    // the error's Display, because the token lives in the request URL.
+    // Port 1 on loopback refuses fast — no network, no fixture.
+    #[tokio::test]
+    async fn transport_error_does_not_leak_bot_token_in_display() {
+        const SENTINEL: &str = "7654321:AAH-liveBotTokenSENTINEL";
+        let gw = TelegramGateway::with_base_url(
+            SENTINEL,
+            "-100".to_string(),
+            "http://127.0.0.1:1/bot".to_string(),
+        );
+
+        // Every request path funnels errors through scrub_url; hit a few.
+        let errs = [
+            gw.send_message("hi").await.unwrap_err(),
+            gw.poll_updates(0, 0).await.unwrap_err(),
+            gw.answer_callback("cbid", "ok").await.unwrap_err(),
+        ];
+        for e in errs {
+            let display = format!("{e}");
+            let alternate = format!("{e:#}");
+            let debug = format!("{e:?}");
+            for rendered in [&display, &alternate, &debug] {
+                assert!(
+                    !rendered.contains(SENTINEL),
+                    "bot token leaked into a Telegram transport error: {rendered}"
+                );
+                // And the token-bearing URL itself must be gone.
+                assert!(
+                    !rendered.contains("/bot"),
+                    "token-bearing URL survived scrubbing: {rendered}"
+                );
+            }
+        }
     }
 }

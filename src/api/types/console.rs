@@ -2,7 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use super::deserialize_u32_from_str_or_num;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// These are console-handoff wire types: `Serialize`/`Deserialize` are
+// load-bearing (parsed from PVE, and the ticket is emitted to the ws
+// client by design — see ACCEPTED-RISKS AR-7). But the one-shot
+// `ticket` and the SPICE `password` are live bearer credentials, so
+// `Debug` is hand-written to redact them — a derived `{:?}` at any
+// future log/error site would leak the exact `vncticket` class the
+// SecretString work (and v0.13.1's WsTarget fix) set out to close.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpiceConfig {
     /// All key/value pairs from the spiceproxy response. Examples:
     ///   host, port, tls-port, password, ca, host-subject, proxy,
@@ -10,6 +17,24 @@ pub struct SpiceConfig {
     /// Stored as strings because the .vv file is INI-style.
     #[serde(flatten)]
     pub keys: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for SpiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mask any credential-shaped key (password / ticket / secret);
+        // show the rest verbatim so diagnostics (host, port, proxy…)
+        // stay useful.
+        let mut m = f.debug_map();
+        for (k, v) in &self.keys {
+            let lower = k.to_ascii_lowercase();
+            if lower.contains("password") || lower.contains("ticket") || lower.contains("secret") {
+                m.entry(k, &"[REDACTED]");
+            } else {
+                m.entry(k, v);
+            }
+        }
+        m.finish()
+    }
 }
 
 impl SpiceConfig {
@@ -42,7 +67,7 @@ impl SpiceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TermproxyTicket {
     /// Backend port the websocket should connect to (e.g. 5900).
@@ -61,7 +86,20 @@ pub struct TermproxyTicket {
     pub upid: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+// Hand-written Debug: redact the one-shot `ticket` (a live WS bearer
+// credential) while keeping port/user/upid for diagnostics.
+impl std::fmt::Debug for TermproxyTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermproxyTicket")
+            .field("port", &self.port)
+            .field("ticket", &"[REDACTED]")
+            .field("user", &self.user)
+            .field("upid", &self.upid)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VncTicket {
     /// Backend port the websocket should connect to (e.g. 5900).
@@ -80,6 +118,20 @@ pub struct VncTicket {
     /// Empty when proxxx connected with `verify_tls=false`.
     #[serde(default)]
     pub cert: String,
+}
+
+// Hand-written Debug: redact the one-shot `ticket`. `cert` is a public
+// server certificate, not a secret, so it stays visible.
+impl std::fmt::Debug for VncTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VncTicket")
+            .field("port", &self.port)
+            .field("ticket", &"[REDACTED]")
+            .field("user", &self.user)
+            .field("upid", &self.upid)
+            .field("cert", &self.cert)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

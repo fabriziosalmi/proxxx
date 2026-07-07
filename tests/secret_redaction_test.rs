@@ -111,6 +111,68 @@ chat_id = "-100200300"
 }
 
 #[test]
+fn console_and_token_wire_types_redact_debug_but_keep_serialize() {
+    use proxxx::api::types::{ApiToken, SpiceConfig, TermproxyTicket, VncTicket};
+
+    // These are Serialize-by-design wire types (parsed from PVE; the
+    // ticket is emitted to the ws client on purpose, AR-7), so they can't
+    // be SecretString — but their live credential fields must still be
+    // redacted in Debug so a future {:?} log can't leak them.
+    let vnc = VncTicket {
+        port: 5900,
+        ticket: "SENTINEL-vncticket-9f2a".to_string(),
+        user: "root@pam".to_string(),
+        upid: "UPID:pve:x".to_string(),
+        cert: "-----BEGIN CERTIFICATE-----".to_string(),
+    };
+    let term = TermproxyTicket {
+        port: 5900,
+        ticket: "SENTINEL-termticket-3b7c".to_string(),
+        user: "root@pam".to_string(),
+        upid: "UPID:pve:y".to_string(),
+    };
+    let mut keys = std::collections::HashMap::new();
+    keys.insert("host".to_string(), "10.0.0.5".to_string());
+    keys.insert("password".to_string(), "SENTINEL-spice-pw-d4e1".to_string());
+    let spice = SpiceConfig { keys };
+    let token = ApiToken {
+        tokenid: "reader".to_string(),
+        privsep: true,
+        comment: String::new(),
+        expire: 0,
+        value: Some("SENTINEL-apitoken-secret-e8f5".to_string()),
+    };
+
+    for (label, rendered) in [
+        ("VncTicket", format!("{vnc:?}")),
+        ("TermproxyTicket", format!("{term:?}")),
+        ("SpiceConfig", format!("{spice:?}")),
+        ("ApiToken", format!("{token:?}")),
+    ] {
+        assert!(
+            !rendered.contains("SENTINEL"),
+            "{label}: a credential leaked through Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "{label}: expected [REDACTED] marker: {rendered}"
+        );
+    }
+    // Non-secret fields must still print (diagnostics stay useful).
+    assert!(format!("{vnc:?}").contains("5900"));
+    assert!(format!("{spice:?}").contains("10.0.0.5"));
+
+    // Serialize is preserved: the ticket/value still ride the wire so the
+    // console handoff and `token create --json` keep working.
+    assert!(serde_json::to_string(&vnc)
+        .unwrap()
+        .contains("SENTINEL-vncticket-9f2a"));
+    assert!(serde_json::to_string(&token)
+        .unwrap()
+        .contains("SENTINEL-apitoken-secret-e8f5"));
+}
+
+#[test]
 fn clone_preserves_value_and_redaction() {
     let original = SecretString::from(S3);
     let clone = original.clone();

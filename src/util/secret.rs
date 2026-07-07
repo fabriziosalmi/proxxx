@@ -12,8 +12,15 @@
 //!
 //! Guarantees, in order of importance:
 //! 1. **`Debug` prints `[REDACTED]`** — never the value, never its length.
-//! 2. **Zeroize-on-drop** — heap bytes are overwritten when the value is
-//!    dropped or replaced (inherited from [`Zeroizing`]).
+//! 2. **Zeroize-on-drop for the wrapped value** — heap bytes are
+//!    overwritten when the value is dropped or replaced (inherited from
+//!    [`Zeroizing`]). Note this covers the value *once constructed*, not
+//!    the temporaries that produced it: `std::env::var`, the config-file
+//!    `String`, and the `toml::Value` parse tree still hold unwiped
+//!    plaintext copies of any inline secret until config load completes.
+//!    Wiping those end-to-end is out of reach given serde/toml internals;
+//!    the guarantee here is the wrapped value's drop, plus a redacted
+//!    `Debug` so those copies can't be re-emitted through a log.
 //! 3. **No `Display`** — `format!("{secret}")` is a compile error; the
 //!    only way to reach the bytes is an explicit [`SecretString::expose`]
 //!    (or the `Deref<Target = str>` it is built on), which greps cleanly.
@@ -108,8 +115,11 @@ impl zeroize::Zeroize for SecretString {
 // itself on drop. Lets tests statically assert the drop guarantee.
 impl zeroize::ZeroizeOnDrop for SecretString {}
 
-// Deserialize only — the serde `String` is moved into the `Zeroizing`
-// (no copy), so no unwiped intermediate outlives this call.
+// Deserialize only. The final `String` is moved into the `Zeroizing`
+// without an extra allocation — but the surrounding config-file `String`
+// and the TOML parser's `Value` tree still hold unwiped secret bytes
+// until load completes (see the module-level note on guarantee #2); this
+// only wraps the value once it exists.
 impl<'de> serde::Deserialize<'de> for SecretString {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
