@@ -30,7 +30,10 @@ becoming an auth server.
   file (both resolver paths are enforced — see `resolve_bot_token`,
   [config/mod.rs](../src/config/mod.rs)).
 - Rotate on suspected compromise (SIGHUP hot-reloads `mcp_token` without a
-  restart).
+  restart — this mitigation is now proven by `reload_swaps_mcp_token_policies_and_rate_limit`
+  and `failed_reload_keeps_last_known_good` in [config/watcher.rs](../src/config/watcher.rs),
+  plus the real-signal `tests/config_reload_e2e.rs`; a reload that fails to
+  parse keeps the last-known-good config rather than clearing auth).
 - Terminate real user identity at a reverse proxy (mTLS / OIDC) in front of the
   MCP endpoint if per-user attribution is required.
 
