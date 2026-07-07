@@ -1375,3 +1375,55 @@ mod secret_file_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// Executable proof for security-invariants row 14 (Injection · env-var
+// secrets capped at ENV_SECRET_MAX_BYTES to prevent OOM via ENV). The
+// matrix previously cited only the constant. Env vars are process-global
+// and integration tests run in parallel, so each test uses a UNIQUE name
+// to avoid cross-test races.
+#[cfg(test)]
+mod env_secret_cap_tests {
+    use super::{env_var_secret, ENV_SECRET_MAX_BYTES};
+
+    #[test]
+    fn over_cap_is_refused() {
+        let name = "PROXXX_TEST_ENV_CAP_OVER";
+        let oversized = "x".repeat(ENV_SECRET_MAX_BYTES + 1);
+        std::env::set_var(name, &oversized);
+        assert!(
+            env_var_secret(name).is_none(),
+            "a value one byte over the cap must be refused (OOM guard)"
+        );
+        std::env::remove_var(name);
+    }
+
+    #[test]
+    fn at_cap_is_accepted() {
+        let name = "PROXXX_TEST_ENV_CAP_AT";
+        let at_cap = "y".repeat(ENV_SECRET_MAX_BYTES);
+        std::env::set_var(name, &at_cap);
+        let got = env_var_secret(name).expect("a value exactly at the cap must be accepted");
+        assert_eq!(got.expose().len(), ENV_SECRET_MAX_BYTES);
+        std::env::remove_var(name);
+    }
+
+    #[test]
+    fn empty_is_none() {
+        let name = "PROXXX_TEST_ENV_CAP_EMPTY";
+        std::env::set_var(name, "");
+        assert!(
+            env_var_secret(name).is_none(),
+            "an empty env var must resolve to None, not an empty secret"
+        );
+        std::env::remove_var(name);
+    }
+
+    #[test]
+    fn normal_value_round_trips() {
+        let name = "PROXXX_TEST_ENV_CAP_OK";
+        std::env::set_var(name, "a-normal-token-value");
+        let got = env_var_secret(name).expect("a normal-sized value resolves");
+        assert_eq!(got.expose(), "a-normal-token-value");
+        std::env::remove_var(name);
+    }
+}
