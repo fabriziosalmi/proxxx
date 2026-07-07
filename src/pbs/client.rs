@@ -24,13 +24,18 @@ use super::types::{ArchiveInfo, DatastoreInfo, PbsVersion, SnapshotInfo};
 use crate::api::types::ApiResponse;
 use crate::api::ApiError;
 use crate::config::PbsConfig;
+use crate::util::secret::SecretString;
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 pub struct PbsClient {
     http: Client,
     base_url: String,
-    auth_header: String,
+    // `SecretString`, not `String`: this is a full PBS credential
+    // (`PBSAPIToken=user!id:secret`) that lives as long as the client.
+    // Until v0.13.2 it sat in the heap as a plain `String` for the
+    // process lifetime — never logged, but unwiped and Debug-printable.
+    auth_header: SecretString,
     limiter: Arc<Limiter>,
 }
 
@@ -50,7 +55,10 @@ impl PbsClient {
         // when handed to reqwest as a header value; the
         // `Zeroizing<String>` still zeros the original heap copy on Drop.
         let secret_ref: &str = &secret;
-        let auth_header = format!("PBSAPIToken={}!{}:{}", cfg.user, cfg.token_id, secret_ref);
+        let auth_header = SecretString::new(format!(
+            "PBSAPIToken={}!{}:{}",
+            cfg.user, cfg.token_id, secret_ref
+        ));
 
         let http = Client::builder()
             .danger_accept_invalid_certs(!cfg.verify_tls)
@@ -87,7 +95,7 @@ impl PbsClient {
         let resp = self
             .http
             .get(&url)
-            .header("Authorization", &self.auth_header)
+            .header("Authorization", self.auth_header.expose())
             .send()
             .await
             // reqwest send failures (DNS, connect, TLS, timeout) are

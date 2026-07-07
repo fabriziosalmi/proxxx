@@ -387,8 +387,8 @@ struct AuthBlock {
     user: String,
     auth: &'static str, // "token" | "password"
     token_id: Option<String>,
-    token_secret: Option<String>,
-    password: Option<String>,
+    token_secret: Option<crate::util::secret::SecretString>,
+    password: Option<crate::util::secret::SecretString>,
 }
 
 async fn prompt_token_auth(url: &str, verify_tls: bool) -> Result<AuthBlock> {
@@ -432,7 +432,7 @@ async fn prompt_token_auth(url: &str, verify_tls: bool) -> Result<AuthBlock> {
         user,
         auth: "token",
         token_id: Some(token_id),
-        token_secret: Some(token_secret),
+        token_secret: Some(token_secret.into()),
         password: None,
     })
 }
@@ -513,7 +513,7 @@ async fn prompt_password_auth(url: &str, verify_tls: bool) -> Result<AuthBlock> 
         auth: "password",
         token_id: None,
         token_secret: None,
-        password: Some(password),
+        password: Some(password.into()),
     })
 }
 
@@ -852,7 +852,7 @@ fn probe_ssh(user: &str, host: &str, key_path: &str) -> Result<String> {
 
 #[derive(Debug)]
 struct TelegramBlock {
-    bot_token: String,
+    bot_token: crate::util::secret::SecretString,
     chat_id: String,
 }
 
@@ -871,7 +871,10 @@ async fn prompt_telegram() -> Result<Option<TelegramBlock>> {
             ));
         }
     }
-    Ok(Some(TelegramBlock { bot_token, chat_id }))
+    Ok(Some(TelegramBlock {
+        bot_token: bot_token.into(),
+        chat_id,
+    }))
 }
 
 async fn probe_telegram(bot_token: &str) -> Result<String> {

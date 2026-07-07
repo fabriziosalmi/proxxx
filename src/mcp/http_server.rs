@@ -79,7 +79,9 @@ impl McpState {
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
         token_gate(
-            expected.as_ref().map(|z| z.as_str()),
+            expected
+                .as_ref()
+                .map(crate::util::secret::SecretString::as_str),
             bearer,
             self.require_token,
         )

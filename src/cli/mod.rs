@@ -1619,7 +1619,7 @@ pub async fn execute(
                 let mut cfg = config;
                 // CLI --token overrides the profile's mcp_token.
                 if let Some(t) = token {
-                    cfg.mcp_token = Some(zeroize::Zeroizing::new(t));
+                    cfg.mcp_token = Some(crate::util::secret::SecretString::new(t));
                 }
                 let handle = crate::config::watcher::new_handle(cfg);
                 crate::config::watcher::spawn_reload_on_sighup(

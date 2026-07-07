@@ -4,6 +4,8 @@ pub use watcher::ConfigHandle;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::util::secret::SecretString;
+
 /// Profile configuration loaded from TOML
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
@@ -12,9 +14,9 @@ pub struct ProfileConfig {
     #[serde(default = "default_auth")]
     pub auth: String,
     pub token_id: Option<String>,
-    pub token_secret: Option<zeroize::Zeroizing<String>>,
+    pub token_secret: Option<SecretString>,
     pub token_secret_file: Option<String>,
-    pub password: Option<zeroize::Zeroizing<String>>,
+    pub password: Option<SecretString>,
     #[serde(default)]
     pub verify_tls: bool,
     /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
@@ -47,7 +49,7 @@ pub struct ProfileConfig {
     /// GET /mcp requests must carry `Authorization: Bearer <token>`. Leave
     /// unset (the default) to run the HTTP server without auth — only do this
     /// on a trusted network or behind a reverse proxy that enforces auth.
-    pub mcp_token: Option<zeroize::Zeroizing<String>>,
+    pub mcp_token: Option<SecretString>,
 
     /// Continuous-reconciliation (`reconcile watch`) config. When present,
     /// `proxxx daemon serve` runs a 4th pillar that periodically diffs the
@@ -226,7 +228,7 @@ pub struct PbsConfig {
     pub token_id: String,
     /// Token secret. Resolution order matches `PROXXX_PBS_TOKEN_SECRET`
     /// env, then `token_secret_file`, then OS keychain.
-    pub token_secret: Option<zeroize::Zeroizing<String>>,
+    pub token_secret: Option<SecretString>,
     pub token_secret_file: Option<String>,
     /// TLS verification. Default true — PBS in homelabs often uses
     /// self-signed certs but we never silently disable verification.
@@ -264,13 +266,10 @@ const fn default_verify_tls_pbs() -> bool {
 /// async call, returning the result when the blocking thread
 /// completes.
 #[cfg(feature = "keychain")]
-async fn keyring_get(
-    service: &'static str,
-    item: &'static str,
-) -> anyhow::Result<zeroize::Zeroizing<String>> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<zeroize::Zeroizing<String>> {
+async fn keyring_get(service: &'static str, item: &'static str) -> anyhow::Result<SecretString> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SecretString> {
         let entry = keyring::Entry::new(service, item)?;
-        Ok(zeroize::Zeroizing::new(entry.get_password()?))
+        Ok(SecretString::new(entry.get_password()?))
     })
     .await
     .map_err(|e| anyhow::anyhow!("keychain spawn_blocking join error: {e}"))?
@@ -299,16 +298,13 @@ fn keyring_candidates(item: &str, profile: Option<&str>) -> Vec<String> {
 /// `password`) route through here; the shared/secondary bot-token + PBS-token
 /// keychain entries stay flat by design (see ACCEPTED-RISKS AR-8).
 #[cfg(feature = "keychain")]
-async fn keyring_get_scoped(
-    item: &str,
-    profile: Option<&str>,
-) -> anyhow::Result<zeroize::Zeroizing<String>> {
+async fn keyring_get_scoped(item: &str, profile: Option<&str>) -> anyhow::Result<SecretString> {
     let candidates = keyring_candidates(item, profile);
-    tokio::task::spawn_blocking(move || -> anyhow::Result<zeroize::Zeroizing<String>> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SecretString> {
         let mut last: Option<keyring::Error> = None;
         for name in &candidates {
             match keyring::Entry::new("proxxx", name).and_then(|e| e.get_password()) {
-                Ok(v) => return Ok(zeroize::Zeroizing::new(v)),
+                Ok(v) => return Ok(SecretString::new(v)),
                 Err(e) => last = Some(e),
             }
         }
@@ -331,7 +327,7 @@ async fn keyring_get_scoped(
 /// corrupted.
 const ENV_SECRET_MAX_BYTES: usize = 64 * 1024;
 
-fn env_var_secret(name: &str) -> Option<zeroize::Zeroizing<String>> {
+fn env_var_secret(name: &str) -> Option<SecretString> {
     let raw = std::env::var(name).ok()?;
     if raw.len() > ENV_SECRET_MAX_BYTES {
         tracing::warn!(
@@ -343,7 +339,7 @@ fn env_var_secret(name: &str) -> Option<zeroize::Zeroizing<String>> {
     if raw.is_empty() {
         return None;
     }
-    Some(zeroize::Zeroizing::new(raw))
+    Some(SecretString::new(raw))
 }
 
 impl PbsConfig {
@@ -352,13 +348,10 @@ impl PbsConfig {
     ///
     /// Async because the keychain branch must run via
     /// `spawn_blocking` (audit) — see `keyring_get`.
-    pub async fn resolve_token_secret(
-        &self,
-        cli_secret: Option<&str>,
-    ) -> Result<zeroize::Zeroizing<String>> {
+    pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
         if let Some(s) = cli_secret {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.to_string()));
+                return Ok(SecretString::from(s));
             }
         }
         if let Some(val) = env_var_secret("PROXXX_PBS_TOKEN_SECRET") {
@@ -389,7 +382,7 @@ impl PbsConfig {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     let s = content.trim().to_string();
                     if !s.is_empty() {
-                        return Ok(zeroize::Zeroizing::new(s));
+                        return Ok(SecretString::new(s));
                     }
                 }
             }
@@ -418,7 +411,9 @@ impl PbsConfig {
 pub struct TelegramConfig {
     /// Inline plaintext token. Kept for lab setups; not recommended for
     /// prod — prefer `bot_token_file` (chmod 600) or the OS keychain.
-    pub bot_token: Option<String>,
+    /// `SecretString`: redacted in `Debug`, zeroized on drop — this field
+    /// was a plain `String` until v0.13.2, the only unwiped credential.
+    pub bot_token: Option<SecretString>,
     /// Path to a file containing the bot token (only the token, no
     /// surrounding JSON). Must be `0600` permissions on Unix; proxxx
     /// refuses to read it otherwise.
@@ -438,9 +433,9 @@ impl TelegramConfig {
     /// Async so the keychain branch can run via `spawn_blocking`
     /// (audit) — keyring calls block on Linux.
     ///
-    /// Returns `Zeroizing<String>` so the heap bytes are wiped on
-    /// drop, matching the PVE/PBS pattern (audit).
-    pub async fn resolve_bot_token(&self) -> Result<zeroize::Zeroizing<String>> {
+    /// Returns [`SecretString`] so the heap bytes are wiped on drop and
+    /// any `{:?}` prints `[REDACTED]`, matching the PVE/PBS pattern.
+    pub async fn resolve_bot_token(&self) -> Result<SecretString> {
         if let Some(val) = env_var_secret("PROXXX_TELEGRAM_BOT_TOKEN") {
             return Ok(val);
         }
@@ -464,14 +459,14 @@ impl TelegramConfig {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     let s = content.trim().to_string();
                     if !s.is_empty() {
-                        return Ok(zeroize::Zeroizing::new(s));
+                        return Ok(SecretString::new(s));
                     }
                 }
             }
         }
         if let Some(ref s) = self.bot_token {
             if !s.is_empty() {
-                return Ok(zeroize::Zeroizing::new(s.clone()));
+                return Ok(s.clone());
             }
         }
         #[cfg(feature = "keychain")]
@@ -763,14 +758,11 @@ impl ProfileConfig {
         }
     }
 
-    pub async fn resolve_token_secret(
-        &self,
-        cli_secret: Option<&str>,
-    ) -> Result<zeroize::Zeroizing<String>> {
+    pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
         // 1. CLI Flag
         if let Some(secret) = cli_secret {
             if !secret.is_empty() {
-                return Ok(zeroize::Zeroizing::new(secret.to_string()));
+                return Ok(SecretString::from(secret));
             }
         }
 
@@ -812,7 +804,7 @@ impl ProfileConfig {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     let secret = content.trim().to_string();
                     if !secret.is_empty() {
-                        return Ok(zeroize::Zeroizing::new(secret));
+                        return Ok(SecretString::new(secret));
                     }
                 }
             } else {
@@ -845,7 +837,7 @@ impl ProfileConfig {
     /// credential rotation at runtime (the documented escape hatch)
     /// AND broke the `beta_bad_token_surfaces_401_cleanly` E2E test
     /// on password-auth configs.
-    pub async fn resolve_password(&self) -> Result<zeroize::Zeroizing<String>> {
+    pub async fn resolve_password(&self) -> Result<SecretString> {
         // Env beats inline — matches the token-secret hierarchy and
         // the long-standing "env always wins" promise in the docs.
         if let Some(val) = env_var_secret("PROXXX_PASSWORD") {

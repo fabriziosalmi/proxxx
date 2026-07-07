@@ -39,7 +39,7 @@ pub struct SshPool {
     verifier: Arc<dyn HostKeyVerifier>,
     sessions: RwLock<HashMap<String, Arc<SshSession>>>,
     semaphore: Arc<Semaphore>,
-    passphrase: Option<String>,
+    passphrase: Option<crate::util::secret::SecretString>,
 }
 
 impl SshPool {
@@ -56,7 +56,7 @@ impl SshPool {
             verifier,
             sessions: RwLock::new(HashMap::new()),
             semaphore: Arc::new(Semaphore::new(max)),
-            passphrase,
+            passphrase: passphrase.map(crate::util::secret::SecretString::new),
         })
     }
 
