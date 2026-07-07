@@ -2,11 +2,13 @@
 #
 # One story for the AI-agent integrator: proxxx is an MCP server, so any
 # MCP client (Claude, Cursor, …) gets typed, audited access to the cluster
-# — 25 tools, the 8 destructive ones flagged so the host can gate them. The
+# — 25 tools, the 10 destructive ones flagged so the host can gate them. The
 # agent calls one and gets live, structured truth back.
 #
 # Verbatim from real runs against a live PVE 9.1 cluster (pve-test-1),
-# 2026-06-30: the `{"tools":25,"destructive":8}` line is the real output of
+# 2026-06-30; destructive count refreshed for v0.13.0, which flipped
+# create_snapshot + suspend_guest to destructive (8 → 10). The
+# `{"tools":25,"destructive":10}` line matches the real output of
 # `proxxx mcp tools | jq …`; the two guest objects are the real result of an
 # MCP `tools/call list_guests` (projected to key fields for width — every
 # value shown is real). Lines beginning `#` / `→` annotate the exchange.
@@ -69,7 +71,7 @@ duration_ms = 1200
 kind       = "output"
 stagger_ms = 0
 lines = [
-  { text = "# 25 typed tools, 8 of them flagged destructive — the agent calls one, read-only:", accent = "dim" },
+  { text = "# 25 typed tools, 10 of them flagged destructive — the agent calls one, read-only:", accent = "dim" },
 ]
 
 [[beat]]
