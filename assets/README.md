@@ -20,7 +20,7 @@ respects `prefers-reduced-motion`):
 | [`demo.svg`](demo.svg) | (in firstframe `examples/proxxx.toml`) | Risk gate refuses a destructive command → HITL approval via Telegram → executes. README hero. **Security / compliance.** |
 | [`demo-gitops.svg`](demo-gitops.svg) | [`demo-gitops.toml`](demo-gitops.toml) | The GitOps reconcile loop: detect drift → preview → converge (safe by default) → `--prune` → in sync. **DevOps / GitOps.** |
 | [`demo-incident.svg`](demo-incident.svg) | [`demo-incident.toml`](demo-incident.toml) | Incident lockdown: `freeze` the fleet → a mutation is refused before reaching PVE → `thaw`. **Platform / SRE on-call.** |
-| [`demo-mcp.svg`](demo-mcp.svg) | [`demo-mcp.toml`](demo-mcp.toml) | MCP server: 25 typed tools (8 flagged destructive); an agent calls `tools/call list_guests` and gets live cluster data. **LLM / agent integrator.** |
+| [`demo-mcp.svg`](demo-mcp.svg) | [`demo-mcp.toml`](demo-mcp.toml) | MCP server: 25 typed tools (10 flagged destructive); an agent calls `tools/call list_guests` and gets live cluster data. **LLM / agent integrator.** |
 | [`demo-homelab.svg`](demo-homelab.svg) | [`demo-homelab.toml`](demo-homelab.toml) | `proxxx describe` — one command prints the whole cluster (nodes, guests, storages) at a glance, no agent installed. **Homelab solo.** |
 
 Each demo maps to a persona row in the README's *"Who is this for?"* table. Output lines are **verbatim** from real runs against a live PVE 9.1 cluster.
