@@ -12,6 +12,33 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-07-07
+
+Patch: secret-hygiene hardening (redaction as a type property, closing a latent log-leak class the v0.13.1 `WsTarget` fix only covered for one type), plus two untested security-relevant paths now proven. No CLI / config / MCP contract change; config stays backward compatible.
+
+### Security
+
+- **Credential redaction is now a type property, not call-site discipline.** A new `SecretString` (redacting `Debug` → `[REDACTED]`, no `Display`, no `Serialize`, zeroize-on-drop) backs every credential field — PVE/PBS token secrets, password, `mcp_token`, `AuthMethod` token/ticket/CSRF, `TelegramConfig.bot_token` (previously a plain unwiped `String`), `PbsClient.auth_header`, SSH passphrases, init-wizard blocks. `Zeroizing<String>` delegates `Debug` to its inner `String`, so a derived `{:?}` on any config/auth struct previously printed live secrets — the same leak class the v0.13.1 `WsTarget` fix closed for one type, now closed at the type level everywhere.
+- **Telegram bot token no longer reachable in the persistent log.** The Bot API embeds the token in the request URL; reqwest's error `Display` appends `for url (…)`, and the HITL long-poll / alert paths log those errors — so a transport blip wrote the live token to the 14-day file log. Every Telegram request now scrubs the URL from its errors (`Error::without_url`) before they can reach a `tracing` event. Found by an adversarial-review pass; proven by a hermetic connection-refused test.
+- **Console / token wire types redact `Debug`.** `VncTicket`, `TermproxyTicket`, `SpiceConfig.password` and `ApiToken.value` keep `Serialize` (they ride the wire / `--json` output by design) but their live-credential fields are now hand-redacted in `Debug`, so a future `{:?}` log can't leak them.
+- **SIGHUP config hot-reload proven (AR-1 dependency).** The `mcp_token`-rotation path AR-1 relies on had zero tests. `reload_once` is extracted and unit-tested (a successful reload swaps `mcp_token` / `policies` / `rate_limit`; a failed parse keeps last-known-good), plus a real-signal end-to-end test (`PROXXX_CONFIG` tempfile + `libc::raise(SIGHUP)`).
+- **Env-var secret 64 KiB cap proven.** The `ENV_SECRET_MAX_BYTES` OOM guard, previously matrix-cited by constant only, now has executable proofs (over-cap refused, at-cap accepted, empty → None).
+
+### Dependencies
+
+- `crossbeam-epoch` 0.9.18 → 0.9.20 (RUSTSEC-2026-0204, transitive; not triggerable via proxxx's usage — the daily supply-chain sweep caught it).
+- `vite` (docs tooling, dev-only) → ≥ 7.3.5 (GHSA-fx2h-pf6j-xcff high + GHSA-v6wh-96g9-6wx3).
+- `github/codeql-action` v4.36.2 → v4.36.3 (CI).
+
+### Docs
+
+- `THREAT_MODEL.md` refreshed to v0.13.x reality: MCP dispatch is fail-closed (10 destructive tools, refuse-without-policy), keychain per-profile scoping, cache-at-rest perms, and vncticket redaction added; a new `tests/docs_consistency_test.rs` fails CI if the destructive-tool count drifts from the registry again.
+- Corrected the stale "8 flagged destructive" → 10 across the README / asset captions (the MCP demo SVG re-rendered) and "8 of the 10 state families" in the mutation-harness wording. Test counts refreshed to the actual `cargo test` totals (745 lib + 478 integration).
+
+### Internal
+
+- Security-invariants matrix: new rows for the redacting-`Debug` and SIGHUP-reload invariants; row 1 (zeroize-on-drop) reworded to its honest compile-time-type-property scope.
+
 ## [0.13.1] — 2026-07-06
 
 Patch: security hardening of the residual "yellow" doubts + dependency bumps. No CLI / config / MCP contract change; keychain resolution stays backward compatible.
