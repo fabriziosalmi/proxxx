@@ -115,12 +115,12 @@ pub const REGISTRY: &[CloudImg] = &[
     CloudImg {
         id: "ubuntu-24.04-noble-amd64",
         distro: "Ubuntu",
-        version: "24.04 LTS (noble, build 20260615)",
+        version: "24.04 LTS (noble, build 20260705)",
         arch: "amd64",
         // Dated immutable build dir (not noble/current/, which rotates
         // daily). Checksum from this dir's SHA256SUMS.
-        url: "https://cloud-images.ubuntu.com/releases/noble/release-20260615/ubuntu-24.04-server-cloudimg-amd64.img",
-        checksum: "5fa5b05e5ec239858c4531485d6023b0896448c2df7c63b34f8dae6ea6051a44",
+        url: "https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-amd64.img",
+        checksum: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6",
         checksum_algorithm: "sha256",
         size_human: "~580 MiB",
         filename: "ubuntu-24.04-noble-amd64.img",
@@ -129,11 +129,11 @@ pub const REGISTRY: &[CloudImg] = &[
     CloudImg {
         id: "debian-13-trixie-amd64",
         distro: "Debian",
-        version: "13 (trixie) genericcloud, build 20260623-2518",
+        version: "13 (trixie) genericcloud, build 20260712-2537",
         arch: "amd64",
         // Debian publishes SHA512SUMS only (no SHA256). Dated build dir.
-        url: "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2",
-        checksum: "df2bd468b08566c0409a7982d6489d73499ad22f9a28646b538c2f21d08f15040a5e4737952ca209e9ad4488cd00793191791be9f135dee93082c86fcca3300c",
+        url: "https://cloud.debian.org/images/cloud/trixie/20260712-2537/debian-13-genericcloud-amd64-20260712-2537.qcow2",
+        checksum: "7ae53e9dbee282bfc16f289dec483dde3a8598769c38a267948310f7a2a52c662620198603bc52c142627efba379863d16079698a10b34102d55bcedd40e8d32",
         checksum_algorithm: "sha512",
         size_human: "~400 MiB",
         filename: "debian-13-trixie-amd64.qcow2",
