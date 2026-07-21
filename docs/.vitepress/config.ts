@@ -13,18 +13,25 @@ export default defineConfig({
   lastUpdated: true,
 
   head: [
-    // Tutto first-party. 'unsafe-inline' serve perche' VitePress emette
-    // uno script inline per il tema e stili inline.
-    [
-      'meta',
-      {
-        'http-equiv': 'Content-Security-Policy',
-        content:
-          "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
-          "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
-          "font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'",
-      },
-    ],
+    // Everything this site loads is first-party. 'unsafe-inline' is required
+    // because VitePress emits an inline appearance script and inline styles.
+    // Applied to the built site only: `vitepress dev` serves HMR over a
+    // websocket, which a strict connect-src would block as soon as the dev
+    // server is not same-origin (--host, or a custom server.hmr.port).
+    ...(process.env.NODE_ENV === 'production'
+      ? [
+          [
+            'meta',
+            {
+              'http-equiv': 'Content-Security-Policy',
+              content:
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
+                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+                "font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'",
+            },
+          ] as [string, Record<string, string>],
+        ]
+      : []),
     // Manual hrefs in `head` bypass vitepress's `base` auto-prefix
     // (it only rewrites URLs that go through the build pipeline).
     // Hard-code the prefix here to match `base` above — without this
@@ -144,7 +151,8 @@ export default defineConfig({
     search: { provider: 'local' },
 
     footer: {
-      message: 'Released under the MIT License.' + ' · <a href="https://fabriziosalmi.github.io/privacy">Privacy &amp; legal</a>',
+      message: 
+        'Released under the MIT License. · <a href="https://fabriziosalmi.github.io/privacy">Privacy &amp; legal</a>',
       copyright: 'Copyright © 2026 Fabrizio Salmi',
     },
 
