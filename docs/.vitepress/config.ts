@@ -13,6 +13,18 @@ export default defineConfig({
   lastUpdated: true,
 
   head: [
+    // Tutto first-party. 'unsafe-inline' serve perche' VitePress emette
+    // uno script inline per il tema e stili inline.
+    [
+      'meta',
+      {
+        'http-equiv': 'Content-Security-Policy',
+        content:
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
+          "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+          "font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'",
+      },
+    ],
     // Manual hrefs in `head` bypass vitepress's `base` auto-prefix
     // (it only rewrites URLs that go through the build pipeline).
     // Hard-code the prefix here to match `base` above — without this
@@ -132,7 +144,7 @@ export default defineConfig({
     search: { provider: 'local' },
 
     footer: {
-      message: 'Released under the MIT License.',
+      message: 'Released under the MIT License.' + ' · <a href="https://fabriziosalmi.github.io/privacy">Privacy &amp; legal</a>',
       copyright: 'Copyright © 2026 Fabrizio Salmi',
     },
 
