@@ -18,12 +18,33 @@ fn write(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).expect("write config");
 }
 
+struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    fn new(prefix: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        Self { path: dir }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[tokio::test]
 async fn sighup_hot_reloads_and_a_bad_edit_keeps_last_known_good() {
     // Isolated temp config; PROXXX_CONFIG makes load_config read it.
-    let dir = std::env::temp_dir().join(format!("proxxx-reload-e2e-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg_path = dir.join("config.toml");
+    let dir = TempDir::new("proxxx-reload-e2e");
+    let cfg_path = dir.path().join("config.toml");
     std::env::set_var("PROXXX_CONFIG", &cfg_path);
 
     // v1 on disk → build the live handle and start the watcher.
@@ -75,5 +96,5 @@ async fn sighup_hot_reloads_and_a_bad_edit_keeps_last_known_good() {
     );
 
     std::env::remove_var("PROXXX_CONFIG");
-    let _ = std::fs::remove_dir_all(&dir);
+    // dir is dropped automatically, cleaning up the temp dir
 }
