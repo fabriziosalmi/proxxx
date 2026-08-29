@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust toolchain (stable)
         # CodeQL's autobuild for Rust invokes `cargo build`. Providing
@@ -83,14 +83,14 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
 
       - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           # Distinct cache key — CodeQL's build produces extra artefacts
           # (database/) that we don't want polluting other jobs' caches.
           shared-key: codeql
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a  # v4.36.3
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           languages: ${{ matrix.language }}
           # `security-and-quality` adds quality queries on top of
@@ -104,9 +104,9 @@ jobs:
         # full compilation graph. If it ever stops working for our
         # build shape, replace with an explicit `cargo build
         # --all-targets` step — same net effect.
-        uses: github/codeql-action/autobuild@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a  # v4.36.3
+        uses: github/codeql-action/autobuild@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a  # v4.36.3
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
           category: "/language:${{ matrix.language }}"
