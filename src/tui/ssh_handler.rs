@@ -84,10 +84,10 @@ impl SshSessionHandler {
     /// Store a passphrase entered via the interactive prompt. Reused for
     /// every subsequent connection this session, so the operator is
     /// prompted at most once.
-    pub fn set_passphrase(&self, passphrase: String) {
+    pub fn set_passphrase(&self, passphrase: crate::util::secret::SecretString) {
         match self.passphrase.lock() {
-            Ok(mut g) => *g = Some(crate::util::secret::SecretString::new(passphrase)),
-            Err(p) => *p.into_inner() = Some(crate::util::secret::SecretString::new(passphrase)),
+            Ok(mut g) => *g = Some(passphrase),
+            Err(p) => *p.into_inner() = Some(passphrase),
         }
     }
 

@@ -12,6 +12,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **The TUI-typed SSH passphrase redacts `Debug` as a type property.** `Action::SshPassphraseInput` and `SideEffect::SetSshPassphraseAndOpen` carried the typed passphrase as a plain `String` inside `Debug`-derived enums — no site logs actions today and the op queue persists through the closed `PersistedOp` set, so nothing leaked, but the invariant since v0.13.2 is that redaction never depends on call-site discipline. Both now carry `SecretString` (`{:?}` → `[REDACTED]`, proven by test), the submit path moves the input buffer into the wrapper via `mem::take` so the plaintext is zeroized instead of surviving in a freed allocation, and `ssh_handler.set_passphrase` accepts the wrapper end-to-end. Flagged while triaging CodeQL's new Rust queries (alert #45).
+
 ## [0.13.3] — 2026-08-29
 
 Patch: supply-chain catch-up (the scheduled audit had been red since 2026-08-25) plus docs-site SEO. No CLI / config / MCP contract change; config stays backward compatible.
