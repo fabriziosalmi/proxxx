@@ -197,7 +197,7 @@ probe "access permissions"             access permissions
 # url-info preflight requires a node to do the HEAD request from. Pick the
 # first cluster node — content of the URL doesn't matter beyond reachable.
 FIRST_NODE=$(echo "$NODES" | awk '{print $1}')
-probe "url-info --node $FIRST_NODE" url-info --node "$FIRST_NODE" --url "https://cloud-images.ubuntu.com/jammy/20260320/SHA256SUMS"
+probe "url-info --node $FIRST_NODE" url-info --node "$FIRST_NODE" --url "https://cloud-images.ubuntu.com/jammy/current/SHA256SUMS"
 for node in $NODES; do
     probe "tasks --node $node"        tasks --node "$node"
     probe "aplinfo list --node $node" aplinfo list --node "$node"
