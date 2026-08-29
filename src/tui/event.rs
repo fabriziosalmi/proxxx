@@ -408,12 +408,12 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
             KeyCode::Char(c) => {
                 let mut q = state.command_input.clone();
                 q.push(c);
-                Some(Action::SshPassphraseInput(q))
+                Some(Action::SshPassphraseInput(q.into()))
             }
             KeyCode::Backspace => {
                 let mut q = state.command_input.clone();
                 q.pop();
-                Some(Action::SshPassphraseInput(q))
+                Some(Action::SshPassphraseInput(q.into()))
             }
             _ => None,
         },

@@ -130,7 +130,9 @@ require = 1
         assert!(swapped, "a successful reload must return true");
         let live = handle.read().await;
         assert_eq!(
-            live.mcp_token.as_ref().map(|s| s.as_str()),
+            live.mcp_token
+                .as_ref()
+                .map(crate::util::secret::SecretString::as_str),
             Some("new-token")
         );
         assert_eq!(live.rate_limit, Some(20));
@@ -157,7 +159,12 @@ mcp_token = "keep-me"
 
         assert!(!swapped, "a failed reload must return false");
         assert_eq!(
-            handle.read().await.mcp_token.as_ref().map(|s| s.as_str()),
+            handle
+                .read()
+                .await
+                .mcp_token
+                .as_ref()
+                .map(crate::util::secret::SecretString::as_str),
             Some("keep-me"),
             "the last-known-good token must survive a failed reload"
         );

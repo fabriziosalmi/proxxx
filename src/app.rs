@@ -12,6 +12,7 @@ pub mod search;
 pub mod snaptree;
 
 use crate::api::types::{Guest, Node, StoragePool};
+use crate::util::secret::SecretString;
 
 /// The single source of truth for the entire application.
 ///
@@ -406,7 +407,11 @@ pub enum Action {
     },
     /// A keystroke in the passphrase prompt — carries the full buffer so
     /// far (same shape as `CommandInput`, but does not change mode).
-    SshPassphraseInput(String),
+    /// `SecretString`, so a `{:?}` of an `Action` can never print the
+    /// passphrase. No site Debug-logs actions today and the op queue
+    /// persists through the closed `PersistedOp` set — but redaction is
+    /// a type property here, not call-site discipline.
+    SshPassphraseInput(SecretString),
     /// Submit the typed passphrase: cache it and (re)open the session.
     SshPassphraseSubmit,
     /// Abandon the passphrase prompt (Esc) — pops back to the prior view.
@@ -1354,13 +1359,20 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             // Only meaningful while prompting; ignore otherwise (a stray
             // keystroke shouldn't hijack `command_input`).
             if matches!(state.mode, AppMode::SshPassphrase { .. }) {
-                state.command_input = input;
+                // Reuse the buffer: overwriting in place avoids a fresh
+                // plaintext allocation per keystroke and never frees the
+                // previous buffer unwiped (review note on this PR).
+                state.command_input.clear();
+                state.command_input.push_str(input.expose());
             }
         }
         Action::SshPassphraseSubmit => {
             if let AppMode::SshPassphrase { vmid } = state.mode {
-                let passphrase = state.command_input.clone();
-                state.command_input.clear();
+                // `take` moves the buffer into the wrapper (leaving the
+                // input empty, as before) so the plaintext is zeroized
+                // with the SecretString instead of surviving in a freed
+                // allocation the way clone-then-clear left it.
+                let passphrase = SecretString::new(std::mem::take(&mut state.command_input));
                 // Back to session mode — the GuestSshSession view is
                 // still on the stack from OpenGuestSsh.
                 state.mode = AppMode::SshSession { vmid };
@@ -1766,7 +1778,7 @@ pub enum SideEffect {
     /// open the session — the retry's key load now has the passphrase.
     SetSshPassphraseAndOpen {
         vmid: u32,
-        passphrase: String,
+        passphrase: SecretString,
     },
     /// Tell the TUI loop to drop the active `PtySession`.
     CloseSshSession,
@@ -1978,6 +1990,24 @@ mod ssh_passphrase_tests {
     }
 
     #[test]
+    fn passphrase_never_reaches_debug_output() {
+        // Redaction as a type property: a `{:?}` of the action or of the
+        // side effect must not contain the typed passphrase.
+        let action = Action::SshPassphraseInput("hunter2".into());
+        let rendered = format!("{action:?}");
+        assert!(!rendered.contains("hunter2"), "leaked in {rendered}");
+        assert!(rendered.contains("[REDACTED]"));
+
+        let eff = SideEffect::SetSshPassphraseAndOpen {
+            vmid: 42,
+            passphrase: "hunter2".into(),
+        };
+        let rendered = format!("{eff:?}");
+        assert!(!rendered.contains("hunter2"), "leaked in {rendered}");
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn input_appends_only_while_prompting() {
         let mut state = AppState::new();
         // Outside the prompt, a stray input action must not hijack the buffer.
@@ -1998,7 +2028,7 @@ mod ssh_passphrase_tests {
         match eff {
             Some(SideEffect::SetSshPassphraseAndOpen { vmid, passphrase }) => {
                 assert_eq!(vmid, 42);
-                assert_eq!(passphrase, "s3cret");
+                assert_eq!(passphrase.expose(), "s3cret");
             }
             _ => panic!("expected SetSshPassphraseAndOpen side effect"),
         }
