@@ -19,6 +19,18 @@ export default defineConfig({
     hostname: 'https://fabriziosalmi.github.io/proxxx/',
   },
 
+  // Per-page og:url. Crawlers treat og:url as the canonical URL, so a
+  // single global value would advertise every subpage as the homepage;
+  // this derives the canonical from the page path instead (cleanUrls
+  // form: strip .md, collapse index to the directory root).
+  transformPageData(pageData) {
+    const canonical =
+      'https://fabriziosalmi.github.io/proxxx/' +
+      pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '')
+    pageData.frontmatter.head ??= []
+    pageData.frontmatter.head.push(['meta', { property: 'og:url', content: canonical }])
+  },
+
   head: [
     // Everything this site loads is first-party. 'unsafe-inline' is required
     // because VitePress emits an inline appearance script and inline styles.
@@ -58,7 +70,6 @@ export default defineConfig({
         content: 'Terminal cockpit for Proxmox VE and Backup Server, gated on a real cluster.',
       },
     ],
-    ['meta', { property: 'og:url', content: 'https://fabriziosalmi.github.io/proxxx/' }],
     ['meta', { property: 'og:image', content: 'https://fabriziosalmi.github.io/proxxx/proxxx-overview.jpg' }],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:image', content: 'https://fabriziosalmi.github.io/proxxx/proxxx-overview.jpg' }],
