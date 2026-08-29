@@ -12,6 +12,13 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
 
+  // Emit sitemap.xml at build time. The hostname must carry the
+  // /proxxx/ base — vitepress joins it with base-less route paths,
+  // so leaving it at the origin would emit URLs that 404 on GH Pages.
+  sitemap: {
+    hostname: 'https://fabriziosalmi.github.io/proxxx/',
+  },
+
   head: [
     // Everything this site loads is first-party. 'unsafe-inline' is required
     // because VitePress emits an inline appearance script and inline styles.
@@ -38,6 +45,23 @@ export default defineConfig({
     // the favicon 404s on the deployed site.
     ['link', { rel: 'icon', href: '/proxxx/favicon.ico', sizes: 'any' }],
     ['meta', { name: 'theme-color', content: '#2563eb' }],
+    // Social cards. Absolute URLs on purpose: og:image/og:url must be
+    // absolute per the OG spec, and absolute hrefs also sidestep the
+    // base-prefix pitfall described above.
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'proxxx' }],
+    ['meta', { property: 'og:title', content: 'proxxx — terminal cockpit for Proxmox VE & PBS' }],
+    [
+      'meta',
+      {
+        property: 'og:description',
+        content: 'Terminal cockpit for Proxmox VE and Backup Server, gated on a real cluster.',
+      },
+    ],
+    ['meta', { property: 'og:url', content: 'https://fabriziosalmi.github.io/proxxx/' }],
+    ['meta', { property: 'og:image', content: 'https://fabriziosalmi.github.io/proxxx/proxxx-overview.jpg' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: 'https://fabriziosalmi.github.io/proxxx/proxxx-overview.jpg' }],
   ],
 
   themeConfig: {
