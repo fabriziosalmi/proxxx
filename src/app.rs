@@ -1359,7 +1359,11 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             // Only meaningful while prompting; ignore otherwise (a stray
             // keystroke shouldn't hijack `command_input`).
             if matches!(state.mode, AppMode::SshPassphrase { .. }) {
-                state.command_input = input.expose().to_string();
+                // Reuse the buffer: overwriting in place avoids a fresh
+                // plaintext allocation per keystroke and never frees the
+                // previous buffer unwiped (review note on this PR).
+                state.command_input.clear();
+                state.command_input.push_str(input.expose());
             }
         }
         Action::SshPassphraseSubmit => {
