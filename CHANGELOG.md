@@ -12,6 +12,34 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.13.3] — 2026-08-29
+
+Patch: supply-chain catch-up (the scheduled audit had been red since 2026-08-25) plus docs-site SEO. No CLI / config / MCP contract change; config stays backward compatible.
+
+### Security
+
+- **Supply-chain audit green again.** Three findings had accumulated in the lockfile: `h2` 0.4.15 → 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames), `lru` 0.18.0 → 0.18.3 (RUSTSEC-2026-0253, unsound `LruCache::pop`, transitive via ratatui-core), and `chacha20` 0.10.0 → 0.10.2 (yanked release, transitive via russh). Lockfile-only; `cargo audit --deny warnings` and `cargo deny check` both pass again.
+- **`russh` 0.62.1 → 0.62.5**, closing four GHSA advisories against the SSH layer (GHSA-m65r-rprj-r5rg, GHSA-g9hv-x236-4qp3, GHSA-cqjc-rmpq-xprq, GHSA-5xvq-cp9x-6p6r).
+- **CodeQL triage.** The codeql-action bump enabled newer Rust queries; all 19 new findings were triaged with written dispositions rather than blanket-dismissed. The one with substance — a claimed passphrase-to-disk flow through the operation queue — is infeasible (the queue persists through the closed `PersistedOp` enum, which cannot carry a raw `Action`), with a follow-up tracked to make the passphrase-bearing variant redact its `Debug` as a type property.
+
+### Dependencies
+
+- `tokio` 1.52.3 → 1.53.1, `tokio-util` 0.7.18 → 0.7.19, `tokio-stream` 0.1.18 → 0.1.19.
+- Patch-and-minor group (12 crates): `serde`, `serde_json`, `clap`, `clap_complete`, `toml_edit`, `anyhow`, `thiserror`, `async-trait`, `rusqlite`, `futures-util`, `rustls`, `libc`.
+- `postcss` (docs tooling, dev-only) → 8.5.26 (GHSA-r28c-9q8g-f849 high + GHSA-fxqj-rqcc-2cmp).
+- GitHub Actions patch-and-minor group (8 actions, incl. `github/codeql-action`).
+
+### Docs
+
+- **The docs site is now crawlable and shareable**: `sitemap.xml` (vitepress `sitemap` with the `/proxxx/` base baked into the hostname — base-less route paths would otherwise emit URLs that 404 on GH Pages), `robots.txt`, and OpenGraph/Twitter cards. `og:url` is derived per page via `transformPageData` — crawlers treat it as canonical, so a single global value would have advertised every subpage as the homepage.
+- Privacy notice linked in the site footer + a meta-CSP on the built site (production builds only — the dev server's HMR websocket needs a laxer `connect-src`).
+
+### Internal
+
+- Cloud-image registry re-pinned to the latest dated upstream builds (Ubuntu noble 20260814, Debian trixie 20260819-2575) with refreshed checksums.
+- Live-harness `url-info` probe un-rotted: `jammy/current/SHA256SUMS` instead of a dated snapshot Ubuntu has since pruned — the probe now tests proxxx, not Ubuntu's retention policy.
+- Live E2E temp-dir leak fixed in the reconcile test; CI branch protection no longer requires branches to be up to date (the auto-merge limbo fix).
+
 ## [0.13.2] — 2026-07-07
 
 Patch: secret-hygiene hardening (redaction as a type property, closing a latent log-leak class the v0.13.1 `WsTarget` fix only covered for one type), plus two untested security-relevant paths now proven. No CLI / config / MCP contract change; config stays backward compatible.
