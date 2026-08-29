@@ -54,7 +54,10 @@ async fn sighup_hot_reloads_and_a_bad_edit_keeps_last_known_good() {
     );
     let initial = proxxx::config::load_config(None).expect("v1 loads");
     assert_eq!(
-        initial.mcp_token.as_ref().map(|s| s.as_str()),
+        initial
+            .mcp_token
+            .as_ref()
+            .map(proxxx::util::secret::SecretString::as_str),
         Some("v1-token")
     );
     let handle = new_handle(initial);
@@ -72,7 +75,14 @@ async fn sighup_hot_reloads_and_a_bad_edit_keeps_last_known_good() {
     for _ in 0..20 {
         unsafe { libc::raise(libc::SIGHUP) };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if handle.read().await.mcp_token.as_ref().map(|s| s.as_str()) == Some("v2-rotated") {
+        if handle
+            .read()
+            .await
+            .mcp_token
+            .as_ref()
+            .map(proxxx::util::secret::SecretString::as_str)
+            == Some("v2-rotated")
+        {
             reloaded = true;
             break;
         }
@@ -90,7 +100,12 @@ async fn sighup_hot_reloads_and_a_bad_edit_keeps_last_known_good() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(
-        handle.read().await.mcp_token.as_ref().map(|s| s.as_str()),
+        handle
+            .read()
+            .await
+            .mcp_token
+            .as_ref()
+            .map(proxxx::util::secret::SecretString::as_str),
         Some("v2-rotated"),
         "a failed reload must keep the last-known-good token, not clear it"
     );
