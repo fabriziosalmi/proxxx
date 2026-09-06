@@ -158,7 +158,7 @@ tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 # E2E test suite (Mission 2 will use this — declared here so adding
 # `#[serial]` tests later doesn't require a Cargo.toml churn).
-serial_test = "3"
+serial_test = "4"
 # Property-based testing for invariants that example tests can't pin.
 # `proptest` generates randomized inputs against `prop_assert!` predicates,
 # shrinks failures to a minimal counterexample, and runs deterministically
