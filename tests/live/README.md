@@ -92,3 +92,53 @@ LOG_DIR=/tmp/proxxx-ci BIN=./target/debug/proxxx ./tests/live/test_run.sh
 - `test_mutation.sh` exits 0 on a clean lifecycle, 1 on early-stage
   abort. The `trap EXIT` cleanup runs regardless — VMID 9999 is never
   leaked even if a step panics.
+
+## The LAN e2e box, and why the live tier is not on GitHub
+
+`cargo test --all-targets` skips every `#[ignore]`d test and never invokes
+the harnesses in this directory, so the highest-consequence behaviour in
+the project — real guest mutations, RBAC across three token identities,
+PBS backup and restore, the Severe delete gate actually refusing — has no
+automated gate. A regression in any of it merges green.
+
+The obvious fix is a GitHub Actions job on a self-hosted runner. We
+deliberately do not do that:
+
+- proxxx is a **public** repo. A self-hosted runner attached to it can be
+  named by a fork's own workflow file (`runs-on: [self-hosted, <label>]`),
+  so the fork-PR approval policy becomes the only thing standing between
+  an outside contributor and code execution on the runner.
+- The live tier needs **real cluster credentials**. Putting them in
+  repository secrets means a live PVE token lives on GitHub, and any job
+  that runs on the runner can read it.
+- Bridging a hosted runner to the cluster (VPN, tunnel, port-forward) is
+  worse still: it hands an inbound path to the LAN.
+
+So the live tier runs on a LAN-only box that is **not** a GitHub runner,
+and the credentials never leave the LAN:
+
+```sh
+# read-only suites against the current HEAD
+tests/live/remote_run.sh
+
+# a specific ref
+tests/live/remote_run.sh v0.14.0
+
+# the mutating suites (creates and destroys real guests)
+tests/live/remote_run.sh --mutations
+```
+
+The box is an unprivileged LXC on the local hypervisor; `remote_run.sh`
+reaches it over the LAN via `pct exec`, with no inbound tunnel and
+nothing exposed to the internet. Override `PROXXX_LIVE_HYPERVISOR` and
+`PROXXX_LIVE_CTID` to point it elsewhere.
+
+Each run writes `tests/live/records/live-tier-<sha>.md` — ref, host,
+timestamps, whether the mutating suites ran, and the per-suite
+`test result:` lines. Committing that record is what keeps "the live tier
+passed for this commit" from resting on memory. The records carry no
+credentials.
+
+Credentials on the box live in a root-owned `0640` env file readable by
+the build user only; it is a copy of your `env.local` and is never
+committed, uploaded, or sent to GitHub.

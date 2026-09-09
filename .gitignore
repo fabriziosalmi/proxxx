@@ -38,3 +38,6 @@ docs/.vitepress/dist/
 
 # Workspace settings - 2026-05-07
 tmp/
+
+# live-tier run logs stay on the box; only the .md records are committed
+tests/live/records/*.log
