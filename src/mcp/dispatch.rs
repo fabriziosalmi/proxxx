@@ -127,7 +127,7 @@ pub async fn handle_tool_call(
                     Ok(tg_gateway) => {
                         let reason = format!("MCP requested action: {name}");
                         let _ = tg_gateway
-                            .request_approval(name, &target, &reason, &txn_id)
+                            .request_approval(name, &target, &reason, &txn_id, policy.require)
                             .await;
                     }
                     Err(e) => {

@@ -17,7 +17,20 @@ pub struct ProfileConfig {
     pub token_secret: Option<SecretString>,
     pub token_secret_file: Option<String>,
     pub password: Option<SecretString>,
-    #[serde(default)]
+    /// Validate the cluster's TLS certificate. **Defaults to `true`**
+    /// since v0.13.4 (audit 2026-09-09, #251): omitting the key used to
+    /// mean `false`, so a minimal config silently accepted any
+    /// certificate — including one presented by whoever sat between
+    /// proxxx and the cluster, who then received the API token.
+    ///
+    /// Proxmox ships a self-signed certificate, so a fresh cluster needs
+    /// either `verify_tls = false` (deliberate, and what `proxxx doctor`
+    /// will flag as "ok for homelab, not for production") or
+    /// `tls_pin_mode = "tofu"` to pin the leaf on first connect.
+    ///
+    /// The PBS block has defaulted to `true` all along; this aligns the
+    /// two.
+    #[serde(default = "default_verify_tls")]
     pub verify_tls: bool,
     /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
     /// insensitive) to snapshot the cluster's leaf cert on first connect
@@ -252,6 +265,12 @@ const fn default_verify_tls_pbs() -> bool {
     true
 }
 
+/// See [`ProfileConfig::verify_tls`]. Separate from the PBS default only
+/// because serde needs a path per field.
+const fn default_verify_tls() -> bool {
+    true
+}
+
 /// (Gemini wave-3 audit) — keychain access wrapper.
 ///
 /// `keyring::Entry::get_password()` is **synchronous** and can block
@@ -421,6 +440,23 @@ pub struct TelegramConfig {
     /// Destination chat / channel id. Negative for groups & channels,
     /// positive for direct chats with the bot user.
     pub chat_id: String,
+    /// Telegram numeric user ids allowed to approve or deny a HITL
+    /// request. **Required for the HITL daemon to act on any callback.**
+    ///
+    /// The callback HMAC proves proxxx minted the keyboard; it does not
+    /// establish who pressed the button. Without this list every member
+    /// of `chat_id` — including anyone added to the group later — could
+    /// approve a destructive operation, which then executes with the
+    /// daemon's full PVE credentials (audit 2026-09-09, #249).
+    ///
+    /// Numeric ids only: a Telegram `username` is mutable and can be
+    /// reassigned after release, so an allowlist keyed on handles is
+    /// forgeable. Get yours by messaging `@userinfobot`.
+    ///
+    /// Absent or empty ⇒ the daemon refuses every callback and tells the
+    /// operator to configure it. This is fail-closed by design.
+    #[serde(default)]
+    pub allowed_approvers: Option<Vec<i64>>,
 }
 
 impl TelegramConfig {
@@ -1425,5 +1461,40 @@ mod env_secret_cap_tests {
         let got = env_var_secret(name).expect("a normal-sized value resolves");
         assert_eq!(got.expose(), "a-normal-token-value");
         std::env::remove_var(name);
+    }
+}
+
+#[cfg(test)]
+mod tls_default_tests {
+    use super::ProfileConfig;
+
+    /// #251 — a profile that omits `verify_tls` must validate the
+    /// cluster certificate. Before v0.13.4 the bare `#[serde(default)]`
+    /// on a bool made omission mean "accept any certificate", so a
+    /// minimal config silently trusted whatever cert it was handed.
+    #[test]
+    fn verify_tls_defaults_to_true_when_omitted() {
+        let toml = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+token_id = "proxxx"
+"#;
+        let cfg: ProfileConfig = toml::from_str(toml).expect("parses");
+        assert!(
+            cfg.verify_tls,
+            "omitting verify_tls must not disable certificate validation"
+        );
+    }
+
+    /// The opt-out still works — it just has to be stated.
+    #[test]
+    fn verify_tls_false_is_still_honoured() {
+        let toml = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+verify_tls = false
+"#;
+        let cfg: ProfileConfig = toml::from_str(toml).expect("parses");
+        assert!(!cfg.verify_tls);
     }
 }

@@ -1046,6 +1046,9 @@ async fn dispatch_side_effect(
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let txn_id = format!("{action}:{vmid}-{now_ms}");
+            // #250 — the quorum the matched policy demands. `secure_mode`
+            // without a matching policy is the single-approver case.
+            let require = policy_match.map_or(1, |pm| pm.require);
             let desc = format!("Operation {action} on {vmid} requires approval via {channel}");
             let reason = format!("TUI requested {action} on guest {vmid}");
             let action_owned = action.to_string();
@@ -1083,7 +1086,7 @@ async fn dispatch_side_effect(
 
                 let receiver = coord_clone.register(txn_id.clone()).await;
                 if let Err(e) = tg
-                    .request_approval(&action_owned, &target_owned, &reason, &txn_id)
+                    .request_approval(&action_owned, &target_owned, &reason, &txn_id, require)
                     .await
                 {
                     error!("Telegram request_approval failed: {e:#} — denying");

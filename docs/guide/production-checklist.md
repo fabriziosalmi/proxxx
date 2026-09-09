@@ -159,6 +159,30 @@ The bot token resolves with the same hierarchy as the PVE
 token: `PROXXX_TELEGRAM_BOT_TOKEN` env, `bot_token_file`,
 keychain, inline.
 
+### `[ ]` Set `allowed_approvers` — without it the daemon refuses every callback
+
+The callback signature proves *proxxx* minted the approval keyboard. It
+does not establish *who pressed the button*: Telegram delivers the
+buttons to everyone who can see the message. Without an allowlist, any
+member of `chat_id` — including someone added to the group later — could
+approve a destructive operation, which then runs with the daemon's full
+PVE credentials.
+
+```toml
+[telegram]
+chat_id = "-1001234567890"
+allowed_approvers = [123456789, 987654321]   # numeric ids, not usernames
+```
+
+Get each approver's numeric id by having them message `@userinfobot`.
+Usernames are deliberately not accepted: a Telegram handle can be
+released and re-registered by someone else, so an allowlist keyed on
+handles is forgeable.
+
+An absent or empty list is treated as "refuse everything" rather than
+"allow anyone" — the same fail-closed posture as a destructive MCP tool
+with no matching policy.
+
 ### `[ ]` Configure `[[policies]]` rules
 
 ```toml
@@ -192,9 +216,12 @@ User=proxxx-ops
 ExecStart=/usr/local/bin/proxxx hitl serve
 Restart=on-failure
 RestartSec=5
-# Replay protection survives single-process restart via
-# session-local consumed-txn-id set; no persistence layer
-# needed.
+# NOTE: replay protection is session-local — a restart clears
+# the consumed-txn-id set, so an approval callback that was
+# already used becomes usable again until the keyboard is
+# superseded. Approver authorisation (allowed_approvers) and
+# the per-request txn_id nonce are the controls that survive
+# a restart. See src/hitl/pending.rs ("Scope honesty").
 
 [Install]
 WantedBy=multi-user.target

@@ -608,7 +608,13 @@ async fn execute_batch_op_full(
                 if let Some(ref tg) = tg_gateway {
                     let reason = format!("CLI requested batch op: {action_str}");
                     if let Err(e) = tg
-                        .request_approval(action_str, &vmid.to_string(), &reason, &txn_id)
+                        .request_approval(
+                            action_str,
+                            &vmid.to_string(),
+                            &reason,
+                            &txn_id,
+                            policy.require,
+                        )
                         .await
                     {
                         error!("Failed to send Telegram approval request: {}", e);

@@ -31,7 +31,10 @@ token_secret  = "..."                 # plain string OR
 token_secret_file = "/etc/proxxx/token"
 password      = "..."                 # only if auth = "password"
 password_file = "..."
-verify_tls    = false
+verify_tls    = true                  # validate the cluster cert. DEFAULT true
+                                      # since v0.13.4 (was false). Proxmox ships
+                                      # a self-signed cert: set false deliberately
+                                      # for a homelab, or prefer tls_pin_mode.
 rate_limit    = 10                    # max API requests/second (default 10)
 read_only     = false                 # true → refuse all mutations on this
                                       # profile client-side (reads still work);
@@ -149,6 +152,14 @@ Used by HITL and alert routing.
 [telegram]
 bot_token = "123456:ABC..."           # from @BotFather
 chat_id   = -1001234567890            # from getUpdates response
+allowed_approvers = [123456789]       # REQUIRED. Telegram numeric user ids
+                                      # permitted to approve/deny. The callback
+                                      # HMAC proves proxxx minted the keyboard,
+                                      # not who pressed it — without this list
+                                      # any member of chat_id could approve a
+                                      # destructive op. Numeric ids only
+                                      # (usernames are mutable). Absent or
+                                      # empty => every callback is refused.
 ```
 
 ## `[[policies]]` (HITL)

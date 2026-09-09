@@ -66,6 +66,12 @@ token_id = "proxxx"
 # [telegram]
 # bot_token = "0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 # chat_id = "-1001234567890"
+# REQUIRED for the HITL daemon to act on any approval. Telegram numeric
+# user ids allowed to approve/deny. The callback signature proves proxxx
+# minted the keyboard, not who pressed it — without this list every
+# member of chat_id could approve a destructive op. Get an id from
+# @userinfobot. Absent or empty => every callback is refused.
+# allowed_approvers = [123456789]
 
 # Per-action policies. `action` matches the dispatch identifier used
 # internally (start, stop, restart, delete, migrate, exec, move_disk,
@@ -74,7 +80,8 @@ token_id = "proxxx"
 # action = "delete"
 # target = "tag:prod"
 # channel = "telegram"
-# require = 1                    # Number of approvals needed
+# require = 2                    # DISTINCT approvers needed before the
+#                                # operation runs (1 = single approver)
 
 # ── Optional: SSH layer (SSH layer) ───────────────────────────
 # Enables features that can't go through the Proxmox REST API:
