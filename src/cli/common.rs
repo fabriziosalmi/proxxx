@@ -513,6 +513,15 @@ async fn execute_batch_op_full(
         });
     }
 
+    // Audit 2026-09-09 (#266) — remember which nodes we could NOT read.
+    //
+    // A node whose listing fails contributes no guests, so every guest on
+    // it is missing from the map. Reporting those as "Guest not found" is
+    // a false statement — the guest exists and was not acted on — and an
+    // operator or CI job reading it concludes the VMID is wrong. This
+    // reintroduced at the batch layer exactly the partial-list behaviour
+    // `get_guests` was changed to stop doing (see api/client.rs).
+    let mut unreachable_nodes: Vec<String> = Vec::new();
     while let Some(res) = join_set.join_next().await {
         match res {
             Ok((_node_name, Ok(guests))) => {
@@ -522,12 +531,16 @@ async fn execute_batch_op_full(
             }
             Ok((node_name, Err(e))) => {
                 tracing::warn!("get_guests({node_name}) failed during batch scan: {e:#}");
+                unreachable_nodes.push(format!("{node_name}: {e}"));
             }
             Err(join_err) => {
                 tracing::warn!("get_guests task panicked during batch scan: {join_err}");
+                unreachable_nodes.push(format!("<panicked task>: {join_err}"));
             }
         }
     }
+    let scan_incomplete = !unreachable_nodes.is_empty();
+    let unreachable_detail = unreachable_nodes.join("; ");
 
     let mut results = Vec::new();
     let mut has_failure = false;
@@ -560,6 +573,17 @@ async fn execute_batch_op_full(
     };
 
     if strict {
+        // #266 — in strict mode an incomplete scan is itself the failure.
+        // Claiming the guests are missing would be a diagnostic lie when
+        // the truth is that we could not look.
+        if scan_incomplete {
+            anyhow::bail!(
+                "Strict mode: cannot determine guest placement — {} node(s) could \
+                 not be listed ({unreachable_detail}). Refusing rather than \
+                 reporting guests on those nodes as missing.",
+                unreachable_nodes.len()
+            );
+        }
         let mut missing = Vec::new();
         for vmid in vmids {
             if !guest_map.contains_key(vmid) {
@@ -705,6 +729,24 @@ async fn execute_batch_op_full(
                     (v, res)
                 });
             }
+        } else if scan_incomplete {
+            // #266 — indeterminate, not absent. The distinction matters:
+            // "not found" invites the operator to recreate or renumber a
+            // guest that is running.
+            warn!(
+                "Guest {vmid} not located, but the scan was incomplete \
+                 ({unreachable_detail})"
+            );
+            results.push(serde_json::json!({
+                "vmid": vmid,
+                "status": "error",
+                "message": format!(
+                    "cannot determine: guest not seen, and {} node(s) could not be \
+                     listed ({unreachable_detail}). It may exist on an unreachable node.",
+                    unreachable_nodes.len()
+                )
+            }));
+            has_failure = true;
         } else {
             warn!("Guest {} not found across any node", vmid);
             results.push(serde_json::json!({
@@ -1159,5 +1201,55 @@ mod require_yes_tests {
     #[test]
     fn allows_with_yes() {
         assert!(require_yes(true, "pool delete").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod incomplete_scan_tests {
+    /// #266 — the shape of the fix, asserted against the source.
+    ///
+    /// A behavioural test needs a multi-node wiremock cluster where one
+    /// node's `/qemu` and `/lxc` both fail while another succeeds, plus a
+    /// full batch dispatch; the live harness covers that. What regresses
+    /// here is someone restoring the unconditional "Guest not found",
+    /// which is a text-level property of this function.
+    #[test]
+    fn a_failed_node_listing_is_not_reported_as_a_missing_guest() {
+        let src = include_str!("common.rs");
+        let body = src
+            .split_once("async fn execute_batch_op_full")
+            .expect("the batch entry point must exist")
+            .1;
+
+        assert!(
+            body.contains("let mut unreachable_nodes"),
+            "the scan must remember which nodes it could not read"
+        );
+        assert!(
+            body.contains("} else if scan_incomplete {"),
+            "a guest missing from an incomplete scan must take a distinct branch \
+             from one missing from a complete scan"
+        );
+        assert!(
+            body.contains("cannot determine"),
+            "the indeterminate case must say so rather than assert absence"
+        );
+        assert!(
+            body.contains("Strict mode: cannot determine guest placement"),
+            "strict mode must fail on the incomplete scan itself, not report the \
+             guests on the unreachable node as missing"
+        );
+    }
+
+    /// The complete-scan case must keep its plain, correct message —
+    /// widening "not found" into "cannot determine" everywhere would
+    /// make the common case vaguer for no reason.
+    #[test]
+    fn a_complete_scan_still_says_not_found() {
+        let src = include_str!("common.rs");
+        assert!(
+            src.contains(r#""message": "Guest not found""#),
+            "a guest genuinely absent from a complete scan is still not found"
+        );
     }
 }

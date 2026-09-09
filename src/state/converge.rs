@@ -182,9 +182,37 @@ pub async fn apply_and_audit<C: StateWriteView + ?Sized>(
 
     // Capture the summary before `apply` consumes `changes` (for the audit entry).
     let summary = crate::cli::reconcile::drift_summary(&changes);
+    let total = changes.len();
+
+    // Audit 2026-09-09 (#265) — leave a record even if we never come back.
+    //
+    // The completion entry below is written after `apply` returns. When
+    // the daemon aborts a component mid-converge, this future is dropped
+    // at whatever await it was sitting on: changes already dispatched
+    // have been applied by PVE and stand, and the entry that would have
+    // described them never runs. An operator restarting the daemon found
+    // a partially converged cluster with nothing in the log.
+    //
+    // A Drop guard is the fix rather than a cancellation token, because
+    // Drop runs on abort too — a token only helps at points we
+    // explicitly check, and the abort lands wherever it lands.
+    //
+    // On the normal path the guard is disarmed and the usual completion
+    // entry is written instead, so the log gains nothing in the case
+    // that already worked.
+    let mut guard = InterruptedRunGuard {
+        armed: !opts.dry_run,
+        action: action.to_string(),
+        user: audit_user.to_string(),
+        profile: profile.to_string(),
+        source: source.to_string(),
+        summary: summary.clone(),
+        total,
+    };
 
     let outcomes = apply(client, changes, opts).await;
     let report = ConvergeReport::from_outcomes(outcomes);
+    guard.armed = false;
 
     // One audit entry per run that actually dispatched (not a dry-run, and
     // something hit PVE). Best-effort — a logging failure never fails the apply.
@@ -193,6 +221,57 @@ pub async fn apply_and_audit<C: StateWriteView + ?Sized>(
     }
 
     report
+}
+
+/// Writes an `<action>_interrupted` audit entry if the run it guards
+/// never reached its completion write (audit 2026-09-09, #265).
+///
+/// Disarmed as soon as `apply` returns, so it fires only when the future
+/// was dropped mid-flight — in practice, a daemon component abort during
+/// shutdown. The entry records what the run intended to do; the changes
+/// that actually landed are recoverable from PVE's own task log, and the
+/// point here is that an investigator learns the run happened at all.
+struct InterruptedRunGuard {
+    armed: bool,
+    action: String,
+    user: String,
+    profile: String,
+    source: String,
+    summary: String,
+    total: usize,
+}
+
+impl Drop for InterruptedRunGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let action = format!("{}_interrupted", self.action);
+        let params = converge_audit_params(&self.profile, &self.source, &self.summary, self.total);
+        let write = (|| -> Result<()> {
+            let mut logger = crate::audit::AuditLogger::open()?;
+            logger.log(
+                &action,
+                &self.user,
+                None,
+                None,
+                Some(&params),
+                "INTERRUPTED",
+            )
+        })();
+        match write {
+            Ok(()) => tracing::error!(
+                "{action}: converge was interrupted mid-apply — changes already \
+                 dispatched to PVE stand. Recorded in the audit log; reconcile \
+                 again to establish the current state."
+            ),
+            Err(e) => tracing::error!(
+                "{action}: converge was interrupted mid-apply AND the audit write \
+                 failed ({e:#}) — the cluster may have been partially changed with \
+                 no record. Reconcile to establish the current state."
+            ),
+        }
+    }
 }
 
 /// Build the `params_json` payload for the converge audit entry. Split out so
@@ -401,5 +480,57 @@ mod tests {
         assert_eq!(report.skipped, 1); // held by prune policy, not the gate
         assert!(!report.dispatched());
         assert!(c.lines().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod interrupted_run_tests {
+    use super::{ApplyOptions, InterruptedRunGuard};
+
+    fn guard(armed: bool) -> InterruptedRunGuard {
+        InterruptedRunGuard {
+            armed,
+            action: "reconcile_converge".to_string(),
+            user: "tester@host".to_string(),
+            profile: "prod".to_string(),
+            source: "/tmp/state.toml".to_string(),
+            summary: "3 changes".to_string(),
+            total: 3,
+        }
+    }
+
+    /// #265 — the guard must be disarmed on the normal path, so a run
+    /// that completes writes only its completion entry.
+    #[test]
+    fn a_completed_run_does_not_leave_an_interrupted_entry() {
+        let mut g = guard(true);
+        g.armed = false; // what `apply_and_audit` does when apply returns
+        drop(g); // must not attempt an audit write
+    }
+
+    /// A dry run never dispatches, so there is nothing to record even if
+    /// it is interrupted.
+    #[test]
+    fn a_dry_run_arms_nothing() {
+        let opts = ApplyOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        assert!(opts.dry_run, "sanity: this is the dry-run case");
+        let g = guard(!opts.dry_run);
+        assert!(!g.armed, "a dry run must not arm the interrupted-run guard");
+        drop(g);
+    }
+
+    /// The guard is armed for a real run — this is the state in which a
+    /// mid-flight drop produces the record.
+    #[test]
+    fn a_real_run_arms_the_guard() {
+        let opts = ApplyOptions::default();
+        let g = guard(!opts.dry_run);
+        assert!(g.armed);
+        // Deliberately not dropped while armed here: Drop opens the real
+        // audit DB, which belongs to the live e2e rather than a unit test.
+        std::mem::forget(g);
     }
 }
