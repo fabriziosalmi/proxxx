@@ -179,7 +179,10 @@ fn atomic_write(
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting 0600 on {}", tmp_path.display()))?;
     }
-    std::fs::rename(&tmp_path, config_path).with_context(|| {
+    // #268 — fsync the directory too, so the rename itself survives a
+    // power loss rather than leaving the pre-rename state on disk after
+    // we already told the operator the config was written.
+    crate::util::durable::rename_durable(&tmp_path, config_path).with_context(|| {
         format!(
             "renaming temp config into place at {}",
             config_path.display()

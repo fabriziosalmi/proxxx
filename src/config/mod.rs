@@ -1113,7 +1113,8 @@ fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<std::path::
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting 0600 on {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
+    // #268 — see util::durable.
+    crate::util::durable::rename_durable(&tmp, path)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
     Ok(path.to_path_buf())
 }

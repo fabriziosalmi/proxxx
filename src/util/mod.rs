@@ -1,3 +1,4 @@
+pub mod durable;
 pub mod format;
 pub mod panic_hook;
 pub mod sanitize;

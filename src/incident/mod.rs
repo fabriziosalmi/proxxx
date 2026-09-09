@@ -556,7 +556,10 @@ fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
+    // #268 — the freeze lock above all: a rename that does not survive a
+    // power loss means the kill-switch is off after the reboot, while the
+    // operator was told the fleet was frozen.
+    crate::util::durable::rename_durable(&tmp, path)
         .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
     Ok(())
 }

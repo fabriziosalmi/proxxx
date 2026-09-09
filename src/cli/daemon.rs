@@ -289,16 +289,25 @@ async fn run_unified(
         Vec::with_capacity(components.len());
     for c in components {
         aborts.push((c.name, c.handle.abort_handle()));
+        // #271 — publish liveness so a pillar that stops is visible to
+        // monitoring, not just to whoever happens to read stderr.
+        crate::metrics::daemon_health::register(c.name);
         let tx = exit_tx.clone();
         let name = c.name;
         crate::util::spawn_traced::spawn_traced("daemon_component_watch", async move {
             let outcome = match c.handle.await {
                 Ok(Ok(())) => "returned Ok — a daemon loop should never finish".to_string(),
                 Ok(Err(e)) => format!("returned error: {e:#}"),
-                Err(e) if e.is_cancelled() => return, // our own abort; not a fault
+                Err(e) if e.is_cancelled() => {
+                    // Our own abort during shutdown: not a fault, but the
+                    // component IS down and the gauge must say so.
+                    crate::metrics::daemon_health::mark_down(name);
+                    return;
+                }
                 Err(e) if e.is_panic() => format!("PANICKED: {e}"),
                 Err(e) => format!("join error: {e}"),
             };
+            crate::metrics::daemon_health::mark_down(name);
             let _ = tx.send((name, outcome)).await;
         });
     }
@@ -358,6 +367,9 @@ async fn schedule_loop(interval_secs: u64) -> Result<()> {
                 let result = tokio::task::spawn_blocking(|| {
                     crate::cli::schedule::run_due(None)
                 }).await;
+                // #271 — a completed tick, so "wedged" is distinguishable
+                // from "idle" in the metrics.
+                crate::metrics::daemon_health::tick("schedule");
                 match result {
                     Ok(Ok(_)) => {} // happy path, swallow the Value/exit
                     Ok(Err(e)) => tracing::warn!("daemon schedule tick: {e:#}"),
@@ -421,6 +433,11 @@ async fn reconcile_loop(
             biased;
             () = crate::util::shutdown::wait_for_shutdown_signal() => break,
             () = tokio::time::sleep(Duration::from_secs(interval)) => {
+                // #271 — the reconcile pillar already had a staleness
+                // signal via proxxx_reconcile_last_check_timestamp; this
+                // adds the same for the component itself so all four
+                // pillars answer the same question the same way.
+                crate::metrics::daemon_health::tick("reconcile");
                 match super::reconcile::compute_drift(&client, &profile_label, &rec.source, &path).await {
                     Ok(changes) => {
                         let in_sync = changes.is_empty();

@@ -129,7 +129,10 @@ pub fn load_or_generate_hmac_key() -> Result<Vec<u8>> {
             f.set_permissions(perms)?;
         }
     }
-    std::fs::rename(&tmp, &path).with_context(|| format!("renaming tmp to {}", path.display()))?;
+    // #268 — durable: losing a newly generated key to a power loss makes
+    // every callback signed with it unverifiable.
+    crate::util::durable::rename_durable(&tmp, &path)
+        .with_context(|| format!("renaming tmp to {}", path.display()))?;
     Ok(key.to_vec())
 }
 

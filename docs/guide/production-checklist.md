@@ -216,6 +216,12 @@ User=proxxx-ops
 ExecStart=/usr/local/bin/proxxx hitl serve
 Restart=on-failure
 RestartSec=5
+# Log records go to stderr as well as the rotating file, so
+# `journalctl -u proxxx-hitl` shows warnings and errors — including
+# the freeze lock becoming unreadable and TLS pinning being skipped.
+# Raise verbosity per-crate when debugging:
+#   Environment=RUST_LOG=proxxx=debug,russh=debug
+Environment=RUST_LOG=proxxx=info
 # NOTE: replay protection is session-local — a restart clears
 # the consumed-txn-id set, so an approval callback that was
 # already used becomes usable again until the keyboard is
@@ -473,6 +479,71 @@ proxxx audit verify        # exits non-zero if the chain has been tampered with
 Run this from a host or account that **can't write** the audit DB — a
 verifier that shares the operator's write access can't prove much. Wire
 the non-zero exit into your monitoring.
+
+## 11. Upgrade, rollback and backup
+
+### `[ ]` Know what must survive the host
+
+proxxx keeps two kinds of state in the platform data directory, and only
+one of them matters if the machine is rebuilt.
+
+| Path | Must be preserved? | Why |
+| :--- | :--- | :--- |
+| `audit.db` | **Yes** | The only record of who issued which mutation. Not reconstructible from anything else. |
+| `audit.key` | **Yes** | 32 bytes. Without it no surviving copy of `audit.db` can be verified — losing the key alone is enough to make the trail worthless. |
+| `freeze.lock`, `freeze.<profile>.lock` | No | Runtime kill-switch state. Absent means thawed, which is the correct default after a rebuild. |
+| `cache.db` | No | Cluster snapshots and the operation queue. Regenerates from the cluster on next start. |
+| `proxxx.log*` | No | 14 daily rotations, forensic convenience only. |
+
+Config lives separately under the config directory and is recreatable
+with `proxxx init`, though backing it up saves re-entering the profile.
+
+Point `PROXXX_AUDIT_DIR` at a volume that is already backed up if you
+would rather not add a new backup target:
+
+```bash
+# systemd unit
+Environment=PROXXX_AUDIT_DIR=/var/lib/proxxx/audit
+```
+
+### `[ ]` Upgrade
+
+```bash
+systemctl stop proxxx-hitl          # let in-flight approvals settle
+# verify + install the new binary (section 1)
+systemctl start proxxx-hitl
+proxxx doctor                       # confirms config, auth and audit chain
+```
+
+Stopping first is deliberate: an approval that is parked when the
+process is replaced is lost from the daemon's in-memory replay window,
+and a request approved during the swap has nothing listening for the
+callback.
+
+What is compatible across an upgrade:
+
+- **Config** — backwards compatible. New keys default; old keys keep working.
+- **Audit DB** — backwards compatible. v1 rows keep verifying under the
+  v1 formula while new rows are written as v2.
+- **Declared state TOML** — carries `meta.schema_version`. A document
+  newer than the binary understands is refused rather than reinterpreted.
+- **Cache DB** — **not** backwards compatible; see rollback.
+
+### `[ ]` Rollback
+
+```bash
+systemctl stop proxxx-hitl
+# reinstall the previous binary
+rm -f "$(proxxx doctor --json | jq -r '.cache_path // empty')"   # or delete cache.db by hand
+systemctl start proxxx-hitl
+```
+
+The cache database records a schema version and **refuses to open when
+that version is newer than the running binary** — an older proxxx will
+report `cache DB schema version N is newer than this binary's M` rather
+than silently misreading it. Deleting `cache.db` is safe: it is
+regenerated from the cluster on the next start. The audit DB and its key
+need no action, and must not be deleted.
 
 ## See also
 

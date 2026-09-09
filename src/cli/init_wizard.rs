@@ -1004,7 +1004,8 @@ fn write_config(config_dir: &Path, config_path: &Path, body: &str) -> Result<()>
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&tmp, config_path)
+    // #268 — see util::durable.
+    crate::util::durable::rename_durable(&tmp, config_path)
         .with_context(|| format!("renaming into {}", config_path.display()))?;
     Ok(())
 }
