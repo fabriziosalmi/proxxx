@@ -16,7 +16,183 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-09
+
+Headline: **the 2026-09-09 audit backlog, closed.** A 20-category audit
+of `32e10020` produced 72 verified findings; the 36 with a concrete,
+bounded fix are all in this release. Several are behavioural breaks and
+are listed first — read those before upgrading an unattended deployment.
+
+### ⚠️ Breaking (behavioural — no schema or CLI contract change)
+
+- **The HITL daemon refuses every callback without `allowed_approvers`.**
+  The callback HMAC proved proxxx minted the approval keyboard; it never
+  established who pressed the button, so any member of `chat_id` —
+  including someone added to the group later — could approve a
+  destructive operation, which then ran with the daemon's full PVE
+  credentials. **Migration:** add the approving Telegram numeric user ids
+  to the profile's `[telegram]` section (`@userinfobot` gives you one).
+  Usernames are deliberately not accepted: a handle can be released and
+  re-registered by someone else. Absent or empty is treated as "refuse
+  everything" rather than "allow anyone", matching the posture v0.13.0
+  took for destructive MCP tools with no matching policy.
+- **`verify_tls` now defaults to `true`.** Omitting the key used to mean
+  `false`, so a minimal config silently accepted any certificate —
+  including one presented by whoever sat between proxxx and the cluster,
+  who then received the API token. **Migration:** Proxmox ships a
+  self-signed certificate, so a homelab needs an explicit
+  `verify_tls = false` or, better, `tls_pin_mode = "tofu"`. The `[pbs]`
+  block has defaulted to `true` all along; this aligns the two.
+- **An unrecognised `auth` or `tls_pin_mode` value no longer starts.**
+  Both were matched rather than validated: `auth` fell through to token
+  auth for anything that was not exactly `"password"`, and a misspelled
+  `tls_pin_mode` warned into a log file and ran unpinned. Both are now
+  rejected at load with the key and its accepted values named.
+- **`Policy.require` is enforced.** It was never compared against
+  anything — `require = 3` was satisfied by one press while the CLI
+  printed "requires 3 approval(s)". Approvals are now counted as a set of
+  distinct approver ids. **Migration:** none if you used `require = 1`;
+  otherwise the quorum now actually applies.
+
 ### Security
+
+- **Approver authentication and quorum for HITL** (#249, #250). The
+  quorum rides in the signed callback payload as a fourth segment, so a
+  keyboard minted by an older proxxx still parses and means one approver.
+- **An unreadable freeze lock now refuses the operation** (#252). Any
+  read or parse error mapped to "not frozen", so a torn write, a
+  truncated copy or a full disk silently disarmed the cluster-wide write
+  kill-switch at exactly the moment it was being relied on. Only a
+  *missing* file means thawed; a file that exists and cannot be read is
+  unknown state, and for a kill-switch unknown means stopped.
+- **Caller-supplied path segments are percent-encoded** (#253), across
+  all 111 path-building sites, plus a traversal guard at the transport
+  that applies to every request regardless of which of the 234 gateway
+  methods built the path.
+- **MCP string parameters carry a shape** (#254), enforced in the
+  dispatcher and published as a JSON Schema `pattern` in `tools/list`.
+  Not added to `registry_json`, so `registry_checksum()` — the contract
+  fingerprint callers pin — is unchanged.
+- **The audit actor is anchored on `getuid()`** (#256), not `$USER`,
+  which the calling process controls. A disagreement between the two is
+  recorded as unverified rather than silently believed.
+- **MCP HTTP authorization is a router layer** (#258), not a per-handler
+  call; `/health` is exempted explicitly rather than by omission.
+- **`--token-secret-file`** (#283), so the credential need not appear in
+  the process listing, shell history or CI logs.
+- **The audit HMAC key can be rotated without invalidating history**
+  (#281). Each row records the key that signed it, retired keys are
+  archived beside the primary, and `proxxx audit rotate-key` does the
+  swap. Previously rotating meant starting a new chain — so the correct
+  response to a host compromise destroyed the evidence. `proxxx doctor`
+  now verifies the chain rather than reporting OK when the DB merely
+  opened, which is what the README already claimed.
+- **Secret resolution order corrected in the docs** (#257) — they said
+  file-then-inline; the code does inline-then-file. An operator moving a
+  secret into a `0600` file without deleting the inline value kept using
+  the inline one. proxxx now warns when both are set.
+
+### Fixed
+
+- **`state`: a family the document never mentions is left alone** (#259).
+  It was indistinguishable from one declared empty, and an empty declared
+  family means "delete every live member" — so a dropped or mistyped
+  section header destroyed that family under `--prune`.
+- **All declaration structs reject unknown fields** (#262), so a
+  misspelled key is a parse error rather than a silently-defaulted one.
+- **Duplicate identities within a family are refused** (#261); they were
+  silently discarded by the diff's `HashMap`.
+- **The state document carries `meta.schema_version`** (#263); a document
+  newer than the binary understands is refused rather than reinterpreted.
+- **`get_guest_status` stamps `guest_type` and `node`** (#260). Every
+  container came back labelled as a QEMU VM on node `""`, and the MCP
+  tool serialised that verbatim. A 403 on the QEMU probe now surfaces
+  instead of falling through to an LXC 404 that names the wrong cause.
+- **The daemon supervises its components** (#264). Nothing polled the
+  handles, so a panicked pillar left the process alive and exiting zero —
+  and `Restart=on-failure` never fired. An unexpected exit now stops the
+  rest and exits non-zero.
+- **An interrupted converge leaves an audit record** (#265), via a Drop
+  guard, which runs on abort where a cancellation token would not.
+- **A per-node listing failure is no longer reported as "Guest not
+  found"** (#266); it is reported as indeterminate, naming the
+  unreachable nodes.
+- **Atomic writes fsync the parent directory** (#268), so the rename that
+  puts a file in place survives a power loss.
+- **`describe` says which sections it could not read** (#278) instead of
+  rendering a 403 as "this cluster has no users".
+
+### Observability
+
+- **Log records reach stderr as well as the rotating file** outside the
+  TUI (#270), so `journalctl` is no longer empty for a daemon. `RUST_LOG`
+  is honoured; the default level drops to `info`.
+- **`proxxx_daemon_component_up` and `…_last_tick_timestamp`** (#271), so
+  a stopped pillar is visible to monitoring rather than looking like a
+  quiet one.
+
+### Performance
+
+- **Guest lookup is one request** (#276) via `/cluster/resources`, not
+  1 + 2N. It runs before almost every per-vmid command and at seventeen
+  MCP dispatch sites.
+- **The TUI refresh adapts** (#277): it sleeps the remainder of its
+  target period rather than a flat 5 s on top of the cycle, warns on
+  screen when it cannot keep up, and bounds its per-node fan-out.
+
+### CI and verification
+
+- **`cargo clippy` runs with `-D warnings`** (#272). The curated
+  pedantic/nursery configuration was decorative; the tree turned out to be
+  clean at that level, so there is no backlog.
+- **ruff, shellcheck and gitleaks gates** (#274) — 10 shell and 2 Python
+  files shipped unchecked, including the script that rewrites Rust source
+  and opens supply-chain PRs.
+- **A coverage job and an on-demand live-tier workflow** (#275), the
+  latter recording its result against a commit SHA.
+- **npm is watched by Dependabot and gated by `npm audit`** (#280), and
+  `cargo-audit`, `cargo-deny` and `cargo-cyclonedx` are version-pinned —
+  the tools deciding whether the build passes its security gate were
+  fetched unpinned on every run.
+- **Two tests that could not fail now can** (#273). One asserted on two
+  local variables while named for lock detection; it passed with lock
+  detection deleted.
+
+### Packaging
+
+- **Release tarballs are reproducible** (#279): `--sort=name`,
+  `--mtime=@SOURCE_DATE_EPOCH`, normalised ownership and `gzip -n`. The
+  published `.sha256` now attests to the source rather than to one CI run.
+
+### Contract
+
+- **The Rust library API is a declared surface** (#284), enumerated in
+  `src/lib.rs` and named in the SemVer contract above. It is linked by
+  the proxima desktop UI and previously had no policy at all.
+- **`--format json-envelope`** wraps the payload in
+  `{"proxxx": "<version>", "data": …}` for consumers that must work
+  against several versions at once. `--format json` is unchanged.
+
+### Documentation
+
+- **ARCHITECTURE.md describes this system** (#282). Its diagram put all
+  three callers behind `app::reducer`, which is TUI-only, and called all
+  of `app/` zero-I/O, which is true only of `app.rs`.
+- **The production checklist gains upgrade, rollback and backup**
+  (#269), including which files must survive a host rebuild and that the
+  cache DB refuses to open under an older binary.
+- **The shipped systemd unit no longer claims** that replay protection
+  survives a restart (#267) — it does not, and the unit's own
+  `Restart=on-failure` makes those restarts routine.
+
+### Dependencies
+
+- `der` 0.8.0 → 0.8.2 and `wnaf` 0.14.0 → 0.14.1, both yanked upstream
+  and reached transitively through russh. Pre-existing drift, unrelated
+  to the audit work; `cargo deny check` and `cargo audit --deny warnings`
+  are green again.
+
+### Also in this release
 
 - **The TUI-typed SSH passphrase redacts `Debug` as a type property.** `Action::SshPassphraseInput` and `SideEffect::SetSshPassphraseAndOpen` carried the typed passphrase as a plain `String` inside `Debug`-derived enums — no site logs actions today and the op queue persists through the closed `PersistedOp` set, so nothing leaked, but the invariant since v0.13.2 is that redaction never depends on call-site discipline. Both now carry `SecretString` (`{:?}` → `[REDACTED]`, proven by test), the submit path moves the input buffer into the wrapper via `mem::take` so the plaintext is zeroized instead of surviving in a freed allocation, and `ssh_handler.set_passphrase` accepts the wrapper end-to-end. Flagged while triaging CodeQL's new Rust queries (alert #45).
 
