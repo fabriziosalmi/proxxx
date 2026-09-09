@@ -16,6 +16,44 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Changed
+
+- **The live tier moved off GitHub Actions and onto a LAN-only box.**
+  v0.14.0 added `.github/workflows/live-tier.yml`, a `workflow_dispatch`
+  job on a self-hosted runner, to close the audit finding that the
+  `#[ignore]`d suites and the `tests/live/` harnesses never ran. That
+  shape was wrong for a **public** repo on two counts, and both are
+  removed rather than mitigated:
+
+  - A self-hosted runner attached to a public repo can be named by a
+    fork's own workflow file (`runs-on: [self-hosted, <label>]`), so the
+    fork-PR approval policy was the only control between an outside
+    contributor and code execution on the runner.
+  - The job read `PROXXX_E2E_PVE_URL` / `_TOKEN` / `_NODE` from
+    repository secrets, which would have put a live PVE token on GitHub
+    — readable by any job that runs on the runner.
+
+  The runner has been unregistered. The live tier now runs on a LAN-only
+  machine that is not a GitHub runner, driven by the maintainer with
+  `tests/live/remote_run.sh`; credentials never leave the LAN and there
+  is no inbound path from GitHub. Each run writes
+  `tests/live/records/live-tier-<sha>.md`, so "the live tier passed for
+  this commit" is still recorded rather than remembered.
+
+  GitHub Actions keeps everything that does not need the cluster: the
+  full hosted test suite, the script gates, and the signed release
+  pipeline.
+
+### Security
+
+- **Live-cluster credentials now live outside the working tree.** The
+  `tests/live/*.sh` harnesses resolve `~/.config/proxxx/live-env` before
+  the gitignored in-repo `env.local` (`PROXXX_E2E_ENV_FILE` still
+  overrides both). A real PVE token inside a checkout is one `git add -f`
+  or one world-readable clone away from leaking, and the in-repo copy was
+  mode 0644 in practice.
+
+
 ## [0.14.0] — 2026-09-09
 
 Headline: **the 2026-09-09 audit backlog, closed.** A 20-category audit

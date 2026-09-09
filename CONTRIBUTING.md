@@ -75,9 +75,17 @@ Hook setup:
 ```bash
 git config core.hooksPath .githooks
 chmod +x scripts/gate.sh .githooks/pre-commit .githooks/pre-push
-cp tests/live/env.local.example tests/live/env.local
+mkdir -p ~/.config/proxxx && chmod 700 ~/.config/proxxx
+cp tests/live/env.local.example ~/.config/proxxx/live-env
+chmod 600 ~/.config/proxxx/live-env
 # fill in PROXXX_E2E_PVE_URL / TOKEN / NODE
 ```
+
+Credentials live **outside the working tree**: a live PVE token inside a
+checkout is one `git add -f` or one world-readable clone away from
+leaking. The harnesses read `~/.config/proxxx/live-env` first and fall
+back to the gitignored `tests/live/env.local` for existing setups;
+`PROXXX_E2E_ENV_FILE` overrides both.
 
 Stages 6 + 7 require a reachable PVE cluster. If you don't have one,
 **explicitly skip stages 6 + 7** in your PR description — a maintainer

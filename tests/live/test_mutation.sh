@@ -19,7 +19,17 @@ ERR="$LOG_DIR/test_mutation_errors.log"
 # script committed a real PVE token to public git history (rotated +
 # revoked when discovered). Loud loader below catches accidental
 # regressions.
-ENV_FILE="${PROXXX_E2E_ENV_FILE:-$SCRIPT_DIR/env.local}"
+# Credentials live OUTSIDE the working tree by default, so a stray `git add`
+# or a world-readable checkout cannot leak a live PVE token. The in-repo
+# path stays as a fallback for existing setups.
+ENV_FILE="${PROXXX_E2E_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+    if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/proxxx/live-env" ]; then
+        ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/proxxx/live-env"
+    else
+        ENV_FILE="$SCRIPT_DIR/env.local"
+    fi
+fi
 if [[ -f "$ENV_FILE" ]]; then
     # `env.local` lives next to the script and is gitignored. Use it
     # to keep cluster + token config off your shell history. Format:

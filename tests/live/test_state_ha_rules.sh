@@ -55,7 +55,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 BIN="${BIN:-$ROOT/target/release/proxxx}"
 
-ENV_FILE="${PROXXX_E2E_ENV_FILE:-$SCRIPT_DIR/env.local}"
+# Credentials live OUTSIDE the working tree by default, so a stray `git add`
+# or a world-readable checkout cannot leak a live PVE token. The in-repo
+# path stays as a fallback for existing setups.
+ENV_FILE="${PROXXX_E2E_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+    if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/proxxx/live-env" ]; then
+        ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/proxxx/live-env"
+    else
+        ENV_FILE="$SCRIPT_DIR/env.local"
+    fi
+fi
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 
 : "${PROXXX_E2E_PVE_URL:?env PROXXX_E2E_PVE_URL not set}"
