@@ -27,43 +27,160 @@ pub(crate) fn require_yes(yes: bool, what: &str) -> Result<()> {
 }
 
 /// Locate which node owns a given VMID and which guest type it is.
-/// Walks `get_nodes()` then `get_guests(node)` per node — O(N nodes)
-/// network calls. Used by every per-vmid command (migrate, exec, config,
-/// disk, …) that the user invokes by VMID alone, without specifying
-/// the node.
+///
+/// ONE request: `GET /cluster/resources?type=vm` returns every guest in
+/// the cluster with its node and type (audit 2026-09-09, #276).
+///
+/// This used to walk `get_nodes()` and then `get_guests(node)` per node.
+/// Because `get_guests` fetches `/qemu` and `/lxc` separately that was
+/// 1 + 2N requests on an N-node cluster, paid by every per-vmid command
+/// (migrate, exec, config, disk, snapshot) and at seventeen call sites in
+/// the MCP dispatcher — before the requested work even started. Against
+/// the default `rate_limit = 10` a ten-node cluster spent roughly two
+/// seconds just locating the guest. It also multiplied the failure
+/// surface: each of those 2N calls could fail, which is what turned one
+/// unreachable node into a false "guest not found".
+///
+/// Falls back to the per-node walk if `/cluster/resources` is
+/// unavailable, so a cluster that does not serve it still works.
 pub async fn find_guest(
     client: &crate::api::PxClient,
     vmid: u32,
 ) -> Result<(String, crate::api::types::GuestType)> {
-    use crate::api::ProxmoxGateway;
-    let nodes = client.get_nodes().await?;
-    let mut node_errors: Vec<String> = Vec::new();
-    for n in nodes {
-        match client.get_guests(&n.node).await {
-            Ok(guests) => {
-                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                    return Ok((n.node.clone(), g.guest_type));
-                }
-            }
-            Err(e) => {
-                node_errors.push(format!("{}: {}", n.node, e));
-            }
+    // Node and type are both in the `/cluster/resources` row, so this
+    // needs exactly one request — no second fetch from the owning node,
+    // unlike `find_guest_full`, whose caller needs the risk-relevant
+    // fields that endpoint does not carry.
+    match find_guest_via_cluster_resources(client, vmid).await {
+        Ok(Some(g)) => return Ok((g.node, g.guest_type)),
+        Ok(None) => {
+            // The cluster answered and has no such vmid. Fall through:
+            // the walk reaches the same conclusion but produces the
+            // richer message when some nodes are unreachable.
+        }
+        Err(e) => {
+            tracing::debug!("/cluster/resources unavailable ({e:#}) — using per-node walk");
         }
     }
-    if node_errors.is_empty() {
-        anyhow::bail!("Guest {vmid} not found on any node")
-    }
-    anyhow::bail!(
-        "Guest {vmid} not found; {} node(s) returned errors: {}",
-        node_errors.len(),
-        node_errors.join("; ")
-    )
+    let g = find_guest_full_via_walk(client, vmid).await?;
+    Ok((g.node, g.guest_type))
+}
+
+/// Resolve `vmid` through `/cluster/resources`, returning `None` when
+/// the cluster answered but does not have that guest.
+///
+/// Separated so both lookups share the fast path and its fallback
+/// decision, rather than each having its own copy — the duplication
+/// between them was itself a finding (#251 in the audit's code-quality
+/// category).
+async fn find_guest_via_cluster_resources(
+    client: &crate::api::PxClient,
+    vmid: u32,
+) -> Result<Option<crate::api::types::Guest>> {
+    use crate::api::types::{Guest, GuestStatus, GuestType};
+    use crate::api::ProxmoxGateway;
+
+    let resources = client.get_cluster_resources(Some("vm")).await?;
+    let Some(r) = resources.into_iter().find(|r| r.vmid == vmid) else {
+        return Ok(None);
+    };
+    let guest_type = match r.resource_type.as_str() {
+        "lxc" => GuestType::Lxc,
+        "qemu" => GuestType::Qemu,
+        // A resource typed as neither is not a guest we can dispatch on.
+        // Fall back rather than guessing a hierarchy — guessing is the
+        // bug class `type_path` exists to prevent.
+        other => {
+            tracing::debug!("cluster/resources returned vmid {vmid} with type {other:?}");
+            return Ok(None);
+        }
+    };
+    Ok(Some(Guest {
+        vmid: r.vmid,
+        name: r.name,
+        status: match r.status.as_str() {
+            "running" => GuestStatus::Running,
+            "stopped" => GuestStatus::Stopped,
+            "paused" => GuestStatus::Paused,
+            "suspended" => GuestStatus::Suspended,
+            _ => GuestStatus::Unknown,
+        },
+        guest_type,
+        node: r.node,
+        cpu: r.cpu,
+        cpus: r.maxcpu,
+        mem: r.mem,
+        maxmem: r.maxmem,
+        disk: r.disk,
+        maxdisk: r.maxdisk,
+        uptime: r.uptime,
+        tags: r.tags,
+        template: r.template != 0,
+        // `/cluster/resources` does not carry `lock`, `hastate` or the
+        // network counters. The pre-flight gate reads all three, so
+        // `find_guest_full` re-fetches from the owning node rather than
+        // handing back a Guest whose risk-relevant fields are silently
+        // empty — which would weaken the gate instead of speeding it up.
+        ..Guest::default()
+    }))
 }
 
 /// Same scan as `find_guest`, but returns the full `Guest` so the
 /// caller can run pre-flight risk assessment (lock, HA state, uptime,
 /// tags, traffic) without a second round-trip.
 pub async fn find_guest_full(
+    client: &crate::api::PxClient,
+    vmid: u32,
+) -> Result<crate::api::types::Guest> {
+    use crate::api::ProxmoxGateway;
+
+    // #276 — one request to locate the guest, then one to the owning
+    // node for the fields `/cluster/resources` does not carry (`lock`,
+    // `hastate`, netin/netout). Two requests regardless of cluster size,
+    // against 1 + 2N before.
+    //
+    // The second fetch is not optional: the pre-flight risk gate reads
+    // exactly those fields, and handing it a Guest with them silently
+    // empty would turn a speed-up into a weakened safety check.
+    match find_guest_via_cluster_resources(client, vmid).await {
+        Ok(Some(located)) => {
+            let node = located.node.clone();
+            match client.get_guests(&node).await {
+                Ok(guests) => {
+                    if let Some(g) = guests.into_iter().find(|g| g.vmid == vmid) {
+                        return Ok(g);
+                    }
+                    // Raced with a migration between the two calls: fall
+                    // through to the full walk rather than return the
+                    // partial record.
+                    tracing::debug!(
+                        "guest {vmid} was on {node} per /cluster/resources but is not \
+                         there now — falling back to the per-node walk"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("get_guests({node}) failed after fast lookup: {e:#}");
+                }
+            }
+        }
+        Ok(None) => {
+            // The cluster answered and does not have this vmid. The walk
+            // below would reach the same conclusion 2N requests later,
+            // but it also produces the richer per-node error message when
+            // some nodes are unreachable, so let it run.
+        }
+        Err(e) => {
+            tracing::debug!("/cluster/resources unavailable ({e:#}) — using per-node walk");
+        }
+    }
+
+    find_guest_full_via_walk(client, vmid).await
+}
+
+/// The original per-node walk, kept as the fallback for a cluster that
+/// does not serve `/cluster/resources` and as the path that produces the
+/// detailed per-node error message.
+async fn find_guest_full_via_walk(
     client: &crate::api::PxClient,
     vmid: u32,
 ) -> Result<crate::api::types::Guest> {
@@ -490,6 +607,7 @@ impl IntoArray for serde_json::Value {
     }
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn execute_batch_op_full(
     client: &std::sync::Arc<crate::api::PxClient>,
     op: BatchOp,
@@ -513,6 +631,15 @@ async fn execute_batch_op_full(
         });
     }
 
+    // Audit 2026-09-09 (#266) — remember which nodes we could NOT read.
+    //
+    // A node whose listing fails contributes no guests, so every guest on
+    // it is missing from the map. Reporting those as "Guest not found" is
+    // a false statement — the guest exists and was not acted on — and an
+    // operator or CI job reading it concludes the VMID is wrong. This
+    // reintroduced at the batch layer exactly the partial-list behaviour
+    // `get_guests` was changed to stop doing (see api/client.rs).
+    let mut unreachable_nodes: Vec<String> = Vec::new();
     while let Some(res) = join_set.join_next().await {
         match res {
             Ok((_node_name, Ok(guests))) => {
@@ -522,12 +649,16 @@ async fn execute_batch_op_full(
             }
             Ok((node_name, Err(e))) => {
                 tracing::warn!("get_guests({node_name}) failed during batch scan: {e:#}");
+                unreachable_nodes.push(format!("{node_name}: {e}"));
             }
             Err(join_err) => {
                 tracing::warn!("get_guests task panicked during batch scan: {join_err}");
+                unreachable_nodes.push(format!("<panicked task>: {join_err}"));
             }
         }
     }
+    let scan_incomplete = !unreachable_nodes.is_empty();
+    let unreachable_detail = unreachable_nodes.join("; ");
 
     let mut results = Vec::new();
     let mut has_failure = false;
@@ -560,6 +691,17 @@ async fn execute_batch_op_full(
     };
 
     if strict {
+        // #266 — in strict mode an incomplete scan is itself the failure.
+        // Claiming the guests are missing would be a diagnostic lie when
+        // the truth is that we could not look.
+        if scan_incomplete {
+            anyhow::bail!(
+                "Strict mode: cannot determine guest placement — {} node(s) could \
+                 not be listed ({unreachable_detail}). Refusing rather than \
+                 reporting guests on those nodes as missing.",
+                unreachable_nodes.len()
+            );
+        }
         let mut missing = Vec::new();
         for vmid in vmids {
             if !guest_map.contains_key(vmid) {
@@ -608,7 +750,13 @@ async fn execute_batch_op_full(
                 if let Some(ref tg) = tg_gateway {
                     let reason = format!("CLI requested batch op: {action_str}");
                     if let Err(e) = tg
-                        .request_approval(action_str, &vmid.to_string(), &reason, &txn_id)
+                        .request_approval(
+                            action_str,
+                            &vmid.to_string(),
+                            &reason,
+                            &txn_id,
+                            policy.require,
+                        )
                         .await
                     {
                         error!("Failed to send Telegram approval request: {}", e);
@@ -699,6 +847,24 @@ async fn execute_batch_op_full(
                     (v, res)
                 });
             }
+        } else if scan_incomplete {
+            // #266 — indeterminate, not absent. The distinction matters:
+            // "not found" invites the operator to recreate or renumber a
+            // guest that is running.
+            warn!(
+                "Guest {vmid} not located, but the scan was incomplete \
+                 ({unreachable_detail})"
+            );
+            results.push(serde_json::json!({
+                "vmid": vmid,
+                "status": "error",
+                "message": format!(
+                    "cannot determine: guest not seen, and {} node(s) could not be \
+                     listed ({unreachable_detail}). It may exist on an unreachable node.",
+                    unreachable_nodes.len()
+                )
+            }));
+            has_failure = true;
         } else {
             warn!("Guest {} not found across any node", vmid);
             results.push(serde_json::json!({
@@ -1153,5 +1319,55 @@ mod require_yes_tests {
     #[test]
     fn allows_with_yes() {
         assert!(require_yes(true, "pool delete").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod incomplete_scan_tests {
+    /// #266 — the shape of the fix, asserted against the source.
+    ///
+    /// A behavioural test needs a multi-node wiremock cluster where one
+    /// node's `/qemu` and `/lxc` both fail while another succeeds, plus a
+    /// full batch dispatch; the live harness covers that. What regresses
+    /// here is someone restoring the unconditional "Guest not found",
+    /// which is a text-level property of this function.
+    #[test]
+    fn a_failed_node_listing_is_not_reported_as_a_missing_guest() {
+        let src = include_str!("common.rs");
+        let body = src
+            .split_once("async fn execute_batch_op_full")
+            .expect("the batch entry point must exist")
+            .1;
+
+        assert!(
+            body.contains("let mut unreachable_nodes"),
+            "the scan must remember which nodes it could not read"
+        );
+        assert!(
+            body.contains("} else if scan_incomplete {"),
+            "a guest missing from an incomplete scan must take a distinct branch \
+             from one missing from a complete scan"
+        );
+        assert!(
+            body.contains("cannot determine"),
+            "the indeterminate case must say so rather than assert absence"
+        );
+        assert!(
+            body.contains("Strict mode: cannot determine guest placement"),
+            "strict mode must fail on the incomplete scan itself, not report the \
+             guests on the unreachable node as missing"
+        );
+    }
+
+    /// The complete-scan case must keep its plain, correct message —
+    /// widening "not found" into "cannot determine" everywhere would
+    /// make the common case vaguer for no reason.
+    #[test]
+    fn a_complete_scan_still_says_not_found() {
+        let src = include_str!("common.rs");
+        assert!(
+            src.contains(r#""message": "Guest not found""#),
+            "a guest genuinely absent from a complete scan is still not found"
+        );
     }
 }

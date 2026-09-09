@@ -165,7 +165,38 @@ jobs:
           mkdir -p dist/"$NAME"
           cp target/${{ matrix.target }}/release/proxxx dist/"$NAME"/
           cp LICENSE README.md SECURITY.md dist/"$NAME"/
-          tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
+          # Audit #279 — reproducible archive. A plain `tar -czf` records
+          # file mtimes and gzip stamps its header, so two builds of the
+          # same commit produced different bytes and different digests.
+          # The .sha256 beside the tarball then attested to one
+          # particular CI run rather than to the source, and nobody could
+          # rebuild the commit and confirm the result matched.
+          #
+          # --sort=name      stable member order
+          # --mtime          all members at the commit's own timestamp
+          # --owner/--group  no build-account identity in the archive
+          # gzip -n          no timestamp in the gzip header
+          #
+          # GNU tar specifically: bsdtar (the default `tar` on macOS)
+          # supports none of --sort, --mtime or --numeric-owner, so the
+          # macOS runner uses `gtar`. Failing loudly beats silently
+          # emitting a non-reproducible archive that still gets a
+          # .sha256 and a signature.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          if tar --version 2>/dev/null | head -1 | grep -q 'GNU tar'; then
+            TAR=tar
+          elif command -v gtar >/dev/null 2>&1; then
+            TAR=gtar
+          else
+            echo "::error::GNU tar not found — refusing to build a non-reproducible archive" >&2
+            exit 1
+          fi
+          "$TAR" --sort=name \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              --owner=0 --group=0 --numeric-owner \
+              --format=gnu \
+              -C dist -cf - "$NAME" | gzip -n > "dist/${NAME}.tar.gz"
           # SHA256 alongside the tarball so users can pin the artefact
           # without GitHub-API round-trips.
           ( cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
@@ -295,7 +326,7 @@ jobs:
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
-          cargo install --locked cargo-cyclonedx
+          cargo install --locked --version 0.5.9 cargo-cyclonedx
           cargo cyclonedx --format json
           # cargo-cyclonedx emits `bom.json` next to Cargo.toml. Move
           # to dist/ with the proxxx-versioned name so it sits

@@ -49,6 +49,11 @@ enum DataMsg {
     /// from this point may be stale.
     ClusterQuorate(bool),
     Error(String),
+    /// The cluster refresh cycle took longer than its target interval,
+    /// so what is on screen is at least this old (#277). Surfaced so the
+    /// operator sees staleness rather than inferring it from numbers
+    /// that stopped moving.
+    RefreshLagging(Duration),
     HitlRequested(String, String),               // txn_id, description
     HitlApproved(String, bool, Box<SideEffect>), // txn_id, approved, action
     TaskStarted(String),                         // upid
@@ -248,6 +253,7 @@ async fn run_hitl_poller(
 /// Run the TUI. Returns `Ok(Some(profile_name))` when the user switches
 /// profiles — the caller should re-enter `run()` with the new profile.
 /// Returns `Ok(None)` on normal quit.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn run(
     profile: Option<&str>,
     cli_secret: Option<&str>,
@@ -409,9 +415,36 @@ pub async fn run(
     let worker_client = Arc::clone(&client);
     let worker_tx = data_tx.clone();
     let api_worker_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        // Audit 2026-09-09 (#277) — sleep for the REMAINDER of the
+        // target period, not a flat 5 s on top of however long the
+        // cycle took.
+        //
+        // `fetch_all` fans out per node and each task issues three
+        // requests, so a refresh costs 3N requests against a client
+        // rate-limited to 10/s by default. Past about three nodes the
+        // cycle already takes longer than its own interval, and adding
+        // a fixed 5 s on top made the real refresh period grow linearly
+        // with the cluster while the code still asked for 5. Nothing
+        // said so: no staleness signal, no adaptation, and the queued
+        // requests competed with whatever the operator was doing.
+        const TARGET: Duration = Duration::from_secs(5);
         loop {
+            let started = std::time::Instant::now();
             fetch_all(&worker_client, &worker_tx).await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            let elapsed = started.elapsed();
+            if elapsed > TARGET {
+                // Cannot keep up. Say so once per cycle rather than
+                // letting the operator infer it from stale numbers.
+                tracing::warn!(
+                    "cluster refresh took {:?}, longer than the {:?} target — data \
+                     will be up to that old. Raise `rate_limit` in the profile, or \
+                     accept the slower cadence on a cluster this size.",
+                    elapsed,
+                    TARGET
+                );
+                let _ = worker_tx.send(DataMsg::RefreshLagging(elapsed)).await;
+            }
+            tokio::time::sleep(TARGET.saturating_sub(elapsed)).await;
         }
     });
 
@@ -656,6 +689,22 @@ pub async fn run(
                         DataMsg::Error(err) => {
                             app::update(&mut state, Action::ErrorOccurred(err));
                         }
+                        // #277 — surface refresh lag as a visible
+                        // condition. Reusing the existing error banner
+                        // rather than adding a status field: the
+                        // operator needs to know the numbers are stale,
+                        // and this is the channel they already read.
+                        DataMsg::RefreshLagging(elapsed) => {
+                            app::update(
+                                &mut state,
+                                Action::ErrorOccurred(format!(
+                                    "cluster refresh is taking {}s — displayed data may be \
+                                     that stale. Raise `rate_limit` in the profile if the \
+                                     cluster can take it.",
+                                    elapsed.as_secs().max(1)
+                                )),
+                            );
+                        }
                         DataMsg::HitlRequested(txn_id, description) => {
                             app::update(&mut state, Action::ApprovalRequested { txn_id, description });
                         }
@@ -801,9 +850,20 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
 
             let mut join_set = tokio::task::JoinSet::new();
 
+            // #277 — bound the fan-out, as the batch path at
+            // cli::common::execute_batch_op_full already does. This loop
+            // runs forever and was the one producer without a gate: on a
+            // large cluster it opened one task per node unconditionally
+            // and relied entirely on the downstream rate limiter to
+            // absorb them.
+            const MAX_INFLIGHT_NODES: usize = 16;
+            let sem = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_NODES));
+
             for node_name in node_names {
                 let client_cloned = Arc::clone(client);
+                let permit_source = Arc::clone(&sem);
                 join_set.spawn(async move {
+                    let _permit = permit_source.acquire_owned().await;
                     let guests = client_cloned.get_guests(&node_name).await;
                     let storage = client_cloned.get_storage_pools(&node_name).await;
                     (node_name, guests, storage)
@@ -978,6 +1038,7 @@ fn spawn_ssh_open<B: ratatui::backend::Backend>(
 /// passthroughs, MoveDisk/ResizeDisk warn-and-skip) don't, so clippy
 /// flags the function as unused-async on a per-branch basis.
 #[allow(clippy::unused_async)]
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn dispatch_side_effect(
     effect: SideEffect,
     state: &AppState,
@@ -1046,6 +1107,9 @@ async fn dispatch_side_effect(
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let txn_id = format!("{action}:{vmid}-{now_ms}");
+            // #250 — the quorum the matched policy demands. `secure_mode`
+            // without a matching policy is the single-approver case.
+            let require = policy_match.map_or(1, |pm| pm.require);
             let desc = format!("Operation {action} on {vmid} requires approval via {channel}");
             let reason = format!("TUI requested {action} on guest {vmid}");
             let action_owned = action.to_string();
@@ -1083,7 +1147,7 @@ async fn dispatch_side_effect(
 
                 let receiver = coord_clone.register(txn_id.clone()).await;
                 if let Err(e) = tg
-                    .request_approval(&action_owned, &target_owned, &reason, &txn_id)
+                    .request_approval(&action_owned, &target_owned, &reason, &txn_id, require)
                     .await
                 {
                     error!("Telegram request_approval failed: {e:#} — denying");
@@ -1991,6 +2055,7 @@ const MIN_FRAME_WIDTH: u16 = 40;
 const MIN_FRAME_HEIGHT: u16 = 8;
 
 /// Top-level render dispatcher — routes to the correct view
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
     let area = f.area();
 

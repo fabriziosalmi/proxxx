@@ -28,7 +28,7 @@
 //! The Telegram offset advancement (`offset = max(offset, id+1)`) is
 //! the cross-restart line of defense.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Reason a callback was rejected by the dedup gate.
@@ -52,6 +52,24 @@ pub enum ReplayError {
 /// below any reasonable concern.
 pub struct PendingApprovals {
     consumed: Mutex<HashSet<String>>,
+    /// Per-transaction set of distinct approver ids, for the `require`
+    /// quorum. Session-local, exactly like `consumed` — see the scope
+    /// note in the module header.
+    votes: Mutex<HashMap<String, HashSet<i64>>>,
+}
+
+/// Outcome of recording one approver's vote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoteProgress {
+    /// The quorum is met; the caller may proceed to execute.
+    Satisfied,
+    /// Still short of the quorum. `duplicate` is true when this approver
+    /// had already voted, so the count did not move.
+    Waiting {
+        have: usize,
+        need: usize,
+        duplicate: bool,
+    },
 }
 
 impl Default for PendingApprovals {
@@ -65,6 +83,38 @@ impl PendingApprovals {
     pub fn new() -> Self {
         Self {
             consumed: Mutex::new(HashSet::new()),
+            votes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one approver's vote for `txn_id` and report whether the
+    /// configured quorum is now satisfied (audit 2026-09-09, #250).
+    ///
+    /// Votes are a SET of approver ids, so the same person pressing
+    /// Approve twice counts once — an N-of-M control that one enthusiastic
+    /// operator can satisfy alone is not a control. `require <= 1` is the
+    /// ordinary single-approver case and is satisfied immediately.
+    ///
+    /// The lock is held across the read-modify-write so two callbacks
+    /// arriving concurrently cannot both observe `have == require - 1`
+    /// and both conclude they completed the quorum.
+    pub fn record_vote(&self, txn_id: &str, approver: i64, require: u8) -> VoteProgress {
+        let mut guard = self
+            .votes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let voters = guard.entry(txn_id.to_string()).or_default();
+        let fresh = voters.insert(approver);
+        let have = voters.len();
+        let need = require.max(1) as usize;
+        if have >= need {
+            VoteProgress::Satisfied
+        } else {
+            VoteProgress::Waiting {
+                have,
+                need,
+                duplicate: !fresh,
+            }
         }
     }
 

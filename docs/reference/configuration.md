@@ -31,8 +31,19 @@ token_secret  = "..."                 # plain string OR
 token_secret_file = "/etc/proxxx/token"
 password      = "..."                 # only if auth = "password"
 password_file = "..."
-verify_tls    = false
-rate_limit    = 10                    # max API requests/second (default 10)
+verify_tls    = true                  # validate the cluster cert. DEFAULT true
+                                      # since v0.13.4 (was false). Proxmox ships
+                                      # a self-signed cert: set false deliberately
+                                      # for a homelab, or prefer tls_pin_mode.
+rate_limit    = 10                    # max API requests/second (default 10).
+                                      # ALSO governs TUI refresh latency: a
+                                      # refresh costs ~3 requests per node, so
+                                      # on an N-node cluster a cycle takes
+                                      # roughly 3N/rate_limit seconds. The TUI
+                                      # targets a 5 s refresh and warns on
+                                      # screen when it cannot keep up (#277).
+                                      # 3 nodes ≈ 1 s; 20 nodes ≈ 6 s;
+                                      # 50 nodes ≈ 15 s at the default.
 read_only     = false                 # true → refuse all mutations on this
                                       # profile client-side (reads still work);
                                       # exit code 8. Default false. Pair with a
@@ -149,6 +160,14 @@ Used by HITL and alert routing.
 [telegram]
 bot_token = "123456:ABC..."           # from @BotFather
 chat_id   = -1001234567890            # from getUpdates response
+allowed_approvers = [123456789]       # REQUIRED. Telegram numeric user ids
+                                      # permitted to approve/deny. The callback
+                                      # HMAC proves proxxx minted the keyboard,
+                                      # not who pressed it — without this list
+                                      # any member of chat_id could approve a
+                                      # destructive op. Numeric ids only
+                                      # (usernames are mutable). Absent or
+                                      # empty => every callback is refused.
 ```
 
 ## `[[policies]]` (HITL)
@@ -210,12 +229,28 @@ For each of `token_secret`, `password`, `pbs.token_secret`:
 1. CLI flag (`--token-secret VALUE`)
 2. Env var (`PROXXX_TOKEN_SECRET`, `PROXXX_PASSWORD`,
    `PROXXX_PBS_TOKEN_SECRET`)
-3. File reference (`<...>_secret_file = "..."`)
-4. Inline TOML value (`<...>_secret = "..."`)
+3. **Inline TOML value** (`<...>_secret = "..."`)
+4. **File reference** (`<...>_secret_file = "..."`)
 5. OS keychain (service `proxxx`, key matches the field name)
 
-The first one that resolves wins. Loaded values live in
-`Zeroizing<String>` and are wiped from the heap on Drop.
+The first one that resolves wins.
+
+::: warning Inline beats the file reference
+Steps 3 and 4 were documented in the opposite order until v0.13.4. If
+you are moving a secret out of the TOML into a `0600` file, **delete the
+inline value** — otherwise the stale inline secret keeps winning, your
+file is never read, and rotating it has no effect. proxxx logs a warning
+when both are set.
+:::
+
+Loaded values live in [`SecretString`](https://github.com/fabriziosalmi/proxxx/blob/main/src/util/secret.rs):
+`Debug` prints `[REDACTED]` (not even the length, which would leak which
+credential class it is), there is no `Display` and no `Serialize`, so
+interpolating one into a string or a JSON dump is a compile error, and
+the wrapped value is zeroized on drop. Note the guarantee covers the
+value once constructed — the `toml` parse tree still holds an unwiped
+copy of any inline secret until config load completes, which is another
+reason to prefer the file or the keychain.
 
 ## Environment variables
 

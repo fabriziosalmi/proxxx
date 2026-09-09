@@ -27,6 +27,7 @@ const VERIFY_TLS_DEFAULT: bool = true;
 /// Run the interactive wizard. Returns the same shape as the
 /// non-interactive `execute_init` so the calling dispatcher doesn't
 /// have to special-case it.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn run(profile_name: Option<&str>) -> Result<(serde_json::Value, i32)> {
     // The interactive wizard writes the flat top-level config. Appending a
     // *named* profile interactively is a larger flow (it would have to read
@@ -1004,7 +1005,8 @@ fn write_config(config_dir: &Path, config_path: &Path, body: &str) -> Result<()>
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&tmp, config_path)
+    // #268 — see util::durable.
+    crate::util::durable::rename_durable(&tmp, config_path)
         .with_context(|| format!("renaming into {}", config_path.display()))?;
     Ok(())
 }

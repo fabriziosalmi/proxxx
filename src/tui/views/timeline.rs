@@ -91,6 +91,7 @@ fn draw_timeline_slider(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(gauge, area);
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_diff_table(f: &mut Frame, area: Rect, state: &AppState) {
     let current_snap = state.timeline_snapshot.as_ref();
     let prev_snap = state.timeline_prev_snapshot.as_ref();

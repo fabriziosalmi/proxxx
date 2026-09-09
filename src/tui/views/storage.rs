@@ -39,6 +39,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     draw_storage_table(f, chunks[1], state);
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
     if state.storage.is_empty() {
         let msg = if state.is_loading {

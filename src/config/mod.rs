@@ -17,7 +17,20 @@ pub struct ProfileConfig {
     pub token_secret: Option<SecretString>,
     pub token_secret_file: Option<String>,
     pub password: Option<SecretString>,
-    #[serde(default)]
+    /// Validate the cluster's TLS certificate. **Defaults to `true`**
+    /// since v0.13.4 (audit 2026-09-09, #251): omitting the key used to
+    /// mean `false`, so a minimal config silently accepted any
+    /// certificate — including one presented by whoever sat between
+    /// proxxx and the cluster, who then received the API token.
+    ///
+    /// Proxmox ships a self-signed certificate, so a fresh cluster needs
+    /// either `verify_tls = false` (deliberate, and what `proxxx doctor`
+    /// will flag as "ok for homelab, not for production") or
+    /// `tls_pin_mode = "tofu"` to pin the leaf on first connect.
+    ///
+    /// The PBS block has defaulted to `true` all along; this aligns the
+    /// two.
+    #[serde(default = "default_verify_tls")]
     pub verify_tls: bool,
     /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
     /// insensitive) to snapshot the cluster's leaf cert on first connect
@@ -252,6 +265,12 @@ const fn default_verify_tls_pbs() -> bool {
     true
 }
 
+/// See [`ProfileConfig::verify_tls`]. Separate from the PBS default only
+/// because serde needs a path per field.
+const fn default_verify_tls() -> bool {
+    true
+}
+
 /// (Gemini wave-3 audit) — keychain access wrapper.
 ///
 /// `keyring::Entry::get_password()` is **synchronous** and can block
@@ -421,6 +440,23 @@ pub struct TelegramConfig {
     /// Destination chat / channel id. Negative for groups & channels,
     /// positive for direct chats with the bot user.
     pub chat_id: String,
+    /// Telegram numeric user ids allowed to approve or deny a HITL
+    /// request. **Required for the HITL daemon to act on any callback.**
+    ///
+    /// The callback HMAC proves proxxx minted the keyboard; it does not
+    /// establish who pressed the button. Without this list every member
+    /// of `chat_id` — including anyone added to the group later — could
+    /// approve a destructive operation, which then executes with the
+    /// daemon's full PVE credentials (audit 2026-09-09, #249).
+    ///
+    /// Numeric ids only: a Telegram `username` is mutable and can be
+    /// reassigned after release, so an allowlist keyed on handles is
+    /// forgeable. Get yours by messaging `@userinfobot`.
+    ///
+    /// Absent or empty ⇒ the daemon refuses every callback and tells the
+    /// operator to configure it. This is fail-closed by design.
+    #[serde(default)]
+    pub allowed_approvers: Option<Vec<i64>>,
 }
 
 impl TelegramConfig {
@@ -758,6 +794,92 @@ impl ProfileConfig {
         }
     }
 
+    /// Reject values for enum-like string keys that are neither of the
+    /// documented options (audit 2026-09-09, #255).
+    ///
+    /// `auth_method()` above maps anything that is not exactly
+    /// `"password"` to token auth, so `auth = "Password"` or a typo
+    /// silently switched authentication mode: the operator supplied a
+    /// password, got token auth, and the secret chain then either failed
+    /// with a message that never mentioned `auth`, or picked up a
+    /// `PROXXX_TOKEN_SECRET` left over from another profile and
+    /// authenticated as a different identity.
+    ///
+    /// Validated at load rather than in `auth_method` so the failure
+    /// names the key and its accepted values, once, before anything
+    /// tries to connect.
+    ///
+    /// # Errors
+    /// When a key holds a value outside its documented set.
+    /// Warn when a lower-precedence secret source is shadowed by a
+    /// higher one (audit 2026-09-09, #257).
+    ///
+    /// The resolution order is inline-then-file, and both the README and
+    /// the configuration reference stated the opposite until v0.13.4. An
+    /// operator following the production checklist's advice to move a
+    /// secret into a `0600` file, without deleting the inline value,
+    /// therefore kept using the inline one: the file was never read, and
+    /// rotating it had no effect.
+    ///
+    /// The order itself is left alone — changing it would silently swap
+    /// which credential a live deployment authenticates with, which is a
+    /// worse failure than the one being fixed. Instead the shadowing is
+    /// made visible at load.
+    pub fn warn_on_shadowed_secret_sources(&self) {
+        let inline_set = |s: &Option<crate::util::secret::SecretString>| {
+            s.as_ref().is_some_and(|v| !v.expose().trim().is_empty())
+        };
+        if inline_set(&self.token_secret) && self.token_secret_file.is_some() {
+            tracing::warn!(
+                "config: both `token_secret` (inline) and `token_secret_file` are set. \
+                 Inline wins — the file is NOT read, and rotating it will have no \
+                 effect. Delete the inline value to use the file."
+            );
+        }
+        if let Some(pbs) = &self.pbs {
+            if inline_set(&pbs.token_secret) && pbs.token_secret_file.is_some() {
+                tracing::warn!(
+                    "config: both `pbs.token_secret` (inline) and \
+                     `pbs.token_secret_file` are set. Inline wins — the file is NOT \
+                     read. Delete the inline value to use the file."
+                );
+            }
+        }
+        if let Some(tg) = &self.telegram {
+            if inline_set(&tg.bot_token) && tg.bot_token_file.is_some() {
+                tracing::warn!(
+                    "config: both `telegram.bot_token` (inline) and \
+                     `telegram.bot_token_file` are set. Inline wins — the file is \
+                     NOT read. Delete the inline value to use the file."
+                );
+            }
+        }
+    }
+
+    pub fn validate_enum_like_fields(&self) -> Result<()> {
+        const AUTH_VALUES: &[&str] = &["token", "password"];
+        if !AUTH_VALUES.contains(&self.auth.as_str()) {
+            anyhow::bail!(
+                "config key `auth` is {:?}, which is not a recognised value. \
+                 Accepted: {}. Note the comparison is case-sensitive.",
+                self.auth,
+                AUTH_VALUES.join(" | ")
+            );
+        }
+        if let Some(mode) = self.tls_pin_mode.as_deref() {
+            if !mode.trim().is_empty() && !mode.eq_ignore_ascii_case("tofu") {
+                anyhow::bail!(
+                    "config key `tls_pin_mode` is {mode:?}, which is not a recognised \
+                     value. Accepted: \"tofu\" (case-insensitive), or omit the key \
+                     entirely for no pinning. Refusing rather than silently running \
+                     unpinned — you set this key because the default trust posture \
+                     was not enough."
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
         // 1. CLI Flag
         if let Some(secret) = cli_secret {
@@ -991,7 +1113,8 @@ fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<std::path::
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting 0600 on {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
+    // #268 — see util::durable.
+    crate::util::durable::rename_durable(&tmp, path)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
     Ok(path.to_path_buf())
 }
@@ -1109,6 +1232,8 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     // only the global lock. Note this is `effective`, not the raw CLI arg,
     // so a `default = "x"` key or single-profile auto-default is attributed.
     cfg.profile_name = effective;
+    cfg.validate_enum_like_fields()?;
+    cfg.warn_on_shadowed_secret_sources();
     Ok(cfg)
 }
 
@@ -1425,5 +1550,111 @@ mod env_secret_cap_tests {
         let got = env_var_secret(name).expect("a normal-sized value resolves");
         assert_eq!(got.expose(), "a-normal-token-value");
         std::env::remove_var(name);
+    }
+}
+
+#[cfg(test)]
+mod tls_default_tests {
+    use super::ProfileConfig;
+
+    /// #251 — a profile that omits `verify_tls` must validate the
+    /// cluster certificate. Before v0.13.4 the bare `#[serde(default)]`
+    /// on a bool made omission mean "accept any certificate", so a
+    /// minimal config silently trusted whatever cert it was handed.
+    #[test]
+    fn verify_tls_defaults_to_true_when_omitted() {
+        let toml = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+token_id = "proxxx"
+"#;
+        let cfg: ProfileConfig = toml::from_str(toml).expect("parses");
+        assert!(
+            cfg.verify_tls,
+            "omitting verify_tls must not disable certificate validation"
+        );
+    }
+
+    /// The opt-out still works — it just has to be stated.
+    #[test]
+    fn verify_tls_false_is_still_honoured() {
+        let toml = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+verify_tls = false
+"#;
+        let cfg: ProfileConfig = toml::from_str(toml).expect("parses");
+        assert!(!cfg.verify_tls);
+    }
+}
+
+#[cfg(test)]
+mod enum_like_validation_tests {
+    use super::ProfileConfig;
+
+    fn parse(toml_src: &str) -> ProfileConfig {
+        toml::from_str(toml_src).expect("parses")
+    }
+
+    const BASE: &str = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+"#;
+
+    /// #255 — `auth_method()` maps anything that is not exactly
+    /// "password" to token auth, so a typo silently switched mode. The
+    /// value is now rejected at load, naming the key.
+    #[test]
+    fn unrecognised_auth_value_is_refused() {
+        for bad in ["Password", "pasword", "tokne", "PAM", ""] {
+            let cfg = parse(&format!("{BASE}auth = \"{bad}\"\n"));
+            let err = cfg
+                .validate_enum_like_fields()
+                .expect_err("must refuse {bad:?}");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("auth") && msg.contains("token | password"),
+                "the error must name the key and its accepted values, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_auth_values_are_accepted() {
+        for good in ["token", "password"] {
+            let cfg = parse(&format!("{BASE}auth = \"{good}\"\n"));
+            cfg.validate_enum_like_fields()
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
+        // Omitted entirely -> serde default, which must also be valid.
+        parse(BASE)
+            .validate_enum_like_fields()
+            .expect("the default auth value must itself be valid");
+    }
+
+    /// #255 — a misspelled `tls_pin_mode` used to warn (to a log file
+    /// nobody reads) and run unpinned. The operator set the key because
+    /// the default trust posture was not enough.
+    #[test]
+    fn unrecognised_tls_pin_mode_is_refused() {
+        for bad in ["TOFU ", "pin", "tofu2", "on"] {
+            let cfg = parse(&format!("{BASE}tls_pin_mode = \"{bad}\"\n"));
+            assert!(
+                cfg.validate_enum_like_fields().is_err(),
+                "must refuse tls_pin_mode = {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tofu_is_accepted_case_insensitively_and_absence_is_fine() {
+        for good in ["tofu", "TOFU", "ToFu"] {
+            let cfg = parse(&format!("{BASE}tls_pin_mode = \"{good}\"\n"));
+            cfg.validate_enum_like_fields()
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
+        parse(BASE)
+            .validate_enum_like_fields()
+            .expect("omitting tls_pin_mode means no pinning, which is valid");
     }
 }

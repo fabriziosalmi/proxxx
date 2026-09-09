@@ -252,7 +252,11 @@ pub async fn export_state<C: StateReadView + ?Sized>(
         .unwrap_or_default();
 
     let mut state = ClusterState {
+        // A fresh export mentions every family it produced, so there is
+        // no provenance to record and `manages()` answers true for all.
+        declared_families: None,
         meta: Some(StateMeta {
+            schema_version: crate::state::model::CURRENT_STATE_SCHEMA,
             profile: profile.to_string(),
             exported_at: rfc3339_now(),
             exported_from_proxxx: env!("CARGO_PKG_VERSION").to_string(),

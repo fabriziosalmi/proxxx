@@ -61,12 +61,20 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Clippy (deny tier)
-        # The `[lints.clippy]` block in Cargo.toml already declares
-        # `unwrap_used`, `expect_used`, `panic`, `todo` as deny. We
-        # also surface pedantic/nursery as warnings (informational).
+      - name: Clippy (deny tier + warnings)
+        # `-D warnings` is the point (audit #272). The `[lints.clippy]`
+        # block in Cargo.toml declares `unwrap_used`, `expect_used`,
+        # `panic`, `todo` and `await_holding_lock` as deny, and surfaces
+        # pedantic + nursery as warnings — but without this flag those
+        # warnings printed and CI exited zero, so the entire curated
+        # pedantic/nursery configuration was decorative. In particular
+        # `cognitive_complexity` (nursery) fired on exactly the functions
+        # it was enabled for and blocked nothing.
+        #
+        # The tree is clean at this level, so there is no backlog to work
+        # through: a new warning means a new regression.
         # `--all-targets` covers tests + examples + benches.
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build (debug)
         run: cargo build --all-targets
@@ -76,6 +84,88 @@ jobs:
 
       - name: Build (release, stripped)
         run: cargo build --release
+
+  lint-scripts:
+    name: Lint shell + Python
+    runs-on: ubuntu-latest
+    # Audit #274: 10 shell files and 2 Python files shipped unchecked.
+    # One of them (scripts/repin-cloudimg.py) rewrites Rust source in
+    # place and opens supply-chain-sensitive re-pin PRs on a schedule;
+    # the live harnesses under tests/live/ decide what a mutation test
+    # asserts against a real cluster, where an unquoted expansion changes
+    # the answer silently.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: ruff (Python)
+        uses: astral-sh/ruff-action@0c50076f12c38c3d0115b7b519b54a91cb9cf0ad  # v3.5.1
+
+      - name: shellcheck
+        # `-S error` only: the tree currently carries style and warning
+        # findings (SC2155, SC2086 …) that are real but not worth
+        # blocking a release over today. Tighten to `-S warning` once
+        # they are cleared — the point of starting at `error` is that the
+        # gate is green and therefore trusted, rather than red and
+        # routinely ignored.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S error tests/live/*.sh scripts/*.sh
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    # Audit #274. GitHub's native secret scanning covers provider
+    # patterns on push; this covers the rest, and covers history — which
+    # matters here specifically: tests/live/test_mutation.sh records that
+    # an earlier revision of that script committed a real PVE token to
+    # public git history (rotated and revoked when discovered).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0   # gitleaks scans history, not just the tree
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3  # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  coverage:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    # Audit #275: nothing measured which code the ~1250 tests execute, so
+    # the distribution of that effort was chosen by judgement and could
+    # not be checked. Deliberately NO threshold: the value is the
+    # per-file view of which modules the suite never enters, which is the
+    # input needed to decide where the next test belongs. A threshold set
+    # below current reality would never bite, and one set above it would
+    # block unrelated work.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: coverage
+
+      - name: Install cargo-llvm-cov
+        run: cargo install --locked --version 0.9.1 cargo-llvm-cov
+
+      - name: Measure
+        run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
+
+      - name: Summary
+        run: cargo llvm-cov report --summary-only | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
 
   audit:
     name: Supply-chain audit
@@ -94,7 +184,14 @@ jobs:
           shared-key: audit
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        # Audit #280 — pinned. `--locked` fixes the tool's own transitive
+        # dependencies but not WHICH version of the tool is installed, so
+        # the code deciding whether the build passes its security gate
+        # changed on every run without review. `cross` and `cargo-deb` in
+        # release.yml were already pinned; the tools with the most
+        # authority were the ones left floating. Dependabot's cargo
+        # cadence carries the bumps as reviewable PRs.
+        run: cargo install --locked --version 0.22.2 cargo-audit
 
       - name: Audit Cargo.lock for CVEs
         # The `--deny warnings` flag escalates yanked-crate notices
@@ -129,7 +226,7 @@ jobs:
           shared-key: deny
 
       - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
+        run: cargo install --locked --version 0.20.2 cargo-deny
 
       - name: Check supply-chain policy (advisories + licenses + bans + sources)
         run: cargo deny check

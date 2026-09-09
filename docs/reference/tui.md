@@ -45,7 +45,10 @@ path is reachable, and its keymap is navigation-only.
 | `Esc` | Clear an active filter; quit when there's none |
 | `q` | Quit |
 
-Scales to hundreds of guests: type `/` to narrow, `s` to surface the
+Scales to hundreds of guests (guest count does not affect request
+count — guests arrive in per-node list responses). What does bind is
+NODE count: see `rate_limit` in [configuration](/reference/configuration)
+for the refresh-latency arithmetic. Type `/` to narrow, `s` to surface the
 busy ones (cpu↓ / mem↓). Search and sort are pure view-state — still
 strictly read-only.
 

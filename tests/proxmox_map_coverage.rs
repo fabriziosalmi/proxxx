@@ -149,6 +149,15 @@ struct ClientPath {
 /// endpoints from the map's perspective.
 const KIND_PLACEHOLDERS: &[&str] = &["{kind}", "{type_str}"];
 
+/// Everything before the first `#[cfg(test)]` in a source file.
+///
+/// Crude but exactly right for this file: client.rs keeps its unit tests
+/// at the bottom, and a path literal that only exists inside a test is
+/// not an endpoint the client calls.
+fn production_source(src: &str) -> &str {
+    src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
+}
+
 /// Extract every API path string the client constructs. Heuristic:
 /// scan source for string literals starting with `/nodes`, `/cluster`,
 /// `/access`, `/storage`, `/pools`, `/version`. Also handles
@@ -156,7 +165,12 @@ const KIND_PLACEHOLDERS: &[&str] = &["{kind}", "{type_str}"];
 /// and the disk-resize site).
 fn parse_client_paths() -> Vec<ClientPath> {
     let mut paths = BTreeSet::new();
-    for s in extract_string_literals(CLIENT_RS) {
+    // Only the production half of client.rs describes real endpoints.
+    // `#[cfg(test)]` modules in that file contain deliberately malformed
+    // fixture paths (traversal probes for the #253 guard, for one), and
+    // counting those as "endpoints proxxx calls" is nonsense that shows
+    // up as phantom drift.
+    for s in extract_string_literals(production_source(CLIENT_RS)) {
         if !is_pve_path(&s) {
             continue;
         }

@@ -220,6 +220,7 @@ pub enum DiffFormat {
 /// pipeline — the document IS the output, re-serialising it through
 /// `format::print` would either escape the TOML's newlines or wrap
 /// the JSON in an additional outer layer.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_state(
     client: &Arc<PxClient>,
     profile: Option<&str>,
@@ -252,7 +253,7 @@ pub async fn execute_state(
             // Read the declared file.
             let toml_str = std::fs::read_to_string(&declared)
                 .with_context(|| format!("reading declared state from {}", declared.display()))?;
-            let declared_state: state::model::ClusterState = toml::from_str(&toml_str)
+            let declared_state = state::model::ClusterState::from_toml_str(&toml_str)
                 .with_context(|| {
                     format!(
                         "parsing TOML at {} — is it the output of `proxxx state export`?",
@@ -311,7 +312,7 @@ pub async fn execute_state(
         } => {
             let toml_str = std::fs::read_to_string(&declared)
                 .with_context(|| format!("reading declared state from {}", declared.display()))?;
-            let declared_state: state::model::ClusterState = toml::from_str(&toml_str)
+            let declared_state = state::model::ClusterState::from_toml_str(&toml_str)
                 .with_context(|| {
                     format!(
                         "parsing TOML at {} — is it the output of `proxxx state export`?",

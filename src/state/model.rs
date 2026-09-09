@@ -27,13 +27,37 @@ use serde::{Deserialize, Serialize};
 /// exports are valid documents. `meta` is emitted on export but
 /// optional on import; a hand-written declared state can omit it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ClusterState {
     /// Provenance: where this state came from and when. Skipped on
     /// serialisation when absent so hand-authored declared states
     /// don't need it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<StateMeta>,
+
+    /// Which resource families the source document actually mentioned
+    /// (audit 2026-09-09, #259).
+    ///
+    /// Every family below is a `Vec` with `#[serde(default)]`, so "not
+    /// managed by this file" and "should be empty" deserialize to the
+    /// same value — and `diff` reads an empty declared family as
+    /// "delete every live member of it". A mistyped or dropped section
+    /// header (`[[pool]]` for `[[pools]]`, a family lost in a merge)
+    /// therefore parses cleanly and, under `--prune`, destroys that
+    /// family. `firewall_options` is the one family that escaped this,
+    /// because being a singleton it is an `Option` and `None` already
+    /// meant "leave it alone".
+    ///
+    /// Rather than change ten field types (and every construction site
+    /// with them), the loader records the top-level keys it saw. `None`
+    /// means "no provenance available" — a state built in memory, as
+    /// `export` does — and is treated as "all families declared", which
+    /// is correct for a fresh export.
+    ///
+    /// `#[serde(skip)]`: this is provenance about the document, not
+    /// content of it, and must never round-trip into an exported file.
+    #[serde(skip)]
+    pub declared_families: Option<std::collections::BTreeSet<String>>,
 
     /// Pools — `GET /pools` + `GET /pools/{poolid}` for membership.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -158,13 +182,141 @@ pub struct ClusterState {
     pub mappings_usb: Vec<MappingUsbDecl>,
 }
 
+impl ClusterState {
+    /// Whether `family` (a top-level TOML key such as `pools`) should be
+    /// reconciled for this document.
+    ///
+    /// True when the document mentioned it, or when no provenance is
+    /// recorded at all. A family the document never mentions is left
+    /// alone entirely — it is not "declared empty".
+    #[must_use]
+    pub fn manages(&self, family: &str) -> bool {
+        self.declared_families
+            .as_ref()
+            .is_none_or(|d| d.contains(family))
+    }
+
+    /// Reject a document that declares the same identity twice within a
+    /// family (audit 2026-09-09, #261).
+    ///
+    /// Every family documents an identity — `poolid`, `name`, `storage`,
+    /// the ACL 4-tuple — and `diff` keys a `HashMap` on it, so a
+    /// duplicate silently kept whichever entry the iteration inserted
+    /// last. An operator merging two branches that both add
+    /// `[[pools]] poolid = "tenant-a"` got a clean parse, a clean diff,
+    /// and a converge that applied one of the two with no warning that
+    /// the other was discarded. In `acl`, the discarded entry may be the
+    /// more restrictive grant.
+    ///
+    /// # Errors
+    /// Names the family and the duplicated identity.
+    pub fn validate_unique_identities(&self) -> Result<(), String> {
+        fn check<T, K, F>(family: &str, items: &[T], key: F) -> Result<(), String>
+        where
+            K: Ord + std::fmt::Display,
+            F: Fn(&T) -> K,
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for item in items {
+                let k = key(item);
+                if !seen.insert(k.to_string()) {
+                    return Err(format!(
+                        "`{family}` declares `{k}` more than once. Each entry in a \
+                         family must have a distinct identity — a duplicate is \
+                         silently discarded at diff time, so this is refused instead."
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        check("pools", &self.pools, |p| p.poolid.clone())?;
+        check("acl", &self.acl, |a| {
+            // Identity is the 4-tuple; `propagate` is part of the value.
+            format!("{}|{}|{}|{}", a.path, a.kind, a.ugid, a.roleid)
+        })?;
+        check("storage", &self.storage, |x| x.storage.clone())?;
+        check("backup_jobs", &self.backup_jobs, |x| x.id.clone())?;
+        check("firewall_aliases", &self.firewall_aliases, |x| {
+            x.name.clone()
+        })?;
+        check("firewall_ipsets", &self.firewall_ipsets, |x| x.name.clone())?;
+        check("firewall_groups", &self.firewall_groups, |x| {
+            x.group.clone()
+        })?;
+        check("notification_matchers", &self.notification_matchers, |x| {
+            x.name.clone()
+        })?;
+        check("ha_resources", &self.ha_resources, |x| x.sid.clone())?;
+        check("ha_rules", &self.ha_rules, |x| x.rule.clone())?;
+        check("mappings_pci", &self.mappings_pci, |x| x.id.clone())?;
+        check("mappings_usb", &self.mappings_usb, |x| x.id.clone())?;
+        Ok(())
+    }
+
+    /// Parse a state document, recording which families it mentions.
+    ///
+    /// Prefer this over a bare `toml::from_str` for anything an operator
+    /// authored: without the provenance, an omitted family is
+    /// indistinguishable from one declared empty, and `diff` reads the
+    /// latter as "delete everything in it" (#259).
+    ///
+    /// # Errors
+    /// When the text is not valid TOML, does not match the schema, or
+    /// declares the same identity twice within a family (#261).
+    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
+        let mut state: Self = toml::from_str(text)?;
+        let raw: toml::Value = toml::from_str(text)?;
+        state.record_declared_families(&raw);
+        state
+            .validate_unique_identities()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(meta) = &state.meta {
+            anyhow::ensure!(
+                meta.schema_version <= CURRENT_STATE_SCHEMA,
+                "state document declares schema_version {} but this proxxx \
+                 understands at most {}. Upgrade proxxx rather than letting an \
+                 older binary reinterpret a newer document.",
+                meta.schema_version,
+                CURRENT_STATE_SCHEMA
+            );
+        }
+        Ok(state)
+    }
+
+    /// Record which top-level keys the source document contained.
+    ///
+    /// Called by the loaders right after deserialization; `raw` is the
+    /// same text parsed as a generic TOML table.
+    pub fn record_declared_families(&mut self, raw: &toml::Value) {
+        if let Some(table) = raw.as_table() {
+            self.declared_families = Some(table.keys().cloned().collect());
+        }
+    }
+}
+
 /// Metadata header emitted by the export layer. Captures *which*
 /// cluster the state was read from, *when*, and *with what proxxx
 /// version*. Useful for audit trail and forensic comparison; ignored
 /// by the apply layer (apply consults live state, not metadata).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StateMeta {
+    /// Shape of this document (audit 2026-09-09, #263).
+    ///
+    /// The cache DB and the audit chain both version their shapes and
+    /// can therefore step old data forward or refuse it. This document —
+    /// the artefact operators commit to git and keep for years — could
+    /// not: every field defaults, so an old file parses into new structs
+    /// successfully and converge computes a diff against a misread
+    /// desired state, with no place to hang a migration or a refusal.
+    ///
+    /// Defaults to [`CURRENT_STATE_SCHEMA`] when absent so documents
+    /// written before v0.13.4 keep loading; a version NEWER than this
+    /// binary understands is refused, the same posture
+    /// `app::cache::migrate_schema` takes for the cache DB.
+    #[serde(default = "default_state_schema")]
+    pub schema_version: u32,
     /// proxxx profile name the state was exported from.
     pub profile: String,
     /// RFC 3339 timestamp at export.
@@ -175,6 +327,20 @@ pub struct StateMeta {
     pub pve_version: String,
 }
 
+/// Schema version this binary writes and understands.
+///
+/// Bump when a family's identity or field set changes in a way that
+/// would make an older document parse into something it did not mean.
+/// A purely additive family does not need a bump — absent fields already
+/// default, and `manages()` keeps an unmentioned family out of the diff.
+pub const CURRENT_STATE_SCHEMA: u32 = 1;
+
+/// Documents written before the field existed are schema 1 by
+/// definition: that is the shape they were written against.
+const fn default_state_schema() -> u32 {
+    CURRENT_STATE_SCHEMA
+}
+
 /// One pool declaration — poolid + comment + members.
 ///
 /// Members are emitted as `kind/id` strings (`qemu/<vmid>`,
@@ -182,7 +348,7 @@ pub struct StateMeta {
 /// PVE API returns a richer object per member, but only the kind + id
 /// is identity-bearing — every other field is recomputable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PoolDecl {
     pub poolid: String,
     /// Free-form description. Empty by default; suppressed in the
@@ -203,7 +369,7 @@ pub struct PoolDecl {
 /// shows up as a separate entry. We mirror that 1:1: the on-disk
 /// state is a flat array of `AclDecl`, identity-keyed at apply time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AclDecl {
     /// ACL path — e.g. `/`, `/vms/100`, `/pool/team-platform`,
     /// `/storage/ceph-rbd`.
@@ -273,7 +439,7 @@ const fn is_zero_u32(n: &u32) -> bool {
 /// or an explicit `vmid` CSV. The two are mutually exclusive in PVE;
 /// the apply layer sends whichever is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BackupJobDecl {
     /// Job id — the identity. Stable across re-apply. Operators pick a
     /// readable one (`nightly-all`, `weekly-prod`); PVE accepts it on
@@ -326,7 +492,7 @@ pub struct BackupJobDecl {
 /// the whole point); the policy / ratelimit strings are skipped when
 /// empty so a minimal block can set just `enable`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallOptionsDecl {
     /// Master switch. `false` disables the entire cluster firewall.
     pub enable: bool,
@@ -349,7 +515,7 @@ pub struct FirewallOptionsDecl {
 /// `comment` are the value. PVE infers `ipversion` from the CIDR, so
 /// it's not modelled (a derived field would round-trip-drift).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallAliasDecl {
     /// Alias name — referenced from rules as `+name`. The identity.
     pub name: String,
@@ -366,7 +532,7 @@ pub struct FirewallAliasDecl {
 /// a map entry is host-DERIVED — a diff there means the hardware moved, not
 /// config drift. `mdev` is the only PCI-specific top-level field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MappingPciDecl {
     /// Mapping id — referenced from a guest as `hostpciN: mapping=<id>`. Identity.
     pub id: String,
@@ -385,7 +551,7 @@ pub struct MappingPciDecl {
 /// identity; `map` is the per-node device list (`node=…,path=…,id=…`). No `mdev`
 /// (USB has no mediated-device concept).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MappingUsbDecl {
     /// Mapping id — referenced from a guest as `usbN: mapping=<id>`. Identity.
     pub id: String,
@@ -401,7 +567,7 @@ pub struct MappingUsbDecl {
 /// `name` is the identity; `comment` + the `cidrs` membership are the
 /// value. CIDRs are sorted by `cidr` on export for diff-stability.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallIpsetDecl {
     /// IP set name — referenced from rules as `+name`. The identity.
     pub name: String,
@@ -417,7 +583,7 @@ pub struct FirewallIpsetDecl {
 /// set; `comment` + `nomatch` are the value. `nomatch` inverts
 /// membership for this entry (carve an exception out of a range).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallIpsetCidrDecl {
     /// The CIDR or address (e.g. `10.0.0.0/24`, `1.2.3.4`).
     pub cidr: String,
@@ -434,7 +600,7 @@ pub struct FirewallIpsetCidrDecl {
 /// rules endpoint is read-only here), so only create/delete are
 /// applied — see [`ClusterState::firewall_groups`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FirewallGroupDecl {
     /// Group name — referenced from `group`-direction rules. Identity.
     pub group: String,
@@ -451,7 +617,7 @@ pub struct FirewallGroupDecl {
 /// The three list fields are sorted on export for diff-stability;
 /// order is not semantically meaningful for `all`/`any` matching.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NotificationMatcherDecl {
     /// Matcher name. The identity. Operators pick a readable one
     /// (`vzdump-failures`, `oncall`); PVE accepts it on create.
@@ -508,7 +674,7 @@ pub struct NotificationMatcherDecl {
 /// `digest` is deliberately NOT modelled — server-generated, would
 /// churn the TOML on every export.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HaRuleDecl {
     /// Rule identifier — the URL last-segment. Operator-chosen on
     /// create (`keep-db-on-pve1`, `web-spread`).
@@ -580,7 +746,7 @@ pub struct HaRuleDecl {
 /// `digest` is deliberately NOT modelled — server-generated, would
 /// churn the TOML on every export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HaResourceDecl {
     /// HA SID. Identity. `vm:<vmid>` or `ct:<vmid>`.
     pub sid: String,
@@ -643,7 +809,7 @@ impl Default for HaResourceDecl {
 ///   Including it would make the TOML churn on every API call even
 ///   when nothing's changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StorageDecl {
     /// Storage id (operator-chosen name, unique across the cluster).
     pub storage: String,
@@ -763,6 +929,7 @@ mod tests {
         // issues, missing #[serde(default)], etc.
         let s = ClusterState {
             meta: Some(StateMeta {
+                schema_version: crate::state::model::CURRENT_STATE_SCHEMA,
                 profile: "prod".into(),
                 exported_at: "2026-05-19T22:00:00Z".into(),
                 exported_from_proxxx: "0.2.1".into(),
@@ -1068,5 +1235,154 @@ members = ["qemu/100", "storage/ceph-rbd"]
         assert!(!toml_str.contains("mode"));
         assert!(!toml_str.contains("invert_match"));
         assert!(!toml_str.contains("disable"));
+    }
+}
+
+#[cfg(test)]
+mod identity_uniqueness_tests {
+    use super::ClusterState;
+
+    /// #261 — `diff` keys a `HashMap` on the identity, so a duplicate was
+    /// silently discarded. The realistic shape is a branch merge where
+    /// both sides added the same pool with different members.
+    #[test]
+    fn duplicate_pool_identity_is_refused() {
+        let err = ClusterState::from_toml_str(
+            r#"
+[[pools]]
+poolid = "tenant-a"
+members = ["qemu/100"]
+
+[[pools]]
+poolid = "tenant-a"
+members = ["qemu/200"]
+"#,
+        )
+        .expect_err("a duplicated poolid must not parse");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pools") && msg.contains("tenant-a"),
+            "the error must name the family and the identity: {msg}"
+        );
+    }
+
+    /// ACL identity is the 4-tuple, not the path alone — two grants on
+    /// the same path with different roles are legitimate.
+    #[test]
+    fn acl_identity_is_the_full_tuple() {
+        ClusterState::from_toml_str(
+            r#"
+[[acl]]
+path = "/vms/100"
+kind = "user"
+ugid = "alice@pve"
+roleid = "PVEVMAdmin"
+
+[[acl]]
+path = "/vms/100"
+kind = "user"
+ugid = "alice@pve"
+roleid = "PVEAuditor"
+"#,
+        )
+        .expect("distinct roles on the same path are two distinct grants");
+
+        ClusterState::from_toml_str(
+            r#"
+[[acl]]
+path = "/vms/100"
+kind = "user"
+ugid = "alice@pve"
+roleid = "PVEVMAdmin"
+
+[[acl]]
+path = "/vms/100"
+kind = "user"
+ugid = "alice@pve"
+roleid = "PVEVMAdmin"
+propagate = false
+"#,
+        )
+        .expect_err("the same 4-tuple twice is a duplicate, whatever the value differs by");
+    }
+
+    #[test]
+    fn distinct_identities_still_parse() {
+        ClusterState::from_toml_str(
+            r#"
+[[pools]]
+poolid = "tenant-a"
+
+[[pools]]
+poolid = "tenant-b"
+"#,
+        )
+        .expect("distinct identities are fine");
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    use super::{ClusterState, CURRENT_STATE_SCHEMA};
+
+    /// #263 — a document written by a NEWER proxxx must be refused, not
+    /// reinterpreted. Same posture the cache DB takes when its
+    /// `user_version` exceeds the binary's.
+    #[test]
+    fn a_newer_schema_is_refused() {
+        let toml = format!(
+            r#"
+[meta]
+schema_version = {}
+profile = "prod"
+exported_at = "2026-09-09T00:00:00Z"
+exported_from_proxxx = "9.9.9"
+pve_version = "9.1.9"
+"#,
+            CURRENT_STATE_SCHEMA + 1
+        );
+        let err = ClusterState::from_toml_str(&toml).expect_err("a newer document must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("schema_version") && msg.contains("Upgrade proxxx"),
+            "the refusal must say what to do: {msg}"
+        );
+    }
+
+    /// Documents written before the field existed keep loading — they
+    /// are schema 1 by definition, being the shape it was introduced to
+    /// describe.
+    #[test]
+    fn a_document_without_the_field_still_loads() {
+        let s = ClusterState::from_toml_str(
+            r#"
+[meta]
+profile = "prod"
+exported_at = "2026-07-01T00:00:00Z"
+exported_from_proxxx = "0.13.3"
+pve_version = "9.1.9"
+"#,
+        )
+        .expect("pre-v0.13.4 documents must keep loading");
+        assert_eq!(
+            s.meta.expect("meta").schema_version,
+            CURRENT_STATE_SCHEMA,
+            "an absent version means the shape the field was introduced for"
+        );
+    }
+
+    #[test]
+    fn the_current_schema_loads() {
+        let toml = format!(
+            r#"
+[meta]
+schema_version = {CURRENT_STATE_SCHEMA}
+profile = "prod"
+exported_at = "2026-09-09T00:00:00Z"
+exported_from_proxxx = "0.13.4"
+pve_version = "9.1.9"
+"#
+        );
+        ClusterState::from_toml_str(&toml).expect("the current schema must load");
     }
 }

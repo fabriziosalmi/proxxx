@@ -144,7 +144,9 @@ pub fn save_store_at(path: &std::path::Path, store: &ScheduleStore) -> Result<()
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&tmp, path)
+    // #268 — durable rename, so a scheduled job written before a crash
+    // is still there afterwards.
+    crate::util::durable::rename_durable(&tmp, path)
         .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
     Ok(())
 }

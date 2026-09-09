@@ -24,19 +24,54 @@ struct Cli {
     #[arg(long, global = true, default_value = "table")]
     format: util::format::OutputFormat,
 
-    /// API Token Secret (Overrides env var and config file)
+    /// API token secret. **Visible in the process listing** (`ps`,
+    /// `/proc/<pid>/cmdline`) for as long as the command runs, and in
+    /// shell history and CI logs. Prefer `--token-secret-file`,
+    /// `PROXXX_TOKEN_SECRET`, or the OS keychain — especially for
+    /// `daemon serve`, which is long-running.
     #[arg(long, global = true)]
     token_secret: Option<String>,
+
+    /// Read the API token secret from a file (audit #283).
+    ///
+    /// Unlike `--token-secret` this leaves nothing in the process
+    /// listing. The file must be readable by this process; trailing
+    /// whitespace is trimmed. Takes precedence over `--token-secret`
+    /// when both are given, because it is the safer of the two and a
+    /// caller passing both most likely means the file.
+    #[arg(long, global = true, value_name = "PATH")]
+    token_secret_file: Option<std::path::PathBuf>,
 
     /// Require Telegram 2FA for all destructive operations (Self-HITL)
     #[arg(long, global = true)]
     secure: bool,
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Tracing → file only (TUI owns stdout).
+    // #283 — resolve the file form once, here, so every downstream call
+    // site sees one value and neither has to know which flag supplied
+    // it. `--token-secret-file` wins when both are given: it is the
+    // safer of the two, and a caller passing both most likely means the
+    // file.
+    let cli_secret: Option<String> = match &cli.token_secret_file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("reading --token-secret-file {}: {e}", path.display())
+            })?;
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("--token-secret-file {} is empty", path.display());
+            }
+            Some(trimmed)
+        }
+        None => cli.token_secret.clone(),
+    };
+
+    // Tracing → rotating file always; stderr as well outside the TUI
+    // (see the block below and #270).
     //
     // (macro audit) — capped log rotation. Without
     // `max_log_files` a daemon left running for months on a flapping
@@ -74,12 +109,63 @@ fn main() -> Result<()> {
         .build(&log_dir)
         .map_err(|e| anyhow::anyhow!("log appender init failed: {e}"))?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_writer(non_blocking)
-        .with_env_filter("proxxx=debug")
-        .init();
 
-    info!("proxxx v{} starting", env!("CARGO_PKG_VERSION"));
+    // Audit 2026-09-09 (#270) — two fixes here.
+    //
+    // 1. STDERR AS WELL AS THE FILE, outside the TUI. "The TUI owns
+    //    stdout" is right for the TUI and wrong for everything else: a
+    //    daemon under the systemd unit this project recommends produced
+    //    a journald stream containing its start and stop lines and
+    //    nothing else, forever. Every diagnostic that matters was
+    //    diverted to a file the operator had not been told about and no
+    //    log shipper was watching — including "freeze: lock unreadable"
+    //    (the write kill-switch has disengaged) and "tls_pin_mode is not
+    //    recognised" (certificate pinning is off).
+    //
+    //    stderr, not stdout: `--format json` and `state export` write
+    //    machine-readable output to stdout, and log lines interleaved
+    //    with it would corrupt every pipeline.
+    //
+    // 2. `RUST_LOG` IS HONOURED. The filter was the compile-time literal
+    //    "proxxx=debug", so every request URL was written to disk on
+    //    every run and retained for 14 days, while an operator debugging
+    //    a TLS or russh problem could not raise those crates above their
+    //    defaults. Worse, setting `RUST_LOG` silently did nothing, which
+    //    is more misleading than not supporting it.
+    //
+    //    The default drops to `info` for the file too: `debug` was
+    //    logging a line per HTTP request, which is a lot of disk for a
+    //    long-running daemon and is one `RUST_LOG=proxxx=debug` away
+    //    when someone actually needs it.
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("proxxx=info"))
+    };
+    let is_tui = cli.command.is_none();
+    if is_tui {
+        tracing_subscriber::fmt()
+            .with_writer(non_blocking)
+            .with_env_filter(filter())
+            .init();
+    } else {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(filter())
+            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
+            )
+            .init();
+    }
+
+    info!(
+        "proxxx v{} starting (log file: {})",
+        env!("CARGO_PKG_VERSION"),
+        log_dir.join("proxxx.log.<date>").display()
+    );
 
     // flight recorder: install the flight-recorder panic hook BEFORE the
     // tokio runtime / TUI / CLI runs. This way a panic anywhere — in
@@ -114,14 +200,11 @@ fn main() -> Result<()> {
             // TUI, then re-enter the fleet view when the user quits it.
             if matches!(cmd, cli::Command::Fleet) {
                 rt.block_on(async {
-                    while let Some(profile) =
-                        tui::fleet::run_fleet(cli.token_secret.as_deref()).await?
-                    {
+                    while let Some(profile) = tui::fleet::run_fleet(cli_secret.as_deref()).await? {
                         // Open the selected cluster's full TUI. Its own
                         // profile-switch return value is ignored — on exit
                         // we always come back to the fleet overview.
-                        let _ = tui::run(Some(&profile), cli.token_secret.as_deref(), cli.secure)
-                            .await?;
+                        let _ = tui::run(Some(&profile), cli_secret.as_deref(), cli.secure).await?;
                     }
                     Ok::<(), anyhow::Error>(())
                 })?;
@@ -131,7 +214,7 @@ fn main() -> Result<()> {
             match rt.block_on(cli::execute(
                 cmd,
                 cli.profile.as_deref(),
-                cli.token_secret.as_deref(),
+                cli_secret.as_deref(),
                 cli.secure,
                 cli.format,
             )) {
@@ -146,8 +229,11 @@ fn main() -> Result<()> {
                     if !result.is_null() {
                         // Ensure the output is a JSON array if Json
                         // format is requested.
-                        let result_array = if matches!(cli.format, util::format::OutputFormat::Json)
-                            && !result.is_array()
+                        let result_array = if matches!(
+                            cli.format,
+                            util::format::OutputFormat::Json
+                                | util::format::OutputFormat::JsonEnvelope
+                        ) && !result.is_array()
                         {
                             serde_json::json!([result])
                         } else {
@@ -218,7 +304,10 @@ fn main() -> Result<()> {
                         }
                         None
                     });
-                    if matches!(cli.format, util::format::OutputFormat::Json) {
+                    if matches!(
+                        cli.format,
+                        util::format::OutputFormat::Json | util::format::OutputFormat::JsonEnvelope
+                    ) {
                         let mut err_obj = serde_json::json!({
                             "error": e.to_string(),
                             "status": "fatal_error",
@@ -259,7 +348,7 @@ fn main() -> Result<()> {
             loop {
                 let next = rt.block_on(tui::run(
                     active_profile.as_deref(),
-                    cli.token_secret.as_deref(),
+                    cli_secret.as_deref(),
                     cli.secure,
                 ))?;
                 match next {

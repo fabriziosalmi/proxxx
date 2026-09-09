@@ -506,17 +506,50 @@ mod proxmox_quirks {
     /// message. We attest the lock-detection state field.
     #[test]
     fn guest_lock_detection_blocks_duplicate_migration_intent() {
-        // The contract surface is `Guest::lock`. When `lock` is
-        // set on a guest (PVE sets it during in-flight ops), the
-        // CLI/TUI's pre-flight refuses any new mutation against
-        // that vmid without `--allow-risk`.
+        // Audit #273 — this test used to construct two local
+        // `Option<String>` values and assert on those, touching neither
+        // `Guest` nor the pre-flight gate. It passed with lock detection
+        // deleted, and its comment misdescribed `Guest::lock` as an
+        // `Option<String>` (it is a plain `String`) — an error it could
+        // not catch precisely because it never referenced the type.
         //
-        // We pin the structural contract: the `lock` field is
-        // `Option<String>` on the Guest type.
-        let g_clean: Option<String> = None;
-        let g_locked: Option<String> = Some("migrate".to_string());
-        assert!(g_clean.is_none());
-        assert_eq!(g_locked.as_deref(), Some("migrate"));
+        // What the row actually claims: a guest PVE has locked mid-op
+        // must be refused a further mutation. So exercise the gate.
+        use proxxx::api::types::Guest;
+        use proxxx::app::preflight::{assess, Op, Risk, RiskLevel};
+
+        let mut locked = Guest {
+            vmid: 100,
+            node: "pve1".into(),
+            ..Default::default()
+        };
+        locked.lock = "migrate".into();
+        assert!(locked.is_locked(), "a non-empty lock means PVE holds it");
+
+        let risks = assess(Op::Migrate, &locked);
+        assert!(
+            risks
+                .iter()
+                .any(|(r, l)| matches!(r, Risk::Locked { .. }) && *l == RiskLevel::Severe),
+            "a locked guest must raise Locked at Severe, so the mutation is \
+             refused without --allow-risk; got {risks:?}"
+        );
+
+        // The control case: the same guest without the lock must not
+        // raise it, or the assertion above would pass for the wrong
+        // reason.
+        let clean = Guest {
+            vmid: 100,
+            node: "pve1".into(),
+            ..Default::default()
+        };
+        assert!(!clean.is_locked());
+        assert!(
+            !assess(Op::Migrate, &clean)
+                .iter()
+                .any(|(r, _)| matches!(r, Risk::Locked { .. })),
+            "an unlocked guest must not raise Locked"
+        );
     }
 }
 
@@ -533,16 +566,22 @@ mod logging {
     /// and `max_log_files(14)`. We pin the const independently.
     #[test]
     fn tracing_appender_rotation_capped_at_14_files() {
-        // The 04-row's contract is "max 14 daily-rotated files".
-        // We pin via the same builder configuration proxxx uses.
-        let _builder = tracing_appender::rolling::Builder::new()
-            .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .max_log_files(14)
-            .filename_prefix("proxxx-test")
-            .filename_suffix("log");
-        // The builder accepts our config (compile-time + runtime).
-        // Real file-rollover behaviour is tested by tracing_appender's
-        // own suite; we attest the proxxx-side wiring.
+        // Audit #273 — this used to build a `tracing_appender` builder
+        // with the same settings, bind it to `_builder`, and assert
+        // nothing about proxxx. It tested the library.
+        //
+        // The claim is about proxxx's own wiring, so assert against
+        // proxxx's own source: the cap must be present, daily, and 14.
+        const MAIN: &str = include_str!("../src/main.rs");
+        assert!(
+            MAIN.contains(".max_log_files(14)"),
+            "main.rs must cap the rotating log at 14 files — without it a daemon \
+             on a flapping network fills the disk"
+        );
+        assert!(
+            MAIN.contains("Rotation::DAILY"),
+            "the cap is 14 DAILY files; another rotation unit changes what 14 means"
+        );
         const MAX_LOG_FILES: usize = 14;
         assert_eq!(MAX_LOG_FILES, 14);
     }

@@ -554,6 +554,7 @@ pub async fn execute_storage(
 /// Backup-jobs CRUD CLI. proxxx already has `proxxx backup` for
 /// one-shot vzdump; this surface manages the RECURRING jobs PVE
 /// stores cluster-wide at `/cluster/backup`.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_backup_jobs(
     client: &Arc<crate::api::PxClient>,
     action: BackupJobsCommand,
@@ -1135,6 +1136,7 @@ pub async fn execute_pbs(
 }
 
 /// Feature #2 CLI dispatch.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_iso(
     client: &Arc<crate::api::PxClient>,
     action: IsoCommand,

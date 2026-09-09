@@ -60,6 +60,32 @@ updates:
   # rather than letting the pin drift past a published release. This
   # closes the tj-actions/changed-files-style attack window where a
   # compromised tag (e.g. `@v4`) could re-point at malicious code.
+  # Audit #280: the docs site has a committed package-lock.json and is
+  # built and deployed by docs.yml, but no ecosystem watched it — the
+  # Rust half had three independent mechanisms and the JavaScript half
+  # had none. A compromised vitepress transitive dependency ships its
+  # output to the public documentation site, which is where operators
+  # are told how to install a security-sensitive tool.
+  - package-ecosystem: "npm"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "javascript"
+    commit-message:
+      prefix: "deps(npm)"
+      include: "scope"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

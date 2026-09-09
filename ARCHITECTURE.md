@@ -15,32 +15,45 @@ state machine**: a CLI (scriptable, JSON-friendly), a TUI
 Proxmox VE and Proxmox Backup Server over REST + SSH + WebSocket.
 No agent on the cluster.
 
-## The three callers, one core
+## The three callers, one set of gates
 
 ```
-                    ┌─────────────────────────────┐
-                    │     pure state machine      │
-                    │       (src/app/*.rs)        │
-                    │   Action → State + SideEff  │
-                    └──────────────┬──────────────┘
-                                   │
-                       Action / SideEffect bus
-                                   │
-              ┌───────────────────┼────────────────────┐
-              │                   │                    │
         ┌───────┐         ┌───────────┐          ┌───────────┐
         │  CLI  │         │   TUI     │          │   MCP     │
         │ (clap)│         │ (ratatui) │          │ (stdio +  │
         │       │         │           │          │  HTTP)    │
-        └───────┘         └───────────┘          └───────────┘
+        └───┬───┘         └─────┬─────┘          └─────┬─────┘
+            │           Action / SideEffect bus        │
+            │            ┌──────┴──────┐               │
+            │            │ app.rs      │               │
+            │            │ reducer     │  TUI only     │
+            │            │ (pure, sync)│               │
+            │            └──────┬──────┘               │
+            │                   │                      │
+            └───────────────────┼──────────────────────┘
+                                │
+                    ┌───────────┴────────────┐
+                    │  the shared gates      │
+                    │  preflight → policy    │
+                    │  → gateway → audit     │
+                    └────────────────────────┘
 ```
 
 All three callers go through the same:
-* `app::reducer` (pure: Action × AppState → AppState + SideEffect)
-* `api::ProxmoxGateway` trait (network I/O)
+* `api::ProxmoxGateway` trait (network I/O), and inside its `post`/`put`/
+  `delete` helpers the read-only guard and the incident-freeze check —
+  so all 234 methods inherit them and a new one cannot skip them
 * `app::preflight::assess()` (11-variant risk gate)
 * `hitl::policy` (Telegram approval gate)
 * `audit::AuditLogger` (HMAC-chain mutation log)
+
+**The reducer is TUI-only.** `app.rs` holds a genuinely pure
+Action × AppState → AppState + SideEffect state machine (2059 lines,
+zero `.await`), but `AppState` is referenced only by `src/tui/`: the CLI
+and MCP paths are imperative and reach the gates directly. An earlier
+version of this document showed all three callers behind the reducer,
+which sent contributors looking for a bus that was not there — corrected
+per the 2026-09-09 audit (#282).
 
 Same gates apply to every mutation, regardless of which caller
 initiated it. There is no "skip the risk gate for MCP" path.
@@ -56,7 +69,8 @@ initiated it. There is no "skip the risk gate for MCP" path.
 | [`access/`](src/access/) | `pveum` shell-out + parser for effective permissions. `shell_quote` defends injection | sync (parser), async (shellout) |
 | [`config/`](src/config/) | TOML profile loader + secret resolution (env → file → inline → keychain). Watcher for SIGHUP reload | sync (load), async (watch) |
 | [`audit/`](src/audit/) | Append-only SQLite audit log with HMAC-SHA256 chain | sync |
-| [`app/`](src/app/) | **Pure state**. Reducer, preflight (11 risk variants), snaptree builder, cache, HA preview, batch policy. Zero I/O — testable end-to-end without a cluster | sync |
+| [`app.rs`](src/app.rs) | **Pure state**: the TUI reducer, `Action × AppState → AppState + SideEffect`. Zero I/O, zero `.await` — testable end-to-end without a cluster | sync |
+| [`app/`](src/app/) | Risk and planning helpers used by every caller: preflight (11 risk variants), snaptree builder, cache, HA preview, batch policy. `preflight`, `patch` and `cache` DO perform gateway I/O (#282 — this row previously claimed the whole module was zero-I/O, which was true only of `app.rs`) | mixed |
 | [`alerts/`](src/alerts/) | Alert daemon: engine (predicates over cluster snapshots) + dedup + notifier (slack/discord/telegram/webhook) | async |
 | [`hitl/`](src/hitl/) | Telegram daemon: long-poll, callback HMAC, replay-rejection, deny-on-timeout | async |
 | [`mcp/`](src/mcp/) | MCP server: stdio JSON-RPC + Streamable HTTP. Compile-time tool registry, SHA-256 pinned | async |
@@ -74,6 +88,8 @@ initiated it. There is no "skip the risk gate for MCP" path.
 argv ─► clap ─► cli::execute_delete
               │
               ├─► find_guest(client, vmid=100) ── REST /cluster/resources
+              │      (one request; falls back to a per-node walk only
+              │       when that endpoint is unavailable — #276)
               │
               ├─► assess_deep(client, pbs, Op::Delete, &guest)
               │      └─ 11 risk variants checked; if SEVERE without

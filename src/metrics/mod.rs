@@ -27,6 +27,12 @@
 //!   `proxxx_storage_total_bytes{node,storage,type}`
 //!   `proxxx_storage_avail_bytes{node,storage,type}`
 //!   `proxxx_storage_active{node,storage,type}`  — 1=active 0=inactive
+//!
+//! proxxx's own health (only while `daemon serve` is running):
+//!   `proxxx_daemon_component_up{component}`     — 1=running 0=exited
+//!   `proxxx_daemon_component_last_tick_timestamp{component}`
+
+pub mod daemon_health;
 
 use std::sync::Arc;
 
@@ -83,6 +89,7 @@ impl MetricWriter {
 
 // ── Scrape ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn scrape(client: &PxClient) -> String {
     let mut w = MetricWriter::new();
 
@@ -211,6 +218,39 @@ pub async fn scrape(client: &PxClient) -> String {
         "1 if the scrape gathered all data; 0 if any fetch failed",
     );
     w.gauge("proxxx_up", &[], scrape_ok);
+
+    // #271 — proxxx's own pillars. Without these a daemon component that
+    // has stopped is indistinguishable from one that is running with
+    // nothing to report: alerts simply stop arriving, approvals stop
+    // being answered, and "the process is up" is true and useless.
+    //
+    // The series stays published with value 0 once a component exits — a
+    // disappearing series looks the same as a failed scrape, which is
+    // the ambiguity being removed.
+    let components = crate::metrics::daemon_health::snapshot();
+    if !components.is_empty() {
+        w.help(
+            "proxxx_daemon_component_up",
+            "1 while the named daemon component is running, 0 once it has exited",
+        );
+        w.help(
+            "proxxx_daemon_component_last_tick_timestamp",
+            "unix seconds of the component's last completed loop iteration",
+        );
+        for (name, up, last_tick) in components {
+            let labels = [("component", name)];
+            w.gauge(
+                "proxxx_daemon_component_up",
+                &labels,
+                if up { 1.0 } else { 0.0 },
+            );
+            w.gauge(
+                "proxxx_daemon_component_last_tick_timestamp",
+                &labels,
+                last_tick as f64,
+            );
+        }
+    }
 
     // Reconcile drift-state, written by the `reconcile watch` daemon pillar
     // to a shared per-profile SQLite store. Absent (no watch / never run) →

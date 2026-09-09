@@ -1,0 +1,83 @@
+# Live-cluster verification, on demand.
+#
+# Audit #275: `cargo test --all-targets` skips every `#[ignore]`d test —
+# 24 of them across five files — and never invokes the ten shell
+# harnesses under tests/live/. Those cover the highest-consequence
+# behaviour in the project: real guest mutations, RBAC against three
+# token identities, PBS backup and restore, and the Severe delete gate
+# actually refusing. A regression in any of them merged green.
+#
+# They need a real PVE cluster, which a hosted runner does not have, so
+# this cannot be a push gate. What it can be is a recorded one: the run
+# is keyed to a commit SHA and its summary is uploaded, so "the live
+# tier passed" stops resting on the maintainer's memory.
+#
+# Requires a self-hosted runner with network reach to the test cluster,
+# and these repository secrets:
+#   PROXXX_E2E_PVE_URL, PROXXX_E2E_PVE_TOKEN, PROXXX_E2E_NODE
+
+name: live tier
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_mutations:
+        description: "Run the mutating suites (creates and destroys guests)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: Live cluster (${{ github.sha }})
+    runs-on: [self-hosted, proxxx-live]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Read-only suites
+        env:
+          PROXXX_E2E_PVE_URL: ${{ secrets.PROXXX_E2E_PVE_URL }}
+          PROXXX_E2E_PVE_TOKEN: ${{ secrets.PROXXX_E2E_PVE_TOKEN }}
+          PROXXX_E2E_NODE: ${{ secrets.PROXXX_E2E_NODE }}
+        # `--ignored` is the whole point: without it these are exactly
+        # the tests the push gate already ran and skipped.
+        run: cargo test --release --test feature_coverage_live -- --ignored --nocapture
+
+      - name: Mutating suites
+        if: ${{ inputs.run_mutations }}
+        env:
+          PROXXX_E2E_PVE_URL: ${{ secrets.PROXXX_E2E_PVE_URL }}
+          PROXXX_E2E_PVE_TOKEN: ${{ secrets.PROXXX_E2E_PVE_TOKEN }}
+          PROXXX_E2E_NODE: ${{ secrets.PROXXX_E2E_NODE }}
+        run: |
+          cargo test --release --test e2e_alpha -- --ignored --nocapture
+          cargo test --release --test e2e_beta  -- --ignored --nocapture
+          bash tests/live/test_mutation.sh
+
+      - name: Record the result against this commit
+        if: always()
+        run: |
+          {
+            echo "# Live tier — ${{ github.sha }}"
+            echo
+            echo "- Ref: \`${{ github.ref_name }}\`"
+            echo "- Mutating suites: ${{ inputs.run_mutations }}"
+            echo "- Outcome: ${{ job.status }}"
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY" > live-tier-result.md
+
+      - name: Upload the record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: live-tier-${{ github.sha }}
+          path: live-tier-result.md

@@ -159,6 +159,30 @@ The bot token resolves with the same hierarchy as the PVE
 token: `PROXXX_TELEGRAM_BOT_TOKEN` env, `bot_token_file`,
 keychain, inline.
 
+### `[ ]` Set `allowed_approvers` — without it the daemon refuses every callback
+
+The callback signature proves *proxxx* minted the approval keyboard. It
+does not establish *who pressed the button*: Telegram delivers the
+buttons to everyone who can see the message. Without an allowlist, any
+member of `chat_id` — including someone added to the group later — could
+approve a destructive operation, which then runs with the daemon's full
+PVE credentials.
+
+```toml
+[telegram]
+chat_id = "-1001234567890"
+allowed_approvers = [123456789, 987654321]   # numeric ids, not usernames
+```
+
+Get each approver's numeric id by having them message `@userinfobot`.
+Usernames are deliberately not accepted: a Telegram handle can be
+released and re-registered by someone else, so an allowlist keyed on
+handles is forgeable.
+
+An absent or empty list is treated as "refuse everything" rather than
+"allow anyone" — the same fail-closed posture as a destructive MCP tool
+with no matching policy.
+
 ### `[ ]` Configure `[[policies]]` rules
 
 ```toml
@@ -192,9 +216,18 @@ User=proxxx-ops
 ExecStart=/usr/local/bin/proxxx hitl serve
 Restart=on-failure
 RestartSec=5
-# Replay protection survives single-process restart via
-# session-local consumed-txn-id set; no persistence layer
-# needed.
+# Log records go to stderr as well as the rotating file, so
+# `journalctl -u proxxx-hitl` shows warnings and errors — including
+# the freeze lock becoming unreadable and TLS pinning being skipped.
+# Raise verbosity per-crate when debugging:
+#   Environment=RUST_LOG=proxxx=debug,russh=debug
+Environment=RUST_LOG=proxxx=info
+# NOTE: replay protection is session-local — a restart clears
+# the consumed-txn-id set, so an approval callback that was
+# already used becomes usable again until the keyboard is
+# superseded. Approver authorisation (allowed_approvers) and
+# the per-request txn_id nonce are the controls that survive
+# a restart. See src/hitl/pending.rs ("Scope honesty").
 
 [Install]
 WantedBy=multi-user.target
@@ -446,6 +479,93 @@ proxxx audit verify        # exits non-zero if the chain has been tampered with
 Run this from a host or account that **can't write** the audit DB — a
 verifier that shares the operator's write access can't prove much. Wire
 the non-zero exit into your monitoring.
+
+### `[ ]` Rotate the audit key after a compromise — it no longer costs you the history
+
+The HMAC key is 32 bytes beside the database it protects, so anyone who
+can read that file can forge the chain. If the host is ever compromised,
+rotate:
+
+```bash
+proxxx audit rotate-key      # archives the old key, starts signing with a new one
+proxxx audit verify          # every entry still verifies, old and new
+```
+
+Until v0.13.4 rotating meant deleting the key and starting a new chain,
+which destroyed the verifiability of exactly the history an
+investigation needs — so in practice the key was permanent. Each row now
+records which key signed it, and retired keys are archived beside the
+primary as `audit.key.<id>`.
+
+**Back up the retired keys.** They are part of the trail: without one,
+the rows it signed can no longer be verified, and `proxxx audit verify`
+counts them as failures rather than skipping them.
+
+## 11. Upgrade, rollback and backup
+
+### `[ ]` Know what must survive the host
+
+proxxx keeps two kinds of state in the platform data directory, and only
+one of them matters if the machine is rebuilt.
+
+| Path | Must be preserved? | Why |
+| :--- | :--- | :--- |
+| `audit.db` | **Yes** | The only record of who issued which mutation. Not reconstructible from anything else. |
+| `audit.key` | **Yes** | 32 bytes. Without it no surviving copy of `audit.db` can be verified — losing the key alone is enough to make the trail worthless. |
+| `audit.key.retired-*` | **Yes** | Keys retired by `audit rotate-key`. Each still proves the rows it signed; losing one turns those rows into verification failures. |
+| `freeze.lock`, `freeze.<profile>.lock` | No | Runtime kill-switch state. Absent means thawed, which is the correct default after a rebuild. |
+| `cache.db` | No | Cluster snapshots and the operation queue. Regenerates from the cluster on next start. |
+| `proxxx.log*` | No | 14 daily rotations, forensic convenience only. |
+
+Config lives separately under the config directory and is recreatable
+with `proxxx init`, though backing it up saves re-entering the profile.
+
+Point `PROXXX_AUDIT_DIR` at a volume that is already backed up if you
+would rather not add a new backup target:
+
+```bash
+# systemd unit
+Environment=PROXXX_AUDIT_DIR=/var/lib/proxxx/audit
+```
+
+### `[ ]` Upgrade
+
+```bash
+systemctl stop proxxx-hitl          # let in-flight approvals settle
+# verify + install the new binary (section 1)
+systemctl start proxxx-hitl
+proxxx doctor                       # confirms config, auth and audit chain
+```
+
+Stopping first is deliberate: an approval that is parked when the
+process is replaced is lost from the daemon's in-memory replay window,
+and a request approved during the swap has nothing listening for the
+callback.
+
+What is compatible across an upgrade:
+
+- **Config** — backwards compatible. New keys default; old keys keep working.
+- **Audit DB** — backwards compatible. v1 rows keep verifying under the
+  v1 formula while new rows are written as v2.
+- **Declared state TOML** — carries `meta.schema_version`. A document
+  newer than the binary understands is refused rather than reinterpreted.
+- **Cache DB** — **not** backwards compatible; see rollback.
+
+### `[ ]` Rollback
+
+```bash
+systemctl stop proxxx-hitl
+# reinstall the previous binary
+rm -f "$(proxxx doctor --json | jq -r '.cache_path // empty')"   # or delete cache.db by hand
+systemctl start proxxx-hitl
+```
+
+The cache database records a schema version and **refuses to open when
+that version is newer than the running binary** — an older proxxx will
+report `cache DB schema version N is newer than this binary's M` rather
+than silently misreading it. Deleting `cache.db` is safe: it is
+regenerated from the cluster on the next start. The audit DB and its key
+need no action, and must not be deleted.
 
 ## See also
 

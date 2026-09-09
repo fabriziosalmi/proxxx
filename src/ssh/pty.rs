@@ -54,6 +54,7 @@ enum PtyInput {
 impl PtySession {
     /// Open a fresh PTY session against a guest. Creates a new SSH connection
     /// (we don't pool guest connections — they're interactive and few).
+    #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
     pub async fn open(
         vmid: u32,
         target: ResolvedGuestSsh,

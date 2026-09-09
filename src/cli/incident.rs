@@ -147,9 +147,13 @@ fn audit_thaw(reason: &str, profile: Option<&str>, prior: Option<&incident::Free
     }
 }
 
+/// Fallback operator label when no prior freeze state names one.
+///
+/// #256 — delegates to the same uid-anchored identity the freeze writer
+/// uses, rather than reading `$USER` (which the caller controls) a
+/// second time with different formatting.
 fn default_operator() -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    format!("{user}@unknown")
+    crate::incident::operator_label()
 }
 
 /// Open the audit logger, call `f`, then drop it. Encapsulates the

@@ -94,7 +94,19 @@ struct TgResponse<T> {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct Chat {
+    pub id: i64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
+    /// Chat the keyboard message lives in. Compared against the
+    /// configured `chat_id` before a callback is honoured, so a keyboard
+    /// forwarded into another chat cannot drive the daemon. `Option`
+    /// because Telegram omits `message` on callbacks from inline mode,
+    /// which proxxx never sends.
+    #[serde(default)]
+    pub chat: Option<Chat>,
     /// Telegram-assigned id for THIS message. Required for the
     /// lifecycle-edit flow: when a callback arrives, the daemon
     /// reads `cb.message.message_id` and calls `edit_message_text`
@@ -120,6 +132,12 @@ pub struct CallbackQuery {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct User {
+    /// Telegram numeric user id. This is the ONLY stable identifier for
+    /// a Telegram account: `username` is mutable and reassignable, so an
+    /// allowlist keyed on it would be forgeable by whoever claims a
+    /// released handle. Approver authorisation compares this field.
+    #[serde(default)]
+    pub id: i64,
     pub username: Option<String>,
     pub first_name: String,
 }
@@ -152,6 +170,11 @@ pub struct TelegramGateway {
     /// `from_config()` call. Tests inject a deterministic key via
     /// `with_base_url_and_key`.
     hmac_key: Vec<u8>,
+    /// Telegram user ids permitted to act on an approval keyboard.
+    /// Empty means "no allowlist configured" — the daemon refuses every
+    /// callback in that state rather than accepting anyone who can see
+    /// the message (audit 2026-09-09, #249).
+    allowed_approvers: Vec<i64>,
 }
 
 impl TelegramGateway {
@@ -173,6 +196,7 @@ impl TelegramGateway {
             chat_id,
             base_url: DEFAULT_TG_API.to_string(),
             hmac_key,
+            allowed_approvers: Vec::new(),
         })
     }
 
@@ -208,6 +232,7 @@ impl TelegramGateway {
             chat_id,
             base_url,
             hmac_key,
+            allowed_approvers: Vec::new(),
         }
     }
 
@@ -219,13 +244,38 @@ impl TelegramGateway {
         &self.hmac_key
     }
 
+    /// Telegram user ids permitted to act on an approval keyboard.
+    /// Empty means no allowlist is configured, which the daemon treats
+    /// as "refuse every callback" rather than "accept anyone".
+    #[must_use]
+    pub fn allowed_approvers(&self) -> &[i64] {
+        &self.allowed_approvers
+    }
+
+    /// The configured destination chat. A callback whose originating
+    /// chat differs is refused, so a keyboard forwarded elsewhere cannot
+    /// drive the daemon.
+    #[must_use]
+    pub fn chat_id(&self) -> &str {
+        &self.chat_id
+    }
+
+    /// Builder used by `from_config` and by tests to install the
+    /// approver allowlist.
+    #[must_use]
+    pub fn with_allowed_approvers(mut self, ids: Vec<i64>) -> Self {
+        self.allowed_approvers = ids;
+        self
+    }
+
     /// High-level convenience: resolve the bot token via the configured
     /// hierarchy (env / file / inline / keychain) and build the gateway.
     /// Use this from production call sites; tests should prefer
     /// `with_base_url()` and pass an explicit fake token.
     pub async fn from_config(config: &crate::config::TelegramConfig) -> Result<Self> {
         let token = config.resolve_bot_token().await?;
-        Self::new(token, config.chat_id.clone())
+        let gw = Self::new(token, config.chat_id.clone())?;
+        Ok(gw.with_allowed_approvers(config.allowed_approvers.clone().unwrap_or_default()))
     }
 
     /// Sends a request for approval to the Telegram chat.
@@ -236,6 +286,7 @@ impl TelegramGateway {
         target: &str,
         reason: &str,
         txn_id: &str,
+        require: u8,
     ) -> Result<i64> {
         // Phase 5.13 — escape user-controlled values inserted into the
         // MarkdownV2 message body. Without this, any reason / txn_id /
@@ -256,7 +307,16 @@ impl TelegramGateway {
         // token but not the HMAC key. Tag is appended as `:<hex>` to
         // the existing `decision:txn_id` shape; the daemon parser
         // peels it off and re-verifies before consuming the txn.
-        let approve_payload = format!("approve:{txn_id}");
+        // #250 — the quorum travels in the signed payload. The sender
+        // knows which policy fired; the daemon does not (it is a separate
+        // process and cannot re-derive tag-scoped matches without a
+        // cluster round trip). The HMAC below covers this segment, so it
+        // cannot be edited by whoever holds the keyboard.
+        //
+        // Appended as a 4th `:`-segment. The daemon's parser reads
+        // segments 0..3 and ignores extras, so a keyboard minted by an
+        // older proxxx (3 segments) still parses and means "require 1".
+        let approve_payload = format!("approve:{txn_id}:r{require}");
         let approve_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &approve_payload);
         let deny_payload = format!("deny:{txn_id}");
         let deny_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &deny_payload);

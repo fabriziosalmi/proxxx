@@ -36,6 +36,7 @@ Idempotent: re-run after editing the source PNG to refresh everything.
 """
 
 from pathlib import Path
+
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent

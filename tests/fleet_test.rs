@@ -121,6 +121,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
     async fn fleet_aggregates_across_clusters_and_degrades_gracefully() {
         // ── alpha: 2 online nodes, 3 guests, shared nfs pool ──
         let alpha = MockServer::start().await;

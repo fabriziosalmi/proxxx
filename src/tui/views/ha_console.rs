@@ -139,6 +139,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
     );
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_ha(f: &mut Frame, area: Rect, state: &AppState) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)

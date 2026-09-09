@@ -38,6 +38,72 @@ const fn type_path(t: crate::api::types::GuestType) -> &'static str {
 /// surface accepts user ids like `root@pam` — the `@` MUST be encoded
 /// in the URL path or some PVE versions misroute. We don't pull a
 /// crate for this; the rules are simple.
+/// Refuse a request path containing a relative segment.
+///
+/// Percent-encoding each caller-supplied segment is what stops these
+/// from being constructed; this is the chokepoint that makes a forgotten
+/// call site loud instead of exploitable. Checked on a lowercased,
+/// partially percent-decoded view so `%2e%2e` cannot slip past.
+fn reject_path_traversal(path: &str) -> Result<()> {
+    let normalised = path
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/");
+    let suspicious = normalised
+        .split(['/', '?', '&', '='])
+        .any(|seg| seg == ".." || seg == ".");
+    if suspicious {
+        anyhow::bail!(
+            "refusing request path containing a relative segment: {path:?} — \
+             a path component was built from an unencoded caller-supplied value"
+        );
+    }
+    Ok(())
+}
+
+/// Percent-encode a value being placed in a **path segment**.
+///
+/// Deliberately more permissive than [`urlenc`], which is for query
+/// values. RFC 3986 `pchar` allows `:` `@` and the sub-delims inside a
+/// segment, and PVE identifiers use them heavily — a UPID is
+/// `UPID:node:hex:hex:name:type:id:user@realm:`. Encoding those would
+/// change the path PVE receives for every task call.
+///
+/// What this DOES encode is anything that could end the segment or
+/// change its meaning: `/`, `?`, `#`, `%`, and every control or
+/// non-ASCII byte. Combined with [`reject_path_traversal`] at the
+/// transport, a caller-supplied value can no longer escape the segment
+/// it was written into.
+fn urlenc_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b':'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn urlenc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -138,11 +204,18 @@ async fn resolve_tofu_cert(config: &ProfileConfig) -> Result<Option<Vec<u8>>> {
         None => return Ok(None),
     };
     if mode != "tofu" {
-        warn!(
-            "tls_pin_mode = {:?} is not recognised (expected \"tofu\"); skipping pinning",
+        // #255 — refuse rather than silently downgrade. The operator who
+        // sets this key is precisely the one who decided the default
+        // trust posture was insufficient; a misspelling that quietly
+        // disables pinning is the worst outcome. `load_config` rejects
+        // this earlier, so reaching here means the config was built
+        // programmatically — still not a reason to run unpinned.
+        anyhow::bail!(
+            "tls_pin_mode = {:?} is not recognised (expected \"tofu\", or omit the \
+             key for no pinning) — refusing to connect rather than silently \
+             skipping certificate pinning",
             config.tls_pin_mode
         );
-        return Ok(None);
     }
     if let Some(der) =
         crate::api::tls_pin::load_pinned_cert(&config.url).context("loading pinned TLS cert")?
@@ -311,6 +384,18 @@ impl PxClient {
     where
         F: FnMut(&Client) -> RequestBuilder,
     {
+        // Audit 2026-09-09 (#253) — traversal guard, applied to every
+        // request regardless of which of the 234 gateway methods built
+        // the path.
+        //
+        // The per-segment `urlenc` calls are the real fix; this is the
+        // net that catches a method that forgets one, or a new method
+        // added later. A `..` segment survives as a dot-segment and is
+        // resolved away by the URL parser, so a value carrying one
+        // silently retargets the request at an endpoint the calling
+        // method never names.
+        reject_path_traversal(path)?;
+
         let mut attempt: u32 = 0;
         let mut auth_retry_done = false;
         loop {
@@ -627,12 +712,18 @@ impl ProxmoxGateway for PxClient {
         // Fetch both QEMU and LXC in parallel
         let (qemu_result, lxc_result) = tokio::join!(
             async {
-                self.get::<ApiResponse<Vec<Guest>>>(&format!("/nodes/{node}/qemu"))
-                    .await
+                self.get::<ApiResponse<Vec<Guest>>>(&format!(
+                    "/nodes/{node}/qemu",
+                    node = urlenc_segment(node)
+                ))
+                .await
             },
             async {
-                self.get::<ApiResponse<Vec<Guest>>>(&format!("/nodes/{node}/lxc"))
-                    .await
+                self.get::<ApiResponse<Vec<Guest>>>(&format!(
+                    "/nodes/{node}/lxc",
+                    node = urlenc_segment(node)
+                ))
+                .await
             }
         );
 
@@ -659,19 +750,68 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn get_guest_status(&self, node: &str, vmid: u32) -> Result<Guest> {
-        // Try QEMU first, then LXC
-        let qemu_path = format!("/nodes/{node}/qemu/{vmid}/status/current");
-        if let Ok(resp) = self.get::<ApiResponse<Guest>>(&qemu_path).await {
-            return Ok(resp.data);
+        // Audit 2026-09-09 (#260) — assign `guest_type` and `node` from
+        // the hierarchy that answered, exactly as `get_guests` does.
+        //
+        // `/status/current` does not carry a `type` field, and `Guest`
+        // is `#[serde(default)]` over a `GuestType` whose Default is
+        // `Qemu` — so this used to return every container labelled as a
+        // QEMU VM, on node "". The MCP `get_guest_status` tool serialises
+        // the value straight to its caller, and anything dispatching on
+        // the returned type then builds a `/qemu/{vmid}/...` URL for an
+        // LXC container: bug #1 all over again (see `type_path`).
+        //
+        // The probe also stops swallowing every error. Falling through
+        // on a 403, a transport failure or an exhausted retry budget
+        // meant the operator was shown an LXC 404 for a VM that exists,
+        // naming the wrong hierarchy and the wrong cause. Only "this
+        // vmid is not a QEMU guest" justifies trying the other one.
+        let qemu_path = format!(
+            "/nodes/{node}/qemu/{vmid}/status/current",
+            node = urlenc_segment(node)
+        );
+        match self.get::<ApiResponse<Guest>>(&qemu_path).await {
+            Ok(resp) => {
+                let mut g = resp.data;
+                g.node = node.to_string();
+                g.guest_type = GuestType::Qemu;
+                return Ok(g);
+            }
+            Err(e) => {
+                let is_wrong_hierarchy = e
+                    .downcast_ref::<super::ApiError>()
+                    .is_some_and(|api| {
+                        matches!(api, super::ApiError::NotFound(_))
+                            // PVE answers 500 for a vmid that exists but
+                            // belongs to the other hierarchy.
+                            || matches!(api, super::ApiError::Other { status, .. } if *status == 500)
+                    });
+                if !is_wrong_hierarchy {
+                    return Err(e).with_context(|| {
+                        format!("querying QEMU status for guest {vmid} on node {node}")
+                    });
+                }
+            }
         }
-        let lxc_path = format!("/nodes/{node}/lxc/{vmid}/status/current");
+
+        let lxc_path = format!(
+            "/nodes/{node}/lxc/{vmid}/status/current",
+            node = urlenc_segment(node)
+        );
         let resp: ApiResponse<Guest> = self.get(&lxc_path).await?;
-        Ok(resp.data)
+        let mut g = resp.data;
+        g.node = node.to_string();
+        g.guest_type = GuestType::Lxc;
+        Ok(g)
     }
 
     async fn get_storage_pools(&self, node: &str) -> Result<Vec<StoragePool>> {
-        let resp: ApiResponse<Vec<StoragePool>> =
-            self.get(&format!("/nodes/{node}/storage")).await?;
+        let resp: ApiResponse<Vec<StoragePool>> = self
+            .get(&format!(
+                "/nodes/{node}/storage",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -684,7 +824,9 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<TaskLog> {
         let resp: ApiResponse<Vec<super::types::TaskLogLine>> = self
             .get(&format!(
-                "/nodes/{node}/tasks/{upid}/log?start={start}&limit={limit}"
+                "/nodes/{node}/tasks/{upid}/log?start={start}&limit={limit}",
+                node = urlenc_segment(node),
+                upid = urlenc_segment(upid)
             ))
             .await?;
         Ok(TaskLog {
@@ -703,7 +845,10 @@ impl ProxmoxGateway for PxClient {
             crate::api::types::GuestType::Qemu => "qemu",
             crate::api::types::GuestType::Lxc => "lxc",
         };
-        let path = format!("/nodes/{node}/{type_str}/{vmid}/config");
+        let path = format!(
+            "/nodes/{node}/{type_str}/{vmid}/config",
+            node = urlenc_segment(node)
+        );
         let resp: ApiResponse<std::collections::HashMap<String, serde_json::Value>> =
             self.get(&path).await?;
 
@@ -734,7 +879,11 @@ impl ProxmoxGateway for PxClient {
         // accepts the raw UPID in the path — no URL-encoding needed
         // for these specific characters in PVE's pveproxy.
         let resp: ApiResponse<crate::api::types::TaskStatus> = self
-            .get(&format!("/nodes/{node}/tasks/{upid}/status"))
+            .get(&format!(
+                "/nodes/{node}/tasks/{upid}/status",
+                node = urlenc_segment(node),
+                upid = urlenc_segment(upid)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -747,7 +896,13 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/start"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/start",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -784,7 +939,13 @@ impl ProxmoxGateway for PxClient {
         let _ = force;
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/stop"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/stop",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -807,7 +968,10 @@ impl ProxmoxGateway for PxClient {
         };
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/{kind}/{vmid}/status/shutdown"),
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/shutdown",
+                    node = urlenc_segment(node)
+                ),
                 params,
             )
             .await?;
@@ -822,7 +986,13 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/reboot"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/reboot",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -835,7 +1005,13 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/suspend"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/suspend",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -848,24 +1024,44 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/status/resume"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/status/resume",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
 
     async fn startall_node(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/startall"), &[]).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/startall", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
     async fn stopall_node(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/stopall"), &[]).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/stopall", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
     async fn suspendall_node(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> =
-            self.post(&format!("/nodes/{node}/suspendall"), &[]).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/suspendall", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
@@ -877,8 +1073,12 @@ impl ProxmoxGateway for PxClient {
         // digest. For a MVP "show me what's there" view, returning
         // the raw `data` value keeps the wire format honest and lets
         // the CLI pretty-print without lossy conversion.
-        let resp: ApiResponse<serde_json::Value> =
-            self.get(&format!("/nodes/{node}/apt/repositories")).await?;
+        let resp: ApiResponse<serde_json::Value> = self
+            .get(&format!(
+                "/nodes/{node}/apt/repositories",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -889,7 +1089,8 @@ impl ProxmoxGateway for PxClient {
         let resp: ApiResponse<String> = self
             .get(&format!(
                 "/nodes/{node}/apt/changelog?name={}",
-                urlenc(package)
+                urlenc(package),
+                node = urlenc_segment(node)
             ))
             .await?;
         Ok(resp.data)
@@ -899,8 +1100,12 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<Vec<crate::api::types::AptInstalledPackage>> {
-        let resp: ApiResponse<Vec<crate::api::types::AptInstalledPackage>> =
-            self.get(&format!("/nodes/{node}/apt/versions")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::AptInstalledPackage>> = self
+            .get(&format!(
+                "/nodes/{node}/apt/versions",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -917,6 +1122,7 @@ impl ProxmoxGateway for PxClient {
             "/nodes/{node}/{kind}/{vmid}/rrddata?timeframe={}&cf={}",
             timeframe.as_pve_str(),
             cf.as_pve_str(),
+            node = urlenc_segment(node),
         );
         let resp: ApiResponse<Vec<crate::api::types::RrdPoint>> = self.get(&path).await?;
         Ok(resp.data)
@@ -932,6 +1138,7 @@ impl ProxmoxGateway for PxClient {
             "/nodes/{node}/rrddata?timeframe={}&cf={}",
             timeframe.as_pve_str(),
             cf.as_pve_str(),
+            node = urlenc_segment(node),
         );
         let resp: ApiResponse<Vec<crate::api::types::RrdPoint>> = self.get(&path).await?;
         Ok(resp.data)
@@ -949,6 +1156,7 @@ impl ProxmoxGateway for PxClient {
             urlenc(storage),
             timeframe.as_pve_str(),
             cf.as_pve_str(),
+            node = urlenc_segment(node),
         );
         let resp: ApiResponse<Vec<crate::api::types::RrdPoint>> = self.get(&path).await?;
         Ok(resp.data)
@@ -996,7 +1204,13 @@ impl ProxmoxGateway for PxClient {
             params.push(("with-local-disks", "1"));
         }
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/migrate"), &params)
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/migrate",
+                    node = urlenc_segment(node)
+                ),
+                &params,
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1022,7 +1236,8 @@ impl ProxmoxGateway for PxClient {
         // than risk a force-delete on a now-running guest.
         let pre = self
             .get::<ApiResponse<crate::api::types::Guest>>(&format!(
-                "/nodes/{node}/{kind}/{vmid}/status/current"
+                "/nodes/{node}/{kind}/{vmid}/status/current",
+                node = urlenc_segment(node)
             ))
             .await
             .with_context(|| format!("pre-flight status check for delete of {kind} {vmid}"))?;
@@ -1034,8 +1249,12 @@ impl ProxmoxGateway for PxClient {
             );
         }
 
-        let resp: ApiResponse<String> =
-            self.delete(&format!("/nodes/{node}/{kind}/{vmid}")).await?;
+        let resp: ApiResponse<String> = self
+            .delete(&format!(
+                "/nodes/{node}/{kind}/{vmid}",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -1073,7 +1292,10 @@ impl ProxmoxGateway for PxClient {
             crate::api::types::GuestType::Qemu => {
                 // Step 1: submit the command — agent forks it and
                 // returns the PID immediately.
-                let exec_path = format!("/nodes/{node}/qemu/{vmid}/agent/exec");
+                let exec_path = format!(
+                    "/nodes/{node}/qemu/{vmid}/agent/exec",
+                    node = urlenc_segment(node)
+                );
                 let exec_resp = tokio::time::timeout(
                     QGA_EXEC_TIMEOUT,
                     self.post::<ApiResponse<AgentExecResponse>>(&exec_path, &params),
@@ -1091,7 +1313,10 @@ impl ProxmoxGateway for PxClient {
                 // we run out of time. Without this, we'd return the
                 // PID and lose the exit code + stdout + stderr — the
                 // pre-fix behaviour that broke shell-pipeline UX.
-                let status_path = format!("/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}");
+                let status_path = format!(
+                    "/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}",
+                    node = urlenc_segment(node)
+                );
                 let deadline = tokio::time::Instant::now() + QGA_EXEC_TIMEOUT;
                 loop {
                     if tokio::time::Instant::now() >= deadline {
@@ -1160,7 +1385,8 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<crate::api::types::GuestAgentFileContent> {
         let path = format!(
             "/nodes/{node}/qemu/{vmid}/agent/file-read?file={}",
-            urlenc(file)
+            urlenc(file),
+            node = urlenc_segment(node)
         );
         let resp: ApiResponse<crate::api::types::GuestAgentFileContent> = self.get(&path).await?;
         Ok(resp.data)
@@ -1173,7 +1399,10 @@ impl ProxmoxGateway for PxClient {
         file: &str,
         content: &str,
     ) -> Result<()> {
-        let path = format!("/nodes/{node}/qemu/{vmid}/agent/file-write");
+        let path = format!(
+            "/nodes/{node}/qemu/{vmid}/agent/file-write",
+            node = urlenc_segment(node)
+        );
         let _resp: ApiResponse<Option<String>> = self
             .post(&path, &[("file", file), ("content", content)])
             .await?;
@@ -1189,7 +1418,10 @@ impl ProxmoxGateway for PxClient {
         // returning the array directly. We hop through serde_json::Value
         // to peel that wrapper before deserializing the typed shape, so
         // the trait surface stays clean.
-        let path = format!("/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces");
+        let path = format!(
+            "/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces",
+            node = urlenc_segment(node)
+        );
         let resp: ApiResponse<serde_json::Value> = self.get(&path).await?;
         let result = resp
             .data
@@ -1208,19 +1440,25 @@ impl ProxmoxGateway for PxClient {
     // ── Node system layer impls ────────────────────────────
 
     async fn get_node_dns(&self, node: &str) -> Result<crate::api::types::NodeDns> {
-        let resp: ApiResponse<crate::api::types::NodeDns> =
-            self.get(&format!("/nodes/{node}/dns")).await?;
+        let resp: ApiResponse<crate::api::types::NodeDns> = self
+            .get(&format!("/nodes/{node}/dns", node = urlenc_segment(node)))
+            .await?;
         Ok(resp.data)
     }
     async fn update_node_dns(&self, node: &str, params: &[(&str, &str)]) -> Result<()> {
-        let _resp: ApiResponse<Option<String>> =
-            self.put(&format!("/nodes/{node}/dns"), params).await?;
+        let _resp: ApiResponse<Option<String>> = self
+            .put(
+                &format!("/nodes/{node}/dns", node = urlenc_segment(node)),
+                params,
+            )
+            .await?;
         Ok(())
     }
 
     async fn get_node_hosts(&self, node: &str) -> Result<crate::api::types::NodeHosts> {
-        let resp: ApiResponse<crate::api::types::NodeHosts> =
-            self.get(&format!("/nodes/{node}/hosts")).await?;
+        let resp: ApiResponse<crate::api::types::NodeHosts> = self
+            .get(&format!("/nodes/{node}/hosts", node = urlenc_segment(node)))
+            .await?;
         Ok(resp.data)
     }
     async fn update_node_hosts(&self, node: &str, data: &str, digest: Option<&str>) -> Result<()> {
@@ -1228,8 +1466,12 @@ impl ProxmoxGateway for PxClient {
         if let Some(d) = digest {
             params.push(("digest", d));
         }
-        let _resp: ApiResponse<Option<String>> =
-            self.post(&format!("/nodes/{node}/hosts"), &params).await?;
+        let _resp: ApiResponse<Option<String>> = self
+            .post(
+                &format!("/nodes/{node}/hosts", node = urlenc_segment(node)),
+                &params,
+            )
+            .await?;
         Ok(())
     }
 
@@ -1237,7 +1479,7 @@ impl ProxmoxGateway for PxClient {
         // Concatenate after the literal path so the static-analysis
         // map gate sees `/nodes/{node}/journal` instead of treating
         // the query placeholder as a path segment.
-        let mut path = format!("/nodes/{node}/journal");
+        let mut path = format!("/nodes/{node}/journal", node = urlenc_segment(node));
         append_query(&mut path, query);
         let resp: ApiResponse<Vec<String>> = self.get(&path).await?;
         Ok(resp.data)
@@ -1248,26 +1490,35 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         query: &[(&str, &str)],
     ) -> Result<Vec<crate::api::types::NodeSyslogLine>> {
-        let mut path = format!("/nodes/{node}/syslog");
+        let mut path = format!("/nodes/{node}/syslog", node = urlenc_segment(node));
         append_query(&mut path, query);
         let resp: ApiResponse<Vec<crate::api::types::NodeSyslogLine>> = self.get(&path).await?;
         Ok(resp.data)
     }
 
     async fn get_node_time(&self, node: &str) -> Result<crate::api::types::NodeTime> {
-        let resp: ApiResponse<crate::api::types::NodeTime> =
-            self.get(&format!("/nodes/{node}/time")).await?;
+        let resp: ApiResponse<crate::api::types::NodeTime> = self
+            .get(&format!("/nodes/{node}/time", node = urlenc_segment(node)))
+            .await?;
         Ok(resp.data)
     }
     async fn update_node_timezone(&self, node: &str, timezone: &str) -> Result<()> {
         let _resp: ApiResponse<Option<String>> = self
-            .put(&format!("/nodes/{node}/time"), &[("timezone", timezone)])
+            .put(
+                &format!("/nodes/{node}/time", node = urlenc_segment(node)),
+                &[("timezone", timezone)],
+            )
             .await?;
         Ok(())
     }
 
     async fn wakeonlan_node(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/wakeonlan"), &[]).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/wakeonlan", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
@@ -1275,25 +1526,39 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<crate::api::types::NodeSubscription> {
-        let resp: ApiResponse<crate::api::types::NodeSubscription> =
-            self.get(&format!("/nodes/{node}/subscription")).await?;
+        let resp: ApiResponse<crate::api::types::NodeSubscription> = self
+            .get(&format!(
+                "/nodes/{node}/subscription",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
     async fn set_node_subscription_key(&self, node: &str, key: &str) -> Result<()> {
         let _resp: ApiResponse<Option<String>> = self
-            .post(&format!("/nodes/{node}/subscription"), &[("key", key)])
+            .post(
+                &format!("/nodes/{node}/subscription", node = urlenc_segment(node)),
+                &[("key", key)],
+            )
             .await?;
         Ok(())
     }
     async fn refresh_node_subscription(&self, node: &str) -> Result<()> {
         let _resp: ApiResponse<Option<String>> = self
-            .put(&format!("/nodes/{node}/subscription"), &[])
+            .put(
+                &format!("/nodes/{node}/subscription", node = urlenc_segment(node)),
+                &[],
+            )
             .await?;
         Ok(())
     }
     async fn delete_node_subscription(&self, node: &str) -> Result<()> {
-        let _resp: ApiResponse<Option<String>> =
-            self.delete(&format!("/nodes/{node}/subscription")).await?;
+        let _resp: ApiResponse<Option<String>> = self
+            .delete(&format!(
+                "/nodes/{node}/subscription",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(())
     }
 
@@ -1302,7 +1567,10 @@ impl ProxmoxGateway for PxClient {
         node: &str,
     ) -> Result<Vec<crate::api::types::NodeCertificateInfo>> {
         let resp: ApiResponse<Vec<crate::api::types::NodeCertificateInfo>> = self
-            .get(&format!("/nodes/{node}/certificates/info"))
+            .get(&format!(
+                "/nodes/{node}/certificates/info",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -1312,13 +1580,22 @@ impl ProxmoxGateway for PxClient {
         params: &[(&str, &str)],
     ) -> Result<()> {
         let _resp: ApiResponse<serde_json::Value> = self
-            .post(&format!("/nodes/{node}/certificates/custom"), params)
+            .post(
+                &format!(
+                    "/nodes/{node}/certificates/custom",
+                    node = urlenc_segment(node)
+                ),
+                params,
+            )
             .await?;
         Ok(())
     }
     async fn delete_node_custom_certificate(&self, node: &str, restart: bool) -> Result<()> {
         let restart_str = if restart { "1" } else { "0" };
-        let path = format!("/nodes/{node}/certificates/custom?restart={restart_str}");
+        let path = format!(
+            "/nodes/{node}/certificates/custom?restart={restart_str}",
+            node = urlenc_segment(node)
+        );
         let _resp: ApiResponse<Option<String>> = self.delete(&path).await?;
         Ok(())
     }
@@ -1326,7 +1603,10 @@ impl ProxmoxGateway for PxClient {
         let force_str = if force { "1" } else { "0" };
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/certificates/acme/certificate"),
+                &format!(
+                    "/nodes/{node}/certificates/acme/certificate",
+                    node = urlenc_segment(node)
+                ),
                 &[("force", force_str)],
             )
             .await?;
@@ -1334,7 +1614,12 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn get_node_report(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> = self.get(&format!("/nodes/{node}/report")).await?;
+        let resp: ApiResponse<String> = self
+            .get(&format!(
+                "/nodes/{node}/report",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -1416,7 +1701,10 @@ impl ProxmoxGateway for PxClient {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/{kind}/{vmid}/snapshot"),
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/snapshot",
+                    node = urlenc_segment(node)
+                ),
                 &[("snapname", name)],
             )
             .await?;
@@ -1432,7 +1720,11 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
-            .delete(&format!("/nodes/{node}/{kind}/{vmid}/snapshot/{name}"))
+            .delete(&format!(
+                "/nodes/{node}/{kind}/{vmid}/snapshot/{name}",
+                node = urlenc_segment(node),
+                name = urlenc_segment(name)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -1447,7 +1739,11 @@ impl ProxmoxGateway for PxClient {
         let kind = type_path(guest_type);
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/{kind}/{vmid}/snapshot/{name}/rollback"),
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/snapshot/{name}/rollback",
+                    node = urlenc_segment(node),
+                    name = urlenc_segment(name)
+                ),
                 &[],
             )
             .await?;
@@ -1471,7 +1767,13 @@ impl ProxmoxGateway for PxClient {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let resp: ApiResponse<Option<String>> = self
-            .put(&format!("/nodes/{node}/{kind}/{vmid}/config"), &pairs)
+            .put(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/config",
+                    node = urlenc_segment(node)
+                ),
+                &pairs,
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1480,7 +1782,13 @@ impl ProxmoxGateway for PxClient {
         // PVE's regen endpoint accepts no body params — it just
         // re-emits the cloud-init ISO from the current ci* fields.
         let resp: ApiResponse<Option<String>> = self
-            .put(&format!("/nodes/{node}/qemu/{vmid}/cloudinit"), &[])
+            .put(
+                &format!(
+                    "/nodes/{node}/qemu/{vmid}/cloudinit",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1493,7 +1801,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<Vec<crate::api::types::PendingConfigEntry>> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<Vec<crate::api::types::PendingConfigEntry>> = self
-            .get(&format!("/nodes/{node}/{kind}/{vmid}/pending"))
+            .get(&format!(
+                "/nodes/{node}/{kind}/{vmid}/pending",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -1510,7 +1821,13 @@ impl ProxmoxGateway for PxClient {
         // Use `Option<String>` so the deserializer accepts null
         // instead of failing the whole call with a parse error.
         let resp: ApiResponse<Option<String>> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/template"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/template",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data.unwrap_or_default())
     }
@@ -1559,7 +1876,13 @@ impl ProxmoxGateway for PxClient {
             params.push(("description", d));
         }
         let resp: ApiResponse<String> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/clone"), &params)
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/clone",
+                    node = urlenc_segment(node)
+                ),
+                &params,
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1597,8 +1920,12 @@ impl ProxmoxGateway for PxClient {
         if let Some(c) = compress {
             params.push(("compress", c));
         }
-        let resp: ApiResponse<String> =
-            self.post(&format!("/nodes/{node}/vzdump"), &params).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/vzdump", node = urlenc_segment(node)),
+                &params,
+            )
+            .await?;
         Ok(resp.data)
     }
 
@@ -1610,7 +1937,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<Vec<crate::api::types::Snapshot>> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<Vec<crate::api::types::Snapshot>> = self
-            .get(&format!("/nodes/{node}/{kind}/{vmid}/snapshot"))
+            .get(&format!(
+                "/nodes/{node}/{kind}/{vmid}/snapshot",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -1636,7 +1966,11 @@ impl ProxmoxGateway for PxClient {
         }
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/storage/{storage}/download-url"),
+                &format!(
+                    "/nodes/{node}/storage/{storage}/download-url",
+                    node = urlenc_segment(node),
+                    storage = urlenc_segment(storage)
+                ),
                 &params,
             )
             .await?;
@@ -1650,8 +1984,16 @@ impl ProxmoxGateway for PxClient {
         content_filter: Option<&str>,
     ) -> Result<Vec<crate::api::types::StorageContent>> {
         let path = match content_filter {
-            Some(c) => format!("/nodes/{node}/storage/{storage}/content?content={c}"),
-            None => format!("/nodes/{node}/storage/{storage}/content"),
+            Some(c) => format!(
+                "/nodes/{node}/storage/{storage}/content?content={c}",
+                node = urlenc_segment(node),
+                storage = urlenc_segment(storage)
+            ),
+            None => format!(
+                "/nodes/{node}/storage/{storage}/content",
+                node = urlenc_segment(node),
+                storage = urlenc_segment(storage)
+            ),
         };
         let resp: ApiResponse<Vec<crate::api::types::StorageContent>> = self.get(&path).await?;
         Ok(resp.data)
@@ -1667,7 +2009,13 @@ impl ProxmoxGateway for PxClient {
         // even attempt this for an LXC vmid (we'll let Proxmox 4xx if
         // they do, surfacing the right error).
         let resp: ApiResponse<crate::api::types::SpiceConfig> = self
-            .post(&format!("/nodes/{node}/qemu/{vmid}/spiceproxy"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/qemu/{vmid}/spiceproxy",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1680,7 +2028,13 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<crate::api::types::TermproxyTicket> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<crate::api::types::TermproxyTicket> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/termproxy"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/termproxy",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1693,7 +2047,13 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<crate::api::types::VncTicket> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<crate::api::types::VncTicket> = self
-            .post(&format!("/nodes/{node}/{kind}/{vmid}/vncproxy"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/vncproxy",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1734,13 +2094,19 @@ impl ProxmoxGateway for PxClient {
         vmid: u32,
     ) -> Result<Vec<crate::api::types::LxcInterface>> {
         let resp: ApiResponse<Vec<crate::api::types::LxcInterface>> = self
-            .get(&format!("/nodes/{node}/lxc/{vmid}/interfaces"))
+            .get(&format!(
+                "/nodes/{node}/lxc/{vmid}/interfaces",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
 
     async fn dump_qemu_cloudinit(&self, node: &str, vmid: u32, kind: &str) -> Result<String> {
-        let mut path = format!("/nodes/{node}/qemu/{vmid}/cloudinit/dump");
+        let mut path = format!(
+            "/nodes/{node}/qemu/{vmid}/cloudinit/dump",
+            node = urlenc_segment(node)
+        );
         append_query(&mut path, &[("type", kind)]);
         let resp: ApiResponse<String> = self.get(&path).await?;
         Ok(resp.data)
@@ -1762,7 +2128,10 @@ impl ProxmoxGateway for PxClient {
         // makes the static-analysis map gate see `/nodes/.../vncwebsocket`
         // as a real PVE path string. The leading slash is required for
         // `is_pve_path` to fire.
-        let path = format!("/nodes/{node}/{kind}/{vmid}/vncwebsocket");
+        let path = format!(
+            "/nodes/{node}/{kind}/{vmid}/vncwebsocket",
+            node = urlenc_segment(node)
+        );
         let ws_base = if let Some(rest) = self.base_url.strip_prefix("https://") {
             format!("wss://{rest}")
         } else if let Some(rest) = self.base_url.strip_prefix("http://") {
@@ -1783,7 +2152,13 @@ impl ProxmoxGateway for PxClient {
         vmid: u32,
     ) -> Result<crate::api::types::SpiceConfig> {
         let resp: ApiResponse<crate::api::types::SpiceConfig> = self
-            .post(&format!("/nodes/{node}/lxc/{vmid}/spiceproxy"), &[])
+            .post(
+                &format!(
+                    "/nodes/{node}/lxc/{vmid}/spiceproxy",
+                    node = urlenc_segment(node)
+                ),
+                &[],
+            )
             .await?;
         Ok(resp.data)
     }
@@ -1800,7 +2175,7 @@ impl ProxmoxGateway for PxClient {
         // (parity with QEMU's QGA exec polling).
         let resp: ApiResponse<serde_json::Value> = self
             .post(
-                &format!("/nodes/{node}/lxc/{vmid}/exec"),
+                &format!("/nodes/{node}/lxc/{vmid}/exec", node = urlenc_segment(node)),
                 &[("command", command)],
             )
             .await?;
@@ -1808,20 +2183,32 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn get_node_termproxy(&self, node: &str) -> Result<crate::api::types::TermproxyTicket> {
-        let resp: ApiResponse<crate::api::types::TermproxyTicket> =
-            self.post(&format!("/nodes/{node}/termproxy"), &[]).await?;
+        let resp: ApiResponse<crate::api::types::TermproxyTicket> = self
+            .post(
+                &format!("/nodes/{node}/termproxy", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
     async fn get_node_vncshell(&self, node: &str) -> Result<crate::api::types::VncTicket> {
-        let resp: ApiResponse<crate::api::types::VncTicket> =
-            self.post(&format!("/nodes/{node}/vncshell"), &[]).await?;
+        let resp: ApiResponse<crate::api::types::VncTicket> = self
+            .post(
+                &format!("/nodes/{node}/vncshell", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
     async fn get_node_spiceshell(&self, node: &str) -> Result<crate::api::types::SpiceConfig> {
-        let resp: ApiResponse<crate::api::types::SpiceConfig> =
-            self.post(&format!("/nodes/{node}/spiceshell"), &[]).await?;
+        let resp: ApiResponse<crate::api::types::SpiceConfig> = self
+            .post(
+                &format!("/nodes/{node}/spiceshell", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
@@ -1867,7 +2254,8 @@ impl ProxmoxGateway for PxClient {
     async fn extract_backup_config(&self, node: &str, volume: &str) -> Result<String> {
         let path = format!(
             "/nodes/{node}/vzdump/extractconfig?volume={}",
-            urlenc(volume)
+            urlenc(volume),
+            node = urlenc_segment(node)
         );
         let resp: ApiResponse<String> = self.get(&path).await?;
         Ok(resp.data)
@@ -2124,7 +2512,9 @@ impl ProxmoxGateway for PxClient {
         let encoded = urlenc(volid);
         let resp: ApiResponse<Option<String>> = self
             .delete(&format!(
-                "/nodes/{node}/storage/{storage}/content/{encoded}"
+                "/nodes/{node}/storage/{storage}/content/{encoded}",
+                node = urlenc_segment(node),
+                storage = urlenc_segment(storage)
             ))
             .await?;
         Ok(resp.data)
@@ -2188,7 +2578,11 @@ impl ProxmoxGateway for PxClient {
             .text("content", content_type.to_string())
             .part("filename", part);
 
-        let path = format!("/nodes/{node}/storage/{storage}/upload");
+        let path = format!(
+            "/nodes/{node}/storage/{storage}/upload",
+            node = urlenc_segment(node),
+            storage = urlenc_segment(storage)
+        );
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {} (streaming upload, {} bytes)", url, file_size);
 
@@ -2214,8 +2608,12 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn list_pci(&self, node: &str) -> Result<Vec<crate::api::types::PciDevice>> {
-        let resp: ApiResponse<Vec<crate::api::types::PciDevice>> =
-            self.get(&format!("/nodes/{node}/hardware/pci")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::PciDevice>> = self
+            .get(&format!(
+                "/nodes/{node}/hardware/pci",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -2229,8 +2627,12 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<Vec<crate::api::types::FirewallRule>> {
-        let resp: ApiResponse<Vec<crate::api::types::FirewallRule>> =
-            self.get(&format!("/nodes/{node}/firewall/rules")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::FirewallRule>> = self
+            .get(&format!(
+                "/nodes/{node}/firewall/rules",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -2242,7 +2644,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<Vec<crate::api::types::FirewallRule>> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<Vec<crate::api::types::FirewallRule>> = self
-            .get(&format!("/nodes/{node}/{kind}/{vmid}/firewall/rules"))
+            .get(&format!(
+                "/nodes/{node}/{kind}/{vmid}/firewall/rules",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -2375,7 +2780,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<Vec<crate::api::types::FirewallAlias>> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<Vec<crate::api::types::FirewallAlias>> = self
-            .get(&format!("/nodes/{node}/{kind}/{vmid}/firewall/aliases"))
+            .get(&format!(
+                "/nodes/{node}/{kind}/{vmid}/firewall/aliases",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -2389,7 +2797,10 @@ impl ProxmoxGateway for PxClient {
         let kind = type_path(guest_type);
         let _resp: ApiResponse<Option<String>> = self
             .post(
-                &format!("/nodes/{node}/{kind}/{vmid}/firewall/aliases"),
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/firewall/aliases",
+                    node = urlenc_segment(node)
+                ),
                 params,
             )
             .await?;
@@ -2408,7 +2819,8 @@ impl ProxmoxGateway for PxClient {
             .put(
                 &format!(
                     "/nodes/{node}/{kind}/{vmid}/firewall/aliases/{}",
-                    urlenc(name)
+                    urlenc(name),
+                    node = urlenc_segment(node)
                 ),
                 params,
             )
@@ -2426,7 +2838,8 @@ impl ProxmoxGateway for PxClient {
         let _resp: ApiResponse<Option<String>> = self
             .delete(&format!(
                 "/nodes/{node}/{kind}/{vmid}/firewall/aliases/{}",
-                urlenc(name)
+                urlenc(name),
+                node = urlenc_segment(node)
             ))
             .await?;
         Ok(())
@@ -2439,7 +2852,10 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<crate::api::types::GuestFirewallOptions> {
         let kind = type_path(guest_type);
         let resp: ApiResponse<crate::api::types::GuestFirewallOptions> = self
-            .get(&format!("/nodes/{node}/{kind}/{vmid}/firewall/options"))
+            .get(&format!(
+                "/nodes/{node}/{kind}/{vmid}/firewall/options",
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(resp.data)
     }
@@ -2453,7 +2869,10 @@ impl ProxmoxGateway for PxClient {
         let kind = type_path(guest_type);
         let _resp: ApiResponse<Option<String>> = self
             .put(
-                &format!("/nodes/{node}/{kind}/{vmid}/firewall/options"),
+                &format!(
+                    "/nodes/{node}/{kind}/{vmid}/firewall/options",
+                    node = urlenc_segment(node)
+                ),
                 params,
             )
             .await?;
@@ -2510,20 +2929,32 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<Vec<crate::api::types::NetworkInterface>> {
-        let resp: ApiResponse<Vec<crate::api::types::NetworkInterface>> =
-            self.get(&format!("/nodes/{node}/network")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::NetworkInterface>> = self
+            .get(&format!(
+                "/nodes/{node}/network",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
     async fn list_usb(&self, node: &str) -> Result<Vec<crate::api::types::UsbDevice>> {
-        let resp: ApiResponse<Vec<crate::api::types::UsbDevice>> =
-            self.get(&format!("/nodes/{node}/hardware/usb")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::UsbDevice>> = self
+            .get(&format!(
+                "/nodes/{node}/hardware/usb",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
     async fn list_node_disks(&self, node: &str) -> Result<Vec<crate::api::types::Disk>> {
-        let resp: ApiResponse<Vec<crate::api::types::Disk>> =
-            self.get(&format!("/nodes/{node}/disks/list")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::Disk>> = self
+            .get(&format!(
+                "/nodes/{node}/disks/list",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -2531,7 +2962,11 @@ impl ProxmoxGateway for PxClient {
         // PVE expects the disk path as a query parameter, not in the
         // URL path — `?disk=/dev/sda`. The leading `/` survives URL
         // encoding (PVE specifically expects it raw).
-        let path = format!("/nodes/{node}/disks/smart?disk={}", urlenc(disk));
+        let path = format!(
+            "/nodes/{node}/disks/smart?disk={}",
+            urlenc(disk),
+            node = urlenc_segment(node)
+        );
         let resp: ApiResponse<crate::api::types::DiskSmart> = self.get(&path).await?;
         Ok(resp.data)
     }
@@ -2546,7 +2981,12 @@ impl ProxmoxGateway for PxClient {
             #[serde(default)]
             children: Vec<crate::api::types::LvmVolumeGroup>,
         }
-        let resp: ApiResponse<LvmTree> = self.get(&format!("/nodes/{node}/disks/lvm")).await?;
+        let resp: ApiResponse<LvmTree> = self
+            .get(&format!(
+                "/nodes/{node}/disks/lvm",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data.children)
     }
 
@@ -2556,14 +2996,22 @@ impl ProxmoxGateway for PxClient {
         // against PVE 9.1.1). Future-proof: explicit `vg=*` would also
         // work but PVE versions disagree on whether `*` is allowed —
         // omitting is the most compatible.
-        let resp: ApiResponse<Vec<crate::api::types::LvmThinPool>> =
-            self.get(&format!("/nodes/{node}/disks/lvmthin")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::LvmThinPool>> = self
+            .get(&format!(
+                "/nodes/{node}/disks/lvmthin",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
     async fn list_node_zfs(&self, node: &str) -> Result<Vec<crate::api::types::ZfsPool>> {
-        let resp: ApiResponse<Vec<crate::api::types::ZfsPool>> =
-            self.get(&format!("/nodes/{node}/disks/zfs")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::ZfsPool>> = self
+            .get(&format!(
+                "/nodes/{node}/disks/zfs",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -2572,8 +3020,13 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         name: &str,
     ) -> Result<crate::api::types::ZfsPoolDetail> {
-        let resp: ApiResponse<RawZfsDetail> =
-            self.get(&format!("/nodes/{node}/disks/zfs/{name}")).await?;
+        let resp: ApiResponse<RawZfsDetail> = self
+            .get(&format!(
+                "/nodes/{node}/disks/zfs/{name}",
+                node = urlenc_segment(node),
+                name = urlenc_segment(name)
+            ))
+            .await?;
         let raw = resp.data;
         let mut children = Vec::new();
         flatten_zfs_children(&raw.children, &mut children);
@@ -2872,7 +3325,10 @@ impl ProxmoxGateway for PxClient {
         cf: crate::api::types::RrdCf,
     ) -> Result<crate::api::types::RrdImage> {
         let kind = type_path(guest_type);
-        let mut path = format!("/nodes/{node}/{kind}/{vmid}/rrd");
+        let mut path = format!(
+            "/nodes/{node}/{kind}/{vmid}/rrd",
+            node = urlenc_segment(node)
+        );
         append_query(
             &mut path,
             &[
@@ -2922,7 +3378,7 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         limit: Option<u32>,
     ) -> Result<Vec<crate::api::types::TaskInfo>> {
-        let mut path = format!("/nodes/{node}/tasks");
+        let mut path = format!("/nodes/{node}/tasks", node = urlenc_segment(node));
         if let Some(n) = limit {
             let n_str = n.to_string();
             append_query(&mut path, &[("limit", n_str.as_str())]);
@@ -2932,7 +3388,11 @@ impl ProxmoxGateway for PxClient {
     }
     async fn stop_node_task(&self, node: &str, upid: &str) -> Result<()> {
         let _resp: ApiResponse<Option<String>> = self
-            .delete(&format!("/nodes/{node}/tasks/{}", urlenc(upid)))
+            .delete(&format!(
+                "/nodes/{node}/tasks/{}",
+                urlenc(upid),
+                node = urlenc_segment(node)
+            ))
             .await?;
         Ok(())
     }
@@ -2947,7 +3407,8 @@ impl ProxmoxGateway for PxClient {
         let kind = type_path(guest_type);
         let path = format!(
             "/nodes/{node}/{kind}/{vmid}/feature?feature={}",
-            urlenc(feature)
+            urlenc(feature),
+            node = urlenc_segment(node)
         );
         let resp: ApiResponse<crate::api::types::GuestFeatureCheck> = self.get(&path).await?;
         Ok(resp.data)
@@ -2956,7 +3417,10 @@ impl ProxmoxGateway for PxClient {
     async fn send_qemu_key(&self, node: &str, vmid: u32, key: &str) -> Result<()> {
         let _resp: ApiResponse<Option<String>> = self
             .put(
-                &format!("/nodes/{node}/qemu/{vmid}/sendkey"),
+                &format!(
+                    "/nodes/{node}/qemu/{vmid}/sendkey",
+                    node = urlenc_segment(node)
+                ),
                 &[("key", key)],
             )
             .await?;
@@ -2973,7 +3437,10 @@ impl ProxmoxGateway for PxClient {
         let force_str = if force { "1" } else { "0" };
         let _resp: ApiResponse<Option<String>> = self
             .put(
-                &format!("/nodes/{node}/qemu/{vmid}/unlink"),
+                &format!(
+                    "/nodes/{node}/qemu/{vmid}/unlink",
+                    node = urlenc_segment(node)
+                ),
                 &[("idlist", idlist), ("force", force_str)],
             )
             .await?;
@@ -2981,8 +3448,12 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn list_node_aplinfo(&self, node: &str) -> Result<Vec<crate::api::types::AplTemplate>> {
-        let resp: ApiResponse<Vec<crate::api::types::AplTemplate>> =
-            self.get(&format!("/nodes/{node}/aplinfo")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::AplTemplate>> = self
+            .get(&format!(
+                "/nodes/{node}/aplinfo",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
     async fn download_node_aplinfo(
@@ -2993,7 +3464,7 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         let resp: ApiResponse<String> = self
             .post(
-                &format!("/nodes/{node}/aplinfo"),
+                &format!("/nodes/{node}/aplinfo", node = urlenc_segment(node)),
                 &[("storage", storage), ("template", template)],
             )
             .await?;
@@ -3005,7 +3476,10 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         url: &str,
     ) -> Result<crate::api::types::UrlMetadata> {
-        let mut path = format!("/nodes/{node}/query-url-metadata");
+        let mut path = format!(
+            "/nodes/{node}/query-url-metadata",
+            node = urlenc_segment(node)
+        );
         append_query(&mut path, &[("url", url)]);
         let resp: ApiResponse<crate::api::types::UrlMetadata> = self.get(&path).await?;
         Ok(resp.data)
@@ -3207,8 +3681,12 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<Vec<crate::api::types::ReplicationStatus>> {
-        let resp: ApiResponse<Vec<crate::api::types::ReplicationStatus>> =
-            self.get(&format!("/nodes/{node}/replication")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::ReplicationStatus>> = self
+            .get(&format!(
+                "/nodes/{node}/replication",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -3233,7 +3711,13 @@ impl ProxmoxGateway for PxClient {
                     ("delete", delete_str),
                 ];
                 let resp: Result<ApiResponse<String>> = self
-                    .post(&format!("/nodes/{node}/qemu/{vmid}/move_disk"), &params)
+                    .post(
+                        &format!(
+                            "/nodes/{node}/qemu/{vmid}/move_disk",
+                            node = urlenc_segment(node)
+                        ),
+                        &params,
+                    )
                     .await;
                 resp.map(|r| r.data)
             }
@@ -3244,7 +3728,13 @@ impl ProxmoxGateway for PxClient {
                     ("delete", delete_str),
                 ];
                 let resp: Result<ApiResponse<String>> = self
-                    .post(&format!("/nodes/{node}/lxc/{vmid}/move_volume"), &params)
+                    .post(
+                        &format!(
+                            "/nodes/{node}/lxc/{vmid}/move_volume",
+                            node = urlenc_segment(node)
+                        ),
+                        &params,
+                    )
                     .await;
                 resp.map(|r| r.data)
             }
@@ -3311,7 +3801,10 @@ impl ProxmoxGateway for PxClient {
             self.base_url
         );
         let auth = self.auth.read().await;
-        let path = format!("/nodes/{node}/{kind}/{vmid}/resize");
+        let path = format!(
+            "/nodes/{node}/{kind}/{vmid}/resize",
+            node = urlenc_segment(node)
+        );
         let resp = auth
             .apply(self.http.put(&url))
             .form(&params)
@@ -3339,8 +3832,12 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn apt_update_refresh(&self, node: &str) -> Result<String> {
-        let resp: ApiResponse<String> =
-            self.post(&format!("/nodes/{node}/apt/update"), &[]).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/apt/update", node = urlenc_segment(node)),
+                &[],
+            )
+            .await?;
         Ok(resp.data)
     }
 
@@ -3348,14 +3845,22 @@ impl ProxmoxGateway for PxClient {
         &self,
         node: &str,
     ) -> Result<Vec<crate::api::types::AptUpgradable>> {
-        let resp: ApiResponse<Vec<crate::api::types::AptUpgradable>> =
-            self.get(&format!("/nodes/{node}/apt/update")).await?;
+        let resp: ApiResponse<Vec<crate::api::types::AptUpgradable>> = self
+            .get(&format!(
+                "/nodes/{node}/apt/update",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
     async fn node_status_detail(&self, node: &str) -> Result<crate::api::types::NodeStatusDetail> {
-        let resp: ApiResponse<crate::api::types::NodeStatusDetail> =
-            self.get(&format!("/nodes/{node}/status")).await?;
+        let resp: ApiResponse<crate::api::types::NodeStatusDetail> = self
+            .get(&format!(
+                "/nodes/{node}/status",
+                node = urlenc_segment(node)
+            ))
+            .await?;
         Ok(resp.data)
     }
 
@@ -3375,12 +3880,22 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn create_qemu(&self, node: &str, params: &[(&str, &str)]) -> Result<String> {
-        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/qemu"), params).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/qemu", node = urlenc_segment(node)),
+                params,
+            )
+            .await?;
         Ok(resp.data)
     }
 
     async fn create_lxc(&self, node: &str, params: &[(&str, &str)]) -> Result<String> {
-        let resp: ApiResponse<String> = self.post(&format!("/nodes/{node}/lxc"), params).await?;
+        let resp: ApiResponse<String> = self
+            .post(
+                &format!("/nodes/{node}/lxc", node = urlenc_segment(node)),
+                params,
+            )
+            .await?;
         Ok(resp.data)
     }
 }
@@ -3439,5 +3954,49 @@ mod tests {
         assert_eq!(out[2].cksum, 3);
         assert_eq!(out[2].state, "DEGRADED");
         assert_eq!(out[2].msg.as_deref(), Some("too many errors"));
+    }
+}
+
+#[cfg(test)]
+mod path_guard_tests {
+    use super::reject_path_traversal;
+
+    /// #253 — a `..` segment reaching the transport must be refused.
+    /// Percent-encoding each caller-supplied segment is what prevents
+    /// this being constructible; the guard is the net for a call site
+    /// that forgets, or a method added later.
+    #[test]
+    fn rejects_relative_segments() {
+        for path in [
+            "/nodes/pve1/tasks/../../../access/users/log",
+            "/nodes/pve1/tasks/..%2f..%2faccess/log",
+            "/nodes/pve1/tasks/%2e%2e/access/log",
+            "/nodes/../access/users",
+            "/nodes/pve1/qemu/100/snapshot/./rollback",
+        ] {
+            assert!(
+                reject_path_traversal(path).is_err(),
+                "must refuse traversal in {path:?}"
+            );
+        }
+    }
+
+    /// Ordinary paths, including legitimately dotted names, still pass —
+    /// a guard that blocks real requests would be reverted within a week.
+    #[test]
+    fn accepts_ordinary_paths() {
+        for path in [
+            "/nodes/pve1/qemu/100/status/current",
+            "/cluster/resources",
+            "/nodes/pve-test-1/storage/local-lvm/content",
+            "/nodes/pve1/tasks/UPID:pve1:0000:0000:test::root@pam:/log?start=0&limit=500",
+            "/nodes/pve1/apt/changelog?name=pve-manager",
+            "/nodes/n1/qemu/1/snapshot/backup.2026-09-09/rollback",
+        ] {
+            assert!(
+                reject_path_traversal(path).is_ok(),
+                "must accept ordinary path {path:?}"
+            );
+        }
     }
 }

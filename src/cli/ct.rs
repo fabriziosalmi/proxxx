@@ -81,6 +81,7 @@ pub enum CtCommand {
     },
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute(
     client: &Arc<crate::api::PxClient>,
     action: CtCommand,

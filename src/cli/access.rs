@@ -184,6 +184,7 @@ pub enum TokenCommand {
 }
 
 /// Feature #10 — read-only access browse.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_access(
     client: &Arc<crate::api::PxClient>,
     action: AccessCommand,

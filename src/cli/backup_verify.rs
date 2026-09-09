@@ -71,6 +71,7 @@ pub enum VerifyStatus {
     Error,
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<(Value, i32)> {
     use crate::api::ProxmoxGateway;
 

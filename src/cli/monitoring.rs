@@ -461,6 +461,7 @@ pub enum ReplicationCommand {
 }
 
 /// Feature #8 — alerts CLI dispatch.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_alerts(
     client: &Arc<crate::api::PxClient>,
     config: crate::config::ConfigHandle,
@@ -723,6 +724,7 @@ pub async fn execute_alerts(
 /// sparkline + min/max/avg over the chosen field; `--format json`
 /// short-circuits and returns the raw rrddata. Auto-discovers the
 /// owning node when the user omits `--node` for vm/ct.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_metrics(
     client: &Arc<crate::api::PxClient>,
     action: MetricsCommand,
@@ -1231,6 +1233,7 @@ pub async fn execute_disks(
 }
 
 /// Feature #5 — HA console CLI.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_ha(
     client: &Arc<crate::api::PxClient>,
     action: HaCommand,

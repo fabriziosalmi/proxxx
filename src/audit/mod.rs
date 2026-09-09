@@ -59,10 +59,12 @@ impl AuditLogger {
                 params_json TEXT,
                 result     TEXT    NOT NULL DEFAULT '',
                 chain_hmac TEXT    NOT NULL,
-                chain_version INTEGER NOT NULL DEFAULT 1
+                chain_version INTEGER NOT NULL DEFAULT 1,
+                key_id     TEXT    NOT NULL DEFAULT 'primary'
             );",
         )?;
         migrate_chain_version(&conn)?;
+        migrate_key_id(&conn)?;
         Ok(Self { conn, key })
     }
 
@@ -93,8 +95,9 @@ impl AuditLogger {
         );
         self.conn.execute(
             "INSERT INTO audit_log
-                (ts, action, user, vmid, node, params_json, result, chain_hmac, chain_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (ts, action, user, vmid, node, params_json, result, chain_hmac,
+                 chain_version, key_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 ts,
                 action,
@@ -105,6 +108,7 @@ impl AuditLogger {
                 result,
                 chain_hmac,
                 CHAIN_V2,
+                PRIMARY_KEY_ID,
             ],
         )?;
         info!(action, vmid, result, "audit");
@@ -133,7 +137,7 @@ impl AuditLogger {
 
     pub fn verify(&self) -> Result<(usize, usize)> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts,action,user,vmid,node,params_json,result,chain_hmac,chain_version
+            "SELECT ts,action,user,vmid,node,params_json,result,chain_hmac,chain_version,key_id
              FROM audit_log ORDER BY id ASC",
         )?;
         let mut prev = String::new();
@@ -150,17 +154,41 @@ impl AuditLogger {
                 r.get::<_, String>(6)?,         // result
                 r.get::<_, String>(7)?,         // chain_hmac
                 r.get::<_, i64>(8)?,            // chain_version
+                r.get::<_, String>(9)?,         // key_id
             ))
         })?;
+        // #281 — a row is verified with the key it was signed with, so a
+        // rotation does not invalidate everything written before it. The
+        // primary key is already loaded; retired ones are read on first
+        // use and cached for the walk.
+        let mut retired: std::collections::HashMap<String, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
         for row in rows {
-            let (ts, action, user, vmid, node, params, result, stored_hmac, version) = row?;
+            let (ts, action, user, vmid, node, params, result, stored_hmac, version, key_id) = row?;
+            let key: &[u8] = if key_id == PRIMARY_KEY_ID {
+                &self.key
+            } else {
+                let entry = retired
+                    .entry(key_id.clone())
+                    .or_insert_with(|| load_retired_key(&key_id).ok());
+                let Some(k) = entry else {
+                    // The key this row was signed with is gone, so its
+                    // MAC cannot be recomputed. Count it as a failure
+                    // rather than silently skipping: an unverifiable row
+                    // IS a gap in the trail.
+                    fail += 1;
+                    prev = stored_hmac;
+                    continue;
+                };
+                k.as_slice()
+            };
             let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
             // Recompute under each row's OWN chain format, so legacy v1 rows
             // keep verifying after the migration while new v2 rows get the
             // stronger who/what coverage.
             let expected = if version == CHAIN_V2 {
                 compute_hmac_v2(
-                    &self.key,
+                    key,
                     &prev,
                     &ts,
                     &action,
@@ -171,7 +199,7 @@ impl AuditLogger {
                     &result,
                 )
             } else {
-                compute_hmac(&self.key, &prev, &ts, &action, &vmid_str, &result)
+                compute_hmac(key, &prev, &ts, &action, &vmid_str, &result)
             };
             if expected == stored_hmac {
                 ok += 1;
@@ -303,6 +331,34 @@ fn migrate_chain_version(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+/// Add the `key_id` column to an `audit_log` written before key
+/// rotation existed (audit 2026-09-09, #281). Pre-existing rows are
+/// `primary`, which is the key they were signed with.
+fn migrate_key_id(conn: &Connection) -> Result<()> {
+    let has_col: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('audit_log') WHERE name = 'key_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_col == 0 {
+        conn.execute(
+            "ALTER TABLE audit_log ADD COLUMN key_id TEXT NOT NULL DEFAULT 'primary'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Identifier of the key currently being written with.
+///
+/// Retired keys keep their own id and stay on disk as
+/// `audit.key.<id>`, so rows signed with them keep verifying. Before
+/// this existed, rotating meant deleting `audit.key` and starting a new
+/// chain — which destroyed the verifiability of exactly the history an
+/// investigation would need, so in practice the key was permanent for
+/// the life of the log.
+pub const PRIMARY_KEY_ID: &str = "primary";
 
 fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     if path.exists() {
@@ -450,6 +506,88 @@ fn audit_key_path() -> Result<PathBuf> {
     ))
 }
 
+/// Path a retired key is archived at: the primary key path with the
+/// key id appended. Keeping them beside the primary means a backup of
+/// the audit directory captures the whole verifiable history, which is
+/// the property #281 is about.
+fn retired_key_path(key_id: &str) -> Result<PathBuf> {
+    let primary = audit_key_path()?;
+    let name = primary
+        .file_name()
+        .map(|n| format!("{}.{key_id}", n.to_string_lossy()))
+        .unwrap_or_else(|| format!("audit.key.{key_id}"));
+    Ok(primary.with_file_name(name))
+}
+
+/// Read a retired key. Same 0600 custody check as the primary — a
+/// retired key still proves every row it signed.
+fn load_retired_key(key_id: &str) -> Result<Vec<u8>> {
+    let path = retired_key_path(key_id)?;
+    anyhow::ensure!(
+        path.exists(),
+        "audit key `{key_id}` is not present at {} — rows signed with it cannot \
+         be verified",
+        path.display()
+    );
+    load_or_create_key(&path)
+}
+
+/// Rotate the audit HMAC key (audit 2026-09-09, #281).
+///
+/// The current key is archived under a fresh id and a new primary is
+/// generated. Rows already written keep their `key_id`, so `verify`
+/// continues to check them against the key that signed them: rotation no
+/// longer destroys the verifiability of the history it is supposed to
+/// protect.
+///
+/// Returns the id the retired key was archived under.
+///
+/// # Errors
+/// When the key directory cannot be read or written.
+pub fn rotate_key() -> Result<String> {
+    let primary = audit_key_path()?;
+    anyhow::ensure!(
+        primary.exists(),
+        "no audit key at {} — nothing to rotate (one is created on first use)",
+        primary.display()
+    );
+    // The id is a timestamp: sortable, and it says when the key stopped
+    // being used, which is what an investigator wants to know.
+    let key_id = format!("retired-{}", now_unix_secs());
+    let dest = retired_key_path(&key_id)?;
+    anyhow::ensure!(
+        !dest.exists(),
+        "a retired key already exists at {} — refusing to overwrite it, since \
+         that would strand every row it signed",
+        dest.display()
+    );
+    std::fs::rename(&primary, &dest)
+        .with_context(|| format!("archiving {} to {}", primary.display(), dest.display()))?;
+    crate::util::durable::sync_parent_dir(&dest)?;
+
+    // Re-point every existing row at the key that actually signed it,
+    // BEFORE creating the new primary — if this fails, the old key is
+    // still the primary and nothing is stranded.
+    let conn = Connection::open(audit_db_path()?)?;
+    migrate_key_id(&conn)?;
+    conn.execute(
+        "UPDATE audit_log SET key_id = ?1 WHERE key_id = ?2",
+        params![key_id, PRIMARY_KEY_ID],
+    )?;
+
+    // Generating the new primary is the last step.
+    let _new = load_or_create_key(&primary)?;
+    info!(key_id = %key_id, "audit key rotated");
+    Ok(key_id)
+}
+
+fn now_unix_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -519,7 +657,8 @@ impl AuditLogger {
                 params_json TEXT,
                 result     TEXT    NOT NULL DEFAULT '',
                 chain_hmac TEXT    NOT NULL,
-                chain_version INTEGER NOT NULL DEFAULT 1
+                chain_version INTEGER NOT NULL DEFAULT 1,
+                key_id     TEXT    NOT NULL DEFAULT 'primary'
             );",
         )
         .expect("create audit_log");
@@ -844,6 +983,114 @@ mod key_tests {
         assert_eq!(
             resolve_audit_key_path(Some("/secure/mnt/proxxx.key".into()), data_dir),
             PathBuf::from("/secure/mnt/proxxx.key")
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_rotation_tests {
+    use super::{compute_hmac_v2, retired_key_path, CHAIN_V2};
+    use rusqlite::{params, Connection};
+
+    /// #281 — the whole point: rotating must NOT invalidate the history
+    /// it exists to protect. Before this, rotation meant deleting the
+    /// key and starting a new chain, so the correct response to a host
+    /// compromise destroyed the evidence.
+    ///
+    /// Driven against an in-memory DB and explicit keys rather than the
+    /// real paths: `PROXXX_AUDIT_DIR` is process-global and cargo runs
+    /// these in parallel, so mutating it races every sibling test — a
+    /// hazard this codebase already documents elsewhere.
+    #[test]
+    fn a_row_verifies_under_the_key_that_signed_it_not_the_current_one() {
+        let old_key = vec![7u8; 32];
+        let new_key = vec![9u8; 32];
+
+        // A row signed with the OLD key.
+        let ts = "2026-09-09T00:00:00Z";
+        let mac_old = compute_hmac_v2(&old_key, "", ts, "test.before", "tester", "", "", "", "OK");
+
+        // Verifying it against the NEW key must fail — this is what
+        // "rotation invalidated the history" looked like.
+        let mac_under_new =
+            compute_hmac_v2(&new_key, "", ts, "test.before", "tester", "", "", "", "OK");
+        assert_ne!(
+            mac_old, mac_under_new,
+            "sanity: the two keys must produce different MACs"
+        );
+
+        // Verifying it against the key it was signed with must pass.
+        // That is exactly what `verify` now does, via the row's key_id.
+        let recomputed =
+            compute_hmac_v2(&old_key, "", ts, "test.before", "tester", "", "", "", "OK");
+        assert_eq!(
+            recomputed, mac_old,
+            "a row must verify under the key that signed it"
+        );
+    }
+
+    /// The schema carries the key id per row, so `verify` can make that
+    /// choice at all. Without the column there is nothing to select on.
+    #[test]
+    fn the_schema_records_which_key_signed_each_row() {
+        let conn = Connection::open_in_memory().expect("sqlite");
+        conn.execute_batch(
+            "CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, action TEXT NOT NULL, user TEXT NOT NULL DEFAULT '',
+                vmid INTEGER, node TEXT, params_json TEXT,
+                result TEXT NOT NULL DEFAULT '', chain_hmac TEXT NOT NULL,
+                chain_version INTEGER NOT NULL DEFAULT 1
+            );",
+        )
+        .expect("create");
+
+        // A pre-rotation database has no key_id column at all.
+        super::migrate_key_id(&conn).expect("migrate");
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('audit_log') WHERE name = 'key_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(has, 1, "migration must add key_id");
+
+        // Existing rows default to `primary` — the key they were signed
+        // with — rather than to NULL or to the new key.
+        conn.execute(
+            "INSERT INTO audit_log (ts, action, chain_hmac, chain_version)
+             VALUES (?1, ?2, ?3, ?4)",
+            params!["2026-01-01T00:00:00Z", "legacy", "deadbeef", CHAIN_V2],
+        )
+        .expect("insert");
+        let key_id: String = conn
+            .query_row("SELECT key_id FROM audit_log LIMIT 1", [], |r| r.get(0))
+            .expect("read");
+        assert_eq!(key_id, super::PRIMARY_KEY_ID);
+
+        // Migration is idempotent — `open()` runs it on every call.
+        super::migrate_key_id(&conn).expect("second migrate is a no-op");
+    }
+
+    /// Retired keys are archived beside the primary, so a backup of the
+    /// audit directory captures the whole verifiable history.
+    #[test]
+    fn a_retired_key_is_archived_next_to_the_primary() {
+        let path = retired_key_path("retired-1757000000").expect("path");
+        let name = path
+            .file_name()
+            .expect("filename")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.ends_with(".retired-1757000000"),
+            "the id must be in the filename so the pairing is obvious: {name}"
+        );
+        assert_eq!(
+            path.parent(),
+            super::audit_key_path().expect("primary").parent(),
+            "retired keys live beside the primary, so one backup covers both"
         );
     }
 }

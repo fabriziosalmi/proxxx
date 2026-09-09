@@ -69,7 +69,7 @@ fn callback_query(id: &str, data: &str) -> CallbackQuery {
     // `from`, so we round-trip through JSON.
     let json = serde_json::json!({
         "id": id,
-        "from": { "first_name": "tester" },
+        "from": { "id": TEST_APPROVER, "first_name": "tester" },
         "data": data,
     });
     serde_json::from_value(json).expect("CallbackQuery deserializes")
@@ -81,7 +81,7 @@ fn update(update_id: i64, cb: CallbackQuery) -> Update {
         // the JSON manually.
         serde_json::json!({
             "id": "fallback",
-            "from": { "first_name": "tester" },
+            "from": { "id": TEST_APPROVER, "first_name": "tester" },
             "data": "approve:start:1",
         })
     });
@@ -144,11 +144,196 @@ async fn setup_telegram_mock() -> MockServer {
 
 /// Build a `TelegramGateway` pointed at the wiremock server.
 fn fake_gateway(server: &MockServer) -> TelegramGateway {
+    // Since #249 the daemon refuses any callback unless the sender is on
+    // the approver allowlist, so every fixture gateway installs the test
+    // approver id used by `callback_query` below.
     TelegramGateway::with_base_url(
         "faketoken".to_string(),
         "12345".to_string(),
         format!("{}/bot", server.uri()),
     )
+    .with_allowed_approvers(vec![TEST_APPROVER])
+}
+
+/// Telegram user id every fixture callback is sent from, and the only
+/// id `fake_gateway` authorises.
+const TEST_APPROVER: i64 = 4242;
+
+/// #249 — a correctly-signed callback from a Telegram account that is
+/// NOT on the allowlist must be refused without executing anything.
+#[tokio::test]
+async fn callback_from_unlisted_user_is_refused() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "cb-intruder",
+        "from": { "id": 9999_i64, "first_name": "intruder" },
+        "data": data,
+        "message": { "message_id": 1_i64 },
+    }))
+    .expect("CallbackQuery deserializes");
+    let gw = HitlMockGateway::new();
+    let pending = PendingApprovals::new();
+    let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
+        .await
+        .expect("handle_callback_update");
+    assert!(
+        matches!(out, CallbackOutcome::UnauthorizedApprover { user_id: 9999 }),
+        "an unlisted sender must be refused, got {out:?}"
+    );
+    assert!(
+        gw.calls_for("shutdown_guest").is_empty(),
+        "refused callback must not reach the gateway, got {:?}",
+        gw.calls_for("shutdown_guest")
+    );
+}
+
+/// #249 — with no `allowed_approvers` configured the daemon refuses
+/// every callback rather than accepting anyone who can see the message.
+#[tokio::test]
+async fn callback_with_no_allowlist_configured_is_refused() {
+    let server = setup_telegram_mock().await;
+    // Deliberately NOT calling `.with_allowed_approvers(..)`.
+    let tg = TelegramGateway::with_base_url(
+        "faketoken".to_string(),
+        "12345".to_string(),
+        format!("{}/bot", server.uri()),
+    );
+    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let cb = callback_query("cb-noallowlist", &data);
+    let gw = HitlMockGateway::new();
+    let pending = PendingApprovals::new();
+    let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
+        .await
+        .expect("handle_callback_update");
+    assert!(
+        matches!(out, CallbackOutcome::UnauthorizedApprover { .. }),
+        "an unconfigured allowlist must fail closed, got {out:?}"
+    );
+    assert!(
+        gw.calls_for("shutdown_guest").is_empty(),
+        "nothing may execute"
+    );
+}
+
+/// #249 — a keyboard forwarded into a different chat cannot drive the
+/// daemon even when the sender is an authorised approver.
+#[tokio::test]
+async fn callback_from_another_chat_is_refused() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server); // configured chat_id = "12345"
+    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "cb-forwarded",
+        "from": { "id": TEST_APPROVER, "first_name": "tester" },
+        "data": data,
+        "message": { "message_id": 1_i64, "chat": { "id": 999_i64 } },
+    }))
+    .expect("CallbackQuery deserializes");
+    let gw = HitlMockGateway::new();
+    let pending = PendingApprovals::new();
+    let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
+        .await
+        .expect("handle_callback_update");
+    assert!(
+        matches!(out, CallbackOutcome::WrongChat { chat_id: 999 }),
+        "a forwarded keyboard must be refused, got {out:?}"
+    );
+    assert!(
+        gw.calls_for("shutdown_guest").is_empty(),
+        "nothing may execute"
+    );
+}
+
+/// #250 — a policy with `require = 2` must not execute on the first
+/// approval, and must execute once a SECOND distinct approver votes.
+#[tokio::test]
+async fn quorum_of_two_needs_two_distinct_approvers() {
+    const SECOND: i64 = 5150;
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server).with_allowed_approvers(vec![TEST_APPROVER, SECOND]);
+    // Payload as `request_approval` mints it for `require = 2`.
+    let data = signed(tg.hmac_key(), "approve:stop:100:r2");
+    let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
+    let pending = PendingApprovals::new();
+
+    let first = handle_callback_update(
+        &update(1, callback_query("cb-q1", &data)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("first vote");
+    assert!(
+        matches!(
+            first,
+            CallbackOutcome::AwaitingApprovals { have: 1, need: 2 }
+        ),
+        "first approval must not execute, got {first:?}"
+    );
+    assert!(
+        gw.calls_for("shutdown_guest").is_empty(),
+        "nothing may execute on a single vote"
+    );
+
+    // The SAME approver pressing again must not complete the quorum.
+    let again = handle_callback_update(
+        &update(2, callback_query("cb-q1b", &data)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("duplicate vote");
+    assert!(
+        matches!(
+            again,
+            CallbackOutcome::AwaitingApprovals { have: 1, need: 2 }
+        ),
+        "the same approver must not satisfy a 2-of-N quorum, got {again:?}"
+    );
+    assert!(gw.calls_for("shutdown_guest").is_empty());
+
+    // A second, distinct approver completes it.
+    let cb2: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "cb-q2",
+        "from": { "id": SECOND, "first_name": "second" },
+        "data": data,
+        "message": { "message_id": 1_i64 },
+    }))
+    .expect("CallbackQuery deserializes");
+    let done = handle_callback_update(&update(3, cb2), &pending, &gw, &tg)
+        .await
+        .expect("second vote");
+    assert!(
+        matches!(done, CallbackOutcome::Executed { .. }),
+        "the second distinct approver must complete the quorum, got {done:?}"
+    );
+}
+
+/// #250 — a keyboard minted before the quorum segment existed (three
+/// payload segments, no `r<N>`) still means one approver.
+#[tokio::test]
+async fn legacy_payload_without_quorum_segment_means_one() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
+    let pending = PendingApprovals::new();
+    let out = handle_callback_update(
+        &update(1, callback_query("cb-legacy", &data)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("legacy payload");
+    assert!(
+        matches!(out, CallbackOutcome::Executed { .. }),
+        "a 3-segment payload must behave as require=1, got {out:?}"
+    );
 }
 
 /// Helper to build a Node by name.
@@ -1384,6 +1569,7 @@ async fn secure_mode_forces_request_approval_for_destructive() {
                 &vmid.to_string(),
                 "test",
                 &format!("{action}:{vmid}"),
+                1,
             )
             .await
             .expect("request_approval");
@@ -1486,7 +1672,7 @@ async fn fast_op_skips_intermediate_executing_edit() {
     let data = signed(tg.hmac_key(), "approve:restart:100");
     let cb_json = serde_json::json!({
         "id": "cb-fast",
-        "from": { "first_name": "tester" },
+        "from": { "id": TEST_APPROVER, "first_name": "tester" },
         "data": data,
         "message": { "message_id": 42 },
     });
@@ -1517,6 +1703,7 @@ async fn fast_op_skips_intermediate_executing_edit() {
 #[serial_test::serial] // env vars are process-global
 async fn env_var_beats_inline_bot_token() {
     let cfg = proxxx::config::TelegramConfig {
+        allowed_approvers: None,
         bot_token: Some(proxxx::util::secret::SecretString::from("inline-loser")),
         bot_token_file: None,
         chat_id: "12345".to_string(),
@@ -1550,6 +1737,7 @@ async fn bot_token_file_with_lax_permissions_is_refused() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
     let cfg = proxxx::config::TelegramConfig {
+        allowed_approvers: None,
         bot_token: None,
         bot_token_file: Some(path.to_string_lossy().to_string()),
         chat_id: "12345".to_string(),

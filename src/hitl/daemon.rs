@@ -55,6 +55,18 @@ pub enum CallbackOutcome {
     InvalidFormat { data: String },
     /// Unknown action token (not start/stop/restart). Ignored.
     UnknownAction { action: String, vmid: u32 },
+    /// The callback was well-formed and correctly signed, but the
+    /// Telegram account that pressed the button is not on the configured
+    /// approver allowlist — or no allowlist is configured at all, which
+    /// is treated the same way. The daemon did NOT execute.
+    UnauthorizedApprover { user_id: i64 },
+    /// The callback originated in a chat other than the configured
+    /// `chat_id` — a forwarded keyboard. The daemon did NOT execute.
+    WrongChat { chat_id: i64 },
+    /// The vote was recorded but the policy's `require` quorum is not
+    /// yet met. The daemon did NOT execute; it is waiting for more
+    /// distinct approvers.
+    AwaitingApprovals { have: usize, need: usize },
 }
 
 /// Process exactly one Telegram update.
@@ -72,6 +84,7 @@ pub enum CallbackOutcome {
 /// Never returns `Err` — all failure modes surface through
 /// `CallbackOutcome`. The `Result` return is reserved for future
 /// expansion (e.g. propagating shutdown signals).
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn handle_callback_update(
     update: &Update,
     pending: &PendingApprovals,
@@ -134,6 +147,67 @@ pub async fn handle_callback_update(
         head_payload.to_string()
     };
 
+    // Audit 2026-09-09 (#249) — WHO pressed the button.
+    //
+    // The HMAC above proves this daemon minted the keyboard. It proves
+    // nothing about the person acting on it: Telegram delivers the
+    // buttons to everyone who can see the message, so without this gate
+    // any member of the chat could approve a destructive operation,
+    // which then executes with the daemon's full PVE credentials.
+    //
+    // Two checks, both fail-closed:
+    //   1. The originating chat must be the configured one, so a
+    //      forwarded keyboard cannot drive the daemon.
+    //   2. The sender must be on `allowed_approvers`. An unconfigured
+    //      (empty) allowlist refuses everything rather than accepting
+    //      anyone — same posture as v0.13.0's "destructive MCP tool with
+    //      no policy is REFUSED".
+    if let Some(chat) = cb.message.as_ref().and_then(|m| m.chat.as_ref()) {
+        if tg_gateway.chat_id() != chat.id.to_string() {
+            warn!(
+                "HITL callback from chat {} but configured chat is {} — refused",
+                chat.id,
+                tg_gateway.chat_id()
+            );
+            let _ = tg_gateway
+                .answer_callback(&cb.id, "❌ Wrong chat — refused")
+                .await;
+            return Ok(CallbackOutcome::WrongChat { chat_id: chat.id });
+        }
+    }
+    let approvers = tg_gateway.allowed_approvers();
+    if approvers.is_empty() {
+        warn!(
+            "HITL callback from user {} refused: no `allowed_approvers` configured. \
+             Add the approving Telegram user ids to the profile's [telegram] section \
+             (numeric ids, e.g. from @userinfobot) — proxxx will not act on an \
+             unauthenticated approval.",
+            cb.from.id
+        );
+        let _ = tg_gateway
+            .answer_callback(
+                &cb.id,
+                "❌ No approver allowlist configured — refused. See `allowed_approvers`.",
+            )
+            .await;
+        return Ok(CallbackOutcome::UnauthorizedApprover {
+            user_id: cb.from.id,
+        });
+    }
+    if !approvers.contains(&cb.from.id) {
+        warn!(
+            "HITL callback from unauthorised user {} (@{}) — refused",
+            cb.from.id,
+            cb.from.username.as_deref().unwrap_or("?")
+        );
+        let _ = tg_gateway
+            .answer_callback(&cb.id, "❌ Not an authorised approver — refused")
+            .await;
+        return Ok(CallbackOutcome::UnauthorizedApprover {
+            user_id: cb.from.id,
+        });
+    }
+
     let parts: Vec<&str> = payload_for_parse.split(':').collect();
     if parts.len() < 3 {
         let _ = tg_gateway
@@ -174,6 +248,43 @@ pub async fn handle_callback_update(
             action: action.to_string(),
             vmid,
         });
+    }
+
+    // #250 — quorum. `require` rides in the signed payload as a 4th
+    // segment (`r<N>`); a keyboard minted before v0.13.4 has no such
+    // segment and means "one approver", which is the historic behaviour.
+    let require: u8 = parts
+        .get(3)
+        .and_then(|seg| seg.strip_prefix('r'))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
+
+    // Vote BEFORE the replay gate: every approver presses the same
+    // keyboard, so their callback data is identical by construction and
+    // the replay gate would reject the second signature as a duplicate.
+    // Only the callback that completes the quorum falls through to
+    // `consume`, which then makes the whole transaction single-use.
+    match pending.record_vote(data, cb.from.id, require) {
+        crate::hitl::pending::VoteProgress::Satisfied => {}
+        crate::hitl::pending::VoteProgress::Waiting {
+            have,
+            need,
+            duplicate,
+        } => {
+            let note = if duplicate {
+                format!("You already approved — {have}/{need}")
+            } else {
+                format!("Recorded — {have}/{need} approvals")
+            };
+            info!("HITL quorum not yet met for {data}: {have}/{need}");
+            let _ = tg_gateway.answer_callback(&cb.id, &note).await;
+            edit_status(
+                &format!("\u{23f3} Awaiting approval ({have}/{need})"),
+                cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
+            )
+            .await;
+            return Ok(CallbackOutcome::AwaitingApprovals { have, need });
+        }
     }
 
     // Replay gate. The full callback data string IS the txn_id from the

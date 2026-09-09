@@ -84,6 +84,7 @@ fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
     );
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
     let visible_list = state.visible_guests();
 
@@ -274,6 +275,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     let guest = state.guests.iter().find(|g| g.vmid == vmid);
 

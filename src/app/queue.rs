@@ -36,6 +36,7 @@ pub enum OpStatus {
 
 impl QueuedOp {
     #[must_use]
+    #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
     pub fn new(action: Box<Action>, state: &AppState) -> Self {
         let (description, diff) = match &*action {
             Action::StartGuest { vmid } => {

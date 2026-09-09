@@ -343,6 +343,7 @@ pub fn assess(changes: &[Change], live: &ClusterState) -> Vec<StateRisk> {
 }
 
 /// Per-change risk surface. Pure function; no I/O.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn assess_one(change: &Change, live: &ClusterState) -> Vec<StateRisk> {
     let mut out = Vec::new();
     match (change.kind, change.resource) {

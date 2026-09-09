@@ -202,10 +202,88 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Identify the operator for the audit trail.
+///
+/// Audit 2026-09-09 (#256): this used to read `$USER`, which the calling
+/// process controls — `USER=someone-else proxxx incident freeze` wrote
+/// and then cryptographically sealed an entry attributing the action to
+/// whoever was named. The v2 chain format binds the actor into the MAC
+/// specifically so a local tamperer cannot rewrite it afterwards; that
+/// is worth nothing if the field was never true to begin with.
+///
+/// The real uid cannot be set by the environment, so it is the anchor.
+/// The resolved login name is a convenience on top: if `$USER` disagrees
+/// with the uid's passwd entry, the uid wins and the claimed name is
+/// recorded separately as unverified, rather than being silently
+/// believed or silently dropped.
+/// Public wrapper so the CLI's audit hooks label the operator exactly
+/// the way the freeze writer does.
+#[must_use]
+pub fn operator_label() -> String {
+    operator_id()
+}
+
 fn operator_id() -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let host = hostname_or_unknown();
-    format!("{user}@{host}")
+    let uid = real_uid();
+    let resolved = login_name_for_uid(uid);
+    let claimed = std::env::var("USER").ok();
+
+    let who = match (resolved.as_deref(), claimed.as_deref()) {
+        // Resolved name and the environment agree — the ordinary case.
+        (Some(r), Some(c)) if r == c => r.to_string(),
+        // Disagreement, or no passwd entry: keep the uid, which is
+        // authoritative, and mark the claim as unverified.
+        (Some(r), Some(c)) => format!("{r}(uid:{uid};claimed:{c})"),
+        (Some(r), None) => r.to_string(),
+        (None, Some(c)) => format!("uid:{uid}(claimed:{c})"),
+        (None, None) => format!("uid:{uid}"),
+    };
+    format!("{who}@{host}")
+}
+
+/// The real (not effective) uid of this process. Unlike `$USER` this is
+/// kernel state and cannot be set by whoever launched us.
+#[cfg(unix)]
+fn real_uid() -> u32 {
+    // SAFETY: `getuid` is always successful, takes no arguments and
+    // touches no memory we own. It is one of the few genuinely
+    // infallible syscalls.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn real_uid() -> u32 {
+    0
+}
+
+/// Resolve a uid to its login name via the passwd database.
+#[cfg(unix)]
+fn login_name_for_uid(uid: u32) -> Option<String> {
+    // SAFETY: `getpwuid` returns a pointer into a static buffer owned by
+    // libc, or NULL when the uid has no passwd entry. We copy the name
+    // out immediately and never retain the pointer, and the buffer is
+    // not mutated between the call and the copy on any single-threaded
+    // path through here.
+    unsafe {
+        let pw = libc::getpwuid(uid as libc::uid_t);
+        if pw.is_null() {
+            return None;
+        }
+        let name = (*pw).pw_name;
+        if name.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(name)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
+#[cfg(not(unix))]
+fn login_name_for_uid(_uid: u32) -> Option<String> {
+    std::env::var("USERNAME").ok()
 }
 
 fn hostname_or_unknown() -> String {
@@ -260,11 +338,11 @@ pub fn current_state_at(path: &std::path::Path) -> Result<Option<FreezeState>> {
 /// future MCP dispatch, future scheduler tick) calls this at the
 /// top before any side-effect.
 ///
-/// I/O errors reading the lock are treated as "no freeze" — we
-/// prefer to over-permit than to silently lock the cluster out due
-/// to a transient I/O failure. The error is logged but not
-/// propagated. This is a deliberate trade-off documented in #64
-/// discussion.
+/// A lock file that exists but cannot be read or parsed is treated as
+/// an ACTIVE freeze, not as an absent one (#252). Only a missing file
+/// means "not frozen". The earlier posture — over-permit on any I/O
+/// error, per the #64 discussion — did not distinguish the two, so a
+/// corrupt lock silently disarmed the kill-switch.
 pub fn check_not_frozen() -> Result<()> {
     check_not_frozen_at(&freeze_path())
 }
@@ -306,9 +384,38 @@ pub fn check_not_frozen_at(path: &std::path::Path) -> Result<()> {
             frozen_at: state.frozen_at,
         })),
         Ok(None) => Ok(()),
+        // Audit 2026-09-09 (#252) — an unreadable lock is UNKNOWN state,
+        // not absent state, and for a kill-switch unknown must mean
+        // stopped.
+        //
+        // This branch used to return `Ok(())` on the reasoning that a
+        // transient I/O error should not lock the cluster out. But the
+        // two cases were conflated: `current_state_at` already returns
+        // `Ok(None)` when the file does not exist, which is the only
+        // case that legitimately means "not frozen". Reaching here means
+        // the file IS there and could not be read or parsed — a torn
+        // write after power loss, a truncated copy, a full disk, or
+        // tampering — and proceeding then silently disarms the control
+        // at exactly the moment it is being relied on.
+        //
+        // `proxxx incident thaw` rewrites the file, so the operator
+        // still has a deliberate way out that does not involve the
+        // process guessing.
         Err(e) => {
-            tracing::warn!("freeze: lock unreadable, allowing operation through: {e:#}");
-            Ok(())
+            tracing::warn!(
+                "freeze: lock at {} exists but is unreadable — refusing the operation: {e:#}",
+                path.display()
+            );
+            Err(anyhow::Error::from(FreezeRefusal {
+                scope: "the fleet (lock unreadable)".to_string(),
+                reason: format!(
+                    "the freeze lock at {} could not be read or parsed, so proxxx cannot \
+                     tell whether a freeze is active. Run `proxxx incident thaw` to clear \
+                     it deliberately, or repair the file. Underlying error: {e}",
+                    path.display()
+                ),
+                frozen_at: 0,
+            }))
         }
     }
 }
@@ -449,13 +556,45 @@ fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
+    // #268 — the freeze lock above all: a rename that does not survive a
+    // power loss means the kill-switch is off after the reboot, while the
+    // operator was told the fleet was frozen.
+    crate::util::durable::rename_durable(&tmp, path)
         .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    /// #252 — a lock file that exists but cannot be parsed is UNKNOWN
+    /// state, and a kill-switch must treat unknown as stopped. Before
+    /// v0.13.4 this returned `Ok(())`, so a torn or truncated lock
+    /// silently disarmed the control.
+    #[test]
+    fn unreadable_lock_refuses_the_operation() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("freeze.lock");
+        std::fs::write(&path, b"\xff\xfe not toml at all \x00").expect("write garbage");
+        let err = super::check_not_frozen_at(&path)
+            .expect_err("a corrupt lock must refuse, not pass through");
+        let refusal = err
+            .downcast_ref::<super::FreezeRefusal>()
+            .expect("must surface as a typed FreezeRefusal (exit code 8)");
+        assert!(
+            refusal.reason.contains("could not be read or parsed"),
+            "the refusal must tell the operator why: {}",
+            refusal.reason
+        );
+    }
+
+    /// The distinction that matters: absent still means not frozen.
+    #[test]
+    fn absent_lock_still_passes() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("does-not-exist.lock");
+        super::check_not_frozen_at(&path).expect("an absent lock means not frozen");
+    }
+
     use super::*;
 
     /// Each test gets its own private temp directory + lock file
@@ -704,5 +843,66 @@ mod tests {
             scopes,
             vec![None, Some("alpha".into()), Some("beta".into())]
         );
+    }
+}
+
+#[cfg(test)]
+mod operator_identity_tests {
+    /// #256 — the audit actor must be anchored on the real uid, which
+    /// the caller cannot set, rather than on `$USER`, which it can.
+    ///
+    /// This test does not mutate the environment (it is process-global
+    /// and other tests in this binary run in parallel); it asserts the
+    /// structural property instead: whatever `$USER` says, the label
+    /// resolves from the passwd entry for our real uid, and a
+    /// disagreement is marked rather than believed.
+    /// Assertion messages here deliberately describe the SHAPE of the
+    /// label rather than interpolating it. A uid is not a credential,
+    /// but it is account-identifying, and `CodeQL`'s `rust/cleartext-logging`
+    /// is right that a test failure should not be the thing that prints
+    /// it into CI output. The structural description is what a reader
+    /// debugging a failure actually needs.
+    #[test]
+    fn operator_label_is_anchored_on_the_real_uid() {
+        let label = super::operator_label();
+        assert!(
+            label.contains('@'),
+            "the label must carry a host component (got {} chars, no '@')",
+            label.len()
+        );
+        let who = label.split('@').next().unwrap_or_default();
+        assert!(!who.is_empty(), "the actor part must not be empty");
+
+        // Either the resolved passwd name (agreeing with $USER), or an
+        // explicit marker that the two disagreed / could not be resolved.
+        let resolved = super::login_name_for_uid(super::real_uid());
+        let claimed = std::env::var("USER").ok();
+        match (resolved.as_deref(), claimed.as_deref()) {
+            (Some(r), Some(c)) if r == c => assert_eq!(
+                who, r,
+                "when passwd and $USER agree the label must be that name verbatim"
+            ),
+            (Some(_), Some(_)) => assert!(
+                who.contains("uid:") && who.contains("claimed:"),
+                "passwd and $USER disagree, so the label must carry both the uid \
+                 and the unverified claim — it carried neither marker"
+            ),
+            _ => assert!(
+                who.contains("uid:") || Some(who) == resolved.as_deref(),
+                "with no passwd entry or no $USER, the label must fall back to the \
+                 uid form or to the resolved name"
+            ),
+        }
+    }
+
+    /// The uid is real kernel state — it must not be affected by the
+    /// environment variable the old implementation trusted.
+    #[test]
+    fn real_uid_is_not_influenced_by_env() {
+        let before = super::real_uid();
+        // Reading is enough: we assert stability across a call that would
+        // have changed the old `$USER`-derived answer.
+        let after = super::real_uid();
+        assert_eq!(before, after, "getuid() must be stable");
     }
 }

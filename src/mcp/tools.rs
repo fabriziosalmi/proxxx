@@ -87,6 +87,86 @@ pub struct ParamDef {
     pub description: &'static str,
     pub param_type: ParamType,
     pub required: bool,
+    /// Character-class constraint for `ParamType::Str` (audit
+    /// 2026-09-09, #254).
+    ///
+    /// The registry could previously express only "this is a string",
+    /// so every string argument reached the dispatcher unconstrained and
+    /// was used to build PVE request paths. `ParamType::Int` gave real
+    /// protection to the vmid-bearing tools, which is why those were
+    /// never the problem; the string ones had nothing.
+    ///
+    /// `Shape::Any` keeps the old behaviour for free-form values
+    /// (descriptions, comments) where a constraint would be wrong.
+    pub shape: Shape,
+}
+
+/// What a string parameter is allowed to contain.
+///
+/// Deliberately coarse: the goal is to keep separators and control
+/// characters out of values that become path segments, not to duplicate
+/// PVE's own validation. Anything rejected here would have been rejected
+/// or misinterpreted by PVE anyway — the difference is that it now fails
+/// at our boundary with the parameter named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// No constraint. For prose: descriptions, comments, notes.
+    Any,
+    /// A PVE node or object name: letters, digits, `-`, `_`, `.`.
+    /// No slashes, no relative segments, 1..=64 bytes.
+    Name,
+    /// A PVE task id: `UPID:node:hex:...:user@realm:`. Allows the `:`
+    /// and `@` a UPID needs, still no slashes.
+    Upid,
+}
+
+impl Shape {
+    /// JSON Schema `pattern` describing this shape, for the `tools/list`
+    /// response. `None` for [`Shape::Any`], which has no constraint.
+    #[must_use]
+    pub const fn json_schema_pattern(self) -> Option<&'static str> {
+        match self {
+            Self::Any => None,
+            Self::Name => Some("^[A-Za-z0-9._-]{1,256}$"),
+            Self::Upid => Some("^[A-Za-z0-9._:@!-]{1,256}$"),
+        }
+    }
+
+    /// Validate `value`, returning a reason on rejection.
+    ///
+    /// # Errors
+    /// Returns the human-readable reason the value is not acceptable.
+    pub fn check(self, value: &str) -> Result<(), String> {
+        let ok_char = |c: char| match self {
+            Self::Any => true,
+            Self::Name => c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'),
+            Self::Upid => {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '@' | '!')
+            }
+        };
+        if matches!(self, Self::Any) {
+            return Ok(());
+        }
+        if value.is_empty() {
+            return Err("must not be empty".to_string());
+        }
+        if value.len() > 256 {
+            return Err(format!("must be at most 256 bytes, got {}", value.len()));
+        }
+        if let Some(bad) = value.chars().find(|c| !ok_char(*c)) {
+            return Err(format!(
+                "contains {bad:?}, which is not allowed here (letters, digits and \
+                 a small punctuation set only — a value that can carry a path \
+                 separator or a relative segment is refused at the boundary)"
+            ));
+        }
+        // Belt and braces: a value made entirely of dots is a relative
+        // segment even though every character passed the class check.
+        if value.chars().all(|c| c == '.') {
+            return Err("must not be a relative path segment".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -106,6 +186,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Connection profile name",
             param_type: ParamType::Str,
             required: false,
+            shape: Shape::Any,
         }],
         action: ToolAction::ListNodes,
         destructive: false,
@@ -120,12 +201,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Connection profile",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "node",
                 description: "Filter by node name",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Name,
             },
         ],
         action: ToolAction::ListGuests,
@@ -140,6 +223,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID (100-999999)",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::GetGuestStatus,
         destructive: false,
@@ -153,6 +237,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID (100-999999)",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::StartGuest,
         destructive: false,
@@ -167,12 +252,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Guest VMID (100-999999)",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "force",
                 description: "Force stop without graceful shutdown",
                 param_type: ParamType::Bool,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::StopGuest,
@@ -187,6 +274,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID (100-999999)",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::RestartGuest,
         destructive: true,
@@ -200,6 +288,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID (100-999999)",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::DeleteGuest,
         destructive: true, // ALWAYS triggers HITL gate
@@ -217,12 +306,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Guest VMID",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "name",
                 description: "Snapshot name",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Name,
             },
         ],
         action: ToolAction::CreateSnapshot,
@@ -243,12 +334,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Guest VMID",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "name",
                 description: "Snapshot name",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Name,
             },
         ],
         action: ToolAction::DeleteSnapshot,
@@ -263,6 +356,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Node name",
             param_type: ParamType::Str,
             required: true,
+            shape: Shape::Name,
         }],
         action: ToolAction::GetStoragePools,
         destructive: false,
@@ -277,6 +371,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::ListSnapshots,
         destructive: false,
@@ -291,12 +386,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Node name where the task ran",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "upid",
                 description: "Task UPID string",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Upid,
             },
         ],
         action: ToolAction::GetTaskLog,
@@ -311,6 +408,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Node name",
             param_type: ParamType::Str,
             required: true,
+            shape: Shape::Name,
         }],
         action: ToolAction::GetNodeResources,
         destructive: false,
@@ -325,6 +423,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::SuspendGuest,
         // Availability-affecting: pausing a running VM freezes it (unresponsive
@@ -343,6 +442,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Guest VMID",
             param_type: ParamType::Int,
             required: true,
+            shape: Shape::Any,
         }],
         action: ToolAction::ResumeGuest,
         destructive: false,
@@ -357,24 +457,28 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Source VMID to clone",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "newid",
                 description: "New VMID (0 = auto-assign next free)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "name",
                 description: "Name for the new guest",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "full",
                 description: "Full clone (true) vs linked clone (false, default)",
                 param_type: ParamType::Bool,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::CloneGuest,
@@ -390,18 +494,21 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Guest VMID",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "target_node",
                 description: "Destination node name",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "online",
                 description: "Live migration while guest is running (default true)",
                 param_type: ParamType::Bool,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::MigrateGuest,
@@ -424,6 +531,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Filter by node (optional, omit for cluster-wide)",
             param_type: ParamType::Str,
             required: false,
+            shape: Shape::Name,
         }],
         action: ToolAction::ListTasks,
         destructive: false,
@@ -437,6 +545,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Node name",
             param_type: ParamType::Str,
             required: true,
+            shape: Shape::Name,
         }],
         action: ToolAction::GetNodeStatus,
         destructive: false,
@@ -458,6 +567,7 @@ pub const TOOLS: &[ToolDef] = &[
             description: "Node name",
             param_type: ParamType::Str,
             required: true,
+            shape: Shape::Name,
         }],
         action: ToolAction::GetReplicationStatus,
         destructive: false,
@@ -472,66 +582,77 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Target Proxmox node name",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "type",
                 description: "Guest type: qemu or lxc",
                 param_type: ParamType::Str,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "vmid",
                 description: "VMID to assign (auto-assigned from cluster nextid if omitted)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "name",
                 description: "VM name (QEMU) or hostname (LXC)",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "memory",
                 description: "Memory in MiB (default: 1024 for QEMU, 512 for LXC)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "cores",
                 description: "CPU cores (default: 1)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "storage",
                 description: "Storage id for boot disk (e.g. local-lvm). If omitted, no disk is created.",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "disk_size",
                 description: "Disk size in GiB (default: 32 QEMU, 8 LXC)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "template",
                 description: "LXC only: ostemplate volid (e.g. local:vztmpl/debian-12-standard_12.0-1_amd64.tar.zst)",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "iso",
                 description: "QEMU only: ISO image volid for CD-ROM (e.g. local:iso/ubuntu-24.04.iso)",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "bridge",
                 description: "Network bridge (default: vmbr0)",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::CreateGuest,
@@ -548,12 +669,14 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Maximum number of events to return (default 50, max 200)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "running_only",
                 description: "When true, return only tasks that are currently running",
                 param_type: ParamType::Bool,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::ListClusterEvents,
@@ -570,54 +693,63 @@ pub const TOOLS: &[ToolDef] = &[
                 description: "Source VMID (template) to clone",
                 param_type: ParamType::Int,
                 required: true,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "newid",
                 description: "New VMID (0 = auto-assign next free)",
                 param_type: ParamType::Int,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "name",
                 description: "Display name for the new VM",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Name,
             },
             ParamDef {
                 name: "full",
                 description: "Full clone (true) vs linked clone (false, default)",
                 param_type: ParamType::Bool,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "ciuser",
                 description: "Cloud-init default user account",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "sshkey",
                 description: "SSH public key (single line, ssh-ed25519/ssh-rsa form)",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "ipconfig0",
                 description: "First-NIC IP config, e.g. `ip=10.0.0.5/24,gw=10.0.0.1` or `ip=dhcp`",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "searchdomain",
                 description: "DNS search domain",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
             ParamDef {
                 name: "nameserver",
                 description: "DNS resolver IP",
                 param_type: ParamType::Str,
                 required: false,
+                shape: Shape::Any,
             },
         ],
         action: ToolAction::CloneWithCloudinit,
@@ -688,13 +820,23 @@ pub fn tools_list_schema() -> serde_json::Value {
                     ParamType::Int => "integer",
                     ParamType::Bool => "boolean",
                 };
-                properties.insert(
-                    p.name.to_string(),
-                    serde_json::json!({
-                        "type": json_type,
-                        "description": p.description,
-                    }),
-                );
+                let mut prop = serde_json::json!({
+                    "type": json_type,
+                    "description": p.description,
+                });
+                // #254 — publish the constraint the dispatcher enforces,
+                // as a JSON Schema `pattern`, so the model is told what
+                // is acceptable instead of discovering it by rejection.
+                //
+                // Deliberately NOT added to `registry_json`, which is
+                // what `registry_checksum` hashes: this is a validation
+                // tightening, not a change to the advertised tool
+                // surface, and the checksum is a contract fingerprint
+                // callers pin.
+                if let Some(pattern) = p.shape.json_schema_pattern() {
+                    prop["pattern"] = serde_json::Value::String(pattern.to_string());
+                }
+                properties.insert(p.name.to_string(), prop);
                 if p.required {
                     required.push(serde_json::Value::String(p.name.to_string()));
                 }
@@ -734,4 +876,67 @@ pub fn registry_checksum() -> String {
     // `AsRef<[u8]>` which Array does implement, so it's the portable
     // way to get a lowercase hex digest across sha2 0.10 and 0.11.
     hex::encode(digest)
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::{Shape, TOOLS};
+
+    /// #254 — every string parameter that becomes a PVE path segment
+    /// must declare a constraint. A registry that can only say "string"
+    /// is why `node` and `upid` reached URL construction unvalidated.
+    #[test]
+    fn path_bearing_string_params_are_constrained() {
+        const PATH_BEARING: &[&str] = &["node", "target_node", "storage", "snapshot", "upid"];
+        for tool in TOOLS {
+            for p in tool.params {
+                if PATH_BEARING.contains(&p.name) {
+                    assert_ne!(
+                        p.shape,
+                        Shape::Any,
+                        "tool `{}` parameter `{}` becomes a path segment and must \
+                         declare a shape",
+                        tool.name,
+                        p.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn name_shape_refuses_separators_and_relative_segments() {
+        for bad in [
+            "../../access",
+            "a/b",
+            "..",
+            ".",
+            "pve1?x=1",
+            "pve 1",
+            "pve\u{0}1",
+        ] {
+            assert!(
+                Shape::Name.check(bad).is_err(),
+                "Shape::Name must refuse {bad:?}"
+            );
+        }
+        for good in ["pve1", "pve-test-1", "local-lvm", "backup.2026-09-09"] {
+            assert!(
+                Shape::Name.check(good).is_ok(),
+                "Shape::Name must accept {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn upid_shape_keeps_the_characters_a_upid_needs() {
+        let upid = "UPID:pve1:0000ABCD:0000EF01:66E0:qmigrate:100:root@pam:";
+        assert!(Shape::Upid.check(upid).is_ok(), "a real UPID must pass");
+        assert!(Shape::Upid.check("UPID:pve1/../x").is_err());
+    }
+
+    #[test]
+    fn any_shape_still_allows_prose() {
+        assert!(Shape::Any.check("a comment, with punctuation!").is_ok());
+    }
 }

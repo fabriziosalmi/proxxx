@@ -240,7 +240,7 @@ log "[step 7] proxxx backup-verify (expect $VMID pass; retries for content-listi
 verify_ok=0
 for attempt in 1 2 3 4 5; do
     out=$("${PX[@]}" backup-verify 2>&1)
-    if echo "$out" | grep -E "^$VMID[[:space:]]" | grep -q "pass"; then
+    if echo "$out" | grep -E "^${VMID}[[:space:]]" | grep -q "pass"; then
         verify_ok=1
         break
     fi

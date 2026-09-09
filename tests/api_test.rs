@@ -26,7 +26,7 @@ mod tests {
         }))
     }
 
-    async fn mock_client(server: &MockServer) -> PxClient {
+    pub(super) async fn mock_client(server: &MockServer) -> PxClient {
         // Pass the secret via the cli_secret parameter (resolver priority
         // #1) instead of `std::env::set_var`. Env vars are process-global
         // and cargo runs integration tests in parallel — set_var would
@@ -98,6 +98,81 @@ mod tests {
             .expect("stop");
     }
 
+    /// #260 — `/status/current` carries no `type` field, so the client
+    /// must stamp `guest_type` and `node` from the hierarchy that
+    /// answered. Before v0.13.4 every container came back labelled as a
+    /// QEMU VM on node "", and the MCP tool serialised that to its
+    /// caller verbatim.
+    #[tokio::test]
+    async fn get_guest_status_stamps_lxc_type_and_node() {
+        let server = MockServer::start().await;
+        // QEMU probe misses — PVE answers 500 for a vmid in the other
+        // hierarchy.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/200/status/current"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/lxc/200/status/current"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "vmid": 200, "name": "ct200", "status": "running" }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = mock_client(&server).await;
+        let g = c.get_guest_status("pve1", 200).await.expect("status");
+        assert_eq!(
+            g.guest_type,
+            GuestType::Lxc,
+            "a container must not be reported as a QEMU VM"
+        );
+        assert_eq!(g.node, "pve1", "the node must be stamped from the query");
+    }
+
+    #[tokio::test]
+    async fn get_guest_status_stamps_qemu_type_and_node() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "vmid": 100, "name": "vm100", "status": "running" }
+            })))
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        let g = c.get_guest_status("pve1", 100).await.expect("status");
+        assert_eq!(g.guest_type, GuestType::Qemu);
+        assert_eq!(g.node, "pve1");
+    }
+
+    /// #260 — a 403 on the QEMU probe is not "this is not a VM". It used
+    /// to fall through and surface an LXC 404, naming the wrong
+    /// hierarchy and the wrong cause.
+    #[tokio::test]
+    async fn get_guest_status_propagates_a_403_instead_of_probing_lxc() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // No LXC mock at all: reaching it would 404 the request and fail
+        // this test for the right reason.
+        let c = mock_client(&server).await;
+        let err = c
+            .get_guest_status("pve1", 100)
+            .await
+            .expect_err("a 403 must surface, not be swallowed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("403") || msg.to_lowercase().contains("privile"),
+            "the permission error must survive: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn lxc_delete_hits_lxc_path() {
         // SPOF 2.3 (Cat. 2 audit): delete now does a pre-flight status
@@ -106,12 +181,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api2/json/nodes/pve1/lxc/200/status/current"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                // #260: deliberately WITHOUT `type` and `node` — real
+                // PVE `/status/current` does not carry them, and the
+                // client must assign both from the hierarchy it queried.
+                // Injecting them here is what hid the defect.
                 "data": {
                     "vmid": 200,
                     "name": "ct200",
-                    "status": "stopped",
-                    "type": "lxc",
-                    "node": "pve1"
+                    "status": "stopped"
                 }
             })))
             .expect(1)
@@ -6237,4 +6314,87 @@ fn empty_backup_jobs_array_parses_cleanly() {
     let parsed: ApiResponse<Vec<BackupJob>> =
         serde_json::from_slice(raw).expect("empty BackupJob array must parse");
     assert!(parsed.data.is_empty());
+}
+
+#[cfg(test)]
+mod fast_guest_lookup {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Reuse the outer module's fixture rather than a second, subtly
+    // different ProfileConfig literal.
+    use super::tests::mock_client as client;
+
+    /// #276 — locating a vmid must cost ONE cluster-wide request, not a
+    /// per-node walk. The `expect(0)` on `/nodes` is the assertion: the
+    /// old path started there.
+    #[tokio::test]
+    async fn find_guest_uses_cluster_resources_not_a_per_node_walk() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "lxc/200", "type": "lxc", "node": "pve7", "vmid": 200,
+                     "name": "ct200", "status": "running"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The per-node walk would begin here. It must not run.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let c = client(&server).await;
+        let (node, guest_type) = proxxx::cli::common::find_guest(&c, 200)
+            .await
+            .expect("guest located");
+        assert_eq!(node, "pve7");
+        assert_eq!(guest_type, proxxx::api::types::GuestType::Lxc);
+    }
+
+    /// If `/cluster/resources` is unavailable, the per-node walk must
+    /// still work — a cluster that does not serve it is not broken.
+    #[tokio::test]
+    async fn falls_back_to_the_per_node_walk() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .respond_with(ResponseTemplate::new(501))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"node": "pve1", "status": "online"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"vmid": 100, "name": "vm100", "status": "running"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/lxc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client(&server).await;
+        let (node, _) = proxxx::cli::common::find_guest(&c, 100)
+            .await
+            .expect("fallback locates the guest");
+        assert_eq!(node, "pve1");
+    }
 }

@@ -16,6 +16,7 @@ use crate::mcp::tools::{ToolAction, TOOLS};
 ///
 /// Returns `Ok(json!({"content": [{"type":"text","text":...}]}))` on success.
 /// The caller wraps this in a JSON-RPC result or HTTP response body.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn handle_tool_call(
     client: &PxClient,
     config: &ProfileConfig,
@@ -45,8 +46,15 @@ pub async fn handle_tool_call(
                     }
                 }
                 ParamType::Str => {
-                    if !val.is_string() {
+                    let Some(text) = val.as_str() else {
                         anyhow::bail!("Parameter '{}': expected string, got {}", p.name, val);
+                    };
+                    // #254 — enforce the registry's declared shape. Until
+                    // v0.13.4 a string parameter was only checked for
+                    // being a string, so values that become PVE path
+                    // segments arrived unconstrained.
+                    if let Err(why) = p.shape.check(text) {
+                        anyhow::bail!("Parameter '{}': {}", p.name, why);
                     }
                 }
             }
@@ -127,7 +135,7 @@ pub async fn handle_tool_call(
                     Ok(tg_gateway) => {
                         let reason = format!("MCP requested action: {name}");
                         let _ = tg_gateway
-                            .request_approval(name, &target, &reason, &txn_id)
+                            .request_approval(name, &target, &reason, &txn_id, policy.require)
                             .await;
                     }
                     Err(e) => {

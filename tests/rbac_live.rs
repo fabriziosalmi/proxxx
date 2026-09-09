@@ -628,7 +628,8 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
         "1".to_string(),
         format!("{}/bot", server.uri()),
         zero_key.clone(),
-    );
+    )
+    .with_allowed_approvers(vec![7_i64]);
 
     // Real operator client against the live PVE cluster.
     let client = env.operator().await.expect("operator client");
@@ -645,7 +646,7 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
         "update_id": 1_i64,
         "callback_query": {
             "id": "live-replay-1",
-            "from": { "first_name": "live-replay-tester" },
+            "from": { "id": 7_i64, "first_name": "live-replay-tester" },
             "data": callback_data,
             "message": { "message_id": 1_i64 },
         }
