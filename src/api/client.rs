@@ -750,20 +750,59 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn get_guest_status(&self, node: &str, vmid: u32) -> Result<Guest> {
-        // Try QEMU first, then LXC
+        // Audit 2026-09-09 (#260) — assign `guest_type` and `node` from
+        // the hierarchy that answered, exactly as `get_guests` does.
+        //
+        // `/status/current` does not carry a `type` field, and `Guest`
+        // is `#[serde(default)]` over a `GuestType` whose Default is
+        // `Qemu` — so this used to return every container labelled as a
+        // QEMU VM, on node "". The MCP `get_guest_status` tool serialises
+        // the value straight to its caller, and anything dispatching on
+        // the returned type then builds a `/qemu/{vmid}/...` URL for an
+        // LXC container: bug #1 all over again (see `type_path`).
+        //
+        // The probe also stops swallowing every error. Falling through
+        // on a 403, a transport failure or an exhausted retry budget
+        // meant the operator was shown an LXC 404 for a VM that exists,
+        // naming the wrong hierarchy and the wrong cause. Only "this
+        // vmid is not a QEMU guest" justifies trying the other one.
         let qemu_path = format!(
             "/nodes/{node}/qemu/{vmid}/status/current",
             node = urlenc_segment(node)
         );
-        if let Ok(resp) = self.get::<ApiResponse<Guest>>(&qemu_path).await {
-            return Ok(resp.data);
+        match self.get::<ApiResponse<Guest>>(&qemu_path).await {
+            Ok(resp) => {
+                let mut g = resp.data;
+                g.node = node.to_string();
+                g.guest_type = GuestType::Qemu;
+                return Ok(g);
+            }
+            Err(e) => {
+                let is_wrong_hierarchy = e
+                    .downcast_ref::<super::ApiError>()
+                    .is_some_and(|api| {
+                        matches!(api, super::ApiError::NotFound(_))
+                            // PVE answers 500 for a vmid that exists but
+                            // belongs to the other hierarchy.
+                            || matches!(api, super::ApiError::Other { status, .. } if *status == 500)
+                    });
+                if !is_wrong_hierarchy {
+                    return Err(e).with_context(|| {
+                        format!("querying QEMU status for guest {vmid} on node {node}")
+                    });
+                }
+            }
         }
+
         let lxc_path = format!(
             "/nodes/{node}/lxc/{vmid}/status/current",
             node = urlenc_segment(node)
         );
         let resp: ApiResponse<Guest> = self.get(&lxc_path).await?;
-        Ok(resp.data)
+        let mut g = resp.data;
+        g.node = node.to_string();
+        g.guest_type = GuestType::Lxc;
+        Ok(g)
     }
 
     async fn get_storage_pools(&self, node: &str) -> Result<Vec<StoragePool>> {

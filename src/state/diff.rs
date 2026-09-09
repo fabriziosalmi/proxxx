@@ -94,32 +94,65 @@ pub struct Change {
 #[must_use]
 pub fn diff(declared: &ClusterState, live: &ClusterState) -> Vec<Change> {
     let mut out = Vec::new();
-    diff_pools(&declared.pools, &live.pools, &mut out);
-    diff_acl(&declared.acl, &live.acl, &mut out);
-    diff_storage(&declared.storage, &live.storage, &mut out);
-    diff_backup_jobs(&declared.backup_jobs, &live.backup_jobs, &mut out);
+    // #259 — a family the source document never mentioned is left
+    // alone, not treated as "declared empty". Without this an omitted
+    // or mistyped section header (`[[pool]]` for `[[pools]]`, a family
+    // lost in a merge) deserializes to an empty Vec, and the delete rule
+    // below reads that as "delete every live member".
+    //
+    // `manages()` answers true when the state carries no provenance —
+    // an export, or a state built in memory — so nothing changes for
+    // the export → diff → apply round trip.
+    if declared.manages("pools") {
+        diff_pools(&declared.pools, &live.pools, &mut out);
+    }
+    if declared.manages("acl") {
+        diff_acl(&declared.acl, &live.acl, &mut out);
+    }
+    if declared.manages("storage") {
+        diff_storage(&declared.storage, &live.storage, &mut out);
+    }
+    if declared.manages("backup_jobs") {
+        diff_backup_jobs(&declared.backup_jobs, &live.backup_jobs, &mut out);
+    }
     diff_firewall_options(
         declared.firewall_options.as_ref(),
         live.firewall_options.as_ref(),
         &mut out,
     );
-    diff_firewall_aliases(&declared.firewall_aliases, &live.firewall_aliases, &mut out);
-    diff_firewall_ipsets(&declared.firewall_ipsets, &live.firewall_ipsets, &mut out);
-    diff_firewall_groups(&declared.firewall_groups, &live.firewall_groups, &mut out);
-    diff_notification_matchers(
-        &declared.notification_matchers,
-        &live.notification_matchers,
-        &mut out,
-    );
+    if declared.manages("firewall_aliases") {
+        diff_firewall_aliases(&declared.firewall_aliases, &live.firewall_aliases, &mut out);
+    }
+    if declared.manages("firewall_ipsets") {
+        diff_firewall_ipsets(&declared.firewall_ipsets, &live.firewall_ipsets, &mut out);
+    }
+    if declared.manages("firewall_groups") {
+        diff_firewall_groups(&declared.firewall_groups, &live.firewall_groups, &mut out);
+    }
+    if declared.manages("notification_matchers") {
+        diff_notification_matchers(
+            &declared.notification_matchers,
+            &live.notification_matchers,
+            &mut out,
+        );
+    }
     // HA resources MUST be diffed BEFORE HA rules so create-order flows
     // resources-then-rules at apply time (rules reference resource SIDs).
     // On the delete side, PVE's `purge=1` default on resource DELETE
     // auto-removes the SID from referencing rules — apply_ha_rule_delete
     // tolerates 404 to keep the cleanup idempotent.
-    diff_ha_resources(&declared.ha_resources, &live.ha_resources, &mut out);
-    diff_ha_rules(&declared.ha_rules, &live.ha_rules, &mut out);
-    diff_mappings_pci(&declared.mappings_pci, &live.mappings_pci, &mut out);
-    diff_mappings_usb(&declared.mappings_usb, &live.mappings_usb, &mut out);
+    if declared.manages("ha_resources") {
+        diff_ha_resources(&declared.ha_resources, &live.ha_resources, &mut out);
+    }
+    if declared.manages("ha_rules") {
+        diff_ha_rules(&declared.ha_rules, &live.ha_rules, &mut out);
+    }
+    if declared.manages("mappings_pci") {
+        diff_mappings_pci(&declared.mappings_pci, &live.mappings_pci, &mut out);
+    }
+    if declared.manages("mappings_usb") {
+        diff_mappings_usb(&declared.mappings_usb, &live.mappings_usb, &mut out);
+    }
     out
 }
 
@@ -1686,5 +1719,98 @@ mod tests {
         assert!(kinds_ab.contains(&ChangeKind::Delete));
         assert!(kinds_ba.contains(&ChangeKind::Create));
         assert!(kinds_ba.contains(&ChangeKind::Delete));
+    }
+}
+
+#[cfg(test)]
+mod declared_family_tests {
+    use super::{diff, ChangeKind};
+    use crate::state::model::{ClusterState, PoolDecl};
+
+    fn live_with_two_pools() -> ClusterState {
+        ClusterState {
+            pools: vec![
+                PoolDecl {
+                    poolid: "tenant-a".into(),
+                    ..Default::default()
+                },
+                PoolDecl {
+                    poolid: "tenant-b".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// #259 — the failure this guards against: a document that meant to
+    /// declare pools but mistyped the section header. It parses cleanly,
+    /// `pools` is empty, and before v0.13.4 the diff read that as
+    /// "delete every live pool" — destruction from a typo under
+    /// `--prune`.
+    #[test]
+    fn a_family_the_document_never_mentions_is_left_alone() {
+        // A document that manages storage and says nothing about pools —
+        // the shape you get when a family is dropped in a branch merge,
+        // or when an operator exports one family deliberately.
+        let declared = ClusterState::from_toml_str(
+            r#"
+[[storage]]
+storage = "local-lvm"
+"#,
+        )
+        .expect("parses");
+
+        assert!(!declared.manages("pools"));
+        let changes = diff(&declared, &live_with_two_pools());
+        let pool_changes: Vec<_> = changes.iter().filter(|c| c.resource == "pool").collect();
+        assert!(
+            pool_changes.is_empty(),
+            "an unmentioned family must produce no changes for itself, got {pool_changes:?}"
+        );
+        // The family it DOES declare is still reconciled — the guard is
+        // per-family, not a blanket opt-out.
+        assert!(changes.iter().any(|c| c.resource == "storage"));
+    }
+
+    /// #262 — the sibling defence. A mistyped section header is now a
+    /// parse error rather than a silently-empty family, so it never
+    /// reaches the diff at all.
+    #[test]
+    fn a_mistyped_section_header_is_a_parse_error() {
+        let err = ClusterState::from_toml_str(
+            r#"
+[[pool]]
+poolid = "tenant-a"
+"#,
+        )
+        .expect_err("`[[pool]]` is not `[[pools]]` and must not be ignored");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pool"),
+            "the error must name the offending key: {msg}"
+        );
+    }
+
+    /// The other half of the distinction: a document that DOES mention
+    /// the family, with nothing in it, still means "make it empty".
+    /// Declaring emptiness has to remain expressible.
+    #[test]
+    fn a_family_declared_empty_still_deletes() {
+        let declared = ClusterState::from_toml_str("pools = []\n").expect("parses");
+        let changes = diff(&declared, &live_with_two_pools());
+        assert_eq!(changes.len(), 2, "explicit emptiness must still prune");
+        assert!(changes.iter().all(|c| c.kind == ChangeKind::Delete));
+    }
+
+    /// A state with no provenance — an export, or one built in memory —
+    /// manages everything, so the export → diff → apply round trip is
+    /// unaffected.
+    #[test]
+    fn a_state_without_provenance_manages_every_family() {
+        let declared = ClusterState::default();
+        assert!(declared.manages("pools"));
+        let changes = diff(&declared, &live_with_two_pools());
+        assert_eq!(changes.len(), 2);
     }
 }

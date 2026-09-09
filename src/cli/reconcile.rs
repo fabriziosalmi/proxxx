@@ -282,7 +282,7 @@ pub(crate) async fn compute_drift_with_live(
     path: &Path,
 ) -> Result<(Vec<Change>, state::model::ClusterState)> {
     let toml_str = load_desired_toml(source, path).await?;
-    let declared: state::model::ClusterState = toml::from_str(&toml_str).with_context(|| {
+    let declared = state::model::ClusterState::from_toml_str(&toml_str).with_context(|| {
         format!(
             "parsing desired state from `{source}` — is it the output of `proxxx state export`?"
         )

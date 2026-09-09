@@ -98,6 +98,81 @@ mod tests {
             .expect("stop");
     }
 
+    /// #260 — `/status/current` carries no `type` field, so the client
+    /// must stamp `guest_type` and `node` from the hierarchy that
+    /// answered. Before v0.13.4 every container came back labelled as a
+    /// QEMU VM on node "", and the MCP tool serialised that to its
+    /// caller verbatim.
+    #[tokio::test]
+    async fn get_guest_status_stamps_lxc_type_and_node() {
+        let server = MockServer::start().await;
+        // QEMU probe misses — PVE answers 500 for a vmid in the other
+        // hierarchy.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/200/status/current"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/lxc/200/status/current"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "vmid": 200, "name": "ct200", "status": "running" }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = mock_client(&server).await;
+        let g = c.get_guest_status("pve1", 200).await.expect("status");
+        assert_eq!(
+            g.guest_type,
+            GuestType::Lxc,
+            "a container must not be reported as a QEMU VM"
+        );
+        assert_eq!(g.node, "pve1", "the node must be stamped from the query");
+    }
+
+    #[tokio::test]
+    async fn get_guest_status_stamps_qemu_type_and_node() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "vmid": 100, "name": "vm100", "status": "running" }
+            })))
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        let g = c.get_guest_status("pve1", 100).await.expect("status");
+        assert_eq!(g.guest_type, GuestType::Qemu);
+        assert_eq!(g.node, "pve1");
+    }
+
+    /// #260 — a 403 on the QEMU probe is not "this is not a VM". It used
+    /// to fall through and surface an LXC 404, naming the wrong
+    /// hierarchy and the wrong cause.
+    #[tokio::test]
+    async fn get_guest_status_propagates_a_403_instead_of_probing_lxc() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/current"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // No LXC mock at all: reaching it would 404 the request and fail
+        // this test for the right reason.
+        let c = mock_client(&server).await;
+        let err = c
+            .get_guest_status("pve1", 100)
+            .await
+            .expect_err("a 403 must surface, not be swallowed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("403") || msg.to_lowercase().contains("privile"),
+            "the permission error must survive: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn lxc_delete_hits_lxc_path() {
         // SPOF 2.3 (Cat. 2 audit): delete now does a pre-flight status
@@ -106,12 +181,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api2/json/nodes/pve1/lxc/200/status/current"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                // #260: deliberately WITHOUT `type` and `node` — real
+                // PVE `/status/current` does not carry them, and the
+                // client must assign both from the hierarchy it queried.
+                // Injecting them here is what hid the defect.
                 "data": {
                     "vmid": 200,
                     "name": "ct200",
-                    "status": "stopped",
-                    "type": "lxc",
-                    "node": "pve1"
+                    "status": "stopped"
                 }
             })))
             .expect(1)

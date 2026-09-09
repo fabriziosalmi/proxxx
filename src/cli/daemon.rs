@@ -41,6 +41,12 @@
 //!
 //! - SIGTERM/SIGINT cancels the outer `await`. We then `.abort()`
 //!   every spawned task and `.await` it to allow Drop cleanup.
+//! - A component that exits on its own — panic, or a loop that returns —
+//!   is a fault, not a no-op (#264). The supervisor selects the shutdown
+//!   signal against the component watchers, stops the rest, and exits
+//!   non-zero so `Restart=on-failure` can act. Before v0.13.4 nothing
+//!   polled the handles: the process stayed up and exited zero with a
+//!   dead pillar, so systemd never noticed.
 //! - Per-task panics propagate as `JoinError`. We log + continue —
 //!   the remaining daemons keep running. A panicking alerts loop
 //!   shouldn't kill the HITL receiver.
@@ -260,25 +266,78 @@ async fn run_unified(
             .join(" + "),
     );
 
-    // Race the global shutdown signal against any spawned task
-    // crashing. A crashing daemon doesn't kill the others (we
-    // log + continue), but a clean signal stops everything.
-    crate::util::shutdown::wait_for_shutdown_signal().await;
-    eprintln!("\nproxxx daemon: shutdown signal received, stopping components...");
-
+    // Audit 2026-09-09 (#264) — actually supervise the components.
+    //
+    // This used to be a bare `wait_for_shutdown_signal().await`, with a
+    // comment claiming it raced the spawned tasks. It did not: nothing
+    // polled the handles, so a component that panicked or returned an
+    // error was neither detected nor restarted. The process stayed alive
+    // and exited zero, which meant the `Restart=on-failure` unit in the
+    // production checklist never fired — systemd saw a running process
+    // while the HITL loop was dead and every approval parked forever.
+    //
+    // Each handle is now watched by a small task that reports the exit
+    // down a channel; the supervisor selects that against the shutdown
+    // signal. A component exiting on its own is a fault: we stop the
+    // rest and exit non-zero so the supervisor above us (systemd) can do
+    // its job. Restarting the component in-process was the alternative,
+    // and is worse here — a HITL loop that dies because its Telegram
+    // credentials were revoked would spin forever instead of surfacing.
+    let (exit_tx, mut exit_rx) =
+        tokio::sync::mpsc::channel::<(&'static str, String)>(components.len().max(1));
+    let mut aborts: Vec<(&'static str, tokio::task::AbortHandle)> =
+        Vec::with_capacity(components.len());
     for c in components {
-        c.handle.abort();
-        // Best-effort join. Aborted tasks return JoinError::Cancelled
-        // which we treat as success. Real panics get logged.
-        match c.handle.await {
-            Ok(Ok(())) => eprintln!("  - {} stopped cleanly", c.name),
-            Ok(Err(e)) => eprintln!("  - {} returned error: {e:#}", c.name),
-            Err(e) if e.is_cancelled() => eprintln!("  - {} stopped (cancelled)", c.name),
-            Err(e) => eprintln!("  - {} JOIN ERROR: {e}", c.name),
+        aborts.push((c.name, c.handle.abort_handle()));
+        let tx = exit_tx.clone();
+        let name = c.name;
+        crate::util::spawn_traced::spawn_traced("daemon_component_watch", async move {
+            let outcome = match c.handle.await {
+                Ok(Ok(())) => "returned Ok — a daemon loop should never finish".to_string(),
+                Ok(Err(e)) => format!("returned error: {e:#}"),
+                Err(e) if e.is_cancelled() => return, // our own abort; not a fault
+                Err(e) if e.is_panic() => format!("PANICKED: {e}"),
+                Err(e) => format!("join error: {e}"),
+            };
+            let _ = tx.send((name, outcome)).await;
+        });
+    }
+    // Drop our sender so `recv()` resolves to None if every watcher ends.
+    drop(exit_tx);
+
+    let exit_code = tokio::select! {
+        () = crate::util::shutdown::wait_for_shutdown_signal() => {
+            eprintln!("\nproxxx daemon: shutdown signal received, stopping components...");
+            0
         }
+        Some((name, outcome)) = exit_rx.recv() => {
+            eprintln!(
+                "\nproxxx daemon: component `{name}` stopped on its own ({outcome}). \
+                 Stopping the remaining components and exiting non-zero so the \
+                 process supervisor can restart the daemon."
+            );
+            tracing::error!("daemon component `{name}` exited unexpectedly: {outcome}");
+            1
+        }
+    };
+
+    for (name, abort) in &aborts {
+        abort.abort();
+        eprintln!("  - {name} stopped");
     }
 
-    Ok((serde_json::json!({"status": "daemon stopped"}), 0))
+    // Drain whatever the watchers reported while we were stopping, so a
+    // second failing component is not lost from the record.
+    while let Ok((name, outcome)) = exit_rx.try_recv() {
+        eprintln!("  - {name}: {outcome}");
+    }
+
+    Ok((
+        serde_json::json!({
+            "status": if exit_code == 0 { "daemon stopped" } else { "daemon component failed" }
+        }),
+        exit_code,
+    ))
 }
 
 /// Schedule tick loop. Every `interval_secs`, fires
@@ -990,6 +1049,53 @@ mod tests {
         assert!(
             c.lines().await.is_empty(),
             "prune-without-cap must not delete a single resource"
+        );
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    /// #264 — the supervisor must watch its components, not just the
+    /// shutdown signal.
+    ///
+    /// Asserted against the source because the behaviour needs a real
+    /// runtime with spawned pillars to exercise end to end, and what
+    /// actually regresses is someone restoring the bare
+    /// `wait_for_shutdown_signal().await`. The comment that used to sit
+    /// above it claimed the race existed while the code did not do it,
+    /// so a structural assertion is the honest guard here.
+    #[test]
+    fn the_supervisor_selects_component_exits_against_the_shutdown_signal() {
+        let src = include_str!("daemon.rs");
+        let body = src
+            .split_once("let exit_code = tokio::select!")
+            .expect("the supervisor must select, not bare-await the signal")
+            .1;
+        let (select_block, _) = body.split_once("};").expect("select block");
+
+        assert!(
+            select_block.contains("wait_for_shutdown_signal()"),
+            "a clean signal must still stop everything"
+        );
+        assert!(
+            select_block.contains("exit_rx.recv()"),
+            "a component exiting on its own must wake the supervisor"
+        );
+        assert!(
+            select_block.contains('1'),
+            "an unexpected component exit must produce a non-zero exit code so \
+             Restart=on-failure can act"
+        );
+    }
+
+    /// Aborting our own components is not a fault — only an exit the
+    /// component chose counts.
+    #[test]
+    fn our_own_abort_is_not_reported_as_a_failure() {
+        let src = include_str!("daemon.rs");
+        assert!(
+            src.contains("Err(e) if e.is_cancelled() => return"),
+            "a cancelled component is our own abort during shutdown, not a fault"
         );
     }
 }

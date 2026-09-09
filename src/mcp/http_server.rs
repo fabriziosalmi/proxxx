@@ -16,8 +16,9 @@
 
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
@@ -123,6 +124,28 @@ fn sha256_bytes(s: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     hasher.finalize().into()
+}
+
+/// Router-level authorization gate.
+///
+/// Runs before any protected handler. Handlers keep their own
+/// `auth_ok` call as defence in depth — belt and braces cost one hash
+/// comparison, and a future refactor that drops the layer should not
+/// silently open the surface.
+async fn require_authorized(
+    State(state): State<McpState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.auth_ok(request.headers()).await {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        [("WWW-Authenticate", "Bearer realm=\"proxxx-mcp\"")],
+        Json(json!({"error": "Unauthorized"})),
+    )
+        .into_response()
 }
 
 /// `POST /mcp` — JSON-RPC 2.0 request handler.
@@ -318,9 +341,33 @@ pub async fn run_http_server(
     let state = McpState::new(client, config, notifications, require_token);
     let addr = format!("{bind}:{port}");
 
-    let app = Router::new()
+    // #253/#258 — authorization is a LAYER, not a per-handler call.
+    //
+    // It was previously the first statement of each handler, and two of
+    // the three routes made that call: `/health` did not. The leak was
+    // minor (a status object), but the shape was the problem — on a
+    // network-exposed surface a route added by someone who copies
+    // `health` rather than `post_mcp` ships open, and neither the build
+    // nor the tests would notice.
+    //
+    // Applying the gate to the whole router inverts the default from
+    // open to closed. `/health` is then exempted explicitly below, so
+    // the exemption is a visible decision instead of an omission. This
+    // is the same reasoning that puts `guard_read_only` and the incident
+    // freeze check inside the three write helpers in api::client rather
+    // than at their call sites.
+    let protected = Router::new()
         .route("/mcp", post(post_mcp))
         .route("/mcp", get(get_mcp_sse))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authorized,
+        ));
+
+    let app = protected
+        // Deliberately unauthenticated: a liveness probe must answer
+        // before credentials are configured, and it reveals nothing
+        // beyond "a proxxx MCP server is listening here".
         .route("/health", get(health))
         .with_state(state);
 
@@ -444,5 +491,45 @@ mod tests {
         // Hostnames and junk — fail-closed: treated as exposed.
         assert!(!is_loopback_bind("mcp.example.com"));
         assert!(!is_loopback_bind(""));
+    }
+}
+
+#[cfg(test)]
+mod router_gate_tests {
+    /// #258 — authorization must be a router layer, not a per-handler
+    /// convention, so a route added later cannot ship open by omission.
+    ///
+    /// Asserted structurally against the source: the protected router
+    /// carries a `route_layer`, and `/health` is registered outside it.
+    /// A behavioural test would need a live listener and a bound port;
+    /// what actually regresses here is someone adding `.route(...)` to
+    /// the wrong builder, which this catches.
+    #[test]
+    fn protected_routes_carry_a_layer_and_health_is_explicitly_outside() {
+        let src = include_str!("http_server.rs");
+        let protected = src
+            .split_once("let protected = Router::new()")
+            .expect("the protected router must exist")
+            .1;
+        let (protected_block, rest) = protected
+            .split_once("let app = protected")
+            .expect("the protected router must be consumed by `app`");
+
+        assert!(
+            protected_block.contains("route_layer(middleware::from_fn_with_state"),
+            "the protected router must apply the auth layer"
+        );
+        assert!(
+            protected_block.contains("\"/mcp\""),
+            "the MCP routes belong behind the layer"
+        );
+        assert!(
+            !protected_block.contains("\"/health\""),
+            "/health must not sit behind the auth layer — it is the liveness probe"
+        );
+        assert!(
+            rest.contains("\"/health\""),
+            "/health must be registered outside the layer, deliberately"
+        );
     }
 }

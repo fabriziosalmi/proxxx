@@ -702,10 +702,15 @@ async fn operator_get_guest_status_on_unowned_returns_typed_forbidden() {
         .expect(1)
         .mount(&server)
         .await;
+    // #260 — a 403 on the QEMU probe means "you may not look", not
+    // "this is not a VM", so it must surface immediately. Expecting ZERO
+    // calls here is the assertion: before v0.13.4 the permission error
+    // was swallowed and a second, pointless request went to the other
+    // hierarchy, whose 404/403 is what the operator finally saw.
     Mock::given(method("GET"))
         .and(path("/api2/json/nodes/pve1/lxc/100/status/current"))
         .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
 
@@ -941,10 +946,15 @@ async fn blind_get_guest_status_on_other_vmid_returns_typed_forbidden() {
         .expect(1)
         .mount(&server)
         .await;
+    // #260 — a 403 on the QEMU probe means "you may not look", not
+    // "this is not a VM", so it must surface immediately. Expecting ZERO
+    // calls here is the assertion: before v0.13.4 the permission error
+    // was swallowed and a second, pointless request went to the other
+    // hierarchy, whose 404/403 is what the operator finally saw.
     Mock::given(method("GET"))
         .and(path("/api2/json/nodes/pve1/lxc/100/status/current"))
         .respond_with(pve_403("Permission check failed (/vms/100, VM.Audit)"))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
 
