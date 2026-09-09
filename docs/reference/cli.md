@@ -1,6 +1,14 @@
 # CLI reference
 
-Every command supports `--format json|table|plain`. Default is `table`.
+Every command supports `--format json|json-envelope|table|plain`. Default
+is `table`.
+
+`json-envelope` wraps the same payload as `json` in
+`{"proxxx": "<version>", "data": …}`. Use it when a consumer must work
+against more than one proxxx version at once — a CI fleet mid-rollout, a
+wrapper supporting the last two releases — so the output says which
+contract produced it instead of the caller having to shell out to
+`proxxx --version`. `json` itself is unchanged and stays additive-only.
 JSON output is part of the public contract — additive-only changes
 within a major version.
 
@@ -8,8 +16,15 @@ within a major version.
 
 ```
 --profile <NAME>           Connection profile name (default: top-level)
---format <FORMAT>          Output format: json | table | plain (default: table)
---token-secret <VALUE>     Override token from config / env / keychain
+--format <FORMAT>          Output format: json | json-envelope | table | plain
+                           (default: table)
+--token-secret <VALUE>     Override token from config / env / keychain.
+                           VISIBLE IN THE PROCESS LISTING — prefer the
+                           flag below, PROXXX_TOKEN_SECRET, or the
+                           keychain, especially for `daemon serve`.
+--token-secret-file <PATH> Read the token secret from a file. Leaves
+                           nothing in argv. Wins over --token-secret
+                           when both are given.
 --secure                   Require Telegram approval for every destructive op
 ```
 

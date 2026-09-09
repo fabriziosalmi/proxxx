@@ -480,6 +480,27 @@ Run this from a host or account that **can't write** the audit DB — a
 verifier that shares the operator's write access can't prove much. Wire
 the non-zero exit into your monitoring.
 
+### `[ ]` Rotate the audit key after a compromise — it no longer costs you the history
+
+The HMAC key is 32 bytes beside the database it protects, so anyone who
+can read that file can forge the chain. If the host is ever compromised,
+rotate:
+
+```bash
+proxxx audit rotate-key      # archives the old key, starts signing with a new one
+proxxx audit verify          # every entry still verifies, old and new
+```
+
+Until v0.13.4 rotating meant deleting the key and starting a new chain,
+which destroyed the verifiability of exactly the history an
+investigation needs — so in practice the key was permanent. Each row now
+records which key signed it, and retired keys are archived beside the
+primary as `audit.key.<id>`.
+
+**Back up the retired keys.** They are part of the trail: without one,
+the rows it signed can no longer be verified, and `proxxx audit verify`
+counts them as failures rather than skipping them.
+
 ## 11. Upgrade, rollback and backup
 
 ### `[ ]` Know what must survive the host
@@ -491,6 +512,7 @@ one of them matters if the machine is rebuilt.
 | :--- | :--- | :--- |
 | `audit.db` | **Yes** | The only record of who issued which mutation. Not reconstructible from anything else. |
 | `audit.key` | **Yes** | 32 bytes. Without it no surviving copy of `audit.db` can be verified — losing the key alone is enough to make the trail worthless. |
+| `audit.key.retired-*` | **Yes** | Keys retired by `audit rotate-key`. Each still proves the rows it signed; losing one turns those rows into verification failures. |
 | `freeze.lock`, `freeze.<profile>.lock` | No | Runtime kill-switch state. Absent means thawed, which is the correct default after a rebuild. |
 | `cache.db` | No | Cluster snapshots and the operation queue. Regenerates from the cluster on next start. |
 | `proxxx.log*` | No | 14 daily rotations, forensic convenience only. |

@@ -35,7 +35,15 @@ verify_tls    = true                  # validate the cluster cert. DEFAULT true
                                       # since v0.13.4 (was false). Proxmox ships
                                       # a self-signed cert: set false deliberately
                                       # for a homelab, or prefer tls_pin_mode.
-rate_limit    = 10                    # max API requests/second (default 10)
+rate_limit    = 10                    # max API requests/second (default 10).
+                                      # ALSO governs TUI refresh latency: a
+                                      # refresh costs ~3 requests per node, so
+                                      # on an N-node cluster a cycle takes
+                                      # roughly 3N/rate_limit seconds. The TUI
+                                      # targets a 5 s refresh and warns on
+                                      # screen when it cannot keep up (#277).
+                                      # 3 nodes ≈ 1 s; 20 nodes ≈ 6 s;
+                                      # 50 nodes ≈ 15 s at the default.
 read_only     = false                 # true → refuse all mutations on this
                                       # profile client-side (reads still work);
                                       # exit code 8. Default false. Pair with a

@@ -1111,6 +1111,7 @@ pub async fn execute(
                 since,
             } => audit_cmd::execute_export(format, *limit, since.as_deref()),
             AuditAction::Verify => audit_cmd::execute_verify(),
+            AuditAction::RotateKey => audit_cmd::execute_rotate_key(),
         };
     }
 
@@ -1304,7 +1305,10 @@ pub async fn execute(
                 // (the streamer's output otherwise starts directly
                 // with the first log line and feels disconnected
                 // from the invocation).
-                let json_mode = matches!(format, util::format::OutputFormat::Json);
+                let json_mode = matches!(
+                    format,
+                    util::format::OutputFormat::Json | util::format::OutputFormat::JsonEnvelope
+                );
                 if !json_mode {
                     eprintln!(
                         "migrating vmid={vmid} {from} → {to} (task {upid})",
@@ -1387,7 +1391,10 @@ pub async fn execute(
         }
         Command::Events { action } => events::execute_events(&client, action).await,
         Command::Logs { action } => {
-            let render = if matches!(format, util::format::OutputFormat::Json) {
+            let render = if matches!(
+                format,
+                util::format::OutputFormat::Json | util::format::OutputFormat::JsonEnvelope
+            ) {
                 logs::LogsRenderMode::Json
             } else {
                 logs::LogsRenderMode::Text

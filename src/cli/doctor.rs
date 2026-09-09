@@ -223,14 +223,41 @@ pub async fn run() -> Result<(Value, i32)> {
         }
     }
 
+    // Audit 2026-09-09 (#281) — actually verify the chain.
+    //
+    // This used to report OK on the strength of the database opening,
+    // while the README credited doctor with validating "audit log
+    // integrity". A chain broken by an interrupted write, a partial
+    // restore or tampering reported OK here — and since nothing else
+    // runs `verify()` automatically, doctor was the most likely place
+    // for that damage to go unnoticed.
     match crate::audit::AuditLogger::open() {
-        Ok(_) => {
-            checks.push(Check {
-                name: "audit_log",
-                status: CheckStatus::Ok,
-                message: "audit log DB accessible".into(),
-            });
-        }
+        Ok(logger) => match logger.verify() {
+            Ok((ok, 0)) => {
+                checks.push(Check {
+                    name: "audit_log",
+                    status: CheckStatus::Ok,
+                    message: format!("audit chain verified — {ok} entries, chain intact"),
+                });
+            }
+            Ok((ok, broken)) => {
+                checks.push(Check {
+                    name: "audit_log",
+                    status: CheckStatus::Fail,
+                    message: format!(
+                        "audit chain BROKEN — {broken} of {} entries failed verification.                          Run `proxxx audit verify` for the first bad link. Entries after a                          break chain onto the damaged prefix, so the trail cannot be                          trusted from that point on.",
+                        ok + broken
+                    ),
+                });
+            }
+            Err(e) => {
+                checks.push(Check {
+                    name: "audit_log",
+                    status: CheckStatus::Warn,
+                    message: format!("audit chain could not be verified: {e}"),
+                });
+            }
+        },
         Err(e) => {
             checks.push(Check {
                 name: "audit_log",

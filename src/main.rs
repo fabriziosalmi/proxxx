@@ -229,8 +229,11 @@ fn main() -> Result<()> {
                     if !result.is_null() {
                         // Ensure the output is a JSON array if Json
                         // format is requested.
-                        let result_array = if matches!(cli.format, util::format::OutputFormat::Json)
-                            && !result.is_array()
+                        let result_array = if matches!(
+                            cli.format,
+                            util::format::OutputFormat::Json
+                                | util::format::OutputFormat::JsonEnvelope
+                        ) && !result.is_array()
                         {
                             serde_json::json!([result])
                         } else {
@@ -301,7 +304,10 @@ fn main() -> Result<()> {
                         }
                         None
                     });
-                    if matches!(cli.format, util::format::OutputFormat::Json) {
+                    if matches!(
+                        cli.format,
+                        util::format::OutputFormat::Json | util::format::OutputFormat::JsonEnvelope
+                    ) {
                         let mut err_obj = serde_json::json!({
                             "error": e.to_string(),
                             "status": "fatal_error",

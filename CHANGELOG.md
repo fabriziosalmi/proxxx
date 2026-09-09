@@ -9,6 +9,10 @@ SemVer contract:
   major bump).
 - Config schema is backwards compatible.
 - MCP tool registry is append-only.
+- **Rust library API** — the crate is linked by the proxima desktop UI.
+  The supported surface (`api`, `config`, `app::preflight`,
+  `state::model`) is additive within a minor; everything else is an
+  implementation detail. Enumerated in `src/lib.rs`.
 
 ## [Unreleased]
 
