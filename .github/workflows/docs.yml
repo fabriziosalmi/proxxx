@@ -43,7 +43,13 @@ concurrency:
 jobs:
   build:
     name: Build VitePress
-    runs-on: [self-hosted, Linux, X64]
+    # Hosted, deliberately. This job builds on `pull_request`, proxxx is
+    # a public repo, and `[self-hosted, Linux, X64]` names no
+    # distinguishing label — so it matched *any* runner attached to the
+    # repo, and a fork PR touching `docs/**` could reach whichever
+    # machine that happened to be. Nothing here needs a private host:
+    # `npm ci` + `npx vitepress build` run identically on ubuntu-latest.
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -98,7 +104,9 @@ jobs:
     # Push to main only — PRs build but don't deploy.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build
-    runs-on: [self-hosted, Linux, X64]
+    # Hosted for the same reason as `build`, and this job additionally
+    # holds the github-pages deployment credential.
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -16,6 +16,19 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **The docs workflow moved off the self-hosted runner.** `docs.yml`
+  declared `runs-on: [self-hosted, Linux, X64]` — labels that name no
+  particular machine, so the job matched *any* self-hosted runner
+  attached to the repo. It builds on `pull_request`, and proxxx is
+  public, so a fork PR touching `docs/**` could execute on whichever
+  runner happened to be registered. Both jobs now run on
+  `ubuntu-latest`; `npm ci` + `npx vitepress build` never needed a
+  private host, and the deploy job additionally holds the `github-pages`
+  credential.
+
+
 ### Changed
 
 - **The live tier moved off GitHub Actions and onto a LAN-only box.**
