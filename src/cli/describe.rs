@@ -77,6 +77,16 @@ pub struct ClusterDigest {
     pub recent_failures: Option<Vec<TaskSummary>>,
     /// Only populated when `--include rbac` or `--include all`.
     pub rbac: Option<RbacSummary>,
+    /// Sections that were requested but could not be read, each with
+    /// the reason (audit 2026-09-09, #278).
+    ///
+    /// Present and non-empty means the digest is INCOMPLETE: the empty
+    /// collections above may be empty because there is nothing there, or
+    /// because we were not allowed to look. Absent from the JSON when
+    /// everything was readable, so the common case is unchanged for
+    /// existing consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -229,8 +239,24 @@ async fn collect(
     }
     let storages: Vec<StorageSummary> = storage_map.into_values().collect();
 
+    // Audit 2026-09-09 (#278) — an API failure must not read as "there
+    // is nothing here". This output is documented as designed to paste
+    // at the top of an LLM chat, and the recent-failure and RBAC
+    // sections are exactly what a reader uses to judge blast radius. A
+    // 403 on /access/users — the common case for the scoped token this
+    // project recommends — rendered as "this cluster has no users".
+    //
+    // Silence is only acceptable when the reader can tell it apart from
+    // zero, so each section that could not be read says so instead.
+    let mut unavailable: Vec<String> = Vec::new();
     let recent_failures = if include_events {
-        let tasks = client.get_cluster_tasks().await.unwrap_or_default();
+        let tasks = match client.get_cluster_tasks().await {
+            Ok(t) => t,
+            Err(e) => {
+                unavailable.push(format!("recent_failures: {e}"));
+                Vec::new()
+            }
+        };
         // Filter to failures (status != "OK" and endtime set).
         // Take the 5 most recent.
         let mut failures: Vec<TaskSummary> = tasks
@@ -259,8 +285,20 @@ async fn collect(
     };
 
     let rbac = if include_rbac {
-        let pools = client.list_pools().await.unwrap_or_default();
-        let users = client.list_users().await.unwrap_or_default();
+        let pools = match client.list_pools().await {
+            Ok(p) => p,
+            Err(e) => {
+                unavailable.push(format!("rbac.pools: {e}"));
+                Vec::new()
+            }
+        };
+        let users = match client.list_users().await {
+            Ok(u) => u,
+            Err(e) => {
+                unavailable.push(format!("rbac.users: {e}"));
+                Vec::new()
+            }
+        };
         Some(RbacSummary {
             pool_count: pools.len(),
             user_count: users.len(),
@@ -282,6 +320,11 @@ async fn collect(
         storages,
         recent_failures,
         rbac,
+        unavailable: if unavailable.is_empty() {
+            None
+        } else {
+            Some(unavailable)
+        },
     })
 }
 
@@ -307,6 +350,17 @@ fn print_text(d: &ClusterDigest) {
         "  {} nodes  /  {} guests  /  {} storages\n",
         d.cluster.node_count, d.cluster.guest_count, d.cluster.storage_count
     );
+    // #278 — say it where the reader is, not only in the JSON. A digest
+    // that silently omits a section it could not read is worse than one
+    // that says so, because the reader has no way to tell.
+    if let Some(missing) = &d.unavailable {
+        println!("## INCOMPLETE — some sections could not be read");
+        for m in missing {
+            println!("  ! {m}");
+        }
+        println!("  (empty sections below may be empty, or unreadable — do not");
+        println!("   infer absence from them)\n");
+    }
     println!("## Nodes");
     for n in &d.nodes {
         let mem_used = format_bytes_gib(n.mem_used_bytes);
@@ -515,7 +569,7 @@ fn print_llm_context(d: &ClusterDigest) {
 mod tests {
     use super::*;
 
-    fn sample_digest() -> ClusterDigest {
+    pub(super) fn sample_digest() -> ClusterDigest {
         ClusterDigest {
             cluster: ClusterInfo {
                 pve_version: "9.1.1".into(),
@@ -550,6 +604,7 @@ mod tests {
             }],
             recent_failures: None,
             rbac: None,
+            unavailable: None,
         }
     }
 
@@ -577,5 +632,39 @@ mod tests {
         assert_eq!(fmt_uptime(3600), "1h");
         assert_eq!(fmt_uptime(86400), "1d0h");
         assert_eq!(fmt_uptime(86400 * 2 + 3600 * 5), "2d5h");
+    }
+}
+
+#[cfg(test)]
+mod unavailable_section_tests {
+    /// #278 — a section that could not be read must be distinguishable
+    /// from one that is genuinely empty. A 403 on `/access/users` is the
+    /// common case for the scoped token this project recommends, and it
+    /// used to render as "this cluster has no users".
+    #[test]
+    fn the_digest_can_say_a_section_was_unreadable() {
+        let mut d = super::tests::sample_digest();
+        assert!(
+            d.unavailable.is_none(),
+            "a complete digest must not carry the marker"
+        );
+        let complete = serde_json::to_value(&d).expect("serialises");
+        assert!(
+            complete.get("unavailable").is_none(),
+            "the field must be absent from JSON when everything was readable, so \
+             existing consumers see an unchanged shape"
+        );
+
+        d.unavailable = Some(vec!["rbac.users: Proxmox refused (403)".into()]);
+        let incomplete = serde_json::to_value(&d).expect("serialises");
+        let listed = incomplete
+            .get("unavailable")
+            .and_then(|v| v.as_array())
+            .expect("the marker must appear once something was unreadable");
+        assert_eq!(listed.len(), 1);
+        assert!(
+            listed[0].as_str().unwrap_or_default().contains("403"),
+            "the reason must travel with the marker, not just the fact"
+        );
     }
 }

@@ -63,6 +63,20 @@ jobs:
         working-directory: docs
         run: npm ci
 
+      - name: npm audit
+        # Audit #280 — the Rust tree is gated by cargo-audit and
+        # cargo-deny; this half had nothing. The output of `npm ci` is
+        # deployed to the public documentation site, so a compromised
+        # build dependency reaches the page that tells operators how to
+        # install proxxx.
+        #
+        # `--audit-level=high` rather than `low`: the vitepress tree
+        # carries a long tail of low findings in dev-only transitive
+        # packages, and a gate that is red by default is a gate people
+        # learn to click past.
+        working-directory: docs
+        run: npm audit --audit-level=high
+
       - name: Build
         working-directory: docs
         run: npx vitepress build

@@ -153,7 +153,7 @@ jobs:
           shared-key: coverage
 
       - name: Install cargo-llvm-cov
-        run: cargo install --locked --version 0.6.16 cargo-llvm-cov
+        run: cargo install --locked --version 0.9.1 cargo-llvm-cov
 
       - name: Measure
         run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
@@ -184,7 +184,14 @@ jobs:
           shared-key: audit
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        # Audit #280 — pinned. `--locked` fixes the tool's own transitive
+        # dependencies but not WHICH version of the tool is installed, so
+        # the code deciding whether the build passes its security gate
+        # changed on every run without review. `cross` and `cargo-deb` in
+        # release.yml were already pinned; the tools with the most
+        # authority were the ones left floating. Dependabot's cargo
+        # cadence carries the bumps as reviewable PRs.
+        run: cargo install --locked --version 0.22.2 cargo-audit
 
       - name: Audit Cargo.lock for CVEs
         # The `--deny warnings` flag escalates yanked-crate notices
@@ -219,7 +226,7 @@ jobs:
           shared-key: deny
 
       - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
+        run: cargo install --locked --version 0.20.2 cargo-deny
 
       - name: Check supply-chain policy (advisories + licenses + bans + sources)
         run: cargo deny check

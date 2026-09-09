@@ -24,9 +24,23 @@ struct Cli {
     #[arg(long, global = true, default_value = "table")]
     format: util::format::OutputFormat,
 
-    /// API Token Secret (Overrides env var and config file)
+    /// API token secret. **Visible in the process listing** (`ps`,
+    /// `/proc/<pid>/cmdline`) for as long as the command runs, and in
+    /// shell history and CI logs. Prefer `--token-secret-file`,
+    /// `PROXXX_TOKEN_SECRET`, or the OS keychain — especially for
+    /// `daemon serve`, which is long-running.
     #[arg(long, global = true)]
     token_secret: Option<String>,
+
+    /// Read the API token secret from a file (audit #283).
+    ///
+    /// Unlike `--token-secret` this leaves nothing in the process
+    /// listing. The file must be readable by this process; trailing
+    /// whitespace is trimmed. Takes precedence over `--token-secret`
+    /// when both are given, because it is the safer of the two and a
+    /// caller passing both most likely means the file.
+    #[arg(long, global = true, value_name = "PATH")]
+    token_secret_file: Option<std::path::PathBuf>,
 
     /// Require Telegram 2FA for all destructive operations (Self-HITL)
     #[arg(long, global = true)]
@@ -36,6 +50,25 @@ struct Cli {
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // #283 — resolve the file form once, here, so every downstream call
+    // site sees one value and neither has to know which flag supplied
+    // it. `--token-secret-file` wins when both are given: it is the
+    // safer of the two, and a caller passing both most likely means the
+    // file.
+    let cli_secret: Option<String> = match &cli.token_secret_file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("reading --token-secret-file {}: {e}", path.display())
+            })?;
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("--token-secret-file {} is empty", path.display());
+            }
+            Some(trimmed)
+        }
+        None => cli.token_secret.clone(),
+    };
 
     // Tracing → rotating file always; stderr as well outside the TUI
     // (see the block below and #270).
@@ -167,14 +200,11 @@ fn main() -> Result<()> {
             // TUI, then re-enter the fleet view when the user quits it.
             if matches!(cmd, cli::Command::Fleet) {
                 rt.block_on(async {
-                    while let Some(profile) =
-                        tui::fleet::run_fleet(cli.token_secret.as_deref()).await?
-                    {
+                    while let Some(profile) = tui::fleet::run_fleet(cli_secret.as_deref()).await? {
                         // Open the selected cluster's full TUI. Its own
                         // profile-switch return value is ignored — on exit
                         // we always come back to the fleet overview.
-                        let _ = tui::run(Some(&profile), cli.token_secret.as_deref(), cli.secure)
-                            .await?;
+                        let _ = tui::run(Some(&profile), cli_secret.as_deref(), cli.secure).await?;
                     }
                     Ok::<(), anyhow::Error>(())
                 })?;
@@ -184,7 +214,7 @@ fn main() -> Result<()> {
             match rt.block_on(cli::execute(
                 cmd,
                 cli.profile.as_deref(),
-                cli.token_secret.as_deref(),
+                cli_secret.as_deref(),
                 cli.secure,
                 cli.format,
             )) {
@@ -312,7 +342,7 @@ fn main() -> Result<()> {
             loop {
                 let next = rt.block_on(tui::run(
                     active_profile.as_deref(),
-                    cli.token_secret.as_deref(),
+                    cli_secret.as_deref(),
                     cli.secure,
                 ))?;
                 match next {
