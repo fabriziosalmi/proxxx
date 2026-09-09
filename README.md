@@ -76,8 +76,8 @@ proxxx is designed for operators who need auditability, data sovereignty, and su
 | **Cryptographic chain verification** | `proxxx audit verify` walks every entry, recomputes the HMAC chain from the keyed root, and reports the first broken link. CI-friendly: exits 0 on pass, 1 on violation — wire it into your compliance pipeline. |
 | **Export for SIEM** | `proxxx audit export --format json` or `--format csv` — pipe into Splunk, Elastic, Wazuh, or any log aggregator without an agent. |
 | **Supply-chain** | Every release ships: SHA-256 sidecar, sigstore keyless cosign signature (pinned to the exact workflow path, offline-verifiable, transparency-log proof embedded), and a CycloneDX SBOM from `Cargo.lock`. Audit with `cosign verify-blob` + `grype` / `trivy`. |
-| **Self-diagnostic** | `proxxx doctor` validates config, cluster connectivity, auth, Telegram HITL, PBS, SSH key, and audit log integrity in one pass. Exits 0 if all critical checks pass. |
-| **Secrets hygiene** | All secret values live in `Zeroizing<String>` (heap-wiped on Drop). HMAC and audit keys are stored at 0600 paths; proxxx refuses to start if a key file has world-readable permissions. |
+| **Self-diagnostic** | `proxxx doctor` validates config, cluster connectivity, auth, Telegram HITL, PBS, SSH key, and audit-chain integrity (it recomputes the HMAC chain, not just that the DB opens) in one pass. Exits 0 if all critical checks pass. |
+| **Secrets hygiene** | All secret values live in `SecretString` — `Debug` prints `[REDACTED]` (not even the length), no `Display` and no `Serialize` so interpolating or serialising one is a *compile error*, and the heap bytes are zeroized on drop. HMAC and audit keys are stored at 0600 paths; proxxx refuses to use a key file with looser permissions. |
 
 > **Note:** proxxx is a management tool, not a compliance product. `proxxx audit verify` provides integrity assurance for the local mutation log; it does not replace a SIEM or a formal audit trail required by a certification body. Use it as one control layer in a broader NIS2 / ISO 27001 implementation.
 
@@ -309,7 +309,7 @@ Default location follows the `directories` project-dirs convention:
 | Linux | `~/.config/proxxx/config.toml` |
 | macOS | `~/Library/Application Support/dev.proxxx.proxxx/config.toml` |
 
-Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → `token_secret_file` (0600 enforced) → inline TOML → OS keychain. Loaded values live in `Zeroizing<String>` and are wiped from the heap on `Drop`.
+Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → inline TOML → `token_secret_file` (0600 enforced) → OS keychain. **Inline beats the file reference** — when moving a secret into a file, delete the inline value or it keeps winning (proxxx warns when both are set). Loaded values live in `SecretString`: redacting `Debug`, no `Display`, no `Serialize`, zeroized on drop.
 
 | Optional section | Unlocks |
 | :--- | :--- |

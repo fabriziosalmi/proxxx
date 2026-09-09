@@ -23,6 +23,14 @@ tokio = { version = "1", features = ["full"] }
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "stream", "multipart"] }
 
+# Real-uid + passwd lookup for the audit trail's operator field: `$USER`
+# is caller-controlled, so the identity written into the HMAC-chained log
+# is anchored on `getuid()` instead (audit #256). Also used by
+# tests/resilience_chaos_e2e.rs to raise signals at the current pid.
+# Already in the build graph transitively via tokio + rustls, so this
+# declaration costs nothing.
+libc = "0.2"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -168,11 +176,6 @@ serial_test = "4"
 # terminate on any graph (incl. cycles); the audit HMAC chain must
 # detect a single-byte mutation anywhere in any sequence.
 proptest = { version = "1", default-features = false, features = ["std"] }
-# Used by tests/resilience_chaos_e2e.rs to raise SIGTERM/SIGHUP at
-# the current pid so the signal-handler invariants can be verified
-# in-process. `libc` is already pulled in transitively by tokio +
-# rustls — declaring it as a dev-dep doesn't add to the build graph.
-libc = "0.2"
 
 # ── Benchmark binaries ──────────────────────────────────
 # Each `[[bench]]` produces an isolated binary so failures or

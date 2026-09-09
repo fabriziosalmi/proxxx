@@ -221,12 +221,28 @@ For each of `token_secret`, `password`, `pbs.token_secret`:
 1. CLI flag (`--token-secret VALUE`)
 2. Env var (`PROXXX_TOKEN_SECRET`, `PROXXX_PASSWORD`,
    `PROXXX_PBS_TOKEN_SECRET`)
-3. File reference (`<...>_secret_file = "..."`)
-4. Inline TOML value (`<...>_secret = "..."`)
+3. **Inline TOML value** (`<...>_secret = "..."`)
+4. **File reference** (`<...>_secret_file = "..."`)
 5. OS keychain (service `proxxx`, key matches the field name)
 
-The first one that resolves wins. Loaded values live in
-`Zeroizing<String>` and are wiped from the heap on Drop.
+The first one that resolves wins.
+
+::: warning Inline beats the file reference
+Steps 3 and 4 were documented in the opposite order until v0.13.4. If
+you are moving a secret out of the TOML into a `0600` file, **delete the
+inline value** — otherwise the stale inline secret keeps winning, your
+file is never read, and rotating it has no effect. proxxx logs a warning
+when both are set.
+:::
+
+Loaded values live in [`SecretString`](https://github.com/fabriziosalmi/proxxx/blob/main/src/util/secret.rs):
+`Debug` prints `[REDACTED]` (not even the length, which would leak which
+credential class it is), there is no `Display` and no `Serialize`, so
+interpolating one into a string or a JSON dump is a compile error, and
+the wrapped value is zeroized on drop. Note the guarantee covers the
+value once constructed — the `toml` parse tree still holds an unwiped
+copy of any inline secret until config load completes, which is another
+reason to prefer the file or the keychain.
 
 ## Environment variables
 

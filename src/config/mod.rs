@@ -794,6 +794,92 @@ impl ProfileConfig {
         }
     }
 
+    /// Reject values for enum-like string keys that are neither of the
+    /// documented options (audit 2026-09-09, #255).
+    ///
+    /// `auth_method()` above maps anything that is not exactly
+    /// `"password"` to token auth, so `auth = "Password"` or a typo
+    /// silently switched authentication mode: the operator supplied a
+    /// password, got token auth, and the secret chain then either failed
+    /// with a message that never mentioned `auth`, or picked up a
+    /// `PROXXX_TOKEN_SECRET` left over from another profile and
+    /// authenticated as a different identity.
+    ///
+    /// Validated at load rather than in `auth_method` so the failure
+    /// names the key and its accepted values, once, before anything
+    /// tries to connect.
+    ///
+    /// # Errors
+    /// When a key holds a value outside its documented set.
+    /// Warn when a lower-precedence secret source is shadowed by a
+    /// higher one (audit 2026-09-09, #257).
+    ///
+    /// The resolution order is inline-then-file, and both the README and
+    /// the configuration reference stated the opposite until v0.13.4. An
+    /// operator following the production checklist's advice to move a
+    /// secret into a `0600` file, without deleting the inline value,
+    /// therefore kept using the inline one: the file was never read, and
+    /// rotating it had no effect.
+    ///
+    /// The order itself is left alone — changing it would silently swap
+    /// which credential a live deployment authenticates with, which is a
+    /// worse failure than the one being fixed. Instead the shadowing is
+    /// made visible at load.
+    pub fn warn_on_shadowed_secret_sources(&self) {
+        let inline_set = |s: &Option<crate::util::secret::SecretString>| {
+            s.as_ref().is_some_and(|v| !v.expose().trim().is_empty())
+        };
+        if inline_set(&self.token_secret) && self.token_secret_file.is_some() {
+            tracing::warn!(
+                "config: both `token_secret` (inline) and `token_secret_file` are set. \
+                 Inline wins — the file is NOT read, and rotating it will have no \
+                 effect. Delete the inline value to use the file."
+            );
+        }
+        if let Some(pbs) = &self.pbs {
+            if inline_set(&pbs.token_secret) && pbs.token_secret_file.is_some() {
+                tracing::warn!(
+                    "config: both `pbs.token_secret` (inline) and \
+                     `pbs.token_secret_file` are set. Inline wins — the file is NOT \
+                     read. Delete the inline value to use the file."
+                );
+            }
+        }
+        if let Some(tg) = &self.telegram {
+            if inline_set(&tg.bot_token) && tg.bot_token_file.is_some() {
+                tracing::warn!(
+                    "config: both `telegram.bot_token` (inline) and \
+                     `telegram.bot_token_file` are set. Inline wins — the file is \
+                     NOT read. Delete the inline value to use the file."
+                );
+            }
+        }
+    }
+
+    pub fn validate_enum_like_fields(&self) -> Result<()> {
+        const AUTH_VALUES: &[&str] = &["token", "password"];
+        if !AUTH_VALUES.contains(&self.auth.as_str()) {
+            anyhow::bail!(
+                "config key `auth` is {:?}, which is not a recognised value. \
+                 Accepted: {}. Note the comparison is case-sensitive.",
+                self.auth,
+                AUTH_VALUES.join(" | ")
+            );
+        }
+        if let Some(mode) = self.tls_pin_mode.as_deref() {
+            if !mode.trim().is_empty() && !mode.eq_ignore_ascii_case("tofu") {
+                anyhow::bail!(
+                    "config key `tls_pin_mode` is {mode:?}, which is not a recognised \
+                     value. Accepted: \"tofu\" (case-insensitive), or omit the key \
+                     entirely for no pinning. Refusing rather than silently running \
+                     unpinned — you set this key because the default trust posture \
+                     was not enough."
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
         // 1. CLI Flag
         if let Some(secret) = cli_secret {
@@ -1145,6 +1231,8 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     // only the global lock. Note this is `effective`, not the raw CLI arg,
     // so a `default = "x"` key or single-profile auto-default is attributed.
     cfg.profile_name = effective;
+    cfg.validate_enum_like_fields()?;
+    cfg.warn_on_shadowed_secret_sources();
     Ok(cfg)
 }
 
@@ -1496,5 +1584,76 @@ verify_tls = false
 "#;
         let cfg: ProfileConfig = toml::from_str(toml).expect("parses");
         assert!(!cfg.verify_tls);
+    }
+}
+
+#[cfg(test)]
+mod enum_like_validation_tests {
+    use super::ProfileConfig;
+
+    fn parse(toml_src: &str) -> ProfileConfig {
+        toml::from_str(toml_src).expect("parses")
+    }
+
+    const BASE: &str = r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+"#;
+
+    /// #255 — `auth_method()` maps anything that is not exactly
+    /// "password" to token auth, so a typo silently switched mode. The
+    /// value is now rejected at load, naming the key.
+    #[test]
+    fn unrecognised_auth_value_is_refused() {
+        for bad in ["Password", "pasword", "tokne", "PAM", ""] {
+            let cfg = parse(&format!("{BASE}auth = \"{bad}\"\n"));
+            let err = cfg
+                .validate_enum_like_fields()
+                .expect_err("must refuse {bad:?}");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("auth") && msg.contains("token | password"),
+                "the error must name the key and its accepted values, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_auth_values_are_accepted() {
+        for good in ["token", "password"] {
+            let cfg = parse(&format!("{BASE}auth = \"{good}\"\n"));
+            cfg.validate_enum_like_fields()
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
+        // Omitted entirely -> serde default, which must also be valid.
+        parse(BASE)
+            .validate_enum_like_fields()
+            .expect("the default auth value must itself be valid");
+    }
+
+    /// #255 — a misspelled `tls_pin_mode` used to warn (to a log file
+    /// nobody reads) and run unpinned. The operator set the key because
+    /// the default trust posture was not enough.
+    #[test]
+    fn unrecognised_tls_pin_mode_is_refused() {
+        for bad in ["TOFU ", "pin", "tofu2", "on"] {
+            let cfg = parse(&format!("{BASE}tls_pin_mode = \"{bad}\"\n"));
+            assert!(
+                cfg.validate_enum_like_fields().is_err(),
+                "must refuse tls_pin_mode = {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tofu_is_accepted_case_insensitively_and_absence_is_fine() {
+        for good in ["tofu", "TOFU", "ToFu"] {
+            let cfg = parse(&format!("{BASE}tls_pin_mode = \"{good}\"\n"));
+            cfg.validate_enum_like_fields()
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+        }
+        parse(BASE)
+            .validate_enum_like_fields()
+            .expect("omitting tls_pin_mode means no pinning, which is valid");
     }
 }

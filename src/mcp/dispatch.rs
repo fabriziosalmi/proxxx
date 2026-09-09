@@ -45,8 +45,15 @@ pub async fn handle_tool_call(
                     }
                 }
                 ParamType::Str => {
-                    if !val.is_string() {
+                    let Some(text) = val.as_str() else {
                         anyhow::bail!("Parameter '{}': expected string, got {}", p.name, val);
+                    };
+                    // #254 — enforce the registry's declared shape. Until
+                    // v0.13.4 a string parameter was only checked for
+                    // being a string, so values that become PVE path
+                    // segments arrived unconstrained.
+                    if let Err(why) = p.shape.check(text) {
+                        anyhow::bail!("Parameter '{}': {}", p.name, why);
                     }
                 }
             }
