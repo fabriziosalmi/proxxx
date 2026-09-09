@@ -188,9 +188,9 @@ are listed first — read those before upgrading an unattended deployment.
 ### Dependencies
 
 - `der` 0.8.0 → 0.8.2 and `wnaf` 0.14.0 → 0.14.1, both yanked upstream
-  and reached transitively through russh. Pre-existing drift, unrelated
-  to the audit work; `cargo deny check` and `cargo audit --deny warnings`
-  are green again.
+  and reached transitively through russh. Landed separately in #245
+  while this branch was open — noted here because it is what took
+  `cargo deny check` green again for this release.
 
 ### Also in this release
 

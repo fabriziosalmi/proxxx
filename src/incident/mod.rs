@@ -856,29 +856,41 @@ mod operator_identity_tests {
     /// structural property instead: whatever `$USER` says, the label
     /// resolves from the passwd entry for our real uid, and a
     /// disagreement is marked rather than believed.
+    /// Assertion messages here deliberately describe the SHAPE of the
+    /// label rather than interpolating it. A uid is not a credential,
+    /// but it is account-identifying, and `CodeQL`'s `rust/cleartext-logging`
+    /// is right that a test failure should not be the thing that prints
+    /// it into CI output. The structural description is what a reader
+    /// debugging a failure actually needs.
     #[test]
     fn operator_label_is_anchored_on_the_real_uid() {
         let label = super::operator_label();
         assert!(
             label.contains('@'),
-            "the label must carry a host component: {label}"
+            "the label must carry a host component (got {} chars, no '@')",
+            label.len()
         );
         let who = label.split('@').next().unwrap_or_default();
-        assert!(!who.is_empty(), "the actor part must not be empty: {label}");
+        assert!(!who.is_empty(), "the actor part must not be empty");
 
         // Either the resolved passwd name (agreeing with $USER), or an
         // explicit marker that the two disagreed / could not be resolved.
         let resolved = super::login_name_for_uid(super::real_uid());
         let claimed = std::env::var("USER").ok();
         match (resolved.as_deref(), claimed.as_deref()) {
-            (Some(r), Some(c)) if r == c => assert_eq!(who, r),
+            (Some(r), Some(c)) if r == c => assert_eq!(
+                who, r,
+                "when passwd and $USER agree the label must be that name verbatim"
+            ),
             (Some(_), Some(_)) => assert!(
                 who.contains("uid:") && who.contains("claimed:"),
-                "a disagreement must be recorded, not silently resolved: {label}"
+                "passwd and $USER disagree, so the label must carry both the uid \
+                 and the unverified claim — it carried neither marker"
             ),
             _ => assert!(
                 who.contains("uid:") || Some(who) == resolved.as_deref(),
-                "unexpected label shape: {label}"
+                "with no passwd entry or no $USER, the label must fall back to the \
+                 uid form or to the resolved name"
             ),
         }
     }
