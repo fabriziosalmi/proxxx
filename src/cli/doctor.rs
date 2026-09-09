@@ -27,6 +27,7 @@ impl CheckStatus {
     }
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn run() -> Result<(Value, i32)> {
     let mut checks: Vec<Check> = Vec::new();
     let mut overall_ok = true;

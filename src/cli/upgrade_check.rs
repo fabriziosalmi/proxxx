@@ -167,6 +167,7 @@ pub enum UpgradeOutput {
     Json,
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_upgrade_check(
     client: &Arc<PxClient>,
     config: &crate::config::ProfileConfig,

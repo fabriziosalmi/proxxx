@@ -74,6 +74,7 @@ pub fn spawn_event_loop(tick_rate: Duration) -> mpsc::Receiver<AppEvent> {
 
 /// Map a key event to an app Action
 #[must_use]
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app::Action> {
     use crate::app::{Action, AppMode, View};
 

@@ -373,6 +373,7 @@ pub enum SnapshotCommand {
     },
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_vm(
     client: &Arc<crate::api::PxClient>,
     action: VmCommand,

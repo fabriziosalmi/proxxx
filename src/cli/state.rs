@@ -220,6 +220,7 @@ pub enum DiffFormat {
 /// pipeline — the document IS the output, re-serialising it through
 /// `format::print` would either escape the TOML's newlines or wrap
 /// the JSON in an additional outer layer.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_state(
     client: &Arc<PxClient>,
     profile: Option<&str>,

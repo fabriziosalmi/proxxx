@@ -33,6 +33,7 @@ struct Cli {
     secure: bool,
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     let cli = Cli::parse();
 

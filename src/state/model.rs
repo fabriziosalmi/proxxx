@@ -1242,7 +1242,7 @@ members = ["qemu/100", "storage/ceph-rbd"]
 mod identity_uniqueness_tests {
     use super::ClusterState;
 
-    /// #261 — `diff` keys a HashMap on the identity, so a duplicate was
+    /// #261 — `diff` keys a `HashMap` on the identity, so a duplicate was
     /// silently discarded. The realistic shape is a branch merge where
     /// both sides added the same pool with different members.
     #[test]

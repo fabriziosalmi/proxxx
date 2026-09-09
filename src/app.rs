@@ -720,6 +720,7 @@ fn guest_block_reason(state: &AppState, vmid: u32, op_label: &str) -> Option<Str
     None
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
     match action {
         Action::Quit => return Some(SideEffect::Quit),

@@ -60,7 +60,7 @@ either with `--no-verify` is owned by the bypasser. Stages:
 | - | --- | --- | --- |
 | 0 | secret regression scan | Looks for tokens / passwords accidentally committed | <1 s |
 | 1 | `cargo fmt --check` | Code style | ~3 s |
-| 2 | `cargo clippy --release --all-targets` | Lints, deny tier (`unwrap_used`, `expect_used`, `panic`, `todo`, `await_holding_lock`) | 10–60 s |
+| 2 | `cargo clippy --release --all-targets -- -D warnings` | Lints, deny tier (`unwrap_used`, `expect_used`, `panic`, `todo`, `await_holding_lock`) | 10–60 s |
 | 3 | `cargo audit --deny warnings` | Supply-chain CVEs from `Cargo.lock` | 3–5 s |
 | 4 | `cargo deny check` | License whitelist + banned crates + crates.io-only sources + wildcard ban | 2–4 s |
 | 5 | `cargo test --release --all-targets` | All unit + integration + wiremock + proptest cases (~25 properties × 256 random cases) | 10–90 s |
@@ -82,6 +82,20 @@ cp tests/live/env.local.example tests/live/env.local
 Stages 6 + 7 require a reachable PVE cluster. If you don't have one,
 **explicitly skip stages 6 + 7** in your PR description — a maintainer
 will run them. Don't silently bypass.
+
+### Script gates (CI also runs these)
+
+| # | Command | What it enforces | Time |
+| :-- | :--- | :--- | :--- |
+| 6 | `ruff check .` | Python lint (`scripts/`, `assets/`) | ~1 s |
+| 7 | `shellcheck -S error tests/live/*.sh scripts/*.sh` | Shell errors in the live harnesses | ~1 s |
+| 8 | `gitleaks detect` | Committed secrets (CI scans history too) | ~2 s |
+
+Added by the 2026-09-09 audit (#274): these three surfaces shipped
+unchecked. `shellcheck` starts at `-S error` deliberately — the tree
+carries style and warning findings that are real but not worth blocking
+on today, and a gate that is red by default is a gate people learn to
+ignore.
 
 ## Live-cluster verification
 

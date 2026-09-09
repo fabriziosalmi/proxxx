@@ -1002,6 +1002,7 @@ pub enum McpCommand {
 ///
 /// `_secure` is reserved for future per-command HITL gating in pipelines;
 /// it's currently honoured by the TUI only (see `state.secure_mode`).
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute(
     cmd: Command,
     profile: Option<&str>,

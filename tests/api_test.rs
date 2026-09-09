@@ -26,7 +26,7 @@ mod tests {
         }))
     }
 
-    async fn mock_client(server: &MockServer) -> PxClient {
+    pub(super) async fn mock_client(server: &MockServer) -> PxClient {
         // Pass the secret via the cli_secret parameter (resolver priority
         // #1) instead of `std::env::set_var`. Env vars are process-global
         // and cargo runs integration tests in parallel — set_var would
@@ -6314,4 +6314,87 @@ fn empty_backup_jobs_array_parses_cleanly() {
     let parsed: ApiResponse<Vec<BackupJob>> =
         serde_json::from_slice(raw).expect("empty BackupJob array must parse");
     assert!(parsed.data.is_empty());
+}
+
+#[cfg(test)]
+mod fast_guest_lookup {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Reuse the outer module's fixture rather than a second, subtly
+    // different ProfileConfig literal.
+    use super::tests::mock_client as client;
+
+    /// #276 — locating a vmid must cost ONE cluster-wide request, not a
+    /// per-node walk. The `expect(0)` on `/nodes` is the assertion: the
+    /// old path started there.
+    #[tokio::test]
+    async fn find_guest_uses_cluster_resources_not_a_per_node_walk() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "lxc/200", "type": "lxc", "node": "pve7", "vmid": 200,
+                     "name": "ct200", "status": "running"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The per-node walk would begin here. It must not run.
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let c = client(&server).await;
+        let (node, guest_type) = proxxx::cli::common::find_guest(&c, 200)
+            .await
+            .expect("guest located");
+        assert_eq!(node, "pve7");
+        assert_eq!(guest_type, proxxx::api::types::GuestType::Lxc);
+    }
+
+    /// If `/cluster/resources` is unavailable, the per-node walk must
+    /// still work — a cluster that does not serve it is not broken.
+    #[tokio::test]
+    async fn falls_back_to_the_per_node_walk() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .respond_with(ResponseTemplate::new(501))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"node": "pve1", "status": "online"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/qemu"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"vmid": 100, "name": "vm100", "status": "running"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/lxc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client(&server).await;
+        let (node, _) = proxxx::cli::common::find_guest(&c, 100)
+            .await
+            .expect("fallback locates the guest");
+        assert_eq!(node, "pve1");
+    }
 }

@@ -16,6 +16,7 @@ use crate::mcp::tools::{ToolAction, TOOLS};
 ///
 /// Returns `Ok(json!({"content": [{"type":"text","text":...}]}))` on success.
 /// The caller wraps this in a JSON-RPC result or HTTP response body.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn handle_tool_call(
     client: &PxClient,
     config: &ProfileConfig,

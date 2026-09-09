@@ -27,43 +27,160 @@ pub(crate) fn require_yes(yes: bool, what: &str) -> Result<()> {
 }
 
 /// Locate which node owns a given VMID and which guest type it is.
-/// Walks `get_nodes()` then `get_guests(node)` per node — O(N nodes)
-/// network calls. Used by every per-vmid command (migrate, exec, config,
-/// disk, …) that the user invokes by VMID alone, without specifying
-/// the node.
+///
+/// ONE request: `GET /cluster/resources?type=vm` returns every guest in
+/// the cluster with its node and type (audit 2026-09-09, #276).
+///
+/// This used to walk `get_nodes()` and then `get_guests(node)` per node.
+/// Because `get_guests` fetches `/qemu` and `/lxc` separately that was
+/// 1 + 2N requests on an N-node cluster, paid by every per-vmid command
+/// (migrate, exec, config, disk, snapshot) and at seventeen call sites in
+/// the MCP dispatcher — before the requested work even started. Against
+/// the default `rate_limit = 10` a ten-node cluster spent roughly two
+/// seconds just locating the guest. It also multiplied the failure
+/// surface: each of those 2N calls could fail, which is what turned one
+/// unreachable node into a false "guest not found".
+///
+/// Falls back to the per-node walk if `/cluster/resources` is
+/// unavailable, so a cluster that does not serve it still works.
 pub async fn find_guest(
     client: &crate::api::PxClient,
     vmid: u32,
 ) -> Result<(String, crate::api::types::GuestType)> {
-    use crate::api::ProxmoxGateway;
-    let nodes = client.get_nodes().await?;
-    let mut node_errors: Vec<String> = Vec::new();
-    for n in nodes {
-        match client.get_guests(&n.node).await {
-            Ok(guests) => {
-                if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                    return Ok((n.node.clone(), g.guest_type));
-                }
-            }
-            Err(e) => {
-                node_errors.push(format!("{}: {}", n.node, e));
-            }
+    // Node and type are both in the `/cluster/resources` row, so this
+    // needs exactly one request — no second fetch from the owning node,
+    // unlike `find_guest_full`, whose caller needs the risk-relevant
+    // fields that endpoint does not carry.
+    match find_guest_via_cluster_resources(client, vmid).await {
+        Ok(Some(g)) => return Ok((g.node, g.guest_type)),
+        Ok(None) => {
+            // The cluster answered and has no such vmid. Fall through:
+            // the walk reaches the same conclusion but produces the
+            // richer message when some nodes are unreachable.
+        }
+        Err(e) => {
+            tracing::debug!("/cluster/resources unavailable ({e:#}) — using per-node walk");
         }
     }
-    if node_errors.is_empty() {
-        anyhow::bail!("Guest {vmid} not found on any node")
-    }
-    anyhow::bail!(
-        "Guest {vmid} not found; {} node(s) returned errors: {}",
-        node_errors.len(),
-        node_errors.join("; ")
-    )
+    let g = find_guest_full_via_walk(client, vmid).await?;
+    Ok((g.node, g.guest_type))
+}
+
+/// Resolve `vmid` through `/cluster/resources`, returning `None` when
+/// the cluster answered but does not have that guest.
+///
+/// Separated so both lookups share the fast path and its fallback
+/// decision, rather than each having its own copy — the duplication
+/// between them was itself a finding (#251 in the audit's code-quality
+/// category).
+async fn find_guest_via_cluster_resources(
+    client: &crate::api::PxClient,
+    vmid: u32,
+) -> Result<Option<crate::api::types::Guest>> {
+    use crate::api::types::{Guest, GuestStatus, GuestType};
+    use crate::api::ProxmoxGateway;
+
+    let resources = client.get_cluster_resources(Some("vm")).await?;
+    let Some(r) = resources.into_iter().find(|r| r.vmid == vmid) else {
+        return Ok(None);
+    };
+    let guest_type = match r.resource_type.as_str() {
+        "lxc" => GuestType::Lxc,
+        "qemu" => GuestType::Qemu,
+        // A resource typed as neither is not a guest we can dispatch on.
+        // Fall back rather than guessing a hierarchy — guessing is the
+        // bug class `type_path` exists to prevent.
+        other => {
+            tracing::debug!("cluster/resources returned vmid {vmid} with type {other:?}");
+            return Ok(None);
+        }
+    };
+    Ok(Some(Guest {
+        vmid: r.vmid,
+        name: r.name,
+        status: match r.status.as_str() {
+            "running" => GuestStatus::Running,
+            "stopped" => GuestStatus::Stopped,
+            "paused" => GuestStatus::Paused,
+            "suspended" => GuestStatus::Suspended,
+            _ => GuestStatus::Unknown,
+        },
+        guest_type,
+        node: r.node,
+        cpu: r.cpu,
+        cpus: r.maxcpu,
+        mem: r.mem,
+        maxmem: r.maxmem,
+        disk: r.disk,
+        maxdisk: r.maxdisk,
+        uptime: r.uptime,
+        tags: r.tags,
+        template: r.template != 0,
+        // `/cluster/resources` does not carry `lock`, `hastate` or the
+        // network counters. The pre-flight gate reads all three, so
+        // `find_guest_full` re-fetches from the owning node rather than
+        // handing back a Guest whose risk-relevant fields are silently
+        // empty — which would weaken the gate instead of speeding it up.
+        ..Guest::default()
+    }))
 }
 
 /// Same scan as `find_guest`, but returns the full `Guest` so the
 /// caller can run pre-flight risk assessment (lock, HA state, uptime,
 /// tags, traffic) without a second round-trip.
 pub async fn find_guest_full(
+    client: &crate::api::PxClient,
+    vmid: u32,
+) -> Result<crate::api::types::Guest> {
+    use crate::api::ProxmoxGateway;
+
+    // #276 — one request to locate the guest, then one to the owning
+    // node for the fields `/cluster/resources` does not carry (`lock`,
+    // `hastate`, netin/netout). Two requests regardless of cluster size,
+    // against 1 + 2N before.
+    //
+    // The second fetch is not optional: the pre-flight risk gate reads
+    // exactly those fields, and handing it a Guest with them silently
+    // empty would turn a speed-up into a weakened safety check.
+    match find_guest_via_cluster_resources(client, vmid).await {
+        Ok(Some(located)) => {
+            let node = located.node.clone();
+            match client.get_guests(&node).await {
+                Ok(guests) => {
+                    if let Some(g) = guests.into_iter().find(|g| g.vmid == vmid) {
+                        return Ok(g);
+                    }
+                    // Raced with a migration between the two calls: fall
+                    // through to the full walk rather than return the
+                    // partial record.
+                    tracing::debug!(
+                        "guest {vmid} was on {node} per /cluster/resources but is not \
+                         there now — falling back to the per-node walk"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("get_guests({node}) failed after fast lookup: {e:#}");
+                }
+            }
+        }
+        Ok(None) => {
+            // The cluster answered and does not have this vmid. The walk
+            // below would reach the same conclusion 2N requests later,
+            // but it also produces the richer per-node error message when
+            // some nodes are unreachable, so let it run.
+        }
+        Err(e) => {
+            tracing::debug!("/cluster/resources unavailable ({e:#}) — using per-node walk");
+        }
+    }
+
+    find_guest_full_via_walk(client, vmid).await
+}
+
+/// The original per-node walk, kept as the fallback for a cluster that
+/// does not serve `/cluster/resources` and as the path that produces the
+/// detailed per-node error message.
+async fn find_guest_full_via_walk(
     client: &crate::api::PxClient,
     vmid: u32,
 ) -> Result<crate::api::types::Guest> {
@@ -490,6 +607,7 @@ impl IntoArray for serde_json::Value {
     }
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn execute_batch_op_full(
     client: &std::sync::Arc<crate::api::PxClient>,
     op: BatchOp,

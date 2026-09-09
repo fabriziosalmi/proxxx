@@ -44,6 +44,7 @@ pub struct ClusterSnapshot {
 /// Evaluate every rule against the snapshot. Returns:
 /// - the events that should fire NOW (subject to caller-side dedup)
 /// - the updated `EngineState` to feed back into the next call
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub fn evaluate(
     rules: &[AlertRuleConfig],
     snap: &ClusterSnapshot,

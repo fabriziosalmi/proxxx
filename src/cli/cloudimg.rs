@@ -361,6 +361,7 @@ pub enum CloudImgOutput {
     Json,
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_cloudimg(
     client: &Arc<PxClient>,
     action: CloudImgCommand,

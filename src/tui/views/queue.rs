@@ -10,6 +10,7 @@ use crate::app::queue::OpStatus;
 use crate::app::AppState;
 use crate::tui::theme::Theme;
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)

@@ -10,6 +10,7 @@ use crate::app::AppState;
 use crate::tui::theme::Theme;
 use crate::util::sanitize::sanitize_display;
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)

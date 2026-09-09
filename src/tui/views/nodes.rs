@@ -46,6 +46,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     draw_node_table(f, chunks[1], state);
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
     if state.nodes.is_empty() {
         let msg = if state.is_loading {

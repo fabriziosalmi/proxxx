@@ -211,6 +211,7 @@ pub fn integrate_rrd(points: &[RrdPoint]) -> WindowedTotals {
     t
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_accounting(
     client: &Arc<PxClient>,
     args: AccountingReportArgs,

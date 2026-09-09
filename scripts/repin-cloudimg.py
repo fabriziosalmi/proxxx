@@ -42,7 +42,8 @@ UA = {"User-Agent": "proxxx-repin-cloudimg/1.0 (+https://github.com/fabriziosalm
 
 def fetch(url: str) -> str:
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310 (https only, official hosts)
+    # https only, official hosts — the URL comes from the pinned registry.
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 

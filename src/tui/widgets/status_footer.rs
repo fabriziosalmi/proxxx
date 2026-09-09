@@ -88,6 +88,7 @@ const fn mode_label_for(mode: &AppMode) -> &'static str {
 
 /// Returns the `(key, label)` pairs to surface for the current
 /// (view, mode). Pure — testable without rendering.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)> {
     if matches!(mode, AppMode::Help) {
         return vec![("any key", "dismiss help")];

@@ -270,7 +270,13 @@ cast_possible_wrap = "allow"
 # `too_many_arguments` flags clap dispatchers and the `ProxmoxGateway`
 # trait — both have wide signatures because the underlying PVE API
 # does. Re-evaluate per-fn if a real legibility issue surfaces.
-too_many_lines = "allow"
+# Audit #272: back to `warn` — the blanket allow also covered
+# `tui::dispatch_side_effect` and `tui::run`, which are deep rather than
+# flat, so nothing reported when a function doubled in size. The genuine
+# exemptions (wide, flat, exhaustive dispatch over a closed enum) now
+# carry a per-function `#[allow]` naming themselves, which is a visible
+# decision rather than a silence.
+too_many_lines = "warn"
 too_many_arguments = "allow"
 
 # Layout: a const or struct decl colocated with its first use is

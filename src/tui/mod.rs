@@ -248,6 +248,7 @@ async fn run_hitl_poller(
 /// Run the TUI. Returns `Ok(Some(profile_name))` when the user switches
 /// profiles — the caller should re-enter `run()` with the new profile.
 /// Returns `Ok(None)` on normal quit.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn run(
     profile: Option<&str>,
     cli_secret: Option<&str>,
@@ -978,6 +979,7 @@ fn spawn_ssh_open<B: ratatui::backend::Backend>(
 /// passthroughs, MoveDisk/ResizeDisk warn-and-skip) don't, so clippy
 /// flags the function as unused-async on a per-branch basis.
 #[allow(clippy::unused_async)]
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn dispatch_side_effect(
     effect: SideEffect,
     state: &AppState,
@@ -1994,6 +1996,7 @@ const MIN_FRAME_WIDTH: u16 = 40;
 const MIN_FRAME_HEIGHT: u16 = 8;
 
 /// Top-level render dispatcher — routes to the correct view
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
     let area = f.area();
 

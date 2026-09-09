@@ -277,6 +277,7 @@ pub fn parse_listening_ports(output: &str) -> Vec<u16> {
 ///
 /// Skipped entirely for LXC (no agent) and stopped guests (no
 /// listening sockets).
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn assess_deep(
     client: &crate::api::PxClient,
     pbs: Option<&crate::pbs::PbsClient>,

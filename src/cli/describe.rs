@@ -155,6 +155,7 @@ pub async fn execute_describe(client: &Arc<PxClient>, args: DescribeArgs) -> Res
     Ok((Value::Null, 0))
 }
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn collect(
     client: &PxClient,
     include_events: bool,

@@ -74,6 +74,8 @@ initiated it. There is no "skip the risk gate for MCP" path.
 argv ─► clap ─► cli::execute_delete
               │
               ├─► find_guest(client, vmid=100) ── REST /cluster/resources
+              │      (one request; falls back to a per-node walk only
+              │       when that endpoint is unavailable — #276)
               │
               ├─► assess_deep(client, pbs, Op::Delete, &guest)
               │      └─ 11 risk variants checked; if SEVERE without

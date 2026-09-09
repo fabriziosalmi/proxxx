@@ -84,6 +84,7 @@ pub enum CallbackOutcome {
 /// Never returns `Err` — all failure modes surface through
 /// `CallbackOutcome`. The `Result` return is reserved for future
 /// expansion (e.g. propagating shutdown signals).
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn handle_callback_update(
     update: &Update,
     pending: &PendingApprovals,

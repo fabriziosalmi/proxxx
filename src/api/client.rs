@@ -50,7 +50,7 @@ fn reject_path_traversal(path: &str) -> Result<()> {
         .replace("%2e", ".")
         .replace("%2f", "/");
     let suspicious = normalised
-        .split(|c| c == '/' || c == '?' || c == '&' || c == '=')
+        .split(['/', '?', '&', '='])
         .any(|seg| seg == ".." || seg == ".");
     if suspicious {
         anyhow::bail!(

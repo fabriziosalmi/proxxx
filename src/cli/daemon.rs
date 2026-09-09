@@ -172,6 +172,7 @@ struct Component {
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn run_unified(
     client: &Arc<PxClient>,
     config_handle: ConfigHandle,
@@ -614,6 +615,7 @@ fn is_frozen(profile: Option<&str>) -> bool {
 /// human review" alert and mutates nothing) and fail-fast
 /// (`continue_on_error = false`). Never returns an error: a failed tick must not
 /// kill the watch loop.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn run_auto_converge(
     client: &Arc<PxClient>,
     profile_label: &str,

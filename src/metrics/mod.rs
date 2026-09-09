@@ -89,6 +89,7 @@ impl MetricWriter {
 
 // ── Scrape ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn scrape(client: &PxClient) -> String {
     let mut w = MetricWriter::new();
 
