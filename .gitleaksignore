@@ -1,0 +1,23 @@
+# Findings verified by hand and deliberately silenced, by FINGERPRINT.
+#
+# Fingerprints pin the exact commit, file and line, so these two entries
+# suppress these two findings and nothing else: a real key added to the same
+# file tomorrow still fires. A path or regex allowlist would have covered that
+# case too, silently, which is the opposite of what a secret scan is for.
+#
+# Both are in init_wizard.rs, and both are the same joke: the code that FINDS
+# ssh keys is flagged for containing the words that identify an ssh key.
+#
+#   src/cli/init_wizard.rs:611   the discovery branch itself,
+#                                `preview.contains("-----BEGIN OPENSSH PRIVATE KEY-----")`,
+#                                which classifies the key files found in ~/.ssh/.
+#
+#   src/cli/init_wizard.rs:1100  a test fixture. Its body is `b3BlbnNzaC1rZXk=`,
+#                                base64 for the twelve bytes "openssh-key".
+#
+# Checked on 2026-09-10 with gitleaks 8.30.1 against all 302 commits: these are
+# the only two findings in the history. The real PVE token that reached this
+# repository in an earlier revision (rotated and revoked when discovered, see
+# the comment on the secret-scan job in ci.yml) is no longer detected.
+87eb71bfe66a4b2eb1482e5228670a4b46456fd7:src/cli/init_wizard.rs:private-key:611
+87eb71bfe66a4b2eb1482e5228670a4b46456fd7:src/cli/init_wizard.rs:private-key:1100
