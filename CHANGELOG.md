@@ -121,7 +121,7 @@ SemVer contract:
   `RateLimited` / `StorageHang`), so teardown scripts never mistake an
   unreachable node for an already-deleted guest.
 - **Configuration errors now consistently exit `3` (`ConfigError`) (#359).**
-  Unknown `--profile` / `PROXXX_PROFILE`, missing `default_profile` in a
+  Unknown `--profile`, missing `default` in a
   multi-profile config, missing required fields or profile parse errors,
   invalid enum-like values in `validate_enum_like_fields`, and invoking
   `proxxx pbs ...` without a PBS configuration block now return typed

@@ -87,8 +87,8 @@ error carried via anyhow; the same chain walker maps it to `6`.
 Configuration errors are typed via `config::ConfigError` with eight
 variants: `NotFound` (no `config.toml`), `Io` (read failure once the
 file exists), `Toml` (invalid TOML syntax), `UnknownProfile` (requested
-`--profile` or `PROXXX_PROFILE` not in `[profiles]`),
-`NoDefaultProfile` (multi-profile config without `default_profile` or
+`--profile` not in `[profiles]`),
+`NoDefaultProfile` (multi-profile config without `default` or
 `--profile`), `ProfileParse` (missing required field or invalid type in
 a profile block), `InvalidValue` (unsupported enum-like setting in
 `validate_enum_like_fields`), and `MissingPbsConfig` (`proxxx pbs`
