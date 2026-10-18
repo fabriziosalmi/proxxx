@@ -174,9 +174,9 @@ invariant so the budget cannot drift below 120 s by accident.
 
 The destructive tool set is **fail-closed** over MCP:
 
-- `stop_guest`, `restart_guest`, `delete_guest`, `delete_snapshot`,
-  `migrate_guest`, `clone_guest`, `clone_with_cloudinit`, `create_guest`,
-  and — new in v0.13.0 — `suspend_guest` and `create_snapshot`.
+- `stop_guest`, `restart_guest`, `delete_guest`, `create_snapshot`,
+  `delete_snapshot`, `suspend_guest`, `clone_guest`, `migrate_guest`,
+  `create_guest`, and `clone_with_cloudinit`.
 
 A destructive tool call with **no matching `[[policies]]` entry is
 REFUSED**. proxxx returns a typed `isError` envelope and the PVE
@@ -184,12 +184,41 @@ gateway is never reached — nothing is queued, nothing executes. There
 is no ungated inline path for a destructive tool.
 
 The **only** way to run a destructive tool over MCP is a matching
-`[[policies]]` entry, which routes the call through `enforce_preflight`
-and `check_hitl` exactly like CLI calls and requires a human approval
-before execution. When a policy matches, the agent sees a
-`pending_hitl` response and can poll for completion via
-`get_guest_status` or wait — proxxx returns a transient error code
-clients are expected to retry on.
+`[[policies]]` entry:
+
+1. **Request persistence (`mcp::dispatch`)**: when a policy matches, MCP
+   resolves the target guest's current `(node, guest_type)` (or records the
+   requested `node` / `type` / `vmid` for `create_guest`), persists a pending
+   row in `<config_dir>/hitl_pending.db` with the full tool arguments in
+   `params`, sends the signed `approve:<id>` / `deny:<id>` inline keyboard to
+   Telegram, and returns the interception message containing the transaction
+   ID.
+2. **Typed decoding & guest binding (`proxxx hitl serve`)**: once `require`
+   authorised approvers approve the request within its 120 s TTL, the HITL
+   daemon deserializes `(action, params)` into the closed `ApprovedOp` enum
+   (`#[serde(deny_unknown_fields)]`, `Shape::Name` validation on path-bearing
+   strings). Any row that fails to decode is marked `failed` with
+   `cannot decode approved operation: ...` without calling PVE. Before
+   executing, the daemon re-resolves the guest on the cluster:
+   - For operations on an existing guest (`stop_guest`, `restart_guest`,
+     `delete_guest`, `create_snapshot`, `delete_snapshot`, `suspend_guest`,
+     `clone_guest`, `migrate_guest`, `clone_with_cloudinit`), if the guest is
+     missing or its live `node` or `guest_type` differs from the stored row,
+     the daemon marks the row `failed` with
+     `guest changed since the request (expected <node>/<type>, found ...)` and
+     does not execute.
+   - For `create_guest`, `clone_guest`, and `clone_with_cloudinit`, if an
+     explicit target VMID (`vmid` / `newid`) is now occupied on the cluster,
+     the daemon marks the row `failed` with
+     `guest changed since the request (expected target VMID <id> to be free, found <node>/<type>)`
+     and does not execute.
+3. **Shared execution & outcome recording**: the daemon executes all 10
+   destructive MCP tools above (plus the 5 CLI batch actions `start`, `stop`,
+   `restart`, `suspend`, `resume`) through the exact same `mcp::dispatch::exec_*`
+   and `cli::common::exec_cli_batch_op` functions used inline. On success the
+   store row is marked `executed` with the PVE `upid`; on PVE error it is
+   marked `failed` with the error message, and the Telegram message footer is
+   updated accordingly.
 
 Non-destructive tools (`start_guest`, `resume_guest`, and the
 `get_*` / `list_*` reads) still run inline without a policy.

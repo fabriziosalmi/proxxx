@@ -158,8 +158,8 @@ Senders (CLI policy intercept and MCP dispatch) persist each request in
 directory alongside `telegram_hmac.key`) with `id`, `action`, `vmid`, `node`,
 `guest_type` (`qemu` or `lxc`), `params`, `require`, `issued_at`, `expires_at`
 (default 120 s TTL), `status` (`pending` / `approved` / `denied` / `expired` /
-`executed` / `failed`), `approvers`, and `error`. Terminal rows older than 7
-days are pruned on open.
+`executed` / `failed`), `approvers`, `upid`, and `error`. Terminal rows older
+than 7 days are pruned on open.
 
 Both the HITL daemon and the TUI poller validate incoming callbacks through
 `verify_callback` and the pending store in fail-closed order:
@@ -175,8 +175,8 @@ Both the HITL daemon and the TUI poller validate incoming callbacks through
 5. Store lookup (`hitl_pending.db` in the daemon, or `HitlCoordinator` in the
    TUI): unknown IDs return `"⚠️ Unknown request"`, expired requests
    (`now > expires_at`) transition to `expired` and return
-   `"⏱️ Request expired (TTL elapsed), request again"`, and non-`pending` rows
-   return `"⚠️ Already handled (status: ...)"` — preventing replay even across
+   `"⏰ Request expired — request again"`, and non-`pending` rows
+   return `"⚠️ Already handled (...)"` — preventing replay even across
    daemon restarts.
 
 For policies with `require > 1`, `require` and distinct approver votes are
@@ -184,6 +184,54 @@ stored in `hitl_pending.db` (or `HitlCoordinator` in the TUI) rather than on
 the button, so quorum progress survives daemon restarts and unblocks or
 executes only after `require` distinct authorised approvers press Approve (a
 single Deny from an authorised approver denies immediately).
+
+## Daemon executors & guest binding (`proxxx hitl serve`)
+
+Once a request reaches `approved` in `hitl_pending.db`, `src/hitl/daemon.rs`
+deserializes `(action, params)` into the closed `ApprovedOp` enum
+(`#[serde(deny_unknown_fields)]`, `Shape::Name` validation on path-bearing
+strings) and dispatches through an exhaustive `match` (no wildcard arm) covering
+all 15 supported operations:
+
+- **CLI batch operations (`cli::common::exec_cli_batch_op`)**:
+  - `start` (`CliEmptyParams`)
+  - `stop` (`CliStopParams`: `force`, `timeout_secs`)
+  - `restart` (`CliEmptyParams`)
+  - `suspend` (`CliEmptyParams`)
+  - `resume` (`CliEmptyParams`)
+- **MCP destructive tools (`mcp::dispatch::exec_*`)**:
+  - `stop_guest` (`McpStopGuestParams`: `guest_id`, `force`)
+  - `restart_guest` (`McpGuestIdParams`: `guest_id`)
+  - `delete_guest` (`McpGuestIdParams`: `guest_id`)
+  - `create_snapshot` (`McpSnapshotParams`: `guest_id`, `name`)
+  - `delete_snapshot` (`McpSnapshotParams`: `guest_id`, `name`)
+  - `suspend_guest` (`McpGuestIdParams`: `guest_id`)
+  - `clone_guest` (`McpCloneGuestParams`: `guest_id`, `newid`, `name`, `full`)
+  - `migrate_guest` (`McpMigrateGuestParams`: `guest_id`, `target_node`, `online`)
+  - `create_guest` (`McpCreateGuestParams`: `node`, `type`, `vmid`, `name`, `memory`, `cores`, `storage`, `disk_size`, `template`, `iso`, `bridge`)
+  - `clone_with_cloudinit` (`McpCloneWithCloudinitParams`: `guest_id`, `newid`, `name`, `full`, `ciuser`, `sshkey`, `ipconfig0`, `searchdomain`, `nameserver`)
+
+Pre-execution safety gates:
+
+- **Undecodable row refusal**: any row whose `(action, params)` fails
+  deserialization or parameter validation is marked `failed` with
+  `cannot decode approved operation: ...` and nothing is executed.
+- **Guest binding (VMID reuse protection)**:
+  - For operations on an existing guest, the daemon resolves `find_guest(vmid)`
+    at execution time and checks that the guest still exists and matches the
+    stored `(node, guest_type)`. If the guest disappeared, moved to another
+    node, or changed guest type (`qemu` vs `lxc`), the row is marked `failed`
+    with `guest changed since the request (expected <node>/<type>, found ...)`
+    and nothing is executed.
+  - For `create_guest`, `clone_guest`, and `clone_with_cloudinit`, if an
+    explicit target VMID (`vmid` / `newid`) is now occupied on the cluster, the
+    row is marked `failed` with
+    `guest changed since the request (expected target VMID <id> to be free, found <node>/<type>)`
+    and nothing is executed.
+- **Outcome recording**: on `Ok(upid)` the row is marked `executed` with `upid`
+  stored in `hitl_pending_requests.upid`; on error it is marked `failed` with
+  the error text, and the Telegram message footer is updated to show either
+  `✅ Done — <upid>` or `❌ Failed: <error>`.
 
 ## Audit trail
 

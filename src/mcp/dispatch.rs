@@ -16,12 +16,38 @@ use crate::mcp::tools::{ToolAction, TOOLS};
 ///
 /// Returns `Ok(json!({"content": [{"type":"text","text":...}]}))` on success.
 /// The caller wraps this in a JSON-RPC result or HTTP response body.
-#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
+///
+/// # Errors
+///
+/// Propagates parameter validation errors or underlying Proxmox gateway errors.
 pub async fn handle_tool_call(
-    client: &PxClient,
+    client: &Arc<PxClient>,
     config: &ProfileConfig,
     name: &str,
     args: &Value,
+) -> Result<Value> {
+    handle_tool_call_with_store(client.as_ref(), config, name, args, None).await
+}
+
+/// Execute a single MCP tool call using an optional caller-supplied
+/// [`crate::hitl::pending::PendingStore`] (`#340`).
+///
+/// Production callers use [`handle_tool_call`], which opens the default on-disk
+/// store (`<config_dir>/hitl_pending.db`) whenever a HITL policy matches. Tests
+/// pass `Some(&store)` to keep pending-request persistence hermetic in a temp
+/// directory.
+///
+/// # Errors
+///
+/// Propagates parameter validation errors, store persistence errors, or
+/// underlying Proxmox gateway errors.
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
+pub async fn handle_tool_call_with_store(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    config: &ProfileConfig,
+    name: &str,
+    args: &Value,
+    pending_store: Option<&crate::hitl::pending::PendingStore>,
 ) -> Result<Value> {
     let tool_def = TOOLS
         .iter()
@@ -61,7 +87,6 @@ pub async fn handle_tool_call(
         }
     }
 
-    use crate::api::ProxmoxGateway;
     let mut is_hitl_pending = false;
     let mut hitl_msg = String::new();
 
@@ -84,10 +109,15 @@ pub async fn handle_tool_call(
     // to permit a destructive MCP op, declare a policy for it.
     if tool_def.destructive {
         let policies = config.policies.as_deref().unwrap_or_default();
-        let vmid = args
+        let guest_id_arg = args
             .get("guest_id")
             .and_then(serde_json::Value::as_u64)
             .map(|g| g as u32);
+        let create_vmid_arg = args
+            .get("vmid")
+            .and_then(serde_json::Value::as_u64)
+            .map(|g| g as u32);
+        let vmid = guest_id_arg.or(create_vmid_arg);
 
         // Tag-targeted policies need the guest's live tags; only fetch
         // them when there are policies to evaluate AND the call carries a
@@ -101,7 +131,7 @@ pub async fn handle_tool_call(
             // targets tags — action/vmid/wildcard policies decide offline.
             let needs_tags = policies.iter().any(|p| p.target.starts_with("tag:"));
             let tags: Vec<String> = if needs_tags {
-                if let Some(v) = vmid {
+                if let Some(v) = guest_id_arg {
                     fetched_guest = client.find_guest(v).await?;
                     fetched_guest
                         .as_ref()
@@ -127,9 +157,9 @@ pub async fn handle_tool_call(
             is_hitl_pending = true;
             let target = vmid.map(|v| v.to_string()).unwrap_or_default();
 
-            let txn_id = if let Some(ref tg) = config.telegram {
+            let txn_id = if config.telegram.is_some() || pending_store.is_some() {
                 if fetched_guest.is_none() {
-                    if let Some(v) = vmid {
+                    if let Some(v) = guest_id_arg {
                         fetched_guest = client.find_guest(v).await.ok().flatten();
                     }
                 }
@@ -147,35 +177,36 @@ pub async fn handle_tool_call(
                     });
                 let mut new_req =
                     crate::hitl::pending::NewPendingRequest::new(name, vmid, policy.require)
-                        .with_params(json!({
-                            "source": "mcp",
-                            "tool": name,
-                            "args": args,
-                        }));
+                        .with_params(args.clone());
                 if let Some(n) = resolved_node {
                     new_req = new_req.with_node(n);
                 }
                 if let Some(gt) = resolved_gt {
                     new_req = new_req.with_guest_type(gt);
                 }
-                let id = match crate::hitl::pending::PendingStore::open_default()
-                    .and_then(|store| store.insert(&new_req))
-                {
+                let insert_res = match pending_store {
+                    Some(store) => store.insert(&new_req),
+                    None => crate::hitl::pending::PendingStore::open_default()
+                        .and_then(|store| store.insert(&new_req)),
+                };
+                let id = match insert_res {
                     Ok(row) => row.id,
                     Err(e) => {
                         tracing::warn!("Failed to record MCP HITL request in pending store: {e:#}");
                         crate::hitl::pending::generate_request_id()?
                     }
                 };
-                match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
-                    Ok(tg_gateway) => {
-                        let reason = format!("MCP requested action: {name}");
-                        let _ = tg_gateway
-                            .request_approval(name, &target, &reason, &id, policy.require)
-                            .await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
+                if let Some(ref tg) = config.telegram {
+                    match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
+                        Ok(tg_gateway) => {
+                            let reason = format!("MCP requested action: {name}");
+                            let _ = tg_gateway
+                                .request_approval(name, &target, &reason, &id, policy.require)
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
+                        }
                     }
                 }
                 id
@@ -245,72 +276,55 @@ pub async fn handle_tool_call(
             format!("Started guest {vmid}. UPID: {upid}")
         }
         ToolAction::StopGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let force = args
-                .get("force")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpStopGuestParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = if force {
-                client.stop_guest(&node, vmid, gt, true).await?
-            } else {
-                client.shutdown_guest(&node, vmid, gt, 60).await?
-            };
-            format!("Stopped guest {vmid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_stop_guest(client, &node, gt, &params).await?;
+            format!("Stopped guest {}. UPID: {upid}", params.guest_id)
         }
         ToolAction::RestartGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpGuestIdParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = client.restart_guest(&node, vmid, gt).await?;
-            format!("Restarted guest {vmid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_restart_guest(client, &node, gt, &params).await?;
+            format!("Restarted guest {}. UPID: {upid}", params.guest_id)
         }
         ToolAction::DeleteGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpGuestIdParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = client.delete_guest(&node, vmid, gt).await?;
-            format!("Deleted guest {vmid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_delete_guest(client, &node, gt, &params).await?;
+            format!("Deleted guest {}. UPID: {upid}", params.guest_id)
         }
         ToolAction::CreateSnapshot => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let snap_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("mcp-snap");
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpSnapshotParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = client.create_snapshot(&node, vmid, gt, snap_name).await?;
-            format!("Snapshot '{snap_name}' created for guest {vmid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_create_snapshot(client, &node, gt, &params).await?;
+            format!(
+                "Snapshot '{}' created for guest {}. UPID: {upid}",
+                params.name, params.guest_id
+            )
         }
         ToolAction::DeleteSnapshot => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let snap_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpSnapshotParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            client.delete_snapshot(&node, vmid, gt, snap_name).await?;
-            format!("Snapshot '{snap_name}' deleted for guest {vmid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let _upid = exec_delete_snapshot(client, &node, gt, &params).await?;
+            format!(
+                "Snapshot '{}' deleted for guest {}",
+                params.name, params.guest_id
+            )
         }
         ToolAction::ListSnapshots => {
             let vmid = args
@@ -344,15 +358,13 @@ pub async fn handle_tool_call(
             serde_json::to_string_pretty(&log)?
         }
         ToolAction::SuspendGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpGuestIdParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = client.suspend_guest(&node, vmid, gt).await?;
-            format!("Suspended guest {vmid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_suspend_guest(client, &node, gt, &params).await?;
+            format!("Suspended guest {}. UPID: {upid}", params.guest_id)
         }
         ToolAction::ResumeGuest => {
             let vmid = args
@@ -366,52 +378,25 @@ pub async fn handle_tool_call(
             format!("Resumed guest {vmid}. UPID: {upid}")
         }
         ToolAction::CloneGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpCloneGuestParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let newid_arg = args
-                .get("newid")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let newid = if newid_arg == 0 {
-                client.next_free_vmid().await?
-            } else {
-                newid_arg
-            };
-            let name = args.get("name").and_then(|v| v.as_str());
-            let full = args
-                .get("full")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let upid = client
-                .clone_guest(&node, vmid, gt, newid, name, None, None, full, None, None)
-                .await?;
-            format!("Cloned guest {vmid} → {newid}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let (newid, upid) = exec_clone_guest(client, &node, gt, &params).await?;
+            format!("Cloned guest {} → {newid}. UPID: {upid}", params.guest_id)
         }
         ToolAction::MigrateGuest => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let target_node = args
-                .get("target_node")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let online = args
-                .get("online")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true);
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpMigrateGuestParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            let upid = client
-                .migrate_guest(&node, vmid, gt, target_node, online, false, false)
-                .await?;
-            format!("Migrating guest {vmid} → {target_node}. UPID: {upid}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let upid = exec_migrate_guest(client, &node, gt, &params).await?;
+            format!(
+                "Migrating guest {} → {}. UPID: {upid}",
+                params.guest_id, params.target_node
+            )
         }
         ToolAction::GetClusterStatus => {
             let status = client.cluster_status().await?;
@@ -442,93 +427,16 @@ pub async fn handle_tool_call(
             serde_json::to_string_pretty(&status)?
         }
         ToolAction::CreateGuest => {
-            use crate::api::ProxmoxGateway;
-            let node = args
-                .get("node")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("create_guest: missing required param 'node'"))?;
-            let guest_type = args
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("create_guest: missing required param 'type'"))?;
-
-            let vmid = if let Some(id) = args.get("vmid").and_then(serde_json::Value::as_u64) {
-                id as u32
-            } else {
-                client.get_next_vmid().await?
-            };
-
-            let name = args.get("name").and_then(serde_json::Value::as_str);
-            let memory = args
-                .get("memory")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(if guest_type == "lxc" { 512 } else { 1024 });
-            let cores = args
-                .get("cores")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(1);
-            let bridge = args
-                .get("bridge")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("vmbr0");
-            let storage = args.get("storage").and_then(serde_json::Value::as_str);
-            let disk_size = args.get("disk_size").and_then(serde_json::Value::as_u64);
-
-            let upid = if guest_type == "lxc" {
-                let template = args
-                    .get("template")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("create_guest lxc: missing 'template'"))?;
-                let size = disk_size.unwrap_or(8);
-                let rootfs_storage = storage.unwrap_or("local-lvm");
-                let rootfs = format!("{rootfs_storage}:{size}");
-                let mut params: Vec<(String, String)> = vec![
-                    ("vmid".into(), vmid.to_string()),
-                    ("ostemplate".into(), template.to_string()),
-                    ("memory".into(), memory.to_string()),
-                    ("cores".into(), cores.to_string()),
-                    ("rootfs".into(), rootfs),
-                    ("net0".into(), format!("name=eth0,bridge={bridge},ip=dhcp")),
-                ];
-                if let Some(n) = name {
-                    params.push(("hostname".into(), n.to_string()));
-                }
-                let as_refs: Vec<(&str, &str)> = params
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                client.create_lxc(node, &as_refs).await?
-            } else {
-                let iso = args.get("iso").and_then(serde_json::Value::as_str);
-                let size = disk_size.unwrap_or(32);
-                let mut params: Vec<(String, String)> = vec![
-                    ("vmid".into(), vmid.to_string()),
-                    ("memory".into(), memory.to_string()),
-                    ("cores".into(), cores.to_string()),
-                    ("ostype".into(), "l26".into()),
-                    ("scsihw".into(), "virtio-scsi-pci".into()),
-                    ("net0".into(), format!("virtio,bridge={bridge}")),
-                ];
-                if let Some(n) = name {
-                    params.push(("name".into(), n.to_string()));
-                }
-                if let Some(st) = storage {
-                    params.push(("scsi0".into(), format!("{st}:{size}")));
-                }
-                if let Some(i) = iso {
-                    params.push(("cdrom".into(), i.to_string()));
-                }
-                let as_refs: Vec<(&str, &str)> = params
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                client.create_qemu(node, &as_refs).await?
-            };
-
+            let params: crate::hitl::daemon::McpCreateGuestParams =
+                serde_json::from_value(args.clone())?;
+            let (vmid, upid) = exec_create_guest(client, &params).await?;
             return Ok(json!({
                 "content": [{
                     "type": "text",
-                    "text": format!("Guest {vmid} ({guest_type}) creation started on {node}. UPID: {upid}")
+                    "text": format!(
+                        "Guest {vmid} ({}) creation started on {}. UPID: {upid}",
+                        params.guest_type, params.node
+                    )
                 }]
             }));
         }
@@ -586,71 +494,16 @@ pub async fn handle_tool_call(
             }))?
         }
         ToolAction::CloneWithCloudinit => {
-            let vmid = args
-                .get("guest_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let (node, gt) = find_node_and_type(client, vmid)
+            let params: crate::hitl::daemon::McpCloneWithCloudinitParams =
+                serde_json::from_value(args.clone())?;
+            let (node, gt) = find_node_and_type(client, params.guest_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
-            if !matches!(gt, crate::api::types::GuestType::Qemu) {
-                anyhow::bail!("clone_with_cloudinit: VMID {vmid} is LXC — cloud-init is QEMU-only");
-            }
-            let newid_arg = args
-                .get("newid")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            let newid = if newid_arg == 0 {
-                client.next_free_vmid().await?
-            } else {
-                newid_arg
-            };
-            let name = args.get("name").and_then(|v| v.as_str());
-            let full = args
-                .get("full")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-
-            let profile = crate::cli::vm::CloudInitProfile {
-                ciuser: args
-                    .get("ciuser")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                cipassword: None,
-                sshkey: args
-                    .get("sshkey")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                sshkey_file: None,
-                ipconfig0: args
-                    .get("ipconfig0")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                searchdomain: args
-                    .get("searchdomain")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                nameserver: args
-                    .get("nameserver")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-            };
-
-            let upid = client
-                .clone_guest(&node, vmid, gt, newid, name, None, None, full, None, None)
-                .await?;
-            // Block until clone lands — applying cloudinit before
-            // the disk image is ready races PVE's own locking.
-            let status = crate::cli::common::poll_task_until_done(client, &node, &upid, 0).await?;
-            if !status.is_success() {
-                anyhow::bail!(
-                    "clone task did not succeed (status={:?}); cloud-init not applied",
-                    status.exitstatus
-                );
-            }
-            let ci = crate::cli::vm::apply_cloudinit_and_regen(client, &node, newid, gt, &profile)
-                .await?;
-            format!("Cloned guest {vmid} → {newid} (UPID: {upid}); cloud-init applied: {ci}")
+                .ok_or_else(|| anyhow::anyhow!("Guest {} not found", params.guest_id))?;
+            let (newid, upid, ci) = exec_clone_with_cloudinit(client, &node, gt, &params).await?;
+            format!(
+                "Cloned guest {} → {newid} (UPID: {upid}); cloud-init applied: {ci}",
+                params.guest_id
+            )
         }
     };
 
@@ -659,11 +512,290 @@ pub async fn handle_tool_call(
     }))
 }
 
+/// Shared `stop_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::stop_guest`] or
+/// [`crate::api::ProxmoxGateway::shutdown_guest`].
+pub async fn exec_stop_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpStopGuestParams,
+) -> Result<String> {
+    if params.force {
+        client.stop_guest(node, params.guest_id, gt, true).await
+    } else {
+        client.shutdown_guest(node, params.guest_id, gt, 60).await
+    }
+}
+
+/// Shared `restart_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::restart_guest`].
+pub async fn exec_restart_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpGuestIdParams,
+) -> Result<String> {
+    client.restart_guest(node, params.guest_id, gt).await
+}
+
+/// Shared `delete_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::delete_guest`].
+pub async fn exec_delete_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpGuestIdParams,
+) -> Result<String> {
+    client.delete_guest(node, params.guest_id, gt).await
+}
+
+/// Shared `create_snapshot` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::create_snapshot`].
+pub async fn exec_create_snapshot(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpSnapshotParams,
+) -> Result<String> {
+    client
+        .create_snapshot(node, params.guest_id, gt, &params.name)
+        .await
+}
+
+/// Shared `delete_snapshot` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::delete_snapshot`].
+pub async fn exec_delete_snapshot(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpSnapshotParams,
+) -> Result<String> {
+    client
+        .delete_snapshot(node, params.guest_id, gt, &params.name)
+        .await
+}
+
+/// Shared `suspend_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::suspend_guest`].
+pub async fn exec_suspend_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpGuestIdParams,
+) -> Result<String> {
+    client.suspend_guest(node, params.guest_id, gt).await
+}
+
+/// Shared `clone_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::next_free_vmid`] or
+/// [`crate::api::ProxmoxGateway::clone_guest`].
+pub async fn exec_clone_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpCloneGuestParams,
+) -> Result<(u32, String)> {
+    let newid = if params.newid == 0 {
+        client.next_free_vmid().await?
+    } else {
+        params.newid
+    };
+    let upid = client
+        .clone_guest(
+            node,
+            params.guest_id,
+            gt,
+            newid,
+            params.name.as_deref(),
+            None,
+            None,
+            params.full,
+            None,
+            None,
+        )
+        .await?;
+    Ok((newid, upid))
+}
+
+/// Shared `migrate_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Propagates any error from [`crate::api::ProxmoxGateway::migrate_guest`].
+pub async fn exec_migrate_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpMigrateGuestParams,
+) -> Result<String> {
+    client
+        .migrate_guest(
+            node,
+            params.guest_id,
+            gt,
+            &params.target_node,
+            params.online,
+            false,
+            false,
+        )
+        .await
+}
+
+/// Shared `create_guest` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Returns an error if required parameters (`template` for LXC) are missing or
+/// the underlying [`crate::api::ProxmoxGateway::create_lxc`] /
+/// [`crate::api::ProxmoxGateway::create_qemu`] call fails.
+pub async fn exec_create_guest(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    params: &crate::hitl::daemon::McpCreateGuestParams,
+) -> Result<(u32, String)> {
+    let node = params.node.as_str();
+    let guest_type = params.guest_type.as_str();
+    if guest_type != "qemu" && guest_type != "lxc" {
+        anyhow::bail!("create_guest: invalid type '{guest_type}' (expected 'qemu' or 'lxc')");
+    }
+    let vmid = if let Some(id) = params.vmid.filter(|&v| v > 0) {
+        id
+    } else {
+        client.get_next_vmid().await?
+    };
+
+    let name = params.name.as_deref();
+    let memory = params
+        .memory
+        .unwrap_or(if guest_type == "lxc" { 512 } else { 1024 });
+    let cores = params.cores.unwrap_or(1);
+    let bridge = params.bridge.as_deref().unwrap_or("vmbr0");
+    let storage = params.storage.as_deref();
+    let disk_size = params.disk_size;
+
+    let upid = if guest_type == "lxc" {
+        let template = params
+            .template
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("create_guest lxc: missing 'template'"))?;
+        let size = disk_size.unwrap_or(8);
+        let rootfs_storage = storage.unwrap_or("local-lvm");
+        let rootfs = format!("{rootfs_storage}:{size}");
+        let mut kv: Vec<(String, String)> = vec![
+            ("vmid".into(), vmid.to_string()),
+            ("ostemplate".into(), template.to_string()),
+            ("memory".into(), memory.to_string()),
+            ("cores".into(), cores.to_string()),
+            ("rootfs".into(), rootfs),
+            ("net0".into(), format!("name=eth0,bridge={bridge},ip=dhcp")),
+        ];
+        if let Some(n) = name {
+            kv.push(("hostname".into(), n.to_string()));
+        }
+        let as_refs: Vec<(&str, &str)> = kv.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        client.create_lxc(node, &as_refs).await?
+    } else {
+        let iso = params.iso.as_deref();
+        let size = disk_size.unwrap_or(32);
+        let mut kv: Vec<(String, String)> = vec![
+            ("vmid".into(), vmid.to_string()),
+            ("memory".into(), memory.to_string()),
+            ("cores".into(), cores.to_string()),
+            ("ostype".into(), "l26".into()),
+            ("scsihw".into(), "virtio-scsi-pci".into()),
+            ("net0".into(), format!("virtio,bridge={bridge}")),
+        ];
+        if let Some(n) = name {
+            kv.push(("name".into(), n.to_string()));
+        }
+        if let Some(st) = storage {
+            kv.push(("scsi0".into(), format!("{st}:{size}")));
+        }
+        if let Some(i) = iso {
+            kv.push(("cdrom".into(), i.to_string()));
+        }
+        let as_refs: Vec<(&str, &str)> = kv.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        client.create_qemu(node, &as_refs).await?
+    };
+
+    Ok((vmid, upid))
+}
+
+/// Shared `clone_with_cloudinit` executor used by both MCP dispatch and the HITL daemon (`#340`).
+///
+/// # Errors
+///
+/// Returns an error if the source guest is not QEMU, the clone task fails, or
+/// cloud-init application/regeneration fails.
+pub async fn exec_clone_with_cloudinit(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    gt: crate::api::types::GuestType,
+    params: &crate::hitl::daemon::McpCloneWithCloudinitParams,
+) -> Result<(u32, String, Value)> {
+    let vmid = params.guest_id;
+    if !matches!(gt, crate::api::types::GuestType::Qemu) {
+        anyhow::bail!("clone_with_cloudinit: VMID {vmid} is LXC — cloud-init is QEMU-only");
+    }
+    let newid = if params.newid == 0 {
+        client.next_free_vmid().await?
+    } else {
+        params.newid
+    };
+    let name = params.name.as_deref();
+    let full = params.full;
+
+    let profile = crate::cli::vm::CloudInitProfile {
+        ciuser: params.ciuser.clone(),
+        cipassword: None,
+        sshkey: params.sshkey.clone(),
+        sshkey_file: None,
+        ipconfig0: params.ipconfig0.clone(),
+        searchdomain: params.searchdomain.clone(),
+        nameserver: params.nameserver.clone(),
+    };
+
+    let upid = client
+        .clone_guest(node, vmid, gt, newid, name, None, None, full, None, None)
+        .await?;
+    // Block until clone lands — applying cloudinit before
+    // the disk image is ready races PVE's own locking.
+    let status = crate::cli::common::poll_task_until_done(client, node, &upid, 0).await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "clone task did not succeed (status={:?}); cloud-init not applied",
+            status.exitstatus
+        );
+    }
+    let ci = crate::cli::vm::apply_cloudinit_and_regen(client, node, newid, gt, &profile).await?;
+    Ok((newid, upid, ci))
+}
+
 pub(crate) async fn find_node_and_type(
-    client: &PxClient,
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
     vmid: u32,
 ) -> Result<Option<(String, crate::api::types::GuestType)>> {
-    use crate::api::ProxmoxGateway;
     Ok(client
         .find_guest(vmid)
         .await?

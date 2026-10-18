@@ -259,54 +259,138 @@ pub async fn handle_callback_update(
     let action = request.action.as_str();
     let vmid = request.vmid.unwrap_or(0);
 
-    let guest = match client.find_guest(vmid).await {
-        Ok(g) => g,
-        Err(e) => {
-            let _ = pending.mark_failed(&request.id, &format!("{e:#}"));
-            return Err(e);
-        }
-    };
-    let target_node = guest.as_ref().map(|g| g.node.clone());
-    let guest_type = guest.map(|g| g.guest_type);
-
-    let (Some(node), Some(gt)) = (target_node, guest_type) else {
-        let _ = pending.mark_failed(&request.id, "node not found");
-        let _ = tg_gateway
-            .answer_callback(&cb.id, "❌ Node not found")
-            .await;
-        edit_status(action, vmid, "❌ Node not found", &user_label).await;
-        return Ok(CallbackOutcome::NodeNotFound { vmid });
-    };
-
-    type ApiFut<'a> =
-        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
-    let api_fut: ApiFut = match action {
-        "start" => Box::pin(client.start_guest(&node, vmid, gt)),
-        "stop" => Box::pin(client.shutdown_guest(&node, vmid, gt, 60)),
-        "restart" => Box::pin(client.restart_guest(&node, vmid, gt)),
-        other => {
-            warn!("Unknown action: {}", other);
-            let _ = pending.mark_failed(&request.id, &format!("unknown action: {other}"));
+    let fail_before_exec = |err_str: String, target_vmid: u32| {
+        let action_owned = request.action.clone();
+        let req_id = request.id.clone();
+        let cb_id = cb.id.clone();
+        let label = user_label.clone();
+        async move {
+            error!("HITL pre-execution check failed for {req_id}: {err_str}");
+            let _ = pending.mark_failed(&req_id, &err_str);
             let _ = tg_gateway
-                .answer_callback(&cb.id, &format!("❌ Unknown action: {other}"))
+                .answer_callback(&cb_id, &format!("❌ Failed: {err_str}"))
                 .await;
+            let err_short = crate::util::sanitize::truncate_ellipsis(&err_str, 200);
             edit_status(
-                action,
-                vmid,
-                &format!("❌ Unknown action: {other}"),
-                &user_label,
+                &action_owned,
+                target_vmid,
+                &format!("❌ Failed: {err_short}"),
+                &label,
             )
             .await;
-            return Ok(CallbackOutcome::UnknownAction {
-                action: other.to_string(),
-                vmid,
-            });
+            CallbackOutcome::ExecuteFailed {
+                action: action_owned,
+                vmid: target_vmid,
+                error: err_str,
+            }
         }
     };
+
+    let op = match ApprovedOp::decode(&request) {
+        Ok(op) => op,
+        Err(reason) => {
+            let err_str = format!("cannot decode approved operation: {reason}");
+            return Ok(fail_before_exec(err_str, vmid).await);
+        }
+    };
+
+    let effective_vmid = op.target_vmid(&request);
+
+    // Guest binding (#340 Decision 3):
+    // - For operations on an existing guest, resolve `find_guest(vmid)` now and
+    //   verify that the guest still exists on `request.node` with `request.guest_type`.
+    // - For `create_guest` / `clone_guest` / `clone_with_cloudinit`, verify that any
+    //   explicit target VMID (`vmid` / `newid`) is still free on the cluster.
+    let bound_existing = if let Some(source_vmid) = op.existing_guest_vmid(&request) {
+        let live = match client.find_guest(source_vmid).await {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = pending.mark_failed(&request.id, &format!("{e:#}"));
+                return Err(e);
+            }
+        };
+        if request.node.is_none() && request.guest_type.is_none() {
+            let Some(g) = live else {
+                let _ = pending.mark_failed(&request.id, "node not found");
+                let _ = tg_gateway
+                    .answer_callback(&cb.id, "❌ Node not found")
+                    .await;
+                edit_status(action, source_vmid, "❌ Node not found", &user_label).await;
+                return Ok(CallbackOutcome::NodeNotFound { vmid: source_vmid });
+            };
+            Some((source_vmid, g.node, g.guest_type))
+        } else {
+            let exp_node = request.node.as_deref().unwrap_or("<any>");
+            let exp_gt = request
+                .guest_type
+                .map_or("<any>", crate::api::types::GuestType::as_str);
+            match live {
+                Some(g)
+                    if request.node.as_deref().is_none_or(|n| n == g.node)
+                        && request.guest_type.is_none_or(|t| t == g.guest_type) =>
+                {
+                    Some((source_vmid, g.node, g.guest_type))
+                }
+                Some(g) => {
+                    let err_str = format!(
+                        "guest changed since the request (expected {exp_node}/{exp_gt}, found {}/{})",
+                        g.node,
+                        g.guest_type.as_str()
+                    );
+                    return Ok(fail_before_exec(err_str, source_vmid).await);
+                }
+                None => {
+                    let err_str = format!(
+                        "guest changed since the request (expected {exp_node}/{exp_gt}, found missing)"
+                    );
+                    return Ok(fail_before_exec(err_str, source_vmid).await);
+                }
+            }
+        }
+    } else {
+        if let ApprovedOp::McpCreateGuest(ref params) = op {
+            let exp_node = request.node.as_deref();
+            let exp_gt = request.guest_type.map(crate::api::types::GuestType::as_str);
+            if exp_node.is_some_and(|n| n != params.node)
+                || exp_gt.is_some_and(|t| t != params.guest_type)
+            {
+                let err_str = format!(
+                    "guest changed since the request (expected {}/{}, found {}/{})",
+                    exp_node.unwrap_or("<any>"),
+                    exp_gt.unwrap_or("<any>"),
+                    params.node,
+                    params.guest_type
+                );
+                return Ok(fail_before_exec(err_str, effective_vmid).await);
+            }
+        }
+        None
+    };
+
+    if let Some(new_vmid) = op.free_target_vmid(&request) {
+        let existing = match client.find_guest(new_vmid).await {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = pending.mark_failed(&request.id, &format!("{e:#}"));
+                return Err(e);
+            }
+        };
+        if let Some(g) = existing {
+            let err_str = format!(
+                "guest changed since the request (expected target VMID {new_vmid} to be free, found {}/{})",
+                g.node,
+                g.guest_type.as_str()
+            );
+            return Ok(fail_before_exec(err_str, effective_vmid).await);
+        }
+    }
+
+    let api_fut = execute_approved_op(client, &op, request.vmid, bound_existing);
     tokio::pin!(api_fut);
 
-    let intermediate_body =
-        format!("🔔 HITL request: {action} VMID {vmid}\n\n⏳ Executing… (by @{user_label})");
+    let intermediate_body = format!(
+        "🔔 HITL request: {action} VMID {effective_vmid}\n\n⏳ Executing… (by @{user_label})"
+    );
     let intermediate = async {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if let Some(id) = msg_id {
@@ -325,12 +409,18 @@ pub async fn handle_callback_update(
 
     match res {
         Ok(upid) => {
-            let _ = pending.mark_executed(&request.id);
+            let _ = pending.mark_executed(&request.id, &upid);
             let _ = tg_gateway.answer_callback(&cb.id, "✅ Executed").await;
-            edit_status(action, vmid, &format!("✅ Done — {upid}"), &user_label).await;
+            edit_status(
+                action,
+                effective_vmid,
+                &format!("✅ Done — {upid}"),
+                &user_label,
+            )
+            .await;
             Ok(CallbackOutcome::Executed {
                 action: request.action,
-                vmid,
+                vmid: effective_vmid,
                 upid,
             })
         }
@@ -344,16 +434,484 @@ pub async fn handle_callback_update(
             let err_short = crate::util::sanitize::truncate_ellipsis(&err_str, 200);
             edit_status(
                 action,
-                vmid,
+                effective_vmid,
                 &format!("❌ Failed: {err_short}"),
                 &user_label,
             )
             .await;
             Ok(CallbackOutcome::ExecuteFailed {
                 action: request.action,
-                vmid,
+                vmid: effective_vmid,
                 error: err_str,
             })
+        }
+    }
+}
+
+const fn default_cli_stop_timeout() -> u32 {
+    60
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// Empty parameter payload for CLI batch actions (`start`, `restart`, `suspend`, `resume`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliEmptyParams {}
+
+/// Parameter payload for the CLI `stop` batch action (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliStopParams {
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default = "default_cli_stop_timeout", alias = "timeout")]
+    pub timeout_secs: u32,
+}
+
+impl Default for CliStopParams {
+    fn default() -> Self {
+        Self {
+            force: false,
+            timeout_secs: default_cli_stop_timeout(),
+        }
+    }
+}
+
+/// Parameter payload for the MCP `stop_guest` tool (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpStopGuestParams {
+    pub guest_id: u32,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Parameter payload for MCP tools taking only `guest_id` (`restart_guest`,
+/// `delete_guest`, `suspend_guest`) (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpGuestIdParams {
+    pub guest_id: u32,
+}
+
+/// Parameter payload for MCP snapshot tools (`create_snapshot`, `delete_snapshot`) (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpSnapshotParams {
+    pub guest_id: u32,
+    pub name: String,
+}
+
+/// Parameter payload for the MCP `clone_guest` tool (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpCloneGuestParams {
+    pub guest_id: u32,
+    #[serde(default)]
+    pub newid: u32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub full: bool,
+}
+
+/// Parameter payload for the MCP `migrate_guest` tool (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpMigrateGuestParams {
+    pub guest_id: u32,
+    pub target_node: String,
+    #[serde(default = "default_true")]
+    pub online: bool,
+}
+
+/// Parameter payload for the MCP `create_guest` tool (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpCreateGuestParams {
+    pub node: String,
+    #[serde(rename = "type")]
+    pub guest_type: String,
+    #[serde(default)]
+    pub vmid: Option<u32>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub memory: Option<u64>,
+    #[serde(default)]
+    pub cores: Option<u64>,
+    #[serde(default)]
+    pub storage: Option<String>,
+    #[serde(default)]
+    pub disk_size: Option<u64>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub iso: Option<String>,
+    #[serde(default)]
+    pub bridge: Option<String>,
+}
+
+/// Parameter payload for the MCP `clone_with_cloudinit` tool (`#340`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpCloneWithCloudinitParams {
+    pub guest_id: u32,
+    #[serde(default)]
+    pub newid: u32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub full: bool,
+    #[serde(default)]
+    pub ciuser: Option<String>,
+    #[serde(default)]
+    pub sshkey: Option<String>,
+    #[serde(default)]
+    pub ipconfig0: Option<String>,
+    #[serde(default)]
+    pub searchdomain: Option<String>,
+    #[serde(default)]
+    pub nameserver: Option<String>,
+}
+
+/// Typed representation of every HITL-approvable operation (`#340`).
+///
+/// Covers all 5 CLI batch actions (`start`, `stop`, `restart`, `suspend`, `resume`)
+/// and all 10 destructive MCP tools (`stop_guest`, `restart_guest`, `delete_guest`,
+/// `create_snapshot`, `delete_snapshot`, `suspend_guest`, `clone_guest`,
+/// `migrate_guest`, `create_guest`, `clone_with_cloudinit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovedOp {
+    CliStart(CliEmptyParams),
+    CliStop(CliStopParams),
+    CliRestart(CliEmptyParams),
+    CliSuspend(CliEmptyParams),
+    CliResume(CliEmptyParams),
+    McpStopGuest(McpStopGuestParams),
+    McpRestartGuest(McpGuestIdParams),
+    McpDeleteGuest(McpGuestIdParams),
+    McpCreateSnapshot(McpSnapshotParams),
+    McpDeleteSnapshot(McpSnapshotParams),
+    McpSuspendGuest(McpGuestIdParams),
+    McpCloneGuest(McpCloneGuestParams),
+    McpMigrateGuest(McpMigrateGuestParams),
+    McpCreateGuest(McpCreateGuestParams),
+    McpCloneWithCloudinit(McpCloneWithCloudinitParams),
+}
+
+impl ApprovedOp {
+    /// Decode `(request.action, request.params_json)` into a typed [`ApprovedOp`]
+    /// and validate path-bearing parameters (`Shape::Name`) and `request.vmid`
+    /// consistency (`#340` Decision 1).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when `action` is unknown, `params_json`
+    /// fails `#[serde(deny_unknown_fields)]` deserialization, a path-bearing
+    /// parameter fails [`crate::mcp::tools::Shape::Name`], or `request.vmid`
+    /// disagrees with `params`.
+    pub fn decode(
+        request: &crate::hitl::pending::PendingRequest,
+    ) -> std::result::Result<Self, String> {
+        use crate::mcp::tools::Shape;
+
+        let raw = request.params_json.as_str();
+        let decode_empty_cli = |name: &str| -> std::result::Result<CliEmptyParams, String> {
+            Self::check_cli_vmid(request)?;
+            serde_json::from_str(raw).map_err(|e| format!("{name}: {e}"))
+        };
+        let decode_guest_id_mcp = |name: &str| -> std::result::Result<McpGuestIdParams, String> {
+            let p: McpGuestIdParams =
+                serde_json::from_str(raw).map_err(|e| format!("{name}: {e}"))?;
+            Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+            Ok(p)
+        };
+        let decode_snapshot_mcp = |name: &str| -> std::result::Result<McpSnapshotParams, String> {
+            let p: McpSnapshotParams =
+                serde_json::from_str(raw).map_err(|e| format!("{name}: {e}"))?;
+            Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+            Shape::Name
+                .check(&p.name)
+                .map_err(|e| format!("{name}.name: {e}"))?;
+            Ok(p)
+        };
+
+        match request.action.as_str() {
+            "start" => Ok(Self::CliStart(decode_empty_cli("start")?)),
+            "stop" => {
+                Self::check_cli_vmid(request)?;
+                let p: CliStopParams =
+                    serde_json::from_str(raw).map_err(|e| format!("stop: {e}"))?;
+                Ok(Self::CliStop(p))
+            }
+            "restart" => Ok(Self::CliRestart(decode_empty_cli("restart")?)),
+            "suspend" => Ok(Self::CliSuspend(decode_empty_cli("suspend")?)),
+            "resume" => Ok(Self::CliResume(decode_empty_cli("resume")?)),
+            "stop_guest" => {
+                let p: McpStopGuestParams =
+                    serde_json::from_str(raw).map_err(|e| format!("stop_guest: {e}"))?;
+                Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+                Ok(Self::McpStopGuest(p))
+            }
+            "restart_guest" => Ok(Self::McpRestartGuest(decode_guest_id_mcp("restart_guest")?)),
+            "delete_guest" => Ok(Self::McpDeleteGuest(decode_guest_id_mcp("delete_guest")?)),
+            "create_snapshot" => Ok(Self::McpCreateSnapshot(decode_snapshot_mcp(
+                "create_snapshot",
+            )?)),
+            "delete_snapshot" => Ok(Self::McpDeleteSnapshot(decode_snapshot_mcp(
+                "delete_snapshot",
+            )?)),
+            "suspend_guest" => Ok(Self::McpSuspendGuest(decode_guest_id_mcp("suspend_guest")?)),
+            "clone_guest" => {
+                let p: McpCloneGuestParams =
+                    serde_json::from_str(raw).map_err(|e| format!("clone_guest: {e}"))?;
+                Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+                if let Some(ref name) = p.name {
+                    Shape::Name
+                        .check(name)
+                        .map_err(|e| format!("clone_guest.name: {e}"))?;
+                }
+                Ok(Self::McpCloneGuest(p))
+            }
+            "migrate_guest" => {
+                let p: McpMigrateGuestParams =
+                    serde_json::from_str(raw).map_err(|e| format!("migrate_guest: {e}"))?;
+                Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+                Shape::Name
+                    .check(&p.target_node)
+                    .map_err(|e| format!("migrate_guest.target_node: {e}"))?;
+                Ok(Self::McpMigrateGuest(p))
+            }
+            "create_guest" => Self::decode_create_guest(raw, request.vmid),
+            "clone_with_cloudinit" => {
+                let p: McpCloneWithCloudinitParams =
+                    serde_json::from_str(raw).map_err(|e| format!("clone_with_cloudinit: {e}"))?;
+                Self::check_mcp_guest_id(request.vmid, p.guest_id)?;
+                if let Some(ref name) = p.name {
+                    Shape::Name
+                        .check(name)
+                        .map_err(|e| format!("clone_with_cloudinit.name: {e}"))?;
+                }
+                Ok(Self::McpCloneWithCloudinit(p))
+            }
+            other => Err(format!("unknown action '{other}'")),
+        }
+    }
+
+    fn check_cli_vmid(
+        request: &crate::hitl::pending::PendingRequest,
+    ) -> std::result::Result<u32, String> {
+        match request.vmid {
+            Some(v) if v > 0 => Ok(v),
+            _ => Err(format!(
+                "missing positive vmid for CLI action '{}'",
+                request.action
+            )),
+        }
+    }
+
+    fn check_mcp_guest_id(row_vmid: Option<u32>, guest_id: u32) -> std::result::Result<(), String> {
+        if guest_id == 0 {
+            return Err("guest_id must be positive".to_string());
+        }
+        if let Some(rv) = row_vmid {
+            if rv != guest_id {
+                return Err(format!(
+                    "row vmid ({rv}) does not match params.guest_id ({guest_id})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_create_guest(raw: &str, row_vmid: Option<u32>) -> std::result::Result<Self, String> {
+        use crate::mcp::tools::Shape;
+
+        let p: McpCreateGuestParams =
+            serde_json::from_str(raw).map_err(|e| format!("create_guest: {e}"))?;
+        Shape::Name
+            .check(&p.node)
+            .map_err(|e| format!("create_guest.node: {e}"))?;
+        if p.guest_type != "qemu" && p.guest_type != "lxc" {
+            return Err(format!(
+                "create_guest: invalid type '{}' (expected 'qemu' or 'lxc')",
+                p.guest_type
+            ));
+        }
+        if p.guest_type == "lxc" && p.template.is_none() {
+            return Err("create_guest lxc: missing 'template'".to_string());
+        }
+        if let Some(ref name) = p.name {
+            Shape::Name
+                .check(name)
+                .map_err(|e| format!("create_guest.name: {e}"))?;
+        }
+        if let Some(ref storage) = p.storage {
+            Shape::Name
+                .check(storage)
+                .map_err(|e| format!("create_guest.storage: {e}"))?;
+        }
+        if let (Some(rv), Some(pv)) = (row_vmid, p.vmid) {
+            if rv != pv {
+                return Err(format!("row vmid ({rv}) does not match params.vmid ({pv})"));
+            }
+        }
+        Ok(Self::McpCreateGuest(p))
+    }
+
+    /// Return the existing guest VMID that must exist and match `(request.node, request.guest_type)`
+    /// before execution, or `None` for `create_guest`.
+    #[must_use]
+    pub const fn existing_guest_vmid(
+        &self,
+        request: &crate::hitl::pending::PendingRequest,
+    ) -> Option<u32> {
+        match self {
+            Self::CliStart(_)
+            | Self::CliStop(_)
+            | Self::CliRestart(_)
+            | Self::CliSuspend(_)
+            | Self::CliResume(_) => request.vmid,
+            Self::McpStopGuest(p) => Some(p.guest_id),
+            Self::McpRestartGuest(p) | Self::McpDeleteGuest(p) | Self::McpSuspendGuest(p) => {
+                Some(p.guest_id)
+            }
+            Self::McpCreateSnapshot(p) | Self::McpDeleteSnapshot(p) => Some(p.guest_id),
+            Self::McpCloneGuest(p) => Some(p.guest_id),
+            Self::McpMigrateGuest(p) => Some(p.guest_id),
+            Self::McpCreateGuest(_) => None,
+            Self::McpCloneWithCloudinit(p) => Some(p.guest_id),
+        }
+    }
+
+    /// Return any explicit new/target VMID (`vmid` for `create_guest`, `newid` for
+    /// `clone_guest` / `clone_with_cloudinit`) that must still be free at execution time.
+    #[must_use]
+    pub fn free_target_vmid(&self, request: &crate::hitl::pending::PendingRequest) -> Option<u32> {
+        match self {
+            Self::McpCreateGuest(p) => p.vmid.or(request.vmid).filter(|&v| v > 0),
+            Self::McpCloneGuest(p) if p.newid > 0 => Some(p.newid),
+            Self::McpCloneWithCloudinit(p) if p.newid > 0 => Some(p.newid),
+            Self::CliStart(_)
+            | Self::CliStop(_)
+            | Self::CliRestart(_)
+            | Self::CliSuspend(_)
+            | Self::CliResume(_)
+            | Self::McpStopGuest(_)
+            | Self::McpRestartGuest(_)
+            | Self::McpDeleteGuest(_)
+            | Self::McpCreateSnapshot(_)
+            | Self::McpDeleteSnapshot(_)
+            | Self::McpSuspendGuest(_)
+            | Self::McpCloneGuest(_)
+            | Self::McpMigrateGuest(_)
+            | Self::McpCloneWithCloudinit(_) => None,
+        }
+    }
+
+    /// Primary VMID reported in [`CallbackOutcome`] and Telegram status messages.
+    #[must_use]
+    pub fn target_vmid(&self, request: &crate::hitl::pending::PendingRequest) -> u32 {
+        self.existing_guest_vmid(request)
+            .or_else(|| self.free_target_vmid(request))
+            .or(request.vmid)
+            .unwrap_or(0)
+    }
+}
+
+/// Execute a decoded [`ApprovedOp`] using the shared CLI and MCP executors (`#340` Decision 2).
+///
+/// The `match` over [`ApprovedOp`] is intentionally exhaustive (no wildcard arm).
+async fn execute_approved_op(
+    client: &(dyn ProxmoxGateway + Send + Sync),
+    op: &ApprovedOp,
+    row_vmid: Option<u32>,
+    bound_existing: Option<(u32, String, crate::api::types::GuestType)>,
+) -> Result<String> {
+    use crate::cli::common::{exec_cli_batch_op, BatchOp};
+    use crate::mcp::dispatch;
+
+    let require_bound = || -> Result<(u32, String, crate::api::types::GuestType)> {
+        bound_existing.ok_or_else(|| anyhow::anyhow!("missing bound guest context"))
+    };
+
+    match op {
+        ApprovedOp::CliStart(_params) => {
+            let (vmid, node, gt) = require_bound()?;
+            exec_cli_batch_op(client, &node, vmid, gt, BatchOp::Start).await
+        }
+        ApprovedOp::CliStop(params) => {
+            let (vmid, node, gt) = require_bound()?;
+            let batch_op = BatchOp::Stop {
+                force: params.force,
+                timeout_secs: params.timeout_secs,
+            };
+            exec_cli_batch_op(client, &node, vmid, gt, batch_op).await
+        }
+        ApprovedOp::CliRestart(_params) => {
+            let (vmid, node, gt) = require_bound()?;
+            exec_cli_batch_op(client, &node, vmid, gt, BatchOp::Restart).await
+        }
+        ApprovedOp::CliSuspend(_params) => {
+            let (vmid, node, gt) = require_bound()?;
+            exec_cli_batch_op(client, &node, vmid, gt, BatchOp::Suspend).await
+        }
+        ApprovedOp::CliResume(_params) => {
+            let (vmid, node, gt) = require_bound()?;
+            exec_cli_batch_op(client, &node, vmid, gt, BatchOp::Resume).await
+        }
+        ApprovedOp::McpStopGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_stop_guest(client, &node, gt, params).await
+        }
+        ApprovedOp::McpRestartGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_restart_guest(client, &node, gt, params).await
+        }
+        ApprovedOp::McpDeleteGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_delete_guest(client, &node, gt, params).await
+        }
+        ApprovedOp::McpCreateSnapshot(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_create_snapshot(client, &node, gt, params).await
+        }
+        ApprovedOp::McpDeleteSnapshot(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_delete_snapshot(client, &node, gt, params).await
+        }
+        ApprovedOp::McpSuspendGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_suspend_guest(client, &node, gt, params).await
+        }
+        ApprovedOp::McpCloneGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_clone_guest(client, &node, gt, params)
+                .await
+                .map(|(_newid, upid)| upid)
+        }
+        ApprovedOp::McpMigrateGuest(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_migrate_guest(client, &node, gt, params).await
+        }
+        ApprovedOp::McpCreateGuest(params) => {
+            let mut effective = params.clone();
+            if effective.vmid.is_none() {
+                effective.vmid = row_vmid;
+            }
+            dispatch::exec_create_guest(client, &effective)
+                .await
+                .map(|(_vmid, upid)| upid)
+        }
+        ApprovedOp::McpCloneWithCloudinit(params) => {
+            let (_vmid, node, gt) = require_bound()?;
+            dispatch::exec_clone_with_cloudinit(client, &node, gt, params)
+                .await
+                .map(|(_newid, upid, _ci)| upid)
         }
     }
 }

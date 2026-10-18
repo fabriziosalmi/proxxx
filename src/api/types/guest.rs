@@ -123,6 +123,17 @@ pub enum GuestType {
     Lxc,
 }
 
+impl GuestType {
+    /// Canonical lowercase representation (`"qemu"` or `"lxc"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Qemu => "qemu",
+            Self::Lxc => "lxc",
+        }
+    }
+}
+
 /// A serial device configured on a guest (QEMU `serial0..3`). Used for console
 /// pre-flight: `termproxy` only attaches if a `serial0: socket` exists, so a
 /// caller can refuse to open a console that would attach to nothing.

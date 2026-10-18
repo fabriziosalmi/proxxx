@@ -303,12 +303,11 @@ async fn find_guest_full_via_walk<G: GuestLookupGateway + ?Sized>(
 const DEFAULT_TASK_TIMEOUT_SECS: u64 = 3600;
 
 pub async fn poll_task_until_done(
-    client: &crate::api::PxClient,
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
     node: &str,
     upid: &str,
     timeout_secs: u64,
 ) -> Result<crate::api::types::TaskStatus> {
-    use crate::api::ProxmoxGateway;
     use std::time::Duration;
     let interval = Duration::from_millis(1500);
     let effective = if timeout_secs > 0 {
@@ -474,13 +473,42 @@ impl crate::ssh::SshGateway for NoSsh {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchOp {
     Start,
     Stop { force: bool, timeout_secs: u32 },
     Restart,
     Suspend,
     Resume,
+}
+
+/// Execute a single CLI batch lifecycle operation against `client`.
+///
+/// Shared between the inline CLI batch path (`execute_batch_op_full`) and the
+/// HITL daemon executor (`src/hitl/daemon.rs`, `#340`) so the two paths cannot
+/// drift.
+///
+/// # Errors
+///
+/// Propagates any error returned by the underlying [`crate::api::ProxmoxGateway`] method.
+pub async fn exec_cli_batch_op(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    node: &str,
+    vmid: u32,
+    gt: crate::api::types::GuestType,
+    op: BatchOp,
+) -> Result<String> {
+    match op {
+        BatchOp::Start => client.start_guest(node, vmid, gt).await,
+        BatchOp::Stop { force: true, .. } => client.stop_guest(node, vmid, gt, true).await,
+        BatchOp::Stop {
+            force: false,
+            timeout_secs,
+        } => client.shutdown_guest(node, vmid, gt, timeout_secs).await,
+        BatchOp::Restart => client.restart_guest(node, vmid, gt).await,
+        BatchOp::Suspend => client.suspend_guest(node, vmid, gt).await,
+        BatchOp::Resume => client.resume_guest(node, vmid, gt).await,
+    }
 }
 
 /// Execution policy for multi-VMID batch operations.
@@ -833,12 +861,13 @@ async fn execute_batch_op_full(
                         BatchOp::Stop {
                             force,
                             timeout_secs,
-                        } => serde_json::json!({
-                            "source": "cli",
-                            "force": force,
-                            "timeout_secs": timeout_secs,
-                        }),
-                        _ => serde_json::json!({ "source": "cli" }),
+                        } => serde_json::to_value(crate::hitl::daemon::CliStopParams {
+                            force,
+                            timeout_secs,
+                        })?,
+                        BatchOp::Start | BatchOp::Restart | BatchOp::Suspend | BatchOp::Resume => {
+                            serde_json::to_value(crate::hitl::daemon::CliEmptyParams {})?
+                        }
                     };
                     let new_req = crate::hitl::pending::NewPendingRequest::new(
                         action_str,
@@ -891,35 +920,11 @@ async fn execute_batch_op_full(
             let v = *vmid;
             let node = guest.node;
             let gt = guest.guest_type;
-            let operation = match op {
-                BatchOp::Start => BatchOp::Start,
-                BatchOp::Stop {
-                    force,
-                    timeout_secs,
-                } => BatchOp::Stop {
-                    force,
-                    timeout_secs,
-                },
-                BatchOp::Restart => BatchOp::Restart,
-                BatchOp::Suspend => BatchOp::Suspend,
-                BatchOp::Resume => BatchOp::Resume,
-            };
+            let operation = op;
 
             if strict {
                 // Bug #1+#2 fix: dispatch by guest_type, route force=false to shutdown.
-                let res = match operation {
-                    BatchOp::Start => client_c.start_guest(&node, v, gt).await,
-                    BatchOp::Stop { force: true, .. } => {
-                        client_c.stop_guest(&node, v, gt, true).await
-                    }
-                    BatchOp::Stop {
-                        force: false,
-                        timeout_secs,
-                    } => client_c.shutdown_guest(&node, v, gt, timeout_secs).await,
-                    BatchOp::Restart => client_c.restart_guest(&node, v, gt).await,
-                    BatchOp::Suspend => client_c.suspend_guest(&node, v, gt).await,
-                    BatchOp::Resume => client_c.resume_guest(&node, v, gt).await,
-                };
+                let res = exec_cli_batch_op(client_c.as_ref(), &node, v, gt, operation).await;
                 match res {
                     Ok(upid) => {
                         results.push(serde_json::json!({
@@ -945,19 +950,7 @@ async fn execute_batch_op_full(
                     // 32 are already in flight, await here — the
                     // semaphore is the FD-exhaustion gate.
                     let _permit = sem.acquire_owned().await;
-                    let res = match operation {
-                        BatchOp::Start => client_c.start_guest(&node, v, gt).await,
-                        BatchOp::Stop { force: true, .. } => {
-                            client_c.stop_guest(&node, v, gt, true).await
-                        }
-                        BatchOp::Stop {
-                            force: false,
-                            timeout_secs,
-                        } => client_c.shutdown_guest(&node, v, gt, timeout_secs).await,
-                        BatchOp::Restart => client_c.restart_guest(&node, v, gt).await,
-                        BatchOp::Suspend => client_c.suspend_guest(&node, v, gt).await,
-                        BatchOp::Resume => client_c.resume_guest(&node, v, gt).await,
-                    };
+                    let res = exec_cli_batch_op(&*client_c, &node, v, gt, operation).await;
                     (v, res)
                 });
             }

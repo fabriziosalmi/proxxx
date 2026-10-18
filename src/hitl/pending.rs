@@ -141,6 +141,7 @@ pub struct PendingRequest {
     pub expires_at: i64,
     pub status: RequestStatus,
     pub approvers: Vec<i64>,
+    pub upid: Option<String>,
     pub error: Option<String>,
 }
 
@@ -244,6 +245,7 @@ CREATE TABLE IF NOT EXISTS hitl_pending_requests (
     expires_at     INTEGER NOT NULL,
     status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'executed', 'failed')),
     approvers_json TEXT NOT NULL DEFAULT '[]',
+    upid           TEXT,
     error          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_hitl_pending_status_expires
@@ -330,7 +332,8 @@ fn row_to_pending_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRe
     let expires_at: i64 = row.get(8)?;
     let status_raw: String = row.get(9)?;
     let approvers_raw: String = row.get(10)?;
-    let error: Option<String> = row.get(11)?;
+    let upid: Option<String> = row.get(11)?;
+    let error: Option<String> = row.get(12)?;
 
     let vmid = vmid_raw.and_then(|v| u32::try_from(v).ok());
     let guest_type = gt_raw
@@ -368,8 +371,21 @@ fn row_to_pending_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRe
         expires_at,
         status,
         approvers,
+        upid,
         error,
     })
+}
+
+fn ensure_upid_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(hitl_pending_requests)")?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    if !cols.iter().any(|c| c == "upid") {
+        conn.execute("ALTER TABLE hitl_pending_requests ADD COLUMN upid TEXT", [])
+            .context("add upid column to hitl_pending_requests")?;
+    }
+    Ok(())
 }
 
 impl PendingStore {
@@ -420,6 +436,7 @@ impl PendingStore {
         .context("configure SQLite pragmas on HITL pending store")?;
         conn.execute_batch(SCHEMA_SQL)
             .context("initialise hitl_pending_requests schema")?;
+        ensure_upid_column(&conn)?;
 
         let cutoff = now_secs.saturating_sub(RETENTION_SECS);
         conn.execute(
@@ -476,8 +493,8 @@ impl PendingStore {
             .execute(
                 "INSERT INTO hitl_pending_requests
                     (id, action, vmid, node, guest_type, params_json, require,
-                     issued_at, expires_at, status, approvers_json, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', '[]', NULL)",
+                     issued_at, expires_at, status, approvers_json, upid, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', '[]', NULL, NULL)",
                 params![
                     id,
                     req.action,
@@ -505,6 +522,7 @@ impl PendingStore {
             expires_at,
             status: RequestStatus::Pending,
             approvers: Vec::new(),
+            upid: None,
             error: None,
         })
     }
@@ -522,7 +540,7 @@ impl PendingStore {
         guard
             .query_row(
                 "SELECT id, action, vmid, node, guest_type, params_json, require,
-                        issued_at, expires_at, status, approvers_json, error
+                        issued_at, expires_at, status, approvers_json, upid, error
                  FROM hitl_pending_requests
                  WHERE id = ?1",
                 params![id],
@@ -583,7 +601,7 @@ impl PendingStore {
         let Some(mut req) = tx
             .query_row(
                 "SELECT id, action, vmid, node, guest_type, params_json, require,
-                        issued_at, expires_at, status, approvers_json, error
+                        issued_at, expires_at, status, approvers_json, upid, error
                  FROM hitl_pending_requests
                  WHERE id = ?1",
                 params![id],
@@ -658,21 +676,22 @@ impl PendingStore {
         }
     }
 
-    /// Mark an `approved` request as `executed` after the Proxmox API call succeeds.
+    /// Mark an `approved` request as `executed` and store the Proxmox `upid`
+    /// after the API call succeeds (`#340`).
     ///
     /// # Errors
     ///
     /// Returns an error if the `SQLite` update fails.
-    pub fn mark_executed(&self, id: &str) -> Result<()> {
+    pub fn mark_executed(&self, id: &str, upid: &str) -> Result<()> {
         let guard = self
             .conn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.execute(
             "UPDATE hitl_pending_requests
-             SET status = 'executed', error = NULL
+             SET status = 'executed', upid = ?2, error = NULL
              WHERE id = ?1",
-            params![id],
+            params![id, upid],
         )?;
         Ok(())
     }
@@ -826,7 +845,9 @@ mod tests {
         store
             .process_callback_at(&old_exec.id, CallbackDecision::Approve, 1, t0 + 1)
             .expect("approve");
-        store.mark_executed(&old_exec.id).expect("mark_executed");
+        store
+            .mark_executed(&old_exec.id, "UPID:stop:101")
+            .expect("mark_executed");
 
         let old_denied = store
             .insert_at(&NewPendingRequest::new("stop", Some(102), 1), t0)
@@ -864,7 +885,7 @@ mod tests {
             )
             .expect("approve recent");
         store
-            .mark_executed(&recent_exec.id)
+            .mark_executed(&recent_exec.id, "UPID:stop:105")
             .expect("mark_executed recent");
         drop(store);
 
@@ -877,9 +898,11 @@ mod tests {
             reopened.get(&old_pending.id).expect("get").is_some(),
             "non-terminal pending row must not be deleted by terminal retention sweep"
         );
-        assert!(
-            reopened.get(&recent_exec.id).expect("get").is_some(),
-            "terminal row younger than 7 days must be kept"
-        );
+        let kept_recent = reopened
+            .get(&recent_exec.id)
+            .expect("get")
+            .expect("terminal row younger than 7 days must be kept");
+        assert_eq!(kept_recent.status, RequestStatus::Executed);
+        assert_eq!(kept_recent.upid.as_deref(), Some("UPID:stop:105"));
     }
 }

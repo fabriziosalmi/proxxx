@@ -498,7 +498,7 @@ pub async fn execute_cloudimg(
                     )
                     .await
                     .context("starting image download")?;
-                let st = poll_task_until_done(client, &node, &upid, 0)
+                let st = poll_task_until_done(client.as_ref(), &node, &upid, 0)
                     .await
                     .context("waiting for image download")?;
                 if !st.is_success() {
@@ -535,7 +535,7 @@ pub async fn execute_cloudimg(
                 .create_qemu(&node, &borrowed)
                 .await
                 .context("creating VM")?;
-            let st = poll_task_until_done(client, &node, &create_upid, 0)
+            let st = poll_task_until_done(client.as_ref(), &node, &create_upid, 0)
                 .await
                 .context("waiting for VM create + disk import")?;
             if !st.is_success() {
@@ -553,7 +553,7 @@ pub async fn execute_cloudimg(
                     .await
                     .context("resizing boot disk")?;
                 if !rupid.is_empty() {
-                    poll_task_until_done(client, &node, &rupid, 0)
+                    poll_task_until_done(client.as_ref(), &node, &rupid, 0)
                         .await
                         .context("waiting for disk resize")?;
                 }
@@ -567,7 +567,7 @@ pub async fn execute_cloudimg(
                     .await
                     .context("starting VM")?;
                 if !supid.is_empty() {
-                    poll_task_until_done(client, &node, &supid, 0)
+                    poll_task_until_done(client.as_ref(), &node, &supid, 0)
                         .await
                         .context("waiting for VM start")?;
                 }

@@ -278,7 +278,7 @@ async fn quorum_of_two_needs_two_distinct_approvers() {
     let (_dir, pending) = temp_pending_store();
     let id = mint_pending(&pending, "stop", 100, 2);
     let data = signed(tg.hmac_key(), &format!("approve:{id}"));
-    let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-quorum"));
 
     let first = handle_callback_update(
         &update(1, callback_query("cb-q1", &data)),
@@ -414,6 +414,8 @@ struct HitlMockGateway {
     guests_by_node: std::collections::HashMap<String, Vec<Guest>>,
     /// (`method_name`, vmid) for every mutation call.
     calls: Mutex<Vec<(String, u32)>>,
+    /// Detailed `"method:arg1:arg2:..."` strings for parameter assertions (`#340`).
+    detailed_calls: Mutex<Vec<String>>,
     /// When set, mutations return Err(this string).
     fail_with: Option<String>,
 }
@@ -451,8 +453,21 @@ impl HitlMockGateway {
             .collect()
     }
 
+    fn all_calls(&self) -> Vec<(String, u32)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn detailed_calls(&self) -> Vec<String> {
+        self.detailed_calls.lock().unwrap().clone()
+    }
+
     fn record(&self, method: &str, vmid: u32) {
         self.calls.lock().unwrap().push((method.to_string(), vmid));
+    }
+
+    fn record_detail(&self, method: &str, vmid: u32, detail: String) {
+        self.record(method, vmid);
+        self.detailed_calls.lock().unwrap().push(detail);
     }
 }
 
@@ -464,8 +479,12 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn get_guests(&self, node: &str) -> Result<Vec<Guest>> {
         Ok(self.guests_by_node.get(node).cloned().unwrap_or_default())
     }
-    async fn start_guest(&self, _node: &str, vmid: u32, _gt: GuestType) -> Result<String> {
-        self.record("start_guest", vmid);
+    async fn start_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
+        self.record_detail(
+            "start_guest",
+            vmid,
+            format!("start_guest:{node}:{vmid}:{}", gt.as_str()),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
@@ -473,29 +492,56 @@ impl ProxmoxGateway for HitlMockGateway {
     }
     async fn shutdown_guest(
         &self,
-        _node: &str,
+        node: &str,
         vmid: u32,
-        _gt: GuestType,
-        _timeout_secs: u32,
+        gt: GuestType,
+        timeout_secs: u32,
     ) -> Result<String> {
-        self.record("shutdown_guest", vmid);
+        self.record_detail(
+            "shutdown_guest",
+            vmid,
+            format!(
+                "shutdown_guest:{node}:{vmid}:{}:{timeout_secs}",
+                gt.as_str()
+            ),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
         Ok(format!("UPID:shutdown:{vmid}"))
     }
-    async fn restart_guest(&self, _node: &str, vmid: u32, _gt: GuestType) -> Result<String> {
-        self.record("restart_guest", vmid);
+    async fn restart_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
+        self.record_detail(
+            "restart_guest",
+            vmid,
+            format!("restart_guest:{node}:{vmid}:{}", gt.as_str()),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
         Ok(format!("UPID:restart:{vmid}"))
     }
-    async fn suspend_guest(&self, _: &str, _: u32, _: GuestType) -> Result<String> {
-        anyhow::bail!("unused in HITL test")
+    async fn suspend_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
+        self.record_detail(
+            "suspend_guest",
+            vmid,
+            format!("suspend_guest:{node}:{vmid}:{}", gt.as_str()),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:suspend:{vmid}"))
     }
-    async fn resume_guest(&self, _: &str, _: u32, _: GuestType) -> Result<String> {
-        anyhow::bail!("unused in HITL test")
+    async fn resume_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
+        self.record_detail(
+            "resume_guest",
+            vmid,
+            format!("resume_guest:{node}:{vmid}:{}", gt.as_str()),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:resume:{vmid}"))
     }
     async fn startall_node(&self, _: &str) -> Result<String> {
         anyhow::bail!("unused")
@@ -640,11 +686,29 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn get_cluster_tasks(&self) -> Result<Vec<TaskInfo>> {
         Ok(vec![])
     }
-    async fn get_task_status(&self, _: &str, _: &str) -> Result<TaskStatus> {
-        anyhow::bail!("unused")
+    async fn get_task_status(&self, _node: &str, upid: &str) -> Result<TaskStatus> {
+        Ok(TaskStatus {
+            upid: upid.to_string(),
+            status: "stopped".to_string(),
+            exitstatus: Some("OK".to_string()),
+            task_type: "qmclone".to_string(),
+            id: "100".to_string(),
+            user: "root@pam".to_string(),
+            starttime: 1,
+        })
     }
-    async fn stop_guest(&self, _: &str, vmid: u32, _: GuestType, _: bool) -> Result<String> {
-        self.record("stop_guest", vmid);
+    async fn stop_guest(
+        &self,
+        node: &str,
+        vmid: u32,
+        gt: GuestType,
+        force: bool,
+    ) -> Result<String> {
+        self.record_detail(
+            "stop_guest",
+            vmid,
+            format!("stop_guest:{node}:{vmid}:{}:{force}", gt.as_str()),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
@@ -652,22 +716,33 @@ impl ProxmoxGateway for HitlMockGateway {
     }
     async fn migrate_guest(
         &self,
-        _: &str,
+        node: &str,
         vmid: u32,
-        _: GuestType,
-        _: &str,
-        _: bool,
+        gt: GuestType,
+        target_node: &str,
+        online: bool,
         _: bool,
         _: bool,
     ) -> Result<String> {
-        self.record("migrate_guest", vmid);
+        self.record_detail(
+            "migrate_guest",
+            vmid,
+            format!(
+                "migrate_guest:{node}:{vmid}:{}:{target_node}:{online}",
+                gt.as_str()
+            ),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
         Ok(format!("UPID:migrate:{vmid}"))
     }
-    async fn delete_guest(&self, _: &str, vmid: u32, _: GuestType) -> Result<String> {
-        self.record("delete_guest", vmid);
+    async fn delete_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
+        self.record_detail(
+            "delete_guest",
+            vmid,
+            format!("delete_guest:{node}:{vmid}:{}", gt.as_str()),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
@@ -805,30 +880,75 @@ impl ProxmoxGateway for HitlMockGateway {
     ) -> Result<Vec<proxxx::api::types::ClusterLogEntry>> {
         Ok(vec![])
     }
-    async fn create_snapshot(&self, _: &str, vmid: u32, _: GuestType, _: &str) -> Result<String> {
-        self.record("create_snapshot", vmid);
+    async fn create_snapshot(
+        &self,
+        node: &str,
+        vmid: u32,
+        gt: GuestType,
+        name: &str,
+    ) -> Result<String> {
+        self.record_detail(
+            "create_snapshot",
+            vmid,
+            format!("create_snapshot:{node}:{vmid}:{}:{name}", gt.as_str()),
+        );
         if let Some(ref e) = self.fail_with {
             anyhow::bail!("{e}")
         }
         Ok(format!("UPID:snapshot:{vmid}"))
     }
-    async fn delete_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
-        anyhow::bail!("unused")
+    async fn delete_snapshot(
+        &self,
+        node: &str,
+        vmid: u32,
+        gt: GuestType,
+        name: &str,
+    ) -> Result<String> {
+        self.record_detail(
+            "delete_snapshot",
+            vmid,
+            format!("delete_snapshot:{node}:{vmid}:{}:{name}", gt.as_str()),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:delsnapshot:{vmid}"))
     }
     async fn rollback_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
         Ok("UPID:mock:rollback".into())
     }
     async fn update_guest_config(
         &self,
-        _: &str,
-        _: u32,
-        _: GuestType,
-        _: &[(String, String)],
+        node: &str,
+        vmid: u32,
+        gt: GuestType,
+        params: &[(String, String)],
     ) -> Result<Option<String>> {
-        anyhow::bail!("unused")
+        let joined: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        self.record_detail(
+            "update_guest_config",
+            vmid,
+            format!(
+                "update_guest_config:{node}:{vmid}:{}:{}",
+                gt.as_str(),
+                joined.join(",")
+            ),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(Some(format!("UPID:cfg:{vmid}")))
     }
-    async fn regenerate_cloudinit(&self, _: &str, _: u32) -> Result<Option<String>> {
-        anyhow::bail!("unused")
+    async fn regenerate_cloudinit(&self, node: &str, vmid: u32) -> Result<Option<String>> {
+        self.record_detail(
+            "regenerate_cloudinit",
+            vmid,
+            format!("regenerate_cloudinit:{node}:{vmid}"),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(Some(format!("UPID:ci:{vmid}")))
     }
     async fn list_pending_config(
         &self,
@@ -843,21 +963,33 @@ impl ProxmoxGateway for HitlMockGateway {
     }
     async fn clone_guest(
         &self,
-        _: &str,
-        _: u32,
-        _: GuestType,
-        _: u32,
+        node: &str,
+        vmid: u32,
+        gt: GuestType,
+        newid: u32,
+        name: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
-        _: bool,
+        full: bool,
         _: Option<&str>,
         _: Option<&str>,
     ) -> Result<String> {
-        anyhow::bail!("unused")
+        self.record_detail(
+            "clone_guest",
+            vmid,
+            format!(
+                "clone_guest:{node}:{vmid}:{}:{newid}:{}:{full}",
+                gt.as_str(),
+                name.unwrap_or("")
+            ),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:clone:{vmid}:{newid}"))
     }
     async fn next_free_vmid(&self) -> Result<u32> {
-        anyhow::bail!("unused")
+        Ok(777)
     }
     async fn create_backup(
         &self,
@@ -1498,11 +1630,37 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn get_next_vmid(&self) -> anyhow::Result<u32> {
         Ok(999)
     }
-    async fn create_qemu(&self, _node: &str, _params: &[(&str, &str)]) -> anyhow::Result<String> {
-        Ok("UPID:pve01:00000000:00000000:create-qemu::root@pam:".into())
+    async fn create_qemu(&self, node: &str, params: &[(&str, &str)]) -> anyhow::Result<String> {
+        let vmid = params
+            .iter()
+            .find_map(|(k, v)| (*k == "vmid").then(|| v.parse::<u32>().ok()).flatten())
+            .unwrap_or(0);
+        let joined: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        self.record_detail(
+            "create_qemu",
+            vmid,
+            format!("create_qemu:{node}:{vmid}:{}", joined.join(";")),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:create_qemu:{vmid}"))
     }
-    async fn create_lxc(&self, _node: &str, _params: &[(&str, &str)]) -> anyhow::Result<String> {
-        Ok("UPID:pve01:00000000:00000000:create-lxc::root@pam:".into())
+    async fn create_lxc(&self, node: &str, params: &[(&str, &str)]) -> anyhow::Result<String> {
+        let vmid = params
+            .iter()
+            .find_map(|(k, v)| (*k == "vmid").then(|| v.parse::<u32>().ok()).flatten())
+            .unwrap_or(0);
+        let joined: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        self.record_detail(
+            "create_lxc",
+            vmid,
+            format!("create_lxc:{node}:{vmid}:{}", joined.join(";")),
+        );
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:create_lxc:{vmid}"))
     }
     async fn get_user(&self, userid: &str) -> Result<proxxx::api::types::User> {
         Ok(proxxx::api::types::User {
@@ -2610,7 +2768,7 @@ async fn daemon_verify_callback_and_handle_callback_update_round_trip() {
     assert_eq!(verified.txn_id, id);
     assert_eq!(verified.approver_id, TEST_APPROVER);
 
-    let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-100"));
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-100"));
     let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
         .await
         .expect("handle_callback_update");
@@ -3113,4 +3271,632 @@ async fn quorum_counted_from_store_across_daemon_restarts() {
         .expect("vote 2 after restart");
     assert!(matches!(out2, CallbackOutcome::Executed { vmid: 100, .. }));
     assert_eq!(client.calls_for("shutdown_guest"), vec![100]);
+}
+
+// ── Issue #340: HITL daemon executors, guest binding & typed decoding ───
+
+struct VariantCase {
+    action: &'static str,
+    vmid: Option<u32>,
+    node: &'static str,
+    guest_type: GuestType,
+    params: serde_json::Value,
+    expected_upid: &'static str,
+    expected_details: &'static [&'static str],
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_all_approved_op_variant_cases() -> Vec<VariantCase> {
+    vec![
+        // 1. CliStart
+        VariantCase {
+            action: "start",
+            vmid: Some(101),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({}),
+            expected_upid: "UPID:start:101",
+            expected_details: &["start_guest:pve01:101:qemu"],
+        },
+        // 2a. CliStop (graceful shutdown with custom timeout)
+        VariantCase {
+            action: "stop",
+            vmid: Some(102),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"force": false, "timeout": 45}),
+            expected_upid: "UPID:shutdown:102",
+            expected_details: &["shutdown_guest:pve01:102:qemu:45"],
+        },
+        // 2b. CliStop (force stop)
+        VariantCase {
+            action: "stop",
+            vmid: Some(103),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"force": true, "timeout": 45}),
+            expected_upid: "UPID:stop:103",
+            expected_details: &["stop_guest:pve01:103:qemu:true"],
+        },
+        // 3. CliRestart
+        VariantCase {
+            action: "restart",
+            vmid: Some(104),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({}),
+            expected_upid: "UPID:restart:104",
+            expected_details: &["restart_guest:pve01:104:qemu"],
+        },
+        // 4. CliSuspend
+        VariantCase {
+            action: "suspend",
+            vmid: Some(105),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({}),
+            expected_upid: "UPID:suspend:105",
+            expected_details: &["suspend_guest:pve01:105:qemu"],
+        },
+        // 5. CliResume
+        VariantCase {
+            action: "resume",
+            vmid: Some(106),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({}),
+            expected_upid: "UPID:resume:106",
+            expected_details: &["resume_guest:pve01:106:qemu"],
+        },
+        // 6a. McpStopGuest (graceful)
+        VariantCase {
+            action: "stop_guest",
+            vmid: Some(201),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 201, "force": false}),
+            expected_upid: "UPID:shutdown:201",
+            expected_details: &["shutdown_guest:pve01:201:qemu:60"],
+        },
+        // 6b. McpStopGuest (force)
+        VariantCase {
+            action: "stop_guest",
+            vmid: Some(202),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 202, "force": true}),
+            expected_upid: "UPID:stop:202",
+            expected_details: &["stop_guest:pve01:202:qemu:true"],
+        },
+        // 7. McpRestartGuest
+        VariantCase {
+            action: "restart_guest",
+            vmid: Some(203),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 203}),
+            expected_upid: "UPID:restart:203",
+            expected_details: &["restart_guest:pve01:203:qemu"],
+        },
+        // 8. McpDeleteGuest
+        VariantCase {
+            action: "delete_guest",
+            vmid: Some(204),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 204}),
+            expected_upid: "UPID:delete:204",
+            expected_details: &["delete_guest:pve01:204:qemu"],
+        },
+        // 9. McpCreateSnapshot
+        VariantCase {
+            action: "create_snapshot",
+            vmid: Some(205),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 205, "name": "snap_pre_upgrade"}),
+            expected_upid: "UPID:snapshot:205",
+            expected_details: &["create_snapshot:pve01:205:qemu:snap_pre_upgrade"],
+        },
+        // 10. McpDeleteSnapshot
+        VariantCase {
+            action: "delete_snapshot",
+            vmid: Some(206),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 206, "name": "snap_old"}),
+            expected_upid: "UPID:delsnapshot:206",
+            expected_details: &["delete_snapshot:pve01:206:qemu:snap_old"],
+        },
+        // 11. McpSuspendGuest
+        VariantCase {
+            action: "suspend_guest",
+            vmid: Some(207),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({"guest_id": 207}),
+            expected_upid: "UPID:suspend:207",
+            expected_details: &["suspend_guest:pve01:207:qemu"],
+        },
+        // 12. McpCloneGuest
+        VariantCase {
+            action: "clone_guest",
+            vmid: Some(208),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({
+                "guest_id": 208,
+                "newid": 308,
+                "name": "vm-clone-308",
+                "full": true
+            }),
+            expected_upid: "UPID:clone:208:308",
+            expected_details: &["clone_guest:pve01:208:qemu:308:vm-clone-308:true"],
+        },
+        // 13. McpMigrateGuest
+        VariantCase {
+            action: "migrate_guest",
+            vmid: Some(209),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({
+                "guest_id": 209,
+                "target_node": "pve02",
+                "online": true
+            }),
+            expected_upid: "UPID:migrate:209",
+            expected_details: &["migrate_guest:pve01:209:qemu:pve02:true"],
+        },
+        // 14a. McpCreateGuest (QEMU)
+        VariantCase {
+            action: "create_guest",
+            vmid: Some(401),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({
+                "node": "pve01",
+                "type": "qemu",
+                "vmid": 401,
+                "name": "new-vm-401",
+                "memory": 2048,
+                "cores": 2,
+                "storage": "local-lvm",
+                "disk_size": 40
+            }),
+            expected_upid: "UPID:create_qemu:401",
+            expected_details: &[
+                "create_qemu:pve01:401:vmid=401;memory=2048;cores=2;ostype=l26;scsihw=virtio-scsi-pci;net0=virtio,bridge=vmbr0;name=new-vm-401;scsi0=local-lvm:40",
+            ],
+        },
+        // 14b. McpCreateGuest (LXC)
+        VariantCase {
+            action: "create_guest",
+            vmid: Some(402),
+            node: "pve01",
+            guest_type: GuestType::Lxc,
+            params: serde_json::json!({
+                "node": "pve01",
+                "type": "lxc",
+                "vmid": 402,
+                "name": "new-ct-402",
+                "template": "local:vztmpl/debian-12.tar.zst",
+                "memory": 1024,
+                "cores": 2
+            }),
+            expected_upid: "UPID:create_lxc:402",
+            expected_details: &[
+                "create_lxc:pve01:402:vmid=402;ostemplate=local:vztmpl/debian-12.tar.zst;memory=1024;cores=2;rootfs=local-lvm:8;net0=name=eth0,bridge=vmbr0,ip=dhcp;hostname=new-ct-402",
+            ],
+        },
+        // 15. McpCloneWithCloudinit
+        VariantCase {
+            action: "clone_with_cloudinit",
+            vmid: Some(210),
+            node: "pve01",
+            guest_type: GuestType::Qemu,
+            params: serde_json::json!({
+                "guest_id": 210,
+                "newid": 310,
+                "name": "vm-ci-310",
+                "full": true,
+                "ciuser": "ubuntu",
+                "ipconfig0": "ip=dhcp"
+            }),
+            expected_upid: "UPID:clone:210:310",
+            expected_details: &[
+                "clone_guest:pve01:210:qemu:310:vm-ci-310:true",
+                "update_guest_config:pve01:310:qemu:ciuser=ubuntu,ipconfig0=ip=dhcp",
+                "regenerate_cloudinit:pve01:310",
+            ],
+        },
+    ]
+}
+
+/// #340 Test 1 — Every `ApprovedOp` variant (all 5 CLI batch ops + all 10
+/// destructive MCP tools) decodes from `(action, params_json)` in `PendingStore`,
+/// executes on an approved callback, invokes the mock gateway with the exact
+/// stored parameters, and records `status = 'executed'` and `upid` in the store.
+#[tokio::test]
+async fn every_approved_op_variant_executes_with_stored_parameters() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+
+    for (idx, case) in build_all_approved_op_variant_cases()
+        .into_iter()
+        .enumerate()
+    {
+        let mut gw = HitlMockGateway::new();
+        if case.action != "create_guest" {
+            let vmid = case.vmid.expect("existing guest vmid");
+            let mut g = guest(vmid, &format!("vm-{vmid}"));
+            g.guest_type = case.guest_type;
+            gw = gw.with_node_and_guest(case.node, g);
+        }
+
+        let req = pending
+            .insert(
+                &proxxx::hitl::pending::NewPendingRequest::new(case.action, case.vmid, 1)
+                    .with_node(case.node)
+                    .with_guest_type(case.guest_type)
+                    .with_params(case.params.clone()),
+            )
+            .expect("insert pending request");
+
+        let data = signed(tg.hmac_key(), &format!("approve:{}", req.id));
+        let cb = callback_query(&format!("cb-var-{idx}"), &data);
+        let out = handle_callback_update(&update(idx as i64 + 1, cb), &pending, &gw, &tg)
+            .await
+            .expect("handle_callback_update");
+
+        let CallbackOutcome::Executed {
+            ref action,
+            vmid,
+            ref upid,
+        } = out
+        else {
+            panic!(
+                "variant {} ({}) must execute, got {out:?}",
+                idx, case.action
+            );
+        };
+        assert_eq!(action, case.action);
+        assert_eq!(vmid, case.vmid.unwrap_or(0));
+        assert_eq!(upid, case.expected_upid);
+
+        let expected_vec: Vec<String> = case
+            .expected_details
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            gw.detailed_calls(),
+            expected_vec,
+            "mismatch in mock gateway calls for variant '{}'",
+            case.action
+        );
+
+        let stored = pending.get(&req.id).expect("get").expect("stored row");
+        assert_eq!(
+            stored.status,
+            proxxx::hitl::pending::RequestStatus::Executed
+        );
+        assert_eq!(stored.upid.as_deref(), Some(case.expected_upid));
+    }
+}
+
+/// #340 Test 2 — MCP end-to-end: `delete_guest` through
+/// `mcp::dispatch::handle_tool_call_with_store` with a matching policy creates a
+/// `PendingStore` row (without calling `delete_guest` yet), and a subsequent
+/// signed approve callback executes `delete_guest` once on the mock gateway.
+#[tokio::test]
+async fn mcp_delete_guest_policy_to_store_to_daemon_executes_once() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(500, "vm-mcp-del"));
+
+    let cfg: proxxx::config::ProfileConfig = toml::from_str(
+        r#"
+        url = "https://127.0.0.1:8006/"
+        user = "root@pam"
+        token_id = "test"
+        token_secret = "00000000-0000-0000-0000-000000000000"
+
+        [[policies]]
+        action = "delete_guest"
+        target = "*"
+        require = 1
+        channel = "telegram"
+        "#,
+    )
+    .expect("parse ProfileConfig");
+
+    let args = serde_json::json!({ "guest_id": 500 });
+    let resp = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw,
+        &cfg,
+        "delete_guest",
+        &args,
+        Some(&pending),
+    )
+    .await
+    .expect("handle_tool_call_with_store");
+
+    let text = resp["content"][0]["text"]
+        .as_str()
+        .expect("MCP response text");
+    assert!(
+        text.contains("Action intercepted by HITL policy"),
+        "expected HITL interception message, got: {text}"
+    );
+    let txn_id = text
+        .rsplit("Transaction: ")
+        .next()
+        .expect("extract txn_id")
+        .trim()
+        .to_string();
+
+    assert!(
+        gw.calls_for("delete_guest").is_empty(),
+        "delete_guest must NOT be called before human approval"
+    );
+
+    let stored_before = pending.get(&txn_id).expect("get").expect("row exists");
+    assert_eq!(stored_before.action, "delete_guest");
+    assert_eq!(stored_before.vmid, Some(500));
+    assert_eq!(stored_before.node.as_deref(), Some("pve01"));
+    assert_eq!(stored_before.guest_type, Some(GuestType::Qemu));
+    assert_eq!(
+        stored_before.status,
+        proxxx::hitl::pending::RequestStatus::Pending
+    );
+
+    let data = signed(tg.hmac_key(), &format!("approve:{txn_id}"));
+    let out = handle_callback_update(
+        &update(1, callback_query("cb-mcp-del", &data)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("daemon handle_callback_update");
+
+    assert!(
+        matches!(
+            out,
+            CallbackOutcome::Executed {
+                ref action,
+                vmid: 500,
+                ref upid
+            } if action == "delete_guest" && upid == "UPID:delete:500"
+        ),
+        "expected Executed for delete_guest 500, got {out:?}"
+    );
+    assert_eq!(
+        gw.detailed_calls(),
+        vec!["delete_guest:pve01:500:qemu".to_string()]
+    );
+
+    let stored_after = pending.get(&txn_id).expect("get").expect("row exists");
+    assert_eq!(
+        stored_after.status,
+        proxxx::hitl::pending::RequestStatus::Executed
+    );
+    assert_eq!(stored_after.upid.as_deref(), Some("UPID:delete:500"));
+}
+
+/// #340 Test 3 — Guest binding (VMID reuse protection):
+/// - If an existing guest moved to another node or changed type (`qemu` -> `lxc`)
+///   or disappeared between request time and approval time, the daemon marks the
+///   row `failed` with `"guest changed since the request (expected <node>/<type>, found ...)"`
+///   and makes zero mutation calls.
+/// - If `create_guest` or `clone_guest` specifies a target VMID that is now taken
+///   at execution time, the daemon marks the row `failed` and makes zero calls.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn guest_binding_refuses_moved_retyped_or_taken_vmid_without_executing() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+
+    // Case A: Guest 100 moved from pve01 to pve02 since request time.
+    let gw_moved = HitlMockGateway::new().with_node_and_guest("pve02", guest(100, "vm-moved"));
+    let req_moved = pending
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new("delete_guest", Some(100), 1)
+                .with_node("pve01")
+                .with_guest_type(GuestType::Qemu)
+                .with_params(serde_json::json!({"guest_id": 100})),
+        )
+        .expect("insert moved");
+    let data_moved = signed(tg.hmac_key(), &format!("approve:{}", req_moved.id));
+    let out_moved = handle_callback_update(
+        &update(1, callback_query("cb-bind-moved", &data_moved)),
+        &pending,
+        &gw_moved,
+        &tg,
+    )
+    .await
+    .expect("handle moved");
+    let CallbackOutcome::ExecuteFailed {
+        error: err_moved, ..
+    } = out_moved
+    else {
+        panic!("moved guest must fail binding check, got {out_moved:?}");
+    };
+    assert!(
+        err_moved
+            .contains("guest changed since the request (expected pve01/qemu, found pve02/qemu)"),
+        "unexpected error for moved guest: {err_moved}"
+    );
+    assert!(gw_moved.all_calls().is_empty());
+    assert_eq!(
+        pending.get(&req_moved.id).unwrap().unwrap().status,
+        proxxx::hitl::pending::RequestStatus::Failed
+    );
+
+    // Case B: VMID 100 was deleted and recreated as LXC on pve01 since request time.
+    let mut lxc_guest = guest(100, "ct-reused");
+    lxc_guest.guest_type = GuestType::Lxc;
+    let gw_retyped = HitlMockGateway::new().with_node_and_guest("pve01", lxc_guest);
+    let req_retyped = pending
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new("stop", Some(100), 1)
+                .with_node("pve01")
+                .with_guest_type(GuestType::Qemu)
+                .with_params(serde_json::json!({"force": true, "timeout": 30})),
+        )
+        .expect("insert retyped");
+    let data_retyped = signed(tg.hmac_key(), &format!("approve:{}", req_retyped.id));
+    let out_retyped = handle_callback_update(
+        &update(2, callback_query("cb-bind-retyped", &data_retyped)),
+        &pending,
+        &gw_retyped,
+        &tg,
+    )
+    .await
+    .expect("handle retyped");
+    let CallbackOutcome::ExecuteFailed {
+        error: err_retyped, ..
+    } = out_retyped
+    else {
+        panic!("retyped guest must fail binding check, got {out_retyped:?}");
+    };
+    assert!(
+        err_retyped
+            .contains("guest changed since the request (expected pve01/qemu, found pve01/lxc)"),
+        "unexpected error for retyped guest: {err_retyped}"
+    );
+    assert!(gw_retyped.all_calls().is_empty());
+
+    // Case C: `create_guest` target VMID 600 is now taken on the cluster.
+    let gw_taken = HitlMockGateway::new().with_node_and_guest("pve01", guest(600, "already-there"));
+    let req_create = pending
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new("create_guest", Some(600), 1)
+                .with_node("pve01")
+                .with_guest_type(GuestType::Qemu)
+                .with_params(serde_json::json!({
+                    "node": "pve01",
+                    "type": "qemu",
+                    "vmid": 600,
+                    "name": "colliding-vm"
+                })),
+        )
+        .expect("insert create");
+    let data_create = signed(tg.hmac_key(), &format!("approve:{}", req_create.id));
+    let out_create = handle_callback_update(
+        &update(3, callback_query("cb-bind-create", &data_create)),
+        &pending,
+        &gw_taken,
+        &tg,
+    )
+    .await
+    .expect("handle create collision");
+    let CallbackOutcome::ExecuteFailed {
+        error: err_create, ..
+    } = out_create
+    else {
+        panic!("create_guest with taken VMID must fail, got {out_create:?}");
+    };
+    assert!(
+        err_create.contains(
+            "guest changed since the request (expected target VMID 600 to be free, found pve01/qemu)"
+        ),
+        "unexpected error for taken create_guest VMID: {err_create}"
+    );
+    assert!(gw_taken.all_calls().is_empty());
+    assert_eq!(
+        pending.get(&req_create.id).unwrap().unwrap().status,
+        proxxx::hitl::pending::RequestStatus::Failed
+    );
+}
+
+/// #340 Test 4 — Any stored row whose `(action, params_json)` cannot be decoded
+/// into `ApprovedOp` (unknown field rejected by `deny_unknown_fields`, malformed
+/// JSON, missing required field, invalid `Shape::Name`, or unknown action)
+/// transitions to `status = 'failed'` with `"cannot decode approved operation: ..."`
+/// and invokes zero methods on the mock gateway.
+#[tokio::test]
+async fn undecodable_params_json_marks_failed_and_makes_no_gateway_call() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-100"));
+
+    let bad_rows: &[(&str, Option<u32>, serde_json::Value)] = &[
+        // Unknown field rejected by #[serde(deny_unknown_fields)]
+        (
+            "delete_guest",
+            Some(100),
+            serde_json::json!({"guest_id": 100, "unexpected_field": true}),
+        ),
+        // Unknown field on CLI stop
+        (
+            "stop",
+            Some(100),
+            serde_json::json!({"force": true, "bogus": 1}),
+        ),
+        // Missing required `guest_id` on MCP tool
+        ("restart_guest", Some(100), serde_json::json!({})),
+        // Path traversal in snapshot name rejected by Shape::Name
+        (
+            "create_snapshot",
+            Some(100),
+            serde_json::json!({"guest_id": 100, "name": "../etc/passwd"}),
+        ),
+        // Disagreement between row.vmid and params.guest_id
+        (
+            "delete_guest",
+            Some(100),
+            serde_json::json!({"guest_id": 999}),
+        ),
+        // Unknown action name
+        ("drop_database", Some(100), serde_json::json!({})),
+    ];
+
+    for (idx, (action, vmid, params)) in bad_rows.iter().enumerate() {
+        let req = pending
+            .insert(
+                &proxxx::hitl::pending::NewPendingRequest::new(*action, *vmid, 1)
+                    .with_node("pve01")
+                    .with_guest_type(GuestType::Qemu)
+                    .with_params(params.clone()),
+            )
+            .expect("insert bad row");
+        let data = signed(tg.hmac_key(), &format!("approve:{}", req.id));
+        let out = handle_callback_update(
+            &update(
+                idx as i64 + 1,
+                callback_query(&format!("cb-bad-{idx}"), &data),
+            ),
+            &pending,
+            &gw,
+            &tg,
+        )
+        .await
+        .expect("handle undecodable row");
+
+        let CallbackOutcome::ExecuteFailed { ref error, .. } = out else {
+            panic!("bad row {idx} ({action}) must return ExecuteFailed, got {out:?}");
+        };
+        assert!(
+            error.starts_with("cannot decode approved operation:"),
+            "error must start with 'cannot decode approved operation:', got: {error}"
+        );
+        let row = pending.get(&req.id).expect("get").expect("row");
+        assert_eq!(row.status, proxxx::hitl::pending::RequestStatus::Failed);
+        assert!(row
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("cannot decode approved operation:"));
+    }
+
+    assert!(
+        gw.all_calls().is_empty(),
+        "undecodable rows must never invoke the PVE gateway, got {:?}",
+        gw.all_calls()
+    );
 }

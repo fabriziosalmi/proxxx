@@ -18,6 +18,25 @@ SemVer contract:
 
 ### Security
 
+- **The HITL daemon now executes all 15 policy-gated CLI and MCP operations from persisted `params_json` with live Guest Binding and strict parameter decoding (#340).**
+  `src/hitl/daemon.rs::execute_approved_action` previously implemented only
+  `stop`, `delete`, `restart`, and `start`, dropped stored parameters such as
+  `force`, `timeout_secs`, `snapname`, `newid`, and `target_node`, re-resolved
+  `(node, guest_type)` from the live cluster by `vmid` alone without checking
+  the approved row, and marked every other policy-gated operation (`shutdown`,
+  `stop_guest`, `restart_guest`, `delete_guest`, `create_snapshot`,
+  `delete_snapshot`, `suspend_guest`, `clone_guest`, `migrate_guest`,
+  `create_guest`, `clone_with_cloudinit`) as `Unknown HITL action`. The daemon
+  now decodes each row into an exhaustive `ApprovedOp` enum across all 5 CLI
+  batch operations and 10 destructive MCP tools (`#[serde(deny_unknown_fields)]`
+  plus `Shape::Name` validation on path-bearing fields), verifies Guest Binding
+  against `get_cluster_resources()` before execution (existing guests must still
+  reside on `(row.node, row.guest_type)` and target VMIDs for `create_guest` /
+  `clone_guest` / `clone_with_cloudinit` must still be free), calls the shared
+  `cli::common::exec_cli_batch_op` and `mcp::dispatch::exec_*` executors with
+  the exact stored parameters, and records the returned UPID or identifier in
+  `hitl_pending_requests.upid`.
+
 - **HITL pending approvals are now persisted in `<config_dir>/hitl_pending.db` with 64-bit random request IDs and a 120-second TTL (#341).**
   CLI and MCP policy intercepts previously constructed a deterministic
   `{action}:{vmid}` transaction ID while `src/hitl/pending.rs` kept the consumed

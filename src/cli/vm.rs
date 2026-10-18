@@ -87,14 +87,13 @@ impl CloudInitProfile {
 /// cloud-init drive. No-op on empty profile (returns
 /// `applied=false`). LXC is rejected — cloud-init is QEMU-only.
 pub async fn apply_cloudinit_and_regen(
-    client: &crate::api::PxClient,
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
     node: &str,
     vmid: u32,
     gt: crate::api::types::GuestType,
     profile: &CloudInitProfile,
 ) -> Result<Value> {
     use crate::api::types::GuestType;
-    use crate::api::ProxmoxGateway;
     if !matches!(gt, GuestType::Qemu) {
         anyhow::bail!("cloud-init is QEMU-only — VMID {vmid} is an LXC container");
     }

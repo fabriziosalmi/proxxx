@@ -1620,7 +1620,8 @@ pub async fn execute(
                 // cloudinit before the disk image lands races PVE's
                 // own locking and returns a generic 500.
                 let status =
-                    crate::cli::common::poll_task_until_done(&client, &src_node, &upid, 0).await?;
+                    crate::cli::common::poll_task_until_done(client.as_ref(), &src_node, &upid, 0)
+                        .await?;
                 if !status.is_success() {
                     anyhow::bail!(
                         "clone task did not succeed (status={:?}); skipping cloud-init apply",
@@ -1628,8 +1629,14 @@ pub async fn execute(
                     );
                 }
                 Some(
-                    vm::apply_cloudinit_and_regen(&client, &landing_node, target_id, gt, &profile)
-                        .await?,
+                    vm::apply_cloudinit_and_regen(
+                        client.as_ref(),
+                        &landing_node,
+                        target_id,
+                        gt,
+                        &profile,
+                    )
+                    .await?,
                 )
             } else {
                 None
