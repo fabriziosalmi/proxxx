@@ -18,6 +18,21 @@ SemVer contract:
 
 ### Security
 
+- **Unified HITL Telegram callback verification and quorum enforcement across the daemon and TUI (#336, #337).**
+  `TelegramGateway::request_approval` mints approve callbacks with a trailing
+  `:r<require>` quorum segment (`approve:<txn_id>:r<require>:<hmac>`), while
+  `src/tui/mod.rs` previously split only at the first `:` after stripping the
+  HMAC tag, leaving `:r<require>` attached to `txn_id` so every TUI approval
+  looked up a non-existent pending key and timed out (#336). In addition, the
+  TUI poller verified only the HMAC tag and skipped the originating `chat.id`
+  check, the `allowed_approvers` allowlist, and `require > 1` quorum counting
+  (#337). Both the daemon and the TUI now validate callbacks through
+  `hitl::daemon::verify_callback` and `parse_callback_payload` (HMAC tag,
+  `chat.id`, fail-closed `allowed_approvers`, and `<decision>:<txn_id>[:r<digits>]`
+  with backward compatibility for 3-segment keyboards), enforce `require`
+  distinct approver votes via `PendingApprovals`, and answer the Telegram
+  callback with `Approved` or `Denied` only after a matching pending entry is
+  resolved (or `Expired or unknown request` when none matches).
 - **The panic hook scrubs `PVEAPIToken=` headers before writing to stderr and the log file (#377).**
   `src/util/panic_hook.rs` redacted `PVEAuthCookie=`, `PBSAPIToken=`,
   `tokenid=`, `password=`, `token_secret=`, `csrfpreventiontoken=`,

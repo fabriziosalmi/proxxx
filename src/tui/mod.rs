@@ -128,33 +128,48 @@ enum DataMsg {
 ///
 /// Pre-fix the TUI used a sleep+auto-approve simulation — the
 /// reviewer caught it and we replaced it with this real path.
-struct HitlCoordinator {
+pub struct HitlCoordinator {
     pending:
         tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    votes: crate::hitl::pending::PendingApprovals,
+}
+
+impl Default for HitlCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HitlCoordinator {
-    fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            votes: crate::hitl::pending::PendingApprovals::new(),
         }
     }
 
     /// Register a pending approval and get back the receiver to await.
-    async fn register(&self, txn_id: String) -> tokio::sync::oneshot::Receiver<bool> {
+    pub async fn register(&self, txn_id: String) -> tokio::sync::oneshot::Receiver<bool> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.lock().await.insert(txn_id, tx);
         rx
     }
 
     /// Drop a pending registration (used on Telegram-send failure).
-    async fn unregister(&self, txn_id: &str) {
+    pub async fn unregister(&self, txn_id: &str) {
         self.pending.lock().await.remove(txn_id);
     }
 
+    /// Whether `txn_id` is currently waiting in `pending`.
+    pub async fn is_pending(&self, txn_id: &str) -> bool {
+        self.pending.lock().await.contains_key(txn_id)
+    }
+
     /// Resolve a pending approval with the user's decision. Called
-    /// from the poller when a `callback_query` arrives.
-    async fn resolve(&self, txn_id: &str, approved: bool) {
+    /// from the poller when a `callback_query` arrives. Returns `true`
+    /// if a pending entry existed and was removed.
+    pub async fn resolve(&self, txn_id: &str, approved: bool) -> bool {
         // Drop the lock BEFORE sending on the oneshot. Holding it
         // across `sender.send(...)` is harmless today (send() is
         // non-blocking) but keeps the lock scope tighter than needed
@@ -162,6 +177,77 @@ impl HitlCoordinator {
         let sender = self.pending.lock().await.remove(txn_id);
         if let Some(s) = sender {
             let _ = s.send(approved);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Handle one Telegram `CallbackQuery` in the TUI poller (#336, #337).
+///
+/// Validates the callback with [`crate::hitl::daemon::verify_callback`]
+/// (HMAC tag, originating chat ID, `allowed_approvers`, and payload grammar
+/// including `:r<require>`), enforces multi-approver quorum via
+/// `coord.votes`, and answers Telegram with `"✅ Approved"` / `"🚫 Denied"`
+/// only after a matching pending operation was found and resolved (or
+/// `"⚠️ Expired or unknown request"` when no pending entry matches).
+pub async fn handle_tui_callback_query(
+    tg: &crate::hitl::telegram::TelegramGateway,
+    coord: &HitlCoordinator,
+    cb: &crate::hitl::telegram::CallbackQuery,
+) -> Option<String> {
+    let verified = match crate::hitl::daemon::verify_callback(tg, cb) {
+        Ok(v) => v,
+        Err(rej) => {
+            warn!("TUI HITL callback rejected: {rej:?}");
+            let text = rej.answer_text()?;
+            let _ = tg.answer_callback(&cb.id, text).await;
+            return Some(text.to_string());
+        }
+    };
+
+    if verified.decision == crate::hitl::daemon::CallbackDecision::Deny {
+        let msg = if coord.resolve(&verified.txn_id, false).await {
+            "🚫 Denied"
+        } else {
+            "⚠️ Expired or unknown request"
+        };
+        let _ = tg.answer_callback(&cb.id, msg).await;
+        return Some(msg.to_string());
+    }
+
+    if !coord.is_pending(&verified.txn_id).await {
+        let msg = "⚠️ Expired or unknown request";
+        let _ = tg.answer_callback(&cb.id, msg).await;
+        return Some(msg.to_string());
+    }
+
+    match coord
+        .votes
+        .record_vote(&verified.txn_id, verified.approver_id, verified.require)
+    {
+        crate::hitl::pending::VoteProgress::Waiting {
+            have,
+            need,
+            duplicate,
+        } => {
+            let note = if duplicate {
+                format!("You already approved — {have}/{need}")
+            } else {
+                format!("Recorded — {have}/{need} approvals")
+            };
+            let _ = tg.answer_callback(&cb.id, &note).await;
+            Some(note)
+        }
+        crate::hitl::pending::VoteProgress::Satisfied => {
+            let msg = if coord.resolve(&verified.txn_id, true).await {
+                "✅ Approved"
+            } else {
+                "⚠️ Expired or unknown request"
+            };
+            let _ = tg.answer_callback(&cb.id, msg).await;
+            Some(msg.to_string())
         }
     }
 }
@@ -181,63 +267,10 @@ async fn run_hitl_poller(
                 backoff = Duration::from_secs(1);
                 for u in updates {
                     offset = offset.max(u.update_id + 1);
-                    let Some(cb) = u.callback_query else { continue };
-                    let Some(data) = cb.data else { continue };
-
-                    // Phase 17: HMAC-verify before resolving. The
-                    // send-side (telegram.rs::request_approval) now
-                    // appends `:<16-hex-tag>` to every callback_data;
-                    // any inbound callback that doesn't match the
-                    // tag's shape OR fails the signature check is
-                    // silently dropped — defense-in-depth against
-                    // bot-token leak (an attacker who can forge bot
-                    // messages can't forge a valid tag without our
-                    // separately-stored HMAC key).
-                    //
-                    // Phase 18 — every callback MUST carry a valid
-                    // HMAC tag. The v0.1.21 backward-compat shim that
-                    // accepted unsigned callbacks is gone; refuse and
-                    // drop. Symmetric with daemon::handle_callback_update.
-                    let payload_for_resolve = {
-                        let tail = data.rsplitn(2, ':').collect::<Vec<&str>>();
-                        if tail.len() != 2
-                            || tail[0].len() != 16
-                            || !tail[0].chars().all(|c| c.is_ascii_hexdigit())
-                        {
-                            warn!(
-                                "TUI HITL callback without HMAC tag — refused (v0.1.22+ \
-                                 requires signed callbacks; restart the TUI so the next \
-                                 request_approval mints a fresh signed keyboard): {data}"
-                            );
-                            let _ = tg
-                                .answer_callback(
-                                    &cb.id,
-                                    "❌ Unsigned callback refused — TUI upgrade needed",
-                                )
-                                .await;
-                            continue;
-                        }
-                        if !crate::hitl::hmac_key::verify(tg.hmac_key(), tail[1], tail[0]) {
-                            warn!("TUI HITL callback failed HMAC verify; dropping: {data}");
-                            let _ = tg
-                                .answer_callback(&cb.id, "❌ Signature verification failed")
-                                .await;
-                            continue;
-                        }
-                        tail[1].to_string()
-                    };
-
-                    let Some((decision, txn_id)) = payload_for_resolve.split_once(':') else {
+                    let Some(cb) = u.callback_query.as_ref() else {
                         continue;
                     };
-                    let approved = decision == "approve";
-                    let confirm_text = if approved {
-                        "✅ Executed"
-                    } else {
-                        "🚫 Denied"
-                    };
-                    let _ = tg.answer_callback(&cb.id, confirm_text).await;
-                    coord.resolve(txn_id, approved).await;
+                    let _ = handle_tui_callback_query(&tg, &coord, cb).await;
                 }
             }
             Err(e) => {

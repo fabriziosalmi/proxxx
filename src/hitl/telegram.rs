@@ -67,15 +67,15 @@ pub(crate) fn escape_markdown_v2(s: &str) -> String {
     out
 }
 
-#[derive(Serialize)]
-struct InlineKeyboardButton {
-    text: String,
-    callback_data: String,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    pub callback_data: String,
 }
 
-#[derive(Serialize)]
-struct InlineKeyboardMarkup {
-    inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InlineKeyboardMarkup {
+    pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
 }
 
 #[derive(Serialize)]
@@ -278,6 +278,31 @@ impl TelegramGateway {
         Ok(gw.with_allowed_approvers(config.allowed_approvers.clone().unwrap_or_default()))
     }
 
+    /// Build the signed inline keyboard for an approval request.
+    ///
+    /// Extracted so callers and tests use the single real keyboard builder
+    /// rather than hand-writing `callback_data` strings (#336).
+    #[must_use]
+    pub fn build_approval_keyboard(&self, txn_id: &str, require: u8) -> InlineKeyboardMarkup {
+        let approve_payload = format!("approve:{txn_id}:r{require}");
+        let approve_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &approve_payload);
+        let deny_payload = format!("deny:{txn_id}");
+        let deny_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &deny_payload);
+
+        InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![
+                InlineKeyboardButton {
+                    text: "✅ Approve".to_string(),
+                    callback_data: format!("{approve_payload}:{approve_tag}"),
+                },
+                InlineKeyboardButton {
+                    text: "❌ Deny".to_string(),
+                    callback_data: format!("{deny_payload}:{deny_tag}"),
+                },
+            ]],
+        }
+    }
+
     /// Sends a request for approval to the Telegram chat.
     /// Returns the `message_id` to track it.
     pub async fn request_approval(
@@ -302,41 +327,11 @@ impl TelegramGateway {
             escape_markdown_v2(txn_id),
         );
 
-        // Phase 17: HMAC-sign each callback_data so the daemon-side
-        // verifier rejects forgeries from anyone who steals the bot
-        // token but not the HMAC key. Tag is appended as `:<hex>` to
-        // the existing `decision:txn_id` shape; the daemon parser
-        // peels it off and re-verifies before consuming the txn.
-        // #250 — the quorum travels in the signed payload. The sender
-        // knows which policy fired; the daemon does not (it is a separate
-        // process and cannot re-derive tag-scoped matches without a
-        // cluster round trip). The HMAC below covers this segment, so it
-        // cannot be edited by whoever holds the keyboard.
-        //
-        // Appended as a 4th `:`-segment. The daemon's parser reads
-        // segments 0..3 and ignores extras, so a keyboard minted by an
-        // older proxxx (3 segments) still parses and means "require 1".
-        let approve_payload = format!("approve:{txn_id}:r{require}");
-        let approve_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &approve_payload);
-        let deny_payload = format!("deny:{txn_id}");
-        let deny_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &deny_payload);
-
         let req = SendMessageReq {
             chat_id: self.chat_id.clone(),
             text,
             parse_mode: "MarkdownV2".to_string(),
-            reply_markup: InlineKeyboardMarkup {
-                inline_keyboard: vec![vec![
-                    InlineKeyboardButton {
-                        text: "✅ Approve".to_string(),
-                        callback_data: format!("{approve_payload}:{approve_tag}"),
-                    },
-                    InlineKeyboardButton {
-                        text: "❌ Deny".to_string(),
-                        callback_data: format!("{deny_payload}:{deny_tag}"),
-                    },
-                ]],
-            },
+            reply_markup: self.build_approval_keyboard(txn_id, require),
         };
 
         let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());

@@ -94,130 +94,69 @@ pub async fn handle_callback_update(
     let Some(cb) = update.callback_query.as_ref() else {
         return Ok(CallbackOutcome::NotACallback);
     };
-    let Some(data) = cb.data.as_ref() else {
-        return Ok(CallbackOutcome::NotACallback);
+    let verified = match verify_callback(tg_gateway, cb) {
+        Ok(v) => v,
+        Err(rej) => {
+            if let Some(ans) = rej.answer_text() {
+                let _ = tg_gateway.answer_callback(&cb.id, ans).await;
+            }
+            return Ok(match rej {
+                CallbackRejection::MissingData => CallbackOutcome::NotACallback,
+                CallbackRejection::Unsigned { data } => {
+                    warn!(
+                        "HITL callback without HMAC tag — refused (v0.1.22+ requires \
+                         signed callbacks; restart your HITL daemon to mint a fresh \
+                         keyboard): {data}"
+                    );
+                    CallbackOutcome::InvalidFormat { data }
+                }
+                CallbackRejection::InvalidSignature { data } => {
+                    warn!("HITL callback failed HMAC verify: {data}");
+                    CallbackOutcome::InvalidFormat { data }
+                }
+                CallbackRejection::WrongChat { chat_id } => {
+                    warn!(
+                        "HITL callback from chat {} but configured chat is {} — refused",
+                        chat_id,
+                        tg_gateway.chat_id()
+                    );
+                    CallbackOutcome::WrongChat { chat_id }
+                }
+                CallbackRejection::NoApproversConfigured { user_id } => {
+                    warn!(
+                        "HITL callback from user {} refused: no `allowed_approvers` configured. \
+                         Add the approving Telegram user ids to the profile's [telegram] section \
+                         (numeric ids, e.g. from @userinfobot) — proxxx will not act on an \
+                         unauthenticated approval.",
+                        user_id
+                    );
+                    CallbackOutcome::UnauthorizedApprover { user_id }
+                }
+                CallbackRejection::UnauthorizedApprover { user_id } => {
+                    warn!(
+                        "HITL callback from unauthorised user {} (@{}) — refused",
+                        user_id,
+                        cb.from.username.as_deref().unwrap_or("?")
+                    );
+                    CallbackOutcome::UnauthorizedApprover { user_id }
+                }
+                CallbackRejection::InvalidPayload { data } => {
+                    CallbackOutcome::InvalidFormat { data }
+                }
+            });
+        }
     };
+
+    let data = &verified.raw_data;
     info!("Received HITL callback: {}", data);
 
-    // Phase 18 — every callback MUST carry a valid HMAC tag. The
-    // v0.1.21 backward-compat shim that accepted unsigned legacy
-    // callbacks is gone, per the contract documented in v0.1.21's
-    // CHANGELOG and tested by `legacy_unsigned_callback_still_accepted_in_v0_1_21`
-    // (now inverted to `legacy_unsigned_callback_is_refused_in_v0_1_22`).
-    //
-    // Canonical shape after v0.1.22:
-    //     decision:action:vmid[-timestamp]:hmac_hex
-    // where hmac_hex is exactly 16 hex chars (8 raw bytes).
-    //
-    // The tag is split off at the LAST `:` so the txn_id segment can
-    // freely contain hyphens, digits, or any non-colon byte. A
-    // callback whose tail isn't a 16-hex-char chunk is refused
-    // outright — no quiet-acceptance branch, no telemetry alert
-    // window. Operators who haven't restarted their HITL daemon
-    // since v0.1.21 will see refusals; the message points them to
-    // upgrade.
-    let payload_for_parse = {
-        let parts: Vec<&str> = data.rsplitn(2, ':').collect();
-        if parts.len() != 2
-            || parts[0].len() != 16
-            || !parts[0].chars().all(|c| c.is_ascii_hexdigit())
-        {
-            warn!(
-                "HITL callback without HMAC tag — refused (v0.1.22+ requires \
-                 signed callbacks; restart your HITL daemon to mint a fresh \
-                 keyboard): {data}"
-            );
-            let _ = tg_gateway
-                .answer_callback(
-                    &cb.id,
-                    "❌ Unsigned callback refused — daemon upgrade needed",
-                )
-                .await;
-            return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-        }
-        let tail_tag = parts[0];
-        let head_payload = parts[1];
-        if !crate::hitl::hmac_key::verify(tg_gateway.hmac_key(), head_payload, tail_tag) {
-            warn!("HITL callback failed HMAC verify: {data}");
-            let _ = tg_gateway
-                .answer_callback(&cb.id, "❌ Signature verification failed")
-                .await;
-            return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-        }
-        head_payload.to_string()
-    };
-
-    // Audit 2026-09-09 (#249) — WHO pressed the button.
-    //
-    // The HMAC above proves this daemon minted the keyboard. It proves
-    // nothing about the person acting on it: Telegram delivers the
-    // buttons to everyone who can see the message, so without this gate
-    // any member of the chat could approve a destructive operation,
-    // which then executes with the daemon's full PVE credentials.
-    //
-    // Two checks, both fail-closed:
-    //   1. The originating chat must be the configured one, so a
-    //      forwarded keyboard cannot drive the daemon.
-    //   2. The sender must be on `allowed_approvers`. An unconfigured
-    //      (empty) allowlist refuses everything rather than accepting
-    //      anyone — same posture as v0.13.0's "destructive MCP tool with
-    //      no policy is REFUSED".
-    if let Some(chat) = cb.message.as_ref().and_then(|m| m.chat.as_ref()) {
-        if tg_gateway.chat_id() != chat.id.to_string() {
-            warn!(
-                "HITL callback from chat {} but configured chat is {} — refused",
-                chat.id,
-                tg_gateway.chat_id()
-            );
-            let _ = tg_gateway
-                .answer_callback(&cb.id, "❌ Wrong chat — refused")
-                .await;
-            return Ok(CallbackOutcome::WrongChat { chat_id: chat.id });
-        }
-    }
-    let approvers = tg_gateway.allowed_approvers();
-    if approvers.is_empty() {
-        warn!(
-            "HITL callback from user {} refused: no `allowed_approvers` configured. \
-             Add the approving Telegram user ids to the profile's [telegram] section \
-             (numeric ids, e.g. from @userinfobot) — proxxx will not act on an \
-             unauthenticated approval.",
-            cb.from.id
-        );
-        let _ = tg_gateway
-            .answer_callback(
-                &cb.id,
-                "❌ No approver allowlist configured — refused. See `allowed_approvers`.",
-            )
-            .await;
-        return Ok(CallbackOutcome::UnauthorizedApprover {
-            user_id: cb.from.id,
-        });
-    }
-    if !approvers.contains(&cb.from.id) {
-        warn!(
-            "HITL callback from unauthorised user {} (@{}) — refused",
-            cb.from.id,
-            cb.from.username.as_deref().unwrap_or("?")
-        );
-        let _ = tg_gateway
-            .answer_callback(&cb.id, "❌ Not an authorised approver — refused")
-            .await;
-        return Ok(CallbackOutcome::UnauthorizedApprover {
-            user_id: cb.from.id,
-        });
-    }
-
-    let parts: Vec<&str> = payload_for_parse.split(':').collect();
-    if parts.len() < 3 {
+    let Some((action, vmid_str)) = verified.txn_id.split_once(':') else {
         let _ = tg_gateway
             .answer_callback(&cb.id, "❌ Invalid transaction ID format")
             .await;
         return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-    }
-    let decision = parts[0];
-    let action = parts[1];
-    let Ok(vmid) = parts[2].parse::<u32>() else {
+    };
+    let Ok(vmid) = vmid_str.parse::<u32>() else {
         let _ = tg_gateway.answer_callback(&cb.id, "❌ Invalid vmid").await;
         return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
     };
@@ -237,7 +176,7 @@ pub async fn handle_callback_update(
         }
     };
 
-    if decision != "approve" {
+    if verified.decision != CallbackDecision::Approve {
         let _ = tg_gateway.answer_callback(&cb.id, "🚫 Denied").await;
         edit_status(
             "🚫 Denied",
@@ -250,21 +189,18 @@ pub async fn handle_callback_update(
         });
     }
 
-    // #250 — quorum. `require` rides in the signed payload as a 4th
-    // segment (`r<N>`); a keyboard minted before v0.13.4 has no such
-    // segment and means "one approver", which is the historic behaviour.
-    let require: u8 = parts
-        .get(3)
-        .and_then(|seg| seg.strip_prefix('r'))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(1);
+    // #250 — quorum. `require` rides in the signed payload as a
+    // trailing `:r<N>` segment; a keyboard minted before v0.13.4 has no
+    // such segment and means "one approver", which is the historic
+    // behaviour.
+    let require = verified.require;
 
     // Vote BEFORE the replay gate: every approver presses the same
     // keyboard, so their callback data is identical by construction and
     // the replay gate would reject the second signature as a duplicate.
     // Only the callback that completes the quorum falls through to
     // `consume`, which then makes the whole transaction single-use.
-    match pending.record_vote(data, cb.from.id, require) {
+    match pending.record_vote(data, verified.approver_id, require) {
         crate::hitl::pending::VoteProgress::Satisfied => {}
         crate::hitl::pending::VoteProgress::Waiting {
             have,
@@ -434,6 +370,215 @@ pub async fn handle_callback_update(
                 vmid,
                 error: err_str,
             })
+        }
+    }
+}
+
+/// Decision encoded in a HITL callback payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackDecision {
+    Approve,
+    Deny,
+}
+
+/// Parsed `<decision>:<txn_id>[:r<require>]` payload after HMAC strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCallback {
+    pub decision: CallbackDecision,
+    pub txn_id: String,
+    pub require: u8,
+}
+
+/// Verified and parsed Telegram callback query (#336, #337).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCallback {
+    pub decision: CallbackDecision,
+    pub txn_id: String,
+    pub require: u8,
+    pub raw_data: String,
+    pub approver_id: i64,
+}
+
+/// Reason a Telegram callback query was rejected by [`verify_callback`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackRejection {
+    MissingData,
+    Unsigned { data: String },
+    InvalidSignature { data: String },
+    WrongChat { chat_id: i64 },
+    NoApproversConfigured { user_id: i64 },
+    UnauthorizedApprover { user_id: i64 },
+    InvalidPayload { data: String },
+}
+
+impl CallbackRejection {
+    /// Text sent back to Telegram via `answerCallbackQuery` for this rejection.
+    #[must_use]
+    pub const fn answer_text(&self) -> Option<&'static str> {
+        match self {
+            Self::MissingData => None,
+            Self::Unsigned { .. } => Some("❌ Unsigned callback refused — daemon upgrade needed"),
+            Self::InvalidSignature { .. } => Some("❌ Signature verification failed"),
+            Self::WrongChat { .. } => Some("❌ Wrong chat — refused"),
+            Self::NoApproversConfigured { .. } => {
+                Some("❌ No approver allowlist configured — refused. See `allowed_approvers`.")
+            }
+            Self::UnauthorizedApprover { .. } => Some("❌ Not an authorised approver — refused"),
+            Self::InvalidPayload { .. } => Some("❌ Invalid transaction ID format"),
+        }
+    }
+}
+
+/// Parse a verified callback payload (after the trailing `:hmac_hex` tag has
+/// been stripped).
+///
+/// Grammar: `<decision> ":" <txn_id> [":r" <digits>]`
+/// - `<decision>` is stripped at the first `:` (`"approve"` or `"deny"`).
+/// - An optional trailing `:r<digits>` quorum segment is stripped next; if
+///   absent, `require` defaults to `1` (backward-compatible with 3-segment
+///   keyboards minted before v0.13.4).
+/// - The remaining middle slice is `txn_id` (which may itself contain `:`).
+///
+/// # Errors
+///
+/// Returns an error if the payload has no `:`, if the decision is neither
+/// `"approve"` nor `"deny"`, if the `:r<digits>` segment overflows `u8`, or if
+/// `txn_id` is empty.
+pub fn parse_callback_payload(payload: &str) -> Result<ParsedCallback> {
+    let Some((decision_str, rest)) = payload.split_once(':') else {
+        anyhow::bail!("missing ':' separator in callback payload");
+    };
+    let decision = match decision_str {
+        "approve" => CallbackDecision::Approve,
+        "deny" => CallbackDecision::Deny,
+        other => anyhow::bail!("unknown callback decision: {other}"),
+    };
+    let (txn_id_str, require) = match rest.rsplit_once(":r") {
+        Some((head, digits))
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            let req = digits
+                .parse::<u8>()
+                .map_err(|e| anyhow::anyhow!("invalid quorum count ':r{digits}': {e}"))?
+                .max(1);
+            (head, req)
+        }
+        _ => (rest, 1),
+    };
+    if txn_id_str.is_empty() {
+        anyhow::bail!("empty txn_id in callback payload");
+    }
+    Ok(ParsedCallback {
+        decision,
+        txn_id: txn_id_str.to_string(),
+        require,
+    })
+}
+
+/// Verify and parse a Telegram `CallbackQuery` for both the HITL daemon and the
+/// TUI poller (#336, #337).
+///
+/// Performs four checks in fail-closed order:
+/// 1. 16-hex-char HMAC tag present at the last `:` and valid under `gateway.hmac_key()`.
+/// 2. Originating chat ID matches `gateway.chat_id()` (when `cb.message.chat` is present).
+/// 3. `cb.from.id` is listed in `gateway.allowed_approvers()` (empty allowlist refuses all).
+/// 4. Payload parses via [`parse_callback_payload`].
+///
+/// # Errors
+///
+/// Returns [`CallbackRejection`] describing the first check that failed.
+pub fn verify_callback(
+    gateway: &TelegramGateway,
+    cb: &crate::hitl::telegram::CallbackQuery,
+) -> std::result::Result<VerifiedCallback, CallbackRejection> {
+    let Some(data) = cb.data.as_ref() else {
+        return Err(CallbackRejection::MissingData);
+    };
+    let parts: Vec<&str> = data.rsplitn(2, ':').collect();
+    if parts.len() != 2 || parts[0].len() != 16 || !parts[0].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(CallbackRejection::Unsigned { data: data.clone() });
+    }
+    let tail_tag = parts[0];
+    let head_payload = parts[1];
+    if !crate::hitl::hmac_key::verify(gateway.hmac_key(), head_payload, tail_tag) {
+        return Err(CallbackRejection::InvalidSignature { data: data.clone() });
+    }
+    if let Some(chat) = cb.message.as_ref().and_then(|m| m.chat.as_ref()) {
+        if gateway.chat_id() != chat.id.to_string() {
+            return Err(CallbackRejection::WrongChat { chat_id: chat.id });
+        }
+    }
+    let approvers = gateway.allowed_approvers();
+    if approvers.is_empty() {
+        return Err(CallbackRejection::NoApproversConfigured {
+            user_id: cb.from.id,
+        });
+    }
+    if !approvers.contains(&cb.from.id) {
+        return Err(CallbackRejection::UnauthorizedApprover {
+            user_id: cb.from.id,
+        });
+    }
+    let parsed = parse_callback_payload(head_payload)
+        .map_err(|_| CallbackRejection::InvalidPayload { data: data.clone() })?;
+    Ok(VerifiedCallback {
+        decision: parsed.decision,
+        txn_id: parsed.txn_id,
+        require: parsed.require,
+        raw_data: data.clone(),
+        approver_id: cb.from.id,
+    })
+}
+
+#[cfg(test)]
+mod callback_verify_tests {
+    use super::*;
+
+    #[test]
+    fn parse_callback_payload_table_test() {
+        let cases: &[(&str, Option<(CallbackDecision, &str, u8)>)] = &[
+            (
+                "approve:stop:100:r2",
+                Some((CallbackDecision::Approve, "stop:100", 2)),
+            ),
+            (
+                "approve:stop:100-1739999999999:r1",
+                Some((CallbackDecision::Approve, "stop:100-1739999999999", 1)),
+            ),
+            (
+                "deny:stop:100",
+                Some((CallbackDecision::Deny, "stop:100", 1)),
+            ),
+            (
+                "approve:stop:100",
+                Some((CallbackDecision::Approve, "stop:100", 1)),
+            ),
+            ("nope:stop:100", None),
+            ("", None),
+        ];
+
+        for (input, expected) in cases {
+            let res = parse_callback_payload(input);
+            match expected {
+                Some((decision, txn_id, require)) => {
+                    let parsed = res.unwrap_or_else(|e| {
+                        panic!("expected Ok for payload {input:?}, got Err: {e}")
+                    });
+                    assert_eq!(
+                        parsed.decision, *decision,
+                        "decision mismatch for {input:?}"
+                    );
+                    assert_eq!(parsed.txn_id, *txn_id, "txn_id mismatch for {input:?}");
+                    assert_eq!(parsed.require, *require, "require mismatch for {input:?}");
+                }
+                None => {
+                    assert!(
+                        res.is_err(),
+                        "expected Err for payload {input:?}, got {res:?}"
+                    );
+                }
+            }
         }
     }
 }

@@ -147,9 +147,26 @@ Timestamp: 2026-05-03 09:32:11 UTC
 [ ✅ Approve ] [ ❌ Deny ]
 ```
 
-The callback data encodes `approve:txn_id` or `deny:txn_id`. The
-poller parses, calls `HitlCoordinator::resolve`, and the spawned task
-unblocks.
+The callback data is HMAC-SHA256 signed with the local HITL key and encodes
+`approve:<txn_id>:r<require>:<hmac>` or `deny:<txn_id>:<hmac>` (with
+backward compatibility for legacy 3-segment `approve:<txn_id>:<hmac>`
+keyboards where `require` defaults to `1`). Both the HITL daemon and the
+TUI poller validate incoming callbacks through `verify_callback`, which
+checks in fail-closed order:
+
+1. A 16-hex-character HMAC tag is present and valid.
+2. The originating chat ID matches `[telegram].chat_id`.
+3. The pressing user's numeric Telegram ID is listed in
+   `[telegram].allowed_approvers` (an empty allowlist refuses all
+   callbacks).
+4. The payload matches `<decision>:<txn_id>[:r<require>]`.
+
+For policies with `require > 1`, both the daemon and the TUI track votes per
+transaction and unblock or execute only after `require` distinct authorised
+approvers press Approve (a single Deny from an authorised approver denies
+immediately). The TUI answers the callback with `Approved` or `Denied` only
+after a matching pending entry is resolved, or `Expired or unknown request`
+if no pending operation matches `txn_id`.
 
 ## Audit trail
 
@@ -184,9 +201,6 @@ on mutations.
   predictable. Mitigation: txn_ids are random + time-bound.
   E2E-verified replay rejection is on the security-invariants matrix
   (still ❌ as of the last audit).
-- **No multi-approver.** Only the first callback wins. "Two
-  approvers required" needs explicit policy plumbing — not yet
-  implemented.
 - **No escalation.** A timed-out request is denied; it does not
   escalate to a second channel. Add a separate alert rule if you
   want oncall to know.
