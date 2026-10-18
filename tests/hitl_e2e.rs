@@ -339,7 +339,7 @@ async fn quorum_of_two_needs_two_distinct_approvers() {
 /// `approve:stop:100:r2`) are refused with `"this approval button is from an
 /// older proxxx, request again"` and do not execute.
 #[tokio::test]
-async fn legacy_payload_without_quorum_segment_means_one() {
+async fn legacy_three_and_four_segment_keyboards_are_refused() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
     let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
