@@ -57,6 +57,14 @@ SemVer contract:
   full hosted test suite, the script gates, and the signed release
   pipeline.
 
+- **CLI flag renames on `audit export`, `events stream`, and `import` (#345).**
+  Three subcommands previously declared a local `--format` argument whose
+  clap id collided with the top-level global `--format <OutputFormat>`,
+  causing clap to panic on downcast (`Mismatch between definition and access of 'format'`).
+  - `proxxx audit export`: `--format` is now `--export-format <json|csv>` (default `json`, validated as a `ValueEnum`).
+  - `proxxx events stream`: the local `--format` flag is removed; output now follows the global `--format` (`json` and `json-envelope` emit NDJSON, `table` and `plain` emit text).
+  - `proxxx import`: `--format` is now `--source-format <raw|qcow2|vmdk|vdi|vhdx|vhd>` (validated as a `ValueEnum`).
+
 ### Security
 
 - **Live-cluster credentials now live outside the working tree.** The

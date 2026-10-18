@@ -265,7 +265,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx import <file> [--format raw\|qcow2\|vmdk\|vdi\|vhdx\|vhd] [--output PATH] [--dry-run] [--print text\|json]` | `qemu-img convert` wrapper. OVA/OVF parsing + libvirt-XML / VMware-direct chains deferred. |
+| `proxxx import <file> [--source-format raw\|qcow2\|vmdk\|vdi\|vhdx\|vhd] [--output PATH] [--dry-run] [--print text\|json]` | `qemu-img convert` wrapper. OVA/OVF parsing + libvirt-XML / VMware-direct chains deferred. |
 
 ## Error knowledge base
 
@@ -311,7 +311,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 | Command | What it does |
 | :--- | :--- |
 | `proxxx audit log [--limit N] [--since T]`        | Show recent audit entries (SQLite, append-only) |
-| `proxxx audit export --format {json\|csv}`        | Dump entries for SIEM ingestion |
+| `proxxx audit export [--export-format {json\|csv}]` | Dump entries for SIEM ingestion |
 | `proxxx audit verify`                             | Walk the full HMAC-SHA256 chain — NIS2/ISO 27001 evidence. Exits non-zero on tamper |
 
 ## Guest lifecycle (additional)
@@ -326,7 +326,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx events stream [--interval <s>] [--node <n>] [--type <t>] [--vmid <id>] [--no-existing] [--format {text\|json}]` | Tail real-time cluster task events (START/DONE/FAIL). NDJSON output with `--format json` |
+| `proxxx events stream [--interval <s>] [--node <n>] [--type <t>] [--vmid <id>] [--no-existing]` | Tail real-time cluster task events (START/DONE/FAIL). Uses global `--format`: `json`/`json-envelope` emit NDJSON, `table`/`plain` emit text |
 
 ## Configuration bootstrap
 

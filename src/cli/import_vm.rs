@@ -35,17 +35,41 @@ pub enum ImportOutput {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SourceFormat {
+    Raw,
+    Qcow2,
+    Vmdk,
+    Vdi,
+    Vhdx,
+    Vhd,
+}
+
+impl SourceFormat {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Qcow2 => "qcow2",
+            Self::Vmdk => "vmdk",
+            Self::Vdi => "vdi",
+            Self::Vhdx => "vhdx",
+            Self::Vhd => "vhd",
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct ImportArgs {
     /// Source image path. Format auto-detected by extension /
-    /// magic-bytes if `--format` is omitted.
+    /// magic-bytes if `--source-format` is omitted.
     pub input: PathBuf,
 
     /// Override the detected source format (`raw`, `qcow2`,
     /// `vmdk`, `vdi`, `vhdx`, `vhd`). Mostly useful when the file
     /// has a misleading extension.
-    #[arg(long)]
-    pub format: Option<String>,
+    #[arg(long, value_enum)]
+    pub source_format: Option<SourceFormat>,
 
     /// Output path for the converted qcow2. Default: `<input>.qcow2`
     /// next to the source.
@@ -76,7 +100,7 @@ pub struct ImportReport {
 /// to `raw` for unknown extensions — `qemu-img info` would be
 /// more accurate but requires invoking the tool; v1 uses the
 /// extension heuristic and the caller can override with
-/// `--format` when needed.
+/// `--source-format` when needed.
 #[must_use]
 pub fn detect_format(path: &std::path::Path) -> String {
     let ext = path
@@ -100,8 +124,8 @@ pub fn execute_import(args: &ImportArgs) -> Result<(Value, i32)> {
         anyhow::bail!("input file does not exist: {}", args.input.display());
     }
     let detected = args
-        .format
-        .clone()
+        .source_format
+        .map(|f| f.as_str().to_owned())
         .unwrap_or_else(|| detect_format(&args.input));
     let output_path = args.output.clone().unwrap_or_else(|| {
         let mut p = args.input.clone();

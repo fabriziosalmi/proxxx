@@ -1,8 +1,15 @@
 //! `proxxx audit` subcommand — view, export, verify the append-only audit log.
 
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum AuditExportFormat {
+    #[default]
+    Json,
+    Csv,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum AuditAction {
@@ -18,8 +25,8 @@ pub enum AuditAction {
     /// Export audit log to JSON or CSV
     Export {
         /// Output format: json (default) or csv
-        #[arg(long, default_value = "json")]
-        format: String,
+        #[arg(long, value_enum, default_value_t = AuditExportFormat::Json)]
+        export_format: AuditExportFormat,
         /// Max entries to export (default all = 1000000)
         #[arg(long, default_value_t = 1_000_000)]
         limit: usize,
@@ -51,10 +58,14 @@ pub fn execute_log(limit: usize, since: Option<&str>) -> Result<(Value, i32)> {
     Ok((serde_json::to_value(&entries)?, 0))
 }
 
-pub fn execute_export(format: &str, limit: usize, since: Option<&str>) -> Result<(Value, i32)> {
+pub fn execute_export(
+    export_format: AuditExportFormat,
+    limit: usize,
+    since: Option<&str>,
+) -> Result<(Value, i32)> {
     let logger = crate::audit::AuditLogger::open()?;
     let entries = logger.query(limit, since)?;
-    if format == "csv" {
+    if export_format == AuditExportFormat::Csv {
         let mut csv = String::from("id,ts,action,user,vmid,node,result,chain_hmac\n");
         for e in &entries {
             csv.push_str(&format!(

@@ -33,7 +33,7 @@ pub enum EventsCommand {
     /// Examples:
     ///   proxxx events stream
     ///   proxxx events stream --node pve1 --type qmmigrate
-    ///   proxxx events stream --format json | jq 'select(.event=="FAIL")'
+    ///   proxxx --format json events stream | jq 'select(.event=="FAIL")'
     Stream {
         /// Poll interval in seconds (default 2, minimum 1)
         #[arg(long, default_value_t = 2)]
@@ -51,13 +51,14 @@ pub enum EventsCommand {
         /// Do not print currently-running tasks at startup
         #[arg(long)]
         no_existing: bool,
-        /// Output format: text (default) or json (NDJSON, one object per line)
-        #[arg(long, default_value = "text")]
-        format: String,
     },
 }
 
-pub async fn execute_events(client: &Arc<PxClient>, action: EventsCommand) -> Result<(Value, i32)> {
+pub async fn execute_events(
+    client: &Arc<PxClient>,
+    action: EventsCommand,
+    format: crate::util::format::OutputFormat,
+) -> Result<(Value, i32)> {
     match action {
         EventsCommand::Stream {
             interval,
@@ -65,10 +66,13 @@ pub async fn execute_events(client: &Arc<PxClient>, action: EventsCommand) -> Re
             r#type,
             vmid,
             no_existing,
-            format,
         } => {
             let interval = interval.max(1);
-            let is_json = format.trim().eq_ignore_ascii_case("json");
+            let is_json = matches!(
+                format,
+                crate::util::format::OutputFormat::Json
+                    | crate::util::format::OutputFormat::JsonEnvelope
+            );
 
             // Initial poll — build the "seen" baseline without emitting
             // events for tasks that were already completed.

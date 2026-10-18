@@ -1106,10 +1106,10 @@ pub async fn execute(
         return match action {
             AuditAction::Log { limit, since } => audit_cmd::execute_log(*limit, since.as_deref()),
             AuditAction::Export {
-                format,
+                export_format,
                 limit,
                 since,
-            } => audit_cmd::execute_export(format, *limit, since.as_deref()),
+            } => audit_cmd::execute_export(*export_format, *limit, since.as_deref()),
             AuditAction::Verify => audit_cmd::execute_verify(),
             AuditAction::RotateKey => audit_cmd::execute_rotate_key(),
         };
@@ -1389,7 +1389,7 @@ pub async fn execute(
             let cfg = client.get_guest_config(&node, vmid, &gt).await?;
             Ok((serde_json::to_value(cfg)?, 0))
         }
-        Command::Events { action } => events::execute_events(&client, action).await,
+        Command::Events { action } => events::execute_events(&client, action, format).await,
         Command::Logs { action } => {
             let render = if matches!(
                 format,
