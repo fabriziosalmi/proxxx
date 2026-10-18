@@ -444,8 +444,10 @@ impl PxClient {
                 Err(e) if is_retryable_error(&e) && attempt < RETRY_MAX_ATTEMPTS => {
                     let delay = backoff_delay(attempt, None);
                     warn!(
-                        "transient connection error on {path}: {e}, retry {attempt}/{} after {:?}",
-                        RETRY_MAX_ATTEMPTS, delay
+                        "transient connection error on {path}: {}, retry {attempt}/{} after {:?}",
+                        super::ApiError::format_error_chain(&e),
+                        RETRY_MAX_ATTEMPTS,
+                        delay
                     );
                     tokio::time::sleep(delay).await;
                     // No `continue;` — match is the last expression in
@@ -455,13 +457,12 @@ impl PxClient {
                 Err(e) => {
                     // Surface transport-level failures (DNS NXDOMAIN, TCP
                     // close mid-handshake, TLS errors, connect timeouts)
-                    // as the typed `ApiError::Transport` so the exit-code
-                    // dispatch in `main.rs` can route them and so
-                    // observability layers can `.downcast_ref::<ApiError>()`
-                    // instead of grepping the anyhow chain.
-                    return Err(anyhow::Error::from(super::ApiError::Transport(format!(
-                        "request to {path} failed: {e}"
-                    ))));
+                    // as the typed `ApiError::Transport` with the full
+                    // std::error::Error::source() chain preserved (#323).
+                    return Err(anyhow::Error::from(super::ApiError::from_transport(
+                        format!("request to {path} failed"),
+                        &e,
+                    )));
                 }
             }
         }
@@ -3854,7 +3855,7 @@ impl ProxmoxGateway for PxClient {
             .await
             // Transport-typed so a dead node on the resize path routes
             // like every other request (it predated the typed-error pass).
-            .map_err(|e| super::ApiError::Transport(format!("PUT {path}: {e}")))?;
+            .map_err(|e| super::ApiError::from_transport(format!("PUT {path}"), &e))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

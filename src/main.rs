@@ -312,25 +312,15 @@ fn main() -> Result<()> {
                         }
                         None
                     });
+                    let exit_code = typed_exit.unwrap_or(1);
                     if matches!(
                         cli.format,
                         util::format::OutputFormat::Json | util::format::OutputFormat::JsonEnvelope
                     ) {
-                        let mut err_obj = serde_json::json!({
-                            "error": e.to_string(),
-                            "status": "fatal_error",
-                        });
-                        if let Some(h) = hint {
-                            err_obj["hint"] = serde_json::Value::String(h.to_string());
-                        }
-                        let err_json = serde_json::Value::Array(vec![err_obj]);
-                        // Falls back to a hand-written JSON literal if
-                        // pretty-printing fails (almost never — the
-                        // payload is a tiny inline json! macro).
-                        match serde_json::to_string_pretty(&err_json) {
+                        match util::format::render_fatal_error(&e, exit_code, hint, cli.format) {
                             Ok(s) => println!("{s}"),
                             Err(_) => println!(
-                                "[{{\"error\":\"<unrenderable>\",\"status\":\"fatal_error\"}}]"
+                                "[{{\"error\":\"<unrenderable>\",\"causes\":[],\"exit_code\":{exit_code},\"status\":\"fatal_error\"}}]"
                             ),
                         }
                     } else {
@@ -345,7 +335,7 @@ fn main() -> Result<()> {
                             eprintln!("  hint: {h}");
                         }
                     }
-                    std::process::exit(typed_exit.unwrap_or(1));
+                    std::process::exit(exit_code);
                 }
             }
         }

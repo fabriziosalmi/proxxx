@@ -143,6 +143,56 @@ See [Exit codes](/reference/exit-codes) for the full table:
 | `PreflightRefusal`                              | 6 |
 | `FreezeRefusal`                                 | 8 |
 
+## JSON error output (`--format json` and `--format json-envelope`)
+
+When a CLI command fails under `--format json`, `proxxx` prints a
+one-element JSON array to stdout before exiting with the mapped code:
+
+```json
+[
+  {
+    "error": "outermost context: middle layer: innermost root cause",
+    "causes": [
+      "outermost context",
+      "middle layer",
+      "innermost root cause"
+    ],
+    "exit_code": 1,
+    "status": "fatal_error",
+    "hint": "optional actionable hint when a typed error provides one"
+  }
+]
+```
+
+- `error`: the full formatted chain (`format!("{e:#}")`), matching text mode.
+- `causes`: array of strings, one per element of `e.chain()`, outermost first.
+- `exit_code`: the integer passed to `std::process::exit`.
+- `status`: always `"fatal_error"`.
+- `hint`: present when a typed `ApiError` in the chain provides `actionable_hint()`.
+
+When `--format json-envelope` is active, the same one-element error array
+is wrapped in the standard versioned envelope from `util::format`:
+
+```json
+{
+  "proxxx": "0.14.0",
+  "data": [
+    {
+      "error": "...",
+      "causes": ["..."],
+      "exit_code": 1,
+      "status": "fatal_error"
+    }
+  ]
+}
+```
+
+For `ApiError::Transport`, `ApiError::from_transport` walks the full
+`std::error::Error::source()` chain of the underlying `reqwest::Error` so
+TLS verification errors, DNS lookup failures, and OS-level socket connect
+errors (such as `Connection refused`) are preserved in both `error` and
+`causes`.
+
 ## Where it's mapped
 
 The canonical `ApiError` production site is `src/api/error.rs` —

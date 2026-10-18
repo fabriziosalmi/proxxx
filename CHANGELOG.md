@@ -174,6 +174,26 @@ SemVer contract:
   (`[profiles.<name>.pbs]`, or `[pbs]` for flat configs) instead of the
   literal placeholder `[profiles.X.pbs]`.
 
+- **JSON fatal errors now include the full error chain, `causes`, `exit_code`, and respect `--format json-envelope` (#361).**
+  Fatal CLI errors under `--format json` and `--format json-envelope`
+  previously emitted `[{"error": e.to_string(), "status": "fatal_error"}]`,
+  dropping every wrapped cause and ignoring the `json-envelope` wrapper.
+  `util::format::render_fatal_error` now formats `error` with `{e:#}`
+  (matching text mode), adds `causes` (one string per element of
+  `e.chain()`, outermost first) and `exit_code` (the integer passed to
+  `std::process::exit`) as additive keys alongside `status` and optional
+  `hint`, and reuses `util::format::render_json_output` so
+  `--format json-envelope` wraps the error array in
+  `{"proxxx": "<version>", "data": [...]}`.
+- **`ApiError::Transport` now preserves the underlying `reqwest` source chain (#323).**
+  `reqwest::Error`'s `Display` implementation prints only the top-level
+  summary (`error sending request for url (...)`) and omits its
+  `std::error::Error::source()` chain, hiding TLS certificate, DNS, and
+  OS-level TCP connection causes (`Connection refused`, timeouts).
+  `ApiError::from_transport` and `ApiError::format_error_chain` now walk
+  the full `.source()` chain when constructing `ApiError::Transport` and
+  logging retry warnings across PVE and PBS clients.
+
 ## [0.14.0] — 2026-09-09
 
 Headline: **the 2026-09-09 audit backlog, closed.** A 20-category audit

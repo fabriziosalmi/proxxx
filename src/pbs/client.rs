@@ -101,7 +101,7 @@ impl PbsClient {
             // reqwest send failures (DNS, connect, TLS, timeout) are
             // transport-level — surface the typed variant so the
             // exit-code dispatch routes them like the PVE client does.
-            .map_err(|e| ApiError::Transport(format!("PBS GET {path}: {e}")))?;
+            .map_err(|e| ApiError::from_transport(format!("PBS GET {path}"), &e))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -141,7 +141,7 @@ impl PbsClient {
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                ApiError::Transport(format!("reading PBS response chunk from {path}: {e}"))
+                ApiError::from_transport(format!("reading PBS response chunk from {path}"), &e)
             })?;
             if buf.len().saturating_add(chunk.len()) > MAX_PBS_RESPONSE_BYTES {
                 anyhow::bail!(

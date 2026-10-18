@@ -119,6 +119,38 @@ impl ApiError {
         }
     }
 
+    /// Format an error together with its entire [`std::error::Error::source`]
+    /// chain (`outer: cause 1: cause 2`).
+    ///
+    /// `reqwest::Error`'s `Display` implementation only formats the outer
+    /// wrapper (`"error sending request for url (...)"`) and omits the
+    /// underlying hyper / rustls / OS socket cause unless `.source()` is
+    /// walked explicitly (#323).
+    #[must_use]
+    pub fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+        let mut chain = err.to_string();
+        let mut current = err.source();
+        while let Some(cause) = current {
+            let cause_str = cause.to_string();
+            if !cause_str.is_empty() && !chain.ends_with(&cause_str) {
+                chain.push_str(": ");
+                chain.push_str(&cause_str);
+            }
+            current = cause.source();
+        }
+        chain
+    }
+
+    /// Construct [`Self::Transport`] preserving the full `source()` chain of
+    /// the underlying transport error (#323).
+    #[must_use]
+    pub fn from_transport(
+        context: impl std::fmt::Display,
+        err: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        Self::Transport(format!("{context}: {}", Self::format_error_chain(err)))
+    }
+
     /// — true if the failure is a pveproxy upstream hang
     /// (status 595 family). UI should render the "storage hang"
     /// banner rather than the generic error toast.

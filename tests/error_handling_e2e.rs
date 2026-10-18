@@ -616,6 +616,108 @@ mod cli_contract {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    /// Issues #361 + #323: `--format json ls nodes` and
+    /// `--format json-envelope ls nodes` against an unreachable port
+    /// (`https://127.0.0.1:1/`) must exit non-zero and include the
+    /// OS-level connect failure (e.g. "Connection refused" / "connect")
+    /// in both `error` and `causes`, and wrap in `{"proxxx", "data"}`
+    /// when `--format json-envelope` is requested.
+    #[test]
+    fn transport_error_json_and_envelope_include_os_connect_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let token_path = tmp.path().join("token.secret");
+        std::fs::write(&token_path, "00000000-0000-0000-0000-000000000000\n").expect("write token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600 token");
+
+        let config_path = tmp.path().join("config.toml");
+        let config_toml = format!(
+            "default = \"dead\"\n\n[profiles.dead]\nurl = \"https://127.0.0.1:1\"\nuser = \"root@pam\"\ntoken_id = \"test\"\ntoken_secret_file = {:?}\nverify_tls = false\n",
+            token_path.display().to_string()
+        );
+        std::fs::write(&config_path, config_toml).expect("write config.toml");
+        let audit_dir = tmp.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).expect("create audit dir");
+
+        let assert_connect_cause = |obj: &serde_json::Value, expected_exit: i64| {
+            let error_str = obj["error"].as_str().expect("error string");
+            let error_lower = error_str.to_ascii_lowercase();
+            assert!(
+                error_lower.contains("connection refused") || error_lower.contains("connect"),
+                "JSON error must contain OS-level connect failure, got: {error_str}"
+            );
+            let causes = obj["causes"].as_array().expect("causes array must exist");
+            assert!(
+                !causes.is_empty(),
+                "causes must be non-empty, got: {causes:?}"
+            );
+            let causes_joined = causes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" | ")
+                .to_ascii_lowercase();
+            assert!(
+                causes_joined.contains("connection refused") || causes_joined.contains("connect"),
+                "JSON causes must contain OS-level connect failure, got: {causes:?}"
+            );
+            assert_eq!(obj["exit_code"].as_i64(), Some(expected_exit));
+            assert_eq!(obj["status"].as_str(), Some("fatal_error"));
+        };
+
+        // 1. `--format json ls nodes`
+        let out_json = Command::new(proxxx_binary())
+            .args(["--format", "json", "ls", "nodes"])
+            .env("PROXXX_CONFIG", &config_path)
+            .env("PROXXX_AUDIT_DIR", &audit_dir)
+            .env_remove("PROXXX_TOKEN_SECRET")
+            .output()
+            .expect("spawn proxxx --format json ls nodes");
+        assert!(
+            !out_json.status.success(),
+            "unreachable port must exit non-zero"
+        );
+        let code_json = i64::from(out_json.status.code().expect("exit code"));
+        let stdout_json = String::from_utf8_lossy(&out_json.stdout);
+        let parsed_json: serde_json::Value =
+            serde_json::from_str(&stdout_json).expect("valid JSON on stdout");
+        let arr = parsed_json.as_array().expect("json format returns array");
+        assert_eq!(arr.len(), 1);
+        assert_connect_cause(&arr[0], code_json);
+
+        // 2. `--format json-envelope ls nodes`
+        let out_env = Command::new(proxxx_binary())
+            .args(["--format", "json-envelope", "ls", "nodes"])
+            .env("PROXXX_CONFIG", &config_path)
+            .env("PROXXX_AUDIT_DIR", &audit_dir)
+            .env_remove("PROXXX_TOKEN_SECRET")
+            .output()
+            .expect("spawn proxxx --format json-envelope ls nodes");
+        assert!(
+            !out_env.status.success(),
+            "unreachable port must exit non-zero"
+        );
+        let code_env = i64::from(out_env.status.code().expect("exit code"));
+        let stdout_env = String::from_utf8_lossy(&out_env.stdout);
+        let parsed_env: serde_json::Value =
+            serde_json::from_str(&stdout_env).expect("valid JSON envelope on stdout");
+        let root = parsed_env
+            .as_object()
+            .expect("json-envelope must be top-level object");
+        assert_eq!(
+            root.get("proxxx").and_then(serde_json::Value::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let data = root
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .expect("envelope data array");
+        assert_eq!(data.len(), 1);
+        assert_connect_cause(&data[0], code_env);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

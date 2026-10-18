@@ -134,9 +134,10 @@ pub(super) async fn read_bounded_body(resp: Response, path: &str) -> Result<Vec<
             // failures, premature EOF) are transport-level — surface
             // as the typed `ApiError::Transport` so the exit-code
             // dispatch routes them rather than dropping into generic 1.
-            anyhow::Error::from(super::ApiError::Transport(format!(
-                "reading response chunk from {path}: {e}"
-            )))
+            anyhow::Error::from(super::ApiError::from_transport(
+                format!("reading response chunk from {path}"),
+                &e,
+            ))
         })?;
         if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             anyhow::bail!("response from {path} exceeded {MAX_RESPONSE_BYTES} bytes mid-stream");
