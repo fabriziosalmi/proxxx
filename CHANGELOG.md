@@ -18,6 +18,24 @@ SemVer contract:
 
 ### Security
 
+- **HITL pending approvals are now persisted in `<config_dir>/hitl_pending.db` with 64-bit random request IDs and a 120-second TTL (#341).**
+  CLI and MCP policy intercepts previously constructed a deterministic
+  `{action}:{vmid}` transaction ID while `src/hitl/pending.rs` kept the consumed
+  set only in process memory with no `issued_at` or `expires_at`, allowing an
+  old approval button to replay after a daemon restart and causing a second
+  legitimate request for the same `(action, vmid)` within a single daemon
+  session to be rejected as stale. Senders and the HITL daemon now share
+  `<config_dir>/hitl_pending.db` (SQLite, `0600` in a `0700` parent directory
+  alongside `telegram_hmac.key`, with 7-day retention pruning of terminal rows
+  on open), storing `id` (16 lowercase hex chars from `getrandom`), `action`,
+  `vmid`, `node`, `guest_type` (`qemu`/`lxc`), `params_json`, `require`,
+  `issued_at`, `expires_at` (120 s default TTL), `status` (`pending`,
+  `approved`, `denied`, `expired`, `executed`, `failed`), `approvers_json`, and
+  `error`. Telegram inline keyboards now emit `approve:<id>:<hmac16>` (41 bytes)
+  and `deny:<id>:<hmac16>` (38 bytes), leaving 23 bytes of headroom under
+  Telegram's 64-byte `callback_data` cap regardless of action length, and
+  legacy 3/4-segment buttons are refused with a prompt to request again.
+
 - **CLI `--secure` now refuses destructive commands with exit code 8 instead of silently ignoring the flag (CLI-surface behaviour change, #338).**
   `src/cli/mod.rs::execute` previously accepted `--secure` as an unused
   `_secure: bool` parameter while `--help` and `docs/integrations/hitl.md`

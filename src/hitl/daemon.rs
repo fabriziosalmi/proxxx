@@ -2,23 +2,20 @@
 //! the per-callback logic is unit-testable without a 30-second
 //! Telegram poll loop.
 //!
-//! Phase 5.13 — refactor that closes the 3 deferred HITL invariants
-//! in [pre-commit/03-security-invariants.md]:
-//! 1. Replay protection — every accepted callback first goes through
-//!    `PendingApprovals::consume`; redelivered callbacks return
-//!    `Replay` and the daemon answers the user with a "stale approval"
-//!    notice instead of executing again.
-//! 2. Privilege escalation refusal — when the executing PVE token is
-//!    unprivileged, the gateway call returns `Err(403)` and we surface
-//!    `ExecuteFailed`. The daemon does NOT silently succeed.
-//! 3. Secure-mode enforcement — the gate that ATTACHES the HITL
-//!    requirement to a destructive op lives in the senders (TUI, CLI
-//!    batch, MCP). This module exists for the receiver side; the
-//!    secure-mode invariant is covered by the sender-side test in
-//!    `tests/hitl_e2e.rs`.
+//! Phase 5.13 / `#336` / `#337` / `#341`:
+//! 1. **Verification (`verify_callback`)** — enforces HMAC signature,
+//!    originating `chat_id`, `allowed_approvers`, and the `<decision>:<id>`
+//!    callback grammar (refusing legacy 3/4-segment keyboards).
+//! 2. **Persisted store lookup (`PendingStore::process_callback`)** —
+//!    atomically checks existence, TTL (`expires_at`), replay status
+//!    (`pending` vs `approved`/`denied`/`expired`/`executed`/`failed`),
+//!    and multi-approver quorum (`require`) from `<config_dir>/hitl_pending.db`.
+//! 3. **Execution & status recording** — transitions to `approved`
+//!    ("execution in flight") before calling PVE, then records `executed`
+//!    on `Ok(upid)` or `failed` (with `error`) on failure.
 
 use crate::api::ProxmoxGateway;
-use crate::hitl::pending::{PendingApprovals, ReplayError};
+use crate::hitl::pending::{PendingApprovals, StoreOutcome};
 use crate::hitl::telegram::{TelegramGateway, Update};
 use anyhow::Result;
 use tracing::{error, info, warn};
@@ -34,7 +31,8 @@ pub enum CallbackOutcome {
         upid: String,
     },
     /// User approved but execution failed (PVE 403, missing node, …).
-    /// The daemon answered the callback with the failure message.
+    /// The daemon answered the callback with the failure message and
+    /// marked the store row `failed`.
     ExecuteFailed {
         action: String,
         vmid: u32,
@@ -42,48 +40,106 @@ pub enum CallbackOutcome {
     },
     /// User pressed Deny.
     Denied { action: String, vmid: u32 },
-    /// Callback for a `txn_id` we already consumed — replay rejected.
-    /// The daemon did NOT execute.
+    /// Callback for a request whose store status is no longer `pending`
+    /// (`approved`, `denied`, `executed`, `failed`) — replay rejected,
+    /// including across daemon restarts.
     Replay { txn_id: String },
-    /// Callback parsed but referred to a vmid we couldn't locate on
-    /// any node (operator deleted the guest in the meantime?).
+    /// Callback referred to a request ID whose `expires_at` has passed.
+    /// Marked `expired` in the store; not executed.
+    Expired { id: String },
+    /// Callback referred to a request ID not present in `hitl_pending.db`.
+    UnknownRequest { id: String },
+    /// Callback was approved in the store, but `vmid` could not be located
+    /// on any node at execution time.
     NodeNotFound { vmid: u32 },
     /// Update had no `callback_query` (we ignore non-callback updates).
     NotACallback,
-    /// Callback data didn't match the expected `decision:action:vmid`
-    /// format. Ignored.
+    /// Callback data failed signature verification, used a legacy
+    /// 3/4-segment format, or had a malformed `<decision>:<id>` payload.
     InvalidFormat { data: String },
-    /// Unknown action token (not start/stop/restart). Ignored.
+    /// Unknown action token in the stored request.
     UnknownAction { action: String, vmid: u32 },
     /// The callback was well-formed and correctly signed, but the
     /// Telegram account that pressed the button is not on the configured
-    /// approver allowlist — or no allowlist is configured at all, which
-    /// is treated the same way. The daemon did NOT execute.
+    /// approver allowlist — or no allowlist is configured at all.
     UnauthorizedApprover { user_id: i64 },
     /// The callback originated in a chat other than the configured
-    /// `chat_id` — a forwarded keyboard. The daemon did NOT execute.
+    /// `chat_id` — a forwarded keyboard.
     WrongChat { chat_id: i64 },
-    /// The vote was recorded but the policy's `require` quorum is not
-    /// yet met. The daemon did NOT execute; it is waiting for more
-    /// distinct approvers.
+    /// The vote was recorded in the store, but the request's `require`
+    /// quorum is not yet met.
     AwaitingApprovals { have: usize, need: usize },
 }
 
-/// Process exactly one Telegram update.
-///
-/// This is the function the wiremock E2E tests drive. Behaviour is a
-/// straight extraction of the original loop body in `cli::hitl_serve`
-/// with one substantive addition: replay protection via the injected
-/// `PendingApprovals`.
-///
-/// The `&dyn ProxmoxGateway` indirection (instead of a concrete
-/// `PxClient`) is what makes the function testable — tests pass a mock
-/// gateway that returns canned `Ok(upid)` / `Err(403)` responses.
+fn map_rejection_to_outcome(
+    rej: CallbackRejection,
+    tg_gateway: &TelegramGateway,
+    username: Option<&str>,
+) -> CallbackOutcome {
+    match rej {
+        CallbackRejection::MissingData => CallbackOutcome::NotACallback,
+        CallbackRejection::Unsigned { data } => {
+            warn!(
+                "HITL callback without HMAC tag — refused (v0.1.22+ requires \
+                 signed callbacks; restart your HITL daemon to mint a fresh \
+                 keyboard): {data}"
+            );
+            CallbackOutcome::InvalidFormat { data }
+        }
+        CallbackRejection::InvalidSignature { data } => {
+            warn!("HITL callback failed HMAC verify: {data}");
+            CallbackOutcome::InvalidFormat { data }
+        }
+        CallbackRejection::MissingChat => {
+            warn!(
+                "HITL callback without originating chat (configured chat is {}) — refused",
+                tg_gateway.chat_id()
+            );
+            CallbackOutcome::WrongChat { chat_id: 0 }
+        }
+        CallbackRejection::WrongChat { chat_id } => {
+            warn!(
+                "HITL callback from chat {} but configured chat is {} — refused",
+                chat_id,
+                tg_gateway.chat_id()
+            );
+            CallbackOutcome::WrongChat { chat_id }
+        }
+        CallbackRejection::NoApproversConfigured { user_id } => {
+            warn!(
+                "HITL callback from user {} refused: no `allowed_approvers` configured. \
+                 Add the approving Telegram user ids to the profile's [telegram] section \
+                 (numeric ids, e.g. from @userinfobot) — proxxx will not act on an \
+                 unauthenticated approval.",
+                user_id
+            );
+            CallbackOutcome::UnauthorizedApprover { user_id }
+        }
+        CallbackRejection::UnauthorizedApprover { user_id } => {
+            warn!(
+                "HITL callback from unauthorised user {} (@{}) — refused",
+                user_id,
+                username.unwrap_or("?")
+            );
+            CallbackOutcome::UnauthorizedApprover { user_id }
+        }
+        CallbackRejection::LegacyFormat { data } => {
+            warn!(
+                "HITL callback uses legacy 3/4-segment format — refused (#341 requires \
+                 store-backed <decision>:<id> callbacks): {data}"
+            );
+            CallbackOutcome::InvalidFormat { data }
+        }
+        CallbackRejection::InvalidPayload { data } => CallbackOutcome::InvalidFormat { data },
+    }
+}
+
+/// Process exactly one Telegram update against [`PendingApprovals`] (`PendingStore`).
 ///
 /// # Errors
-/// Never returns `Err` — all failure modes surface through
-/// `CallbackOutcome`. The `Result` return is reserved for future
-/// expansion (e.g. propagating shutdown signals).
+///
+/// Propagates store I/O errors or transient `find_guest` errors (after recording
+/// `failed` in the store).
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn handle_callback_update(
     update: &Update,
@@ -100,81 +156,25 @@ pub async fn handle_callback_update(
             if let Some(ans) = rej.answer_text() {
                 let _ = tg_gateway.answer_callback(&cb.id, ans).await;
             }
-            return Ok(match rej {
-                CallbackRejection::MissingData => CallbackOutcome::NotACallback,
-                CallbackRejection::Unsigned { data } => {
-                    warn!(
-                        "HITL callback without HMAC tag — refused (v0.1.22+ requires \
-                         signed callbacks; restart your HITL daemon to mint a fresh \
-                         keyboard): {data}"
-                    );
-                    CallbackOutcome::InvalidFormat { data }
-                }
-                CallbackRejection::InvalidSignature { data } => {
-                    warn!("HITL callback failed HMAC verify: {data}");
-                    CallbackOutcome::InvalidFormat { data }
-                }
-                CallbackRejection::MissingChat => {
-                    warn!(
-                        "HITL callback without originating chat (configured chat is {}) — refused",
-                        tg_gateway.chat_id()
-                    );
-                    CallbackOutcome::WrongChat { chat_id: 0 }
-                }
-                CallbackRejection::WrongChat { chat_id } => {
-                    warn!(
-                        "HITL callback from chat {} but configured chat is {} — refused",
-                        chat_id,
-                        tg_gateway.chat_id()
-                    );
-                    CallbackOutcome::WrongChat { chat_id }
-                }
-                CallbackRejection::NoApproversConfigured { user_id } => {
-                    warn!(
-                        "HITL callback from user {} refused: no `allowed_approvers` configured. \
-                         Add the approving Telegram user ids to the profile's [telegram] section \
-                         (numeric ids, e.g. from @userinfobot) — proxxx will not act on an \
-                         unauthenticated approval.",
-                        user_id
-                    );
-                    CallbackOutcome::UnauthorizedApprover { user_id }
-                }
-                CallbackRejection::UnauthorizedApprover { user_id } => {
-                    warn!(
-                        "HITL callback from unauthorised user {} (@{}) — refused",
-                        user_id,
-                        cb.from.username.as_deref().unwrap_or("?")
-                    );
-                    CallbackOutcome::UnauthorizedApprover { user_id }
-                }
-                CallbackRejection::InvalidPayload { data } => {
-                    CallbackOutcome::InvalidFormat { data }
-                }
-            });
+            return Ok(map_rejection_to_outcome(
+                rej,
+                tg_gateway,
+                cb.from.username.as_deref(),
+            ));
         }
     };
 
     let data = &verified.raw_data;
     info!("Received HITL callback: {}", data);
 
-    let Some((action, vmid_str)) = verified.txn_id.split_once(':') else {
-        let _ = tg_gateway
-            .answer_callback(&cb.id, "❌ Invalid transaction ID format")
-            .await;
-        return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-    };
-    let Ok(vmid) = vmid_str.parse::<u32>() else {
-        let _ = tg_gateway.answer_callback(&cb.id, "❌ Invalid vmid").await;
-        return Ok(CallbackOutcome::InvalidFormat { data: data.clone() });
-    };
-
-    // Lifecycle UX (Phase 5.13 polish): the callback carries the
-    // original message_id, so the daemon can edit the inline-keyboard
-    // message in-place to show outcome state instead of leaving a
-    // stale prompt forever. Available for every code path below.
     let msg_id = cb.message.as_ref().map(|m| m.message_id);
-    let edit_status = |status: &str, who: &str| {
-        // Format the lifecycle footer the same way every branch.
+    let user_label = cb
+        .from
+        .username
+        .as_deref()
+        .unwrap_or(&cb.from.first_name)
+        .to_string();
+    let edit_status = |action: &str, vmid: u32, status: &str, who: &str| {
         let body = format!("🔔 HITL request: {action} VMID {vmid}\n\n{status} (by @{who})");
         async move {
             if let Some(id) = msg_id {
@@ -183,119 +183,101 @@ pub async fn handle_callback_update(
         }
     };
 
-    if verified.decision != CallbackDecision::Approve {
-        let _ = tg_gateway.answer_callback(&cb.id, "🚫 Denied").await;
-        edit_status(
-            "🚫 Denied",
-            cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
-        )
-        .await;
-        return Ok(CallbackOutcome::Denied {
-            action: action.to_string(),
-            vmid,
-        });
-    }
-
-    // #250 — quorum. `require` rides in the signed payload as a
-    // trailing `:r<N>` segment; a keyboard minted before v0.13.4 has no
-    // such segment and means "one approver", which is the historic
-    // behaviour.
-    let require = verified.require;
-
-    // Vote BEFORE the replay gate: every approver presses the same
-    // keyboard, so their callback data is identical by construction and
-    // the replay gate would reject the second signature as a duplicate.
-    // Only the callback that completes the quorum falls through to
-    // `consume`, which then makes the whole transaction single-use.
-    match pending.record_vote(data, verified.approver_id, require) {
-        crate::hitl::pending::VoteProgress::Satisfied => {}
-        crate::hitl::pending::VoteProgress::Waiting {
+    let request = match pending.process_callback(
+        &verified.txn_id,
+        verified.decision,
+        verified.approver_id,
+    )? {
+        StoreOutcome::UnknownRequest => {
+            warn!("HITL callback for unknown request id: {}", verified.txn_id);
+            let _ = tg_gateway
+                .answer_callback(&cb.id, "⚠️ Unknown request")
+                .await;
+            return Ok(CallbackOutcome::UnknownRequest {
+                id: verified.txn_id,
+            });
+        }
+        StoreOutcome::Expired { request } => {
+            warn!("HITL callback for expired request id: {}", request.id);
+            let _ = tg_gateway
+                .answer_callback(&cb.id, "⏰ Request expired — request again")
+                .await;
+            edit_status(
+                &request.action,
+                request.vmid.unwrap_or(0),
+                "⏰ Expired",
+                &user_label,
+            )
+            .await;
+            return Ok(CallbackOutcome::Expired { id: request.id });
+        }
+        StoreOutcome::AlreadyHandled { request } => {
+            warn!(
+                "HITL replay rejected for {} (status={}): {data}",
+                request.id, request.status
+            );
+            let _ = tg_gateway
+                .answer_callback(&cb.id, &format!("⚠️ Already handled ({})", request.status))
+                .await;
+            return Ok(CallbackOutcome::Replay { txn_id: request.id });
+        }
+        StoreOutcome::Denied { request } => {
+            let vmid = request.vmid.unwrap_or(0);
+            let _ = tg_gateway.answer_callback(&cb.id, "🚫 Denied").await;
+            edit_status(&request.action, vmid, "🚫 Denied", &user_label).await;
+            return Ok(CallbackOutcome::Denied {
+                action: request.action,
+                vmid,
+            });
+        }
+        StoreOutcome::AwaitingApprovals {
+            request,
             have,
             need,
             duplicate,
         } => {
+            let vmid = request.vmid.unwrap_or(0);
             let note = if duplicate {
                 format!("You already approved — {have}/{need}")
             } else {
                 format!("Recorded — {have}/{need} approvals")
             };
-            info!("HITL quorum not yet met for {data}: {have}/{need}");
+            info!("HITL quorum not yet met for {}: {have}/{need}", request.id);
             let _ = tg_gateway.answer_callback(&cb.id, &note).await;
             edit_status(
+                &request.action,
+                vmid,
                 &format!("\u{23f3} Awaiting approval ({have}/{need})"),
-                cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
+                &user_label,
             )
             .await;
             return Ok(CallbackOutcome::AwaitingApprovals { have, need });
         }
-    }
+        StoreOutcome::Approved { request } => request,
+    };
 
-    // Replay gate. The full callback data string IS the txn_id from the
-    // dedup engine's perspective — two identical callbacks (same data)
-    // are by definition the same transaction. Distinct legitimate ops
-    // produce distinct txn_id suffixes (timestamp / nonce) thanks to
-    // the senders in `tui::mod` and `cli::mod::hitl_handler`.
-    if pending.consume(data) == Err(ReplayError::AlreadyConsumed) {
-        warn!("HITL replay rejected: {data}");
-        let _ = tg_gateway
-            .answer_callback(&cb.id, "⚠️ Stale approval — already executed")
-            .await;
-        // Don't edit the message on replay — the original message
-        // already shows the first outcome; overwriting would erase
-        // valid history.
-        return Ok(CallbackOutcome::Replay {
-            txn_id: data.clone(),
-        });
-    }
+    let action = request.action.as_str();
+    let vmid = request.vmid.unwrap_or(0);
 
-    // Approved + first time. We DON'T eagerly emit "⏳ Executing…"
-    // anymore: PVE's start/stop/restart return in <300ms, so an
-    // immediate edit lands at Telegram ~200ms before the final
-    // outcome edit and gets collapsed by the mobile client (no flicker
-    // = invisible). The deferred edit below only fires if the op
-    // takes >1s, which is the regime where the operator NEEDS the
-    // visual feedback ("did the daemon pick up the click?").
-
-    // Find which node + guest_type this vmid lives on. Propagate a fetch error
-    // (a transient failure must not read as "not found" and silently drop an
-    // already-approved action).
-    let guest = client.find_guest(vmid).await?;
+    let guest = match client.find_guest(vmid).await {
+        Ok(g) => g,
+        Err(e) => {
+            let _ = pending.mark_failed(&request.id, &format!("{e:#}"));
+            return Err(e);
+        }
+    };
     let target_node = guest.as_ref().map(|g| g.node.clone());
     let guest_type = guest.map(|g| g.guest_type);
 
     let (Some(node), Some(gt)) = (target_node, guest_type) else {
+        let _ = pending.mark_failed(&request.id, "node not found");
         let _ = tg_gateway
             .answer_callback(&cb.id, "❌ Node not found")
             .await;
-        edit_status(
-            "❌ Node not found",
-            cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
-        )
-        .await;
+        edit_status(action, vmid, "❌ Node not found", &user_label).await;
         return Ok(CallbackOutcome::NodeNotFound { vmid });
     };
 
-    // Race the API call against a 1-second deferred-emit timer.
-    //
-    // If the API resolves first (fast op like restart/stop/start —
-    // typically <300ms), the timer's `intermediate` future is dropped
-    // before its sleep completes, so NO `⏳` edit is sent. The final
-    // outcome edit is the only thing the operator sees on Telegram.
-    //
-    // If the API takes longer than 1s (live migration, big backup
-    // dispatch), the timer fires, edits the message to `⏳ Executing…`,
-    // and we then continue waiting on the API future. Final outcome
-    // edit overwrites `⏳` with `✅ Done — UPID:…` or `❌ Failed: …`.
-    //
-    // `biased` in the select! makes tokio poll the API future FIRST
-    // each round, so if both are ready in the same tick (boundary at
-    // exactly ~1s), the API arm wins and no flicker is emitted.
-    let user_label = cb
-        .from
-        .username
-        .as_deref()
-        .unwrap_or(&cb.from.first_name)
-        .to_string();
     type ApiFut<'a> =
         std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
     let api_fut: ApiFut = match action {
@@ -304,10 +286,17 @@ pub async fn handle_callback_update(
         "restart" => Box::pin(client.restart_guest(&node, vmid, gt)),
         other => {
             warn!("Unknown action: {}", other);
+            let _ = pending.mark_failed(&request.id, &format!("unknown action: {other}"));
             let _ = tg_gateway
                 .answer_callback(&cb.id, &format!("❌ Unknown action: {other}"))
                 .await;
-            edit_status(&format!("❌ Unknown action: {other}"), &user_label).await;
+            edit_status(
+                action,
+                vmid,
+                &format!("❌ Unknown action: {other}"),
+                &user_label,
+            )
+            .await;
             return Ok(CallbackOutcome::UnknownAction {
                 action: other.to_string(),
                 vmid,
@@ -330,50 +319,38 @@ pub async fn handle_callback_update(
         biased;
         r = &mut api_fut => r,
         () = &mut intermediate => {
-            // Slow-op branch: `⏳` has been emitted; now wait for the
-            // API call to finish so we can produce the final outcome.
             api_fut.await
         }
     };
 
     match res {
         Ok(upid) => {
+            let _ = pending.mark_executed(&request.id);
             let _ = tg_gateway.answer_callback(&cb.id, "✅ Executed").await;
-            edit_status(
-                &format!("✅ Done — {upid}"),
-                cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
-            )
-            .await;
+            edit_status(action, vmid, &format!("✅ Done — {upid}"), &user_label).await;
             Ok(CallbackOutcome::Executed {
-                action: action.to_string(),
+                action: request.action,
                 vmid,
                 upid,
             })
         }
         Err(e) => {
-            // Critical: a 403 from PVE (e.g. token without VM.PowerMgmt
-            // privilege on the target VM) MUST surface here, not be
-            // swallowed. The HITL approval does not confer extra
-            // privilege — proxxx just sends the same PVE-side request
-            // it would have sent without HITL, and PVE's RBAC decides.
             error!("Execution failed: {}", e);
             let err_str = format!("{e}");
+            let _ = pending.mark_failed(&request.id, &err_str);
             let _ = tg_gateway
                 .answer_callback(&cb.id, &format!("❌ Failed: {err_str}"))
                 .await;
-            // Truncate long error strings in the message body —
-            // Telegram's 4096-char limit + readability. Char-boundary
-            // safe: PVE error text is frequently non-ASCII, and a naive
-            // `&err_str[..200]` byte slice panics when byte 200 splits a
-            // multi-byte char.
             let err_short = crate::util::sanitize::truncate_ellipsis(&err_str, 200);
             edit_status(
+                action,
+                vmid,
                 &format!("❌ Failed: {err_short}"),
-                cb.from.username.as_deref().unwrap_or(&cb.from.first_name),
+                &user_label,
             )
             .await;
             Ok(CallbackOutcome::ExecuteFailed {
-                action: action.to_string(),
+                action: request.action,
                 vmid,
                 error: err_str,
             })
@@ -388,20 +365,18 @@ pub enum CallbackDecision {
     Deny,
 }
 
-/// Parsed `<decision>:<txn_id>[:r<require>]` payload after HMAC strip.
+/// Parsed `<decision>:<id>` payload after HMAC strip (`#341`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCallback {
     pub decision: CallbackDecision,
     pub txn_id: String,
-    pub require: u8,
 }
 
-/// Verified and parsed Telegram callback query (#336, #337).
+/// Verified and parsed Telegram callback query (`#336`, `#337`, `#341`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCallback {
     pub decision: CallbackDecision,
     pub txn_id: String,
-    pub require: u8,
     pub raw_data: String,
     pub approver_id: i64,
 }
@@ -410,13 +385,30 @@ pub struct VerifiedCallback {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallbackRejection {
     MissingData,
-    Unsigned { data: String },
-    InvalidSignature { data: String },
+    Unsigned {
+        data: String,
+    },
+    InvalidSignature {
+        data: String,
+    },
     MissingChat,
-    WrongChat { chat_id: i64 },
-    NoApproversConfigured { user_id: i64 },
-    UnauthorizedApprover { user_id: i64 },
-    InvalidPayload { data: String },
+    WrongChat {
+        chat_id: i64,
+    },
+    NoApproversConfigured {
+        user_id: i64,
+    },
+    UnauthorizedApprover {
+        user_id: i64,
+    },
+    /// Old 3-segment (`approve:<action>:<vmid>`) or 4-segment
+    /// (`approve:<action>:<vmid>:r<N>`) keyboard from an earlier proxxx release.
+    LegacyFormat {
+        data: String,
+    },
+    InvalidPayload {
+        data: String,
+    },
 }
 
 impl CallbackRejection {
@@ -432,65 +424,92 @@ impl CallbackRejection {
                 Some("❌ No approver allowlist configured — refused. See `allowed_approvers`.")
             }
             Self::UnauthorizedApprover { .. } => Some("❌ Not an authorised approver — refused"),
+            Self::LegacyFormat { .. } => {
+                Some("⚠️ This approval button is from an older proxxx, request again")
+            }
             Self::InvalidPayload { .. } => Some("❌ Invalid transaction ID format"),
         }
     }
 }
 
+/// Reason [`parse_callback_payload`] rejected a signed payload head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadParseError {
+    /// Multi-colon legacy payload (`approve:<action>:<vmid>[:r<N>]`).
+    LegacyFormat,
+    /// Missing `:`, unknown decision prefix, empty ID, or non-URL-safe characters.
+    Invalid,
+}
+
+impl std::fmt::Display for PayloadParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyFormat => {
+                f.write_str("legacy multi-segment callback format is no longer accepted")
+            }
+            Self::Invalid => f.write_str("invalid callback payload format"),
+        }
+    }
+}
+
+impl std::error::Error for PayloadParseError {}
+
 /// Parse a verified callback payload (after the trailing `:hmac_hex` tag has
 /// been stripped).
 ///
-/// Grammar: `<decision> ":" <txn_id> [":r" <digits>]`
-/// - `<decision>` is stripped at the first `:` (`"approve"` or `"deny"`).
-/// - An optional trailing `:r<digits>` quorum segment is stripped next; if
-///   absent, `require` defaults to `1` (backward-compatible with 3-segment
-///   keyboards minted before v0.13.4).
-/// - The remaining middle slice is `txn_id` (which may itself contain `:`).
+/// Grammar (`#341`): `<decision> ":" <id>`
+/// - `<decision>` is `"approve"` or `"deny"`.
+/// - `<id>` is a single non-empty URL-safe token (`[A-Za-z0-9_-]{1,64}`) with
+///   **no** `:` separator.
+/// - Old 3/4-segment payloads containing an extra `:` (e.g.
+///   `approve:stop:100` or `approve:stop:100:r2`) return
+///   `Err(PayloadParseError::LegacyFormat)` so callers can tell the operator
+///   that the button was minted by an older proxxx and must be requested again.
 ///
 /// # Errors
 ///
-/// Returns an error if the payload has no `:`, if the decision is neither
-/// `"approve"` nor `"deny"`, if the `:r<digits>` segment overflows `u8`, or if
-/// `txn_id` is empty.
-pub fn parse_callback_payload(payload: &str) -> Result<ParsedCallback> {
-    let Some((decision_str, rest)) = payload.split_once(':') else {
-        anyhow::bail!("missing ':' separator in callback payload");
+/// Returns [`PayloadParseError::LegacyFormat`] when the ID portion contains `:`,
+/// or [`PayloadParseError::Invalid`] when the decision prefix or ID token is
+/// missing or malformed.
+pub fn parse_callback_payload(
+    payload: &str,
+) -> std::result::Result<ParsedCallback, PayloadParseError> {
+    let Some((decision_str, id_str)) = payload.split_once(':') else {
+        return Err(PayloadParseError::Invalid);
     };
     let decision = match decision_str {
         "approve" => CallbackDecision::Approve,
         "deny" => CallbackDecision::Deny,
-        other => anyhow::bail!("unknown callback decision: {other}"),
+        _ => return Err(PayloadParseError::Invalid),
     };
-    let (txn_id_str, require) = match rest.rsplit_once(":r") {
-        Some((head, digits))
-            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            let req = digits
-                .parse::<u8>()
-                .map_err(|e| anyhow::anyhow!("invalid quorum count ':r{digits}': {e}"))?
-                .max(1);
-            (head, req)
-        }
-        _ => (rest, 1),
-    };
-    if txn_id_str.is_empty() {
-        anyhow::bail!("empty txn_id in callback payload");
+    if id_str.is_empty() {
+        return Err(PayloadParseError::Invalid);
+    }
+    if id_str.contains(':') {
+        return Err(PayloadParseError::LegacyFormat);
+    }
+    if id_str.len() > 64
+        || !id_str
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(PayloadParseError::Invalid);
     }
     Ok(ParsedCallback {
         decision,
-        txn_id: txn_id_str.to_string(),
-        require,
+        txn_id: id_str.to_string(),
     })
 }
 
 /// Verify and parse a Telegram `CallbackQuery` for both the HITL daemon and the
-/// TUI poller (#336, #337).
+/// TUI poller (`#336`, `#337`, `#341`).
 ///
 /// Performs four checks in fail-closed order:
 /// 1. 16-hex-char HMAC tag present at the last `:` and valid under `gateway.hmac_key()`.
 /// 2. Originating chat (`cb.message.chat.id`) is present and matches `gateway.chat_id()`.
 /// 3. `cb.from.id` is listed in `gateway.allowed_approvers()` (empty allowlist refuses all).
-/// 4. Payload parses via [`parse_callback_payload`].
+/// 4. Payload parses via [`parse_callback_payload`] (rejecting legacy 3/4-segment
+///    buttons with [`CallbackRejection::LegacyFormat`]).
 ///
 /// # Errors
 ///
@@ -529,12 +548,18 @@ pub fn verify_callback(
             user_id: cb.from.id,
         });
     }
-    let parsed = parse_callback_payload(head_payload)
-        .map_err(|_| CallbackRejection::InvalidPayload { data: data.clone() })?;
+    let parsed = match parse_callback_payload(head_payload) {
+        Ok(p) => p,
+        Err(PayloadParseError::LegacyFormat) => {
+            return Err(CallbackRejection::LegacyFormat { data: data.clone() });
+        }
+        Err(PayloadParseError::Invalid) => {
+            return Err(CallbackRejection::InvalidPayload { data: data.clone() });
+        }
+    };
     Ok(VerifiedCallback {
         decision: parsed.decision,
         txn_id: parsed.txn_id,
-        require: parsed.require,
         raw_data: data.clone(),
         approver_id: cb.from.id,
     })
@@ -544,49 +569,42 @@ pub fn verify_callback(
 mod callback_verify_tests {
     use super::*;
 
-    type ExpectedParsed = Option<(CallbackDecision, &'static str, u8)>;
+    type ExpectedParsed = std::result::Result<(CallbackDecision, &'static str), PayloadParseError>;
 
     #[test]
     fn parse_callback_payload_table_test() {
         let cases: &[(&str, ExpectedParsed)] = &[
             (
-                "approve:stop:100:r2",
-                Some((CallbackDecision::Approve, "stop:100", 2)),
+                "approve:0123456789abcdef",
+                Ok((CallbackDecision::Approve, "0123456789abcdef")),
             ),
             (
-                "approve:stop:100-1739999999999:r1",
-                Some((CallbackDecision::Approve, "stop:100-1739999999999", 1)),
+                "deny:fedcba9876543210",
+                Ok((CallbackDecision::Deny, "fedcba9876543210")),
             ),
-            (
-                "deny:stop:100",
-                Some((CallbackDecision::Deny, "stop:100", 1)),
-            ),
-            (
-                "approve:stop:100",
-                Some((CallbackDecision::Approve, "stop:100", 1)),
-            ),
-            ("nope:stop:100", None),
-            ("", None),
+            ("approve:stop:100", Err(PayloadParseError::LegacyFormat)),
+            ("approve:stop:100:r2", Err(PayloadParseError::LegacyFormat)),
+            ("deny:stop:100", Err(PayloadParseError::LegacyFormat)),
+            ("nope:0123456789abcdef", Err(PayloadParseError::Invalid)),
+            ("approve:", Err(PayloadParseError::Invalid)),
+            ("", Err(PayloadParseError::Invalid)),
         ];
 
         for (input, expected) in cases {
             let res = parse_callback_payload(input);
             match expected {
-                Some((decision, txn_id, require)) => {
+                Ok((decision, txn_id)) => {
                     let parsed = res.unwrap_or_else(|e| {
                         panic!("expected Ok for payload {input:?}, got Err: {e}")
                     });
-                    assert_eq!(
-                        parsed.decision, *decision,
-                        "decision mismatch for {input:?}"
-                    );
-                    assert_eq!(parsed.txn_id, *txn_id, "txn_id mismatch for {input:?}");
-                    assert_eq!(parsed.require, *require, "require mismatch for {input:?}");
+                    assert_eq!(parsed.decision, *decision);
+                    assert_eq!(parsed.txn_id, *txn_id);
                 }
-                None => {
-                    assert!(
-                        res.is_err(),
-                        "expected Err for payload {input:?}, got {res:?}"
+                Err(expected_err) => {
+                    assert_eq!(
+                        res,
+                        Err(*expected_err),
+                        "unexpected Err variant for {input:?}"
                     );
                 }
             }

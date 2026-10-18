@@ -828,23 +828,54 @@ async fn execute_batch_op_full(
                     action_str, vmid, policy.action, policy.target
                 );
 
-                let txn_id = format!("{action_str}:{vmid}");
+                let txn_id = if let Some(ref tg) = tg_gateway {
+                    let params = match op {
+                        BatchOp::Stop {
+                            force,
+                            timeout_secs,
+                        } => serde_json::json!({
+                            "source": "cli",
+                            "force": force,
+                            "timeout_secs": timeout_secs,
+                        }),
+                        _ => serde_json::json!({ "source": "cli" }),
+                    };
+                    let new_req = crate::hitl::pending::NewPendingRequest::new(
+                        action_str,
+                        Some(*vmid),
+                        policy.require,
+                    )
+                    .with_node(guest.node.clone())
+                    .with_guest_type(guest.guest_type)
+                    .with_params(params);
 
-                if let Some(ref tg) = tg_gateway {
+                    let id = match crate::hitl::pending::PendingStore::open_default()
+                        .and_then(|store| store.insert(&new_req))
+                    {
+                        Ok(row) => row.id,
+                        Err(e) => {
+                            error!("Failed to record HITL request in pending store: {e:#}");
+                            crate::hitl::pending::generate_request_id()?
+                        }
+                    };
+
                     let reason = format!("CLI requested batch op: {action_str}");
                     if let Err(e) = tg
                         .request_approval(
                             action_str,
                             &vmid.to_string(),
                             &reason,
-                            &txn_id,
+                            &id,
                             policy.require,
                         )
                         .await
                     {
                         error!("Failed to send Telegram approval request: {}", e);
                     }
-                }
+                    id
+                } else {
+                    crate::hitl::pending::generate_request_id()?
+                };
 
                 results.push(serde_json::json!({
                     "vmid": vmid,

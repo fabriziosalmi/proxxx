@@ -93,6 +93,7 @@ pub async fn handle_tool_call(
         // them when there are policies to evaluate AND the call carries a
         // guest_id. `create_guest` / `clone_*` have no pre-existing
         // guest_id — they can only ever match a wildcard/action policy.
+        let mut fetched_guest: Option<crate::api::types::Guest> = None;
         let matched = if policies.is_empty() {
             None
         } else {
@@ -101,9 +102,9 @@ pub async fn handle_tool_call(
             let needs_tags = policies.iter().any(|p| p.target.starts_with("tag:"));
             let tags: Vec<String> = if needs_tags {
                 if let Some(v) = vmid {
-                    client
-                        .find_guest(v)
-                        .await?
+                    fetched_guest = client.find_guest(v).await?;
+                    fetched_guest
+                        .as_ref()
                         .map(|g| {
                             g.tag_list()
                                 .into_iter()
@@ -125,24 +126,62 @@ pub async fn handle_tool_call(
         if let Some(policy) = matched {
             is_hitl_pending = true;
             let target = vmid.map(|v| v.to_string()).unwrap_or_default();
-            let txn_id = match vmid {
-                Some(v) => format!("{name}:{v}"),
-                None => name.to_string(),
-            };
 
-            if let Some(ref tg) = config.telegram {
+            let txn_id = if let Some(ref tg) = config.telegram {
+                if fetched_guest.is_none() {
+                    if let Some(v) = vmid {
+                        fetched_guest = client.find_guest(v).await.ok().flatten();
+                    }
+                }
+                let resolved_node = fetched_guest
+                    .as_ref()
+                    .map(|g| g.node.clone())
+                    .or_else(|| args.get("node").and_then(Value::as_str).map(String::from));
+                let resolved_gt =
+                    fetched_guest.as_ref().map(|g| g.guest_type).or_else(|| {
+                        match args.get("type").and_then(Value::as_str) {
+                            Some("qemu") => Some(crate::api::types::GuestType::Qemu),
+                            Some("lxc") => Some(crate::api::types::GuestType::Lxc),
+                            _ => None,
+                        }
+                    });
+                let mut new_req =
+                    crate::hitl::pending::NewPendingRequest::new(name, vmid, policy.require)
+                        .with_params(json!({
+                            "source": "mcp",
+                            "tool": name,
+                            "args": args,
+                        }));
+                if let Some(n) = resolved_node {
+                    new_req = new_req.with_node(n);
+                }
+                if let Some(gt) = resolved_gt {
+                    new_req = new_req.with_guest_type(gt);
+                }
+                let id = match crate::hitl::pending::PendingStore::open_default()
+                    .and_then(|store| store.insert(&new_req))
+                {
+                    Ok(row) => row.id,
+                    Err(e) => {
+                        tracing::warn!("Failed to record MCP HITL request in pending store: {e:#}");
+                        crate::hitl::pending::generate_request_id()?
+                    }
+                };
                 match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
                     Ok(tg_gateway) => {
                         let reason = format!("MCP requested action: {name}");
                         let _ = tg_gateway
-                            .request_approval(name, &target, &reason, &txn_id, policy.require)
+                            .request_approval(name, &target, &reason, &id, policy.require)
                             .await;
                     }
                     Err(e) => {
                         tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
                     }
                 }
-            }
+                id
+            } else {
+                crate::hitl::pending::generate_request_id()?
+            };
 
             hitl_msg = format!(
                 "Action intercepted by HITL policy. Requires {} approval(s) via {}. Transaction: {}",

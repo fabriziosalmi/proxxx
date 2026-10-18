@@ -161,13 +161,32 @@ fn fake_gateway(server: &MockServer) -> TelegramGateway {
 /// id `fake_gateway` authorises.
 const TEST_APPROVER: i64 = 4242;
 
+fn temp_pending_store() -> (tempfile::TempDir, PendingApprovals) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PendingApprovals::open_at(dir.path().join("hitl_pending.db")).expect("open_at");
+    (dir, store)
+}
+
+fn mint_pending(store: &PendingApprovals, action: &str, vmid: u32, require: u8) -> String {
+    store
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new(action, Some(vmid), require)
+                .with_node("pve01")
+                .with_guest_type(GuestType::Qemu),
+        )
+        .expect("insert pending request")
+        .id
+}
+
 /// #249 — a correctly-signed callback from a Telegram account that is
 /// NOT on the allowlist must be refused without executing anything.
 #[tokio::test]
 async fn callback_from_unlisted_user_is_refused() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let (_dir, pending) = temp_pending_store();
+    let id = mint_pending(&pending, "stop", 100, 1);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
         "id": "cb-intruder",
         "from": { "id": 9999_i64, "first_name": "intruder" },
@@ -176,7 +195,6 @@ async fn callback_from_unlisted_user_is_refused() {
     }))
     .expect("CallbackQuery deserializes");
     let gw = HitlMockGateway::new();
-    let pending = PendingApprovals::new();
     let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
         .await
         .expect("handle_callback_update");
@@ -202,10 +220,11 @@ async fn callback_with_no_allowlist_configured_is_refused() {
         "12345".to_string(),
         format!("{}/bot", server.uri()),
     );
-    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let (_dir, pending) = temp_pending_store();
+    let id = mint_pending(&pending, "stop", 100, 1);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let cb = callback_query("cb-noallowlist", &data);
     let gw = HitlMockGateway::new();
-    let pending = PendingApprovals::new();
     let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
         .await
         .expect("handle_callback_update");
@@ -225,7 +244,9 @@ async fn callback_with_no_allowlist_configured_is_refused() {
 async fn callback_from_another_chat_is_refused() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server); // configured chat_id = "12345"
-    let data = signed(tg.hmac_key(), "approve:stop:100");
+    let (_dir, pending) = temp_pending_store();
+    let id = mint_pending(&pending, "stop", 100, 1);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
         "id": "cb-forwarded",
         "from": { "id": TEST_APPROVER, "first_name": "tester" },
@@ -234,7 +255,6 @@ async fn callback_from_another_chat_is_refused() {
     }))
     .expect("CallbackQuery deserializes");
     let gw = HitlMockGateway::new();
-    let pending = PendingApprovals::new();
     let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
         .await
         .expect("handle_callback_update");
@@ -248,17 +268,17 @@ async fn callback_from_another_chat_is_refused() {
     );
 }
 
-/// #250 — a policy with `require = 2` must not execute on the first
-/// approval, and must execute once a SECOND distinct approver votes.
+/// #250 / #341 — a request with `require = 2` in the store must not execute on
+/// the first approval, and must execute once a SECOND distinct approver votes.
 #[tokio::test]
 async fn quorum_of_two_needs_two_distinct_approvers() {
     const SECOND: i64 = 5150;
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server).with_allowed_approvers(vec![TEST_APPROVER, SECOND]);
-    // Payload as `request_approval` mints it for `require = 2`.
-    let data = signed(tg.hmac_key(), "approve:stop:100:r2");
+    let (_dir, pending) = temp_pending_store();
+    let id = mint_pending(&pending, "stop", 100, 2);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
-    let pending = PendingApprovals::new();
 
     let first = handle_callback_update(
         &update(1, callback_query("cb-q1", &data)),
@@ -315,27 +335,44 @@ async fn quorum_of_two_needs_two_distinct_approvers() {
     );
 }
 
-/// #250 — a keyboard minted before the quorum segment existed (three
-/// payload segments, no `r<N>`) still means one approver.
+/// #341 (Decision 5) — Old 3/4-segment keyboards (`approve:stop:100` and
+/// `approve:stop:100:r2`) are refused with `"this approval button is from an
+/// older proxxx, request again"` and do not execute.
 #[tokio::test]
 async fn legacy_payload_without_quorum_segment_means_one() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let data = signed(tg.hmac_key(), "approve:stop:100");
     let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-quorum"));
-    let pending = PendingApprovals::new();
-    let out = handle_callback_update(
-        &update(1, callback_query("cb-legacy", &data)),
-        &pending,
-        &gw,
-        &tg,
-    )
-    .await
-    .expect("legacy payload");
-    assert!(
-        matches!(out, CallbackOutcome::Executed { .. }),
-        "a 3-segment payload must behave as require=1, got {out:?}"
-    );
+    let (_dir, pending) = temp_pending_store();
+
+    for legacy_payload in ["approve:stop:100", "approve:stop:100:r2", "deny:stop:100"] {
+        let data = signed(tg.hmac_key(), legacy_payload);
+        let cb = callback_query("cb-legacy", &data);
+        let verified = proxxx::hitl::daemon::verify_callback(&tg, &cb);
+        let Err(rej) = verified else {
+            panic!("legacy payload {legacy_payload:?} must be rejected by verify_callback");
+        };
+        assert_eq!(
+            rej,
+            proxxx::hitl::daemon::CallbackRejection::LegacyFormat { data: data.clone() }
+        );
+        let answer = rej.answer_text().expect("answer text");
+        assert!(
+            answer
+                .to_ascii_lowercase()
+                .contains("from an older proxxx, request again"),
+            "legacy rejection answer must tell operator to request again, got: {answer}"
+        );
+
+        let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
+            .await
+            .expect("legacy payload handled");
+        assert!(
+            matches!(out, CallbackOutcome::InvalidFormat { .. }),
+            "a 3/4-segment legacy payload must be refused, got {out:?}"
+        );
+    }
+    assert!(gw.calls_for("shutdown_guest").is_empty());
 }
 
 /// Helper to build a Node by name.
@@ -1487,15 +1524,13 @@ impl ProxmoxGateway for HitlMockGateway {
 async fn replay_callback_does_not_re_execute() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
 
-    // v0.1.22: every callback MUST be HMAC-signed. Pre-compute the
-    // signed shape once and reuse it for both deliveries — the
-    // replay-protection store keys off the full callback_data string,
-    // so first → execute, second → Replay is the contract this test
-    // pins.
-    let data = signed(tg.hmac_key(), "approve:stop:100");
+    // v0.1.22+: every callback MUST be HMAC-signed, and the request is
+    // persisted in PendingStore under a random 16-hex id.
+    let id = mint_pending(&pending, "stop", 100, 1);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let cb = callback_query("cb-1", &data);
     let upd = update(1, cb);
 
@@ -1513,8 +1548,8 @@ async fn replay_callback_does_not_re_execute() {
         .await
         .expect("second call");
     assert!(
-        matches!(out2, CallbackOutcome::Replay { ref txn_id } if txn_id == &data),
-        "replay must be rejected with full signed txn_id, got {out2:?}"
+        matches!(out2, CallbackOutcome::Replay { ref txn_id } if txn_id == &id),
+        "replay must be rejected with request id, got {out2:?}"
     );
 
     // Critical assertion: the gateway saw exactly one shutdown call.
@@ -1540,12 +1575,13 @@ async fn replay_callback_does_not_re_execute() {
 async fn pve_403_during_execute_surfaces_as_failure() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new()
         .with_node_and_guest("pve01", guest(200, "vm-restricted"))
         .fail_mutations("403 Forbidden: token has no VM.PowerMgmt on /vms/200");
 
-    let cb = callback_query("cb-403", &signed(tg.hmac_key(), "approve:start:200"));
+    let id = mint_pending(&pending, "start", 200, 1);
+    let cb = callback_query("cb-403", &signed(tg.hmac_key(), &format!("approve:{id}")));
     let upd = update(2, cb);
 
     let outcome = handle_callback_update(&upd, &pending, &client, &tg)
@@ -1570,6 +1606,11 @@ async fn pve_403_during_execute_surfaces_as_failure() {
     // call, it just authorizes proxxx to make it. The 403 came from PVE.
     let starts = client.calls_for("start_guest");
     assert_eq!(starts, vec![200], "start_guest must be invoked once");
+
+    // Step 9 (#341): failed execution sets status='failed' and records the error in the store.
+    let stored = pending.get(&id).expect("get").expect("row exists");
+    assert_eq!(stored.status, proxxx::hitl::pending::RequestStatus::Failed);
+    assert!(stored.error.as_deref().unwrap_or("").contains("403"));
 }
 
 /// #339 Test 1 — Every mutating `SideEffect` variant maps to `Some(HitlTarget)`
@@ -1704,7 +1745,7 @@ async fn approve_pending_tui_txn(
     cb_id: &str,
     txn_id: &str,
 ) -> proxxx::app::SideEffect {
-    let kb = tg.build_approval_keyboard(txn_id, 1);
+    let kb = tg.build_approval_keyboard(txn_id);
     let approve_data = &kb.inline_keyboard[0][0].callback_data;
     let cb = callback_query(cb_id, approve_data);
     let ans = proxxx::tui::handle_tui_callback_query(tg, coord, &cb).await;
@@ -2033,10 +2074,10 @@ async fn execute_queue_refuses_unclassified_action_without_dispatching() {
 async fn invalid_callback_format_does_not_invoke_gateway() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new();
 
-    // Missing :vmid suffix.
+    // Missing HMAC suffix.
     let cb = callback_query("cb-bad", "approve:stop");
     let upd = update(3, cb);
     let outcome = handle_callback_update(&upd, &pending, &client, &tg)
@@ -2048,17 +2089,16 @@ async fn invalid_callback_format_does_not_invoke_gateway() {
     assert_eq!(pending.consumed_count(), 0);
 }
 
-/// Bonus: deny callbacks are not consumed by the replay gate.
-/// (A "deny" means the user pressed reject; it does not represent a
-/// pending op that should be locked out.)
+/// Bonus: deny callbacks mark the pending request as Denied and do not invoke the gateway.
 #[tokio::test]
 async fn deny_callback_does_not_invoke_gateway() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(50, "vm-test"));
 
-    let cb = callback_query("cb-deny", &signed(tg.hmac_key(), "deny:stop:50"));
+    let id = mint_pending(&pending, "stop", 50, 1);
+    let cb = callback_query("cb-deny", &signed(tg.hmac_key(), &format!("deny:{id}")));
     let upd = update(4, cb);
     let outcome = handle_callback_update(&upd, &pending, &client, &tg)
         .await
@@ -2108,13 +2148,14 @@ async fn fast_op_skips_intermediate_executing_edit() {
         .await;
 
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
 
     // Build a CallbackQuery that includes a `message` so the daemon
-    // has a message_id to (potentially) edit. v0.1.22: sign the
+    // has a message_id to (potentially) edit. v0.1.22+: sign the
     // callback_data; unsigned shapes are refused upstream.
-    let data = signed(tg.hmac_key(), "approve:restart:100");
+    let id = mint_pending(&pending, "restart", 100, 1);
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
     let cb_json = serde_json::json!({
         "id": "cb-fast",
         "from": { "id": TEST_APPROVER, "first_name": "tester" },
@@ -2209,21 +2250,17 @@ fn _force_link(_u: User) {}
 // ── Phase 17: HMAC-signed callback_data ─────────────────────────────────
 
 /// Signed callback with a valid tag passes verification and executes
-/// exactly like a legacy unsigned one. This pins that the new path
-/// hasn't broken the happy path of `request_approval` → click
-/// → daemon dispatch.
+/// when the request id exists in `PendingStore`.
 #[tokio::test]
 async fn signed_callback_with_valid_tag_executes() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(7, "vm-signed-ok"));
 
-    // Use the SAME key the gateway holds (fake_gateway sets the
-    // all-zeros test key via `with_base_url`). Sign over the canonical
-    // prefix the daemon strips off.
-    let payload = "approve:stop:7";
-    let tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), payload);
+    let id = mint_pending(&pending, "stop", 7, 1);
+    let payload = format!("approve:{id}");
+    let tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), &payload);
     let signed_data = format!("{payload}:{tag}");
 
     let cb = callback_query("cb-sig-ok", &signed_data);
@@ -2248,11 +2285,12 @@ async fn signed_callback_with_valid_tag_executes() {
 async fn callback_with_tampered_tag_is_refused() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(8, "vm-untrusted"));
 
-    let payload = "approve:stop:8";
-    let mut tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), payload);
+    let id = mint_pending(&pending, "stop", 8, 1);
+    let payload = format!("approve:{id}");
+    let mut tag = proxxx::hitl::hmac_key::sign(tg.hmac_key(), &payload);
     // Flip one hex digit — the verifier compares constant-time so
     // any single-bit difference rejects.
     let last = tag.pop().expect("tag non-empty");
@@ -2288,15 +2326,16 @@ async fn callback_with_tampered_tag_is_refused() {
 async fn callback_signed_with_wrong_key_is_refused() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(9, "vm-target"));
 
     // Attacker's key — different from the all-zeros key the test
     // gateway holds. Both are 32 bytes so the signing succeeds; only
     // the verifier catches the mismatch.
     let attacker_key = vec![0x42u8; 32];
-    let payload = "approve:stop:9";
-    let attacker_tag = proxxx::hitl::hmac_key::sign(&attacker_key, payload);
+    let id = mint_pending(&pending, "stop", 9, 1);
+    let payload = format!("approve:{id}");
+    let attacker_tag = proxxx::hitl::hmac_key::sign(&attacker_key, &payload);
     let forged = format!("{payload}:{attacker_tag}");
 
     let cb = callback_query("cb-wrong-key", &forged);
@@ -2331,7 +2370,7 @@ async fn callback_signed_with_wrong_key_is_refused() {
 async fn legacy_unsigned_callback_is_refused_in_v0_1_22() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let pending = PendingApprovals::new();
+    let (_dir, pending) = temp_pending_store();
     let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(10, "vm-legacy"));
 
     // No `:hex16` tail — pre-Phase-17 shape.
@@ -2365,11 +2404,11 @@ async fn tui_round_trip_with_real_keyboard_builder_resolves_approved() {
     let tg = fake_gateway(&server);
     let coord = proxxx::tui::HitlCoordinator::new();
 
-    let txn_id = "stop:100-1739999999999".to_string();
+    let txn_id = proxxx::hitl::pending::generate_request_id().expect("id");
     let mut rx = coord.register(txn_id.clone()).await;
 
     // Build callback_data with the REAL keyboard builder from telegram.rs.
-    let keyboard = tg.build_approval_keyboard(&txn_id, 1);
+    let keyboard = tg.build_approval_keyboard(&txn_id);
     let approve_btn = &keyboard.inline_keyboard[0][0];
     assert!(approve_btn.text.contains("Approve"));
 
@@ -2484,10 +2523,10 @@ async fn tui_rejections_and_quorum_enforcement() {
     let tg = fake_gateway(&server).with_allowed_approvers(vec![TEST_APPROVER, SECOND_APPROVER]);
     let coord = proxxx::tui::HitlCoordinator::new();
 
-    let txn_id = "stop:100-1739999999999".to_string();
-    let mut rx = coord.register(txn_id.clone()).await;
+    let txn_id = proxxx::hitl::pending::generate_request_id().expect("id");
+    let mut rx = coord.register_with_quorum(txn_id.clone(), 2).await;
 
-    let keyboard = tg.build_approval_keyboard(&txn_id, 2);
+    let keyboard = tg.build_approval_keyboard(&txn_id);
     let approve_data = keyboard.inline_keyboard[0][0].callback_data.clone();
 
     assert_tui_rejections(&tg, &coord, &mut rx, &approve_data).await;
@@ -2549,7 +2588,9 @@ async fn tui_rejections_and_quorum_enforcement() {
 async fn daemon_verify_callback_and_handle_callback_update_round_trip() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
-    let keyboard = tg.build_approval_keyboard("stop:100", 1);
+    let (_dir, pending) = temp_pending_store();
+    let id = mint_pending(&pending, "stop", 100, 1);
+    let keyboard = tg.build_approval_keyboard(&id);
     let approve_data = keyboard.inline_keyboard[0][0].callback_data.clone();
 
     let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
@@ -2566,11 +2607,9 @@ async fn daemon_verify_callback_and_handle_callback_update_round_trip() {
         verified.decision,
         proxxx::hitl::daemon::CallbackDecision::Approve
     );
-    assert_eq!(verified.txn_id, "stop:100");
-    assert_eq!(verified.require, 1);
+    assert_eq!(verified.txn_id, id);
     assert_eq!(verified.approver_id, TEST_APPROVER);
 
-    let pending = PendingApprovals::new();
     let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-100"));
     let out = handle_callback_update(&update(1, cb), &pending, &gw, &tg)
         .await
@@ -2588,10 +2627,11 @@ async fn callback_without_originating_chat_is_rejected() {
     let server = setup_telegram_mock().await;
     let tg = fake_gateway(&server);
     let coord = proxxx::tui::HitlCoordinator::new();
-    let txn_id = "stop:100".to_string();
+    let (_dir, pending) = temp_pending_store();
+    let txn_id = mint_pending(&pending, "stop", 100, 1);
     let mut rx = coord.register(txn_id.clone()).await;
 
-    let keyboard = tg.build_approval_keyboard(&txn_id, 1);
+    let keyboard = tg.build_approval_keyboard(&txn_id);
     let approve_data = keyboard.inline_keyboard[0][0].callback_data.clone();
 
     let cb_no_message: CallbackQuery = serde_json::from_value(serde_json::json!({
@@ -2629,7 +2669,6 @@ async fn callback_without_originating_chat_is_rejected() {
             "callback without chat must not resolve TUI pending op"
         );
 
-        let pending = PendingApprovals::new();
         let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-100"));
         let out = handle_callback_update(&update(1, cb.clone()), &pending, &gw, &tg)
             .await
@@ -2896,4 +2935,182 @@ fn shared_destructive_actions_gate_both_tui_and_cli() {
         policy: "continue".into(),
     };
     assert!(proxxx::cli::enforce_cli_secure_mode(&start_cmd, true).is_ok());
+}
+
+// ── Issue #341: Persisted pending-approval store, random IDs & TTL ──────
+
+/// #341 Test 1 — Replay after daemon restart (reopening the `SQLite` store from
+/// the same on-disk path) is refused with `CallbackOutcome::Replay` and does
+/// NOT re-execute the PVE mutation.
+#[tokio::test]
+async fn replay_after_daemon_restart_is_refused() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("hitl_pending.db");
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
+
+    let id = {
+        let store1 = PendingApprovals::open_at(&db_path).expect("open store1");
+        let id = mint_pending(&store1, "stop", 100, 1);
+        let data = signed(tg.hmac_key(), &format!("approve:{id}"));
+        let out1 = handle_callback_update(
+            &update(1, callback_query("cb-r1", &data)),
+            &store1,
+            &client,
+            &tg,
+        )
+        .await
+        .expect("first delivery");
+        assert!(matches!(out1, CallbackOutcome::Executed { vmid: 100, .. }));
+        id
+    };
+    assert_eq!(client.calls_for("shutdown_guest"), vec![100]);
+
+    // Simulate daemon restart by opening a fresh PendingStore handle on the same file.
+    let store2 = PendingApprovals::open_at(&db_path).expect("reopen store2");
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
+    let out2 = handle_callback_update(
+        &update(2, callback_query("cb-r2", &data)),
+        &store2,
+        &client,
+        &tg,
+    )
+    .await
+    .expect("replay delivery after restart");
+    assert!(
+        matches!(out2, CallbackOutcome::Replay { ref txn_id } if txn_id == &id),
+        "replay after daemon restart must be refused, got {out2:?}"
+    );
+    assert_eq!(
+        client.calls_for("shutdown_guest"),
+        vec![100],
+        "shutdown_guest must not be called a second time after daemon restart"
+    );
+}
+
+/// #341 Test 2 — An expired request (`expires_at < now`) is refused with
+/// `CallbackOutcome::Expired`, transitions to `status = 'expired'` in `SQLite`,
+/// and does not invoke the PVE gateway.
+#[tokio::test]
+async fn expired_request_is_refused_and_not_executed() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
+
+    let now = proxxx::hitl::pending::now_unix_secs();
+    let id = pending
+        .insert_at(
+            &proxxx::hitl::pending::NewPendingRequest::new("stop", Some(100), 1)
+                .with_node("pve01")
+                .with_guest_type(GuestType::Qemu)
+                .with_ttl_secs(120),
+            now - 300,
+        )
+        .expect("insert expired request")
+        .id;
+
+    let data = signed(tg.hmac_key(), &format!("approve:{id}"));
+    let out = handle_callback_update(
+        &update(1, callback_query("cb-exp", &data)),
+        &pending,
+        &client,
+        &tg,
+    )
+    .await
+    .expect("handle expired");
+    assert!(
+        matches!(out, CallbackOutcome::Expired { id: ref exp_id } if exp_id == &id),
+        "expired request must return CallbackOutcome::Expired, got {out:?}"
+    );
+    assert!(client.calls_for("shutdown_guest").is_empty());
+    let row = pending.get(&id).expect("get").expect("row");
+    assert_eq!(row.status, proxxx::hitl::pending::RequestStatus::Expired);
+}
+
+/// #341 Test 3 — A second legitimate request for the same `(action, vmid)`
+/// within the same daemon session gets a fresh random id and succeeds, rather
+/// than colliding with the first request's consumed entry.
+#[tokio::test]
+async fn second_legitimate_request_for_same_action_vmid_succeeds() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-prod-01"));
+
+    let id1 = mint_pending(&pending, "stop", 100, 1);
+    let id2 = mint_pending(&pending, "stop", 100, 1);
+    assert_ne!(
+        id1, id2,
+        "two requests for stop:100 must receive distinct random IDs"
+    );
+
+    let data1 = signed(tg.hmac_key(), &format!("approve:{id1}"));
+    let out1 = handle_callback_update(
+        &update(1, callback_query("cb-s1", &data1)),
+        &pending,
+        &client,
+        &tg,
+    )
+    .await
+    .expect("first stop:100");
+    assert!(matches!(out1, CallbackOutcome::Executed { vmid: 100, .. }));
+
+    let data2 = signed(tg.hmac_key(), &format!("approve:{id2}"));
+    let out2 = handle_callback_update(
+        &update(2, callback_query("cb-s2", &data2)),
+        &pending,
+        &client,
+        &tg,
+    )
+    .await
+    .expect("second legitimate stop:100");
+    assert!(matches!(out2, CallbackOutcome::Executed { vmid: 100, .. }));
+    assert_eq!(client.calls_for("shutdown_guest"), vec![100, 100]);
+}
+
+/// #341 Test 4 — Quorum is counted from the persisted `SQLite` store (not from
+/// the callback button), so vote 1 persists on disk and vote 2 after a daemon
+/// restart completes the quorum and executes.
+#[tokio::test]
+async fn quorum_counted_from_store_across_daemon_restarts() {
+    const SECOND_APPROVER: i64 = 5150;
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server).with_allowed_approvers(vec![TEST_APPROVER, SECOND_APPROVER]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("hitl_pending.db");
+    let client = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-quorum"));
+
+    let id = {
+        let store1 = PendingApprovals::open_at(&db_path).expect("open store1");
+        let id = mint_pending(&store1, "stop", 100, 2);
+        let kb = tg.build_approval_keyboard(&id);
+        let data = &kb.inline_keyboard[0][0].callback_data;
+        assert!(
+            !data.contains(":r2:"),
+            "button must not carry :r2: segment: {data}"
+        );
+        let cb1 = build_tui_callback_for_test("cb-q1", TEST_APPROVER, "tester", data, 12345);
+        let out1 = handle_callback_update(&update(1, cb1), &store1, &client, &tg)
+            .await
+            .expect("vote 1");
+        assert!(matches!(
+            out1,
+            CallbackOutcome::AwaitingApprovals { have: 1, need: 2 }
+        ));
+        id
+    };
+    assert!(client.calls_for("shutdown_guest").is_empty());
+
+    let store2 = PendingApprovals::open_at(&db_path).expect("reopen store2");
+    let data = tg.build_approval_keyboard(&id).inline_keyboard[0][0]
+        .callback_data
+        .clone();
+    let cb2 = build_tui_callback_for_test("cb-q2", SECOND_APPROVER, "second", &data, 12345);
+    let out2 = handle_callback_update(&update(2, cb2), &store2, &client, &tg)
+        .await
+        .expect("vote 2 after restart");
+    assert!(matches!(out2, CallbackOutcome::Executed { vmid: 100, .. }));
+    assert_eq!(client.calls_for("shutdown_guest"), vec![100]);
 }

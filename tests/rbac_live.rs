@@ -634,12 +634,18 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
     // Real operator client against the live PVE cluster.
     let client = env.operator().await.expect("operator client");
 
-    // Build the synthetic callback. Since v0.1.22 every callback must
-    // carry a valid HMAC tag (format: `{payload}:{16_hex_tag}`). Sign
-    // the payload with the same zero key the TelegramGateway holds so
-    // the daemon-side verifier accepts it. The gate stores the FULL
-    // data string as the txn_id; two identical Updates collide on it.
-    let cb_payload = format!("approve:restart:{}", env.blind_vmid);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pending =
+        PendingApprovals::open_at(dir.path().join("hitl_pending.db")).expect("open pending store");
+    let req = pending
+        .insert(&proxxx::hitl::pending::NewPendingRequest::new(
+            "restart",
+            Some(env.blind_vmid),
+            1,
+        ))
+        .expect("insert pending request");
+
+    let cb_payload = format!("approve:{}", req.id);
     let cb_tag = proxxx::hitl::hmac_key::sign(&zero_key, &cb_payload);
     let callback_data = format!("{cb_payload}:{cb_tag}");
     let update_json = serde_json::json!({
@@ -648,12 +654,10 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
             "id": "live-replay-1",
             "from": { "id": 7_i64, "first_name": "live-replay-tester" },
             "data": callback_data,
-            "message": { "message_id": 1_i64 },
+            "message": { "message_id": 1_i64, "chat": { "id": 1_i64 } },
         }
     });
     let update: Update = serde_json::from_value(update_json).expect("Update deserializes");
-
-    let pending = PendingApprovals::new();
 
     // First call — passes the gate, hits real PVE for node/guest
     // discovery, ends in NodeNotFound (blind_vmid does not exist on
@@ -681,12 +685,12 @@ async fn hitl_callback_replay_rejected_under_live_pve() {
         panic!("second call MUST be Replay, got {second:?} — replay gate is broken");
     };
     assert_eq!(
-        txn_id, callback_data,
-        "Replay outcome must surface the colliding callback data as txn_id"
+        txn_id, req.id,
+        "Replay outcome must surface the colliding request id as txn_id"
     );
     assert_eq!(
         pending.consumed_count(),
         1,
-        "consumed_count must NOT increment on replay (HashSet dedup invariant)"
+        "consumed_count must NOT increment on replay"
     );
 }

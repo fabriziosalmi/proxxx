@@ -278,13 +278,14 @@ impl TelegramGateway {
         Ok(gw.with_allowed_approvers(config.allowed_approvers.clone().unwrap_or_default()))
     }
 
-    /// Build the signed inline keyboard for an approval request.
+    /// Build the signed inline keyboard for an approval request (`#336`, `#341`).
     ///
-    /// Extracted so callers and tests use the single real keyboard builder
-    /// rather than hand-writing `callback_data` strings (#336).
+    /// Emits `approve:<id>:<hmac16>` and `deny:<id>:<hmac16>`. Quorum (`require`),
+    /// action, target, and operation parameters live in [`crate::hitl::pending::PendingStore`]
+    /// (or the TUI coordinator registry) rather than in the 64-byte button payload.
     #[must_use]
-    pub fn build_approval_keyboard(&self, txn_id: &str, require: u8) -> InlineKeyboardMarkup {
-        let approve_payload = format!("approve:{txn_id}:r{require}");
+    pub fn build_approval_keyboard(&self, txn_id: &str) -> InlineKeyboardMarkup {
+        let approve_payload = format!("approve:{txn_id}");
         let approve_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &approve_payload);
         let deny_payload = format!("deny:{txn_id}");
         let deny_tag = crate::hitl::hmac_key::sign(&self.hmac_key, &deny_payload);
@@ -311,7 +312,7 @@ impl TelegramGateway {
         target: &str,
         reason: &str,
         txn_id: &str,
-        require: u8,
+        _require: u8,
     ) -> Result<i64> {
         // Phase 5.13 — escape user-controlled values inserted into the
         // MarkdownV2 message body. Without this, any reason / txn_id /
@@ -331,7 +332,7 @@ impl TelegramGateway {
             chat_id: self.chat_id.clone(),
             text,
             parse_mode: "MarkdownV2".to_string(),
-            reply_markup: self.build_approval_keyboard(txn_id, require),
+            reply_markup: self.build_approval_keyboard(txn_id),
         };
 
         let url = format!("{}{}/sendMessage", self.base_url, self.bot_token.expose());

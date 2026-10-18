@@ -2043,9 +2043,9 @@ pub(crate) async fn hitl_serve(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Telegram not configured"))?;
     let tg_gateway = crate::hitl::telegram::TelegramGateway::from_config(tg_config).await?;
-    // Phase 5.13 — replay protection for callbacks. Session-local; see
-    // `hitl::pending` module docs for the full threat model + scope.
-    let pending = std::sync::Arc::new(crate::hitl::pending::PendingApprovals::new());
+    // #341 — persisted pending-approval store at `<config_dir>/hitl_pending.db`
+    // (next to `telegram_hmac.key`), shared with CLI and MCP senders.
+    let pending = std::sync::Arc::new(crate::hitl::pending::PendingStore::open_default()?);
 
     info!("Starting HITL daemon...");
     let mut offset = 0;

@@ -222,12 +222,10 @@ RestartSec=5
 # Raise verbosity per-crate when debugging:
 #   Environment=RUST_LOG=proxxx=debug,russh=debug
 Environment=RUST_LOG=proxxx=info
-# NOTE: replay protection is session-local — a restart clears
-# the consumed-txn-id set, so an approval callback that was
-# already used becomes usable again until the keyboard is
-# superseded. Approver authorisation (allowed_approvers) and
-# the per-request txn_id nonce are the controls that survive
-# a restart. See src/hitl/pending.rs ("Scope honesty").
+# NOTE: pending approvals, quorum votes, TTL expiry (120 s default),
+# and replay protection are persisted in `<config_dir>/hitl_pending.db`
+# next to `telegram_hmac.key` (0700 dir / 0600 file), so consumed or
+# expired approval buttons remain refused across daemon restarts.
 
 [Install]
 WantedBy=multi-user.target
@@ -505,20 +503,23 @@ counts them as failures rather than skipping them.
 
 ### `[ ]` Know what must survive the host
 
-proxxx keeps two kinds of state in the platform data directory, and only
-one of them matters if the machine is rebuilt.
+proxxx keeps state in the platform data and config directories; only the
+audit trail and cryptographic keys must survive if the machine is rebuilt.
 
 | Path | Must be preserved? | Why |
 | :--- | :--- | :--- |
 | `audit.db` | **Yes** | The only record of who issued which mutation. Not reconstructible from anything else. |
 | `audit.key` | **Yes** | 32 bytes. Without it no surviving copy of `audit.db` can be verified — losing the key alone is enough to make the trail worthless. |
 | `audit.key.retired-*` | **Yes** | Keys retired by `audit rotate-key`. Each still proves the rows it signed; losing one turns those rows into verification failures. |
+| `telegram_hmac.key` (in `<config_dir>`) | Optional | 32-byte HMAC key signing Telegram inline keyboards (`0600`). Regenerated automatically if absent, which invalidates any in-flight buttons. |
+| `hitl_pending.db` (in `<config_dir>`) | No | SQLite store (`0600`, alongside `telegram_hmac.key`) holding pending HITL requests, quorum votes, 120 s TTL expiry, and a 7-day terminal replay log. Recreated automatically on start. |
 | `freeze.lock`, `freeze.<profile>.lock` | No | Runtime kill-switch state. Absent means thawed, which is the correct default after a rebuild. |
 | `cache.db` | No | Cluster snapshots and the operation queue. Regenerates from the cluster on next start. |
 | `proxxx.log*` | No | 14 daily rotations, forensic convenience only. |
 
-Config lives separately under the config directory and is recreatable
-with `proxxx init`, though backing it up saves re-entering the profile.
+Config (`config.toml`) lives under the config directory alongside
+`telegram_hmac.key` and `hitl_pending.db` and is recreatable with
+`proxxx init`, though backing it up saves re-entering the profile.
 
 Point `PROXXX_AUDIT_DIR` at a volume that is already backed up if you
 would rather not add a new backup target:
@@ -537,10 +538,11 @@ systemctl start proxxx-hitl
 proxxx doctor                       # confirms config, auth and audit chain
 ```
 
-Stopping first is deliberate: an approval that is parked when the
-process is replaced is lost from the daemon's in-memory replay window,
-and a request approved during the swap has nothing listening for the
-callback.
+Stopping first is deliberate: while pending requests, quorum votes, and
+replay state persist on disk in `<config_dir>/hitl_pending.db`, a request
+approved while the service is stopped has nothing polling `getUpdates`
+until the new binary starts (and buttons minted before v0.13.x's `<decision>:<id>:<hmac16>`
+grammar are refused with a prompt to request again).
 
 What is compatible across an upgrade:
 

@@ -280,20 +280,51 @@ mod tests {
         );
     }
 
-    /// Tag-length budget against Telegram's 64-byte `callback_data` cap.
-    /// Worst-case: `approve:` + `restart:` + 5-digit vmid + `-` +
-    /// 13-digit millis + `:` + 16-char tag = 49. Locks the budget so a
-    /// future change to the tag length can't silently overflow.
+    /// Tag-length budget against Telegram's 64-byte `callback_data` cap (`#341`).
+    /// With store-backed `<decision>:<16-hex-id>:<16-hex-tag>`, even the longest
+    /// action name (`clone_with_cloudinit`, `execute_guest_command`) produces a
+    /// fixed 41-byte `approve` payload and 38-byte `deny` payload — 23 bytes of
+    /// margin below Telegram's 64-byte limit.
     #[test]
     fn telegram_callback_data_budget_holds() {
-        let key = b"0123456789abcdef0123456789abcdef".to_vec();
-        let payload = "approve:restart:99999-1715634000000";
-        let tag = sign(&key, payload);
-        let full = format!("{payload}:{tag}");
-        assert!(
-            full.len() <= 64,
-            "callback_data exceeded Telegram's 64-byte cap: {} bytes",
-            full.len()
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::hitl::pending::PendingStore::open_at(dir.path().join("hitl_pending.db"))
+            .expect("open store");
+        let gw = crate::hitl::telegram::TelegramGateway::with_base_url(
+            "faketoken",
+            "12345".into(),
+            "http://127.0.0.1:1/bot".into(),
         );
+
+        for longest_action in [
+            "clone_with_cloudinit",
+            "execute_guest_command",
+            "download_iso",
+            "delete_snapshot",
+        ] {
+            let req = store
+                .insert(&crate::hitl::pending::NewPendingRequest::new(
+                    longest_action,
+                    Some(999_999),
+                    3,
+                ))
+                .expect("insert pending request");
+            let kb = gw.build_approval_keyboard(&req.id);
+            let approve_data = &kb.inline_keyboard[0][0].callback_data;
+            let deny_data = &kb.inline_keyboard[0][1].callback_data;
+
+            assert_eq!(approve_data.len(), 41);
+            assert_eq!(deny_data.len(), 38);
+            assert!(
+                approve_data.len() <= 64 - 16,
+                "approve callback_data must fit inside 64 bytes with comfortable margin: {} bytes",
+                approve_data.len()
+            );
+            assert!(
+                deny_data.len() <= 64 - 16,
+                "deny callback_data must fit inside 64 bytes with comfortable margin: {} bytes",
+                deny_data.len()
+            );
+        }
     }
 }

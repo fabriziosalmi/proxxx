@@ -128,10 +128,32 @@ pub enum DataMsg {
 ///
 /// Pre-fix the TUI used a sleep+auto-approve simulation — the
 /// reviewer caught it and we replaced it with this real path.
+struct PendingTuiEntry {
+    sender: tokio::sync::oneshot::Sender<bool>,
+    require: u8,
+    expires_at: std::time::Instant,
+    approvers: std::collections::HashSet<i64>,
+}
+
+/// Outcome of applying one callback decision to [`HitlCoordinator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiCoordOutcome {
+    /// Entry was missing or its TTL (`expires_at`) had already elapsed.
+    ExpiredOrUnknown,
+    /// Entry was resolved as denied.
+    Denied,
+    /// Vote recorded on a pending entry, waiting for more distinct approvers.
+    AwaitingApprovals {
+        have: usize,
+        need: usize,
+        duplicate: bool,
+    },
+    /// Quorum met and entry resolved as approved.
+    Approved,
+}
+
 pub struct HitlCoordinator {
-    pending:
-        tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
-    votes: crate::hitl::pending::PendingApprovals,
+    pending: tokio::sync::Mutex<std::collections::HashMap<String, PendingTuiEntry>>,
 }
 
 impl Default for HitlCoordinator {
@@ -145,53 +167,132 @@ impl HitlCoordinator {
     pub fn new() -> Self {
         Self {
             pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            votes: crate::hitl::pending::PendingApprovals::new(),
         }
     }
 
-    /// Register a pending approval and get back the receiver to await.
+    /// Register a single-approver (`require = 1`) pending approval with the
+    /// default 120-second HITL TTL (`DEFAULT_HITL_TTL_SECS`).
     pub async fn register(&self, txn_id: String) -> tokio::sync::oneshot::Receiver<bool> {
+        self.register_with_quorum(txn_id, 1).await
+    }
+
+    /// Register a pending approval requiring `require` distinct approvers with
+    /// the default 120-second HITL TTL (`DEFAULT_HITL_TTL_SECS`).
+    pub async fn register_with_quorum(
+        &self,
+        txn_id: String,
+        require: u8,
+    ) -> tokio::sync::oneshot::Receiver<bool> {
+        let ttl = Duration::from_secs(
+            u64::try_from(crate::hitl::pending::DEFAULT_HITL_TTL_SECS).unwrap_or(120),
+        );
+        self.register_with_quorum_and_ttl(txn_id, require, ttl)
+            .await
+    }
+
+    /// Register a pending approval with an explicit quorum and TTL duration.
+    pub async fn register_with_quorum_and_ttl(
+        &self,
+        txn_id: String,
+        require: u8,
+        ttl: Duration,
+    ) -> tokio::sync::oneshot::Receiver<bool> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.lock().await.insert(txn_id, tx);
+        let entry = PendingTuiEntry {
+            sender: tx,
+            require: require.max(1),
+            expires_at: std::time::Instant::now() + ttl,
+            approvers: std::collections::HashSet::new(),
+        };
+        self.pending.lock().await.insert(txn_id, entry);
         rx
     }
 
-    /// Drop a pending registration (used on Telegram-send failure).
+    /// Drop a pending registration (used on Telegram-send failure or timeout).
     pub async fn unregister(&self, txn_id: &str) {
         self.pending.lock().await.remove(txn_id);
     }
 
-    /// Whether `txn_id` is currently waiting in `pending`.
+    /// Whether `txn_id` is currently waiting in `pending` and has not expired.
     pub async fn is_pending(&self, txn_id: &str) -> bool {
-        self.pending.lock().await.contains_key(txn_id)
+        let now = std::time::Instant::now();
+        let mut guard = self.pending.lock().await;
+        if let Some(entry) = guard.get(txn_id) {
+            if now < entry.expires_at {
+                return true;
+            }
+            guard.remove(txn_id);
+        }
+        false
     }
 
-    /// Resolve a pending approval with the user's decision. Called
-    /// from the poller when a `callback_query` arrives. Returns `true`
-    /// if a pending entry existed and was removed.
+    /// Resolve a pending approval directly (bypassing quorum counting).
+    /// Returns `true` if a non-expired pending entry existed and was removed.
     pub async fn resolve(&self, txn_id: &str, approved: bool) -> bool {
-        // Drop the lock BEFORE sending on the oneshot. Holding it
-        // across `sender.send(...)` is harmless today (send() is
-        // non-blocking) but keeps the lock scope tighter than needed
-        // and trips clippy's significant_drop_in_scrutinee.
-        let sender = self.pending.lock().await.remove(txn_id);
-        if let Some(s) = sender {
-            let _ = s.send(approved);
-            true
+        let now = std::time::Instant::now();
+        let entry = self.pending.lock().await.remove(txn_id);
+        if let Some(e) = entry {
+            if now < e.expires_at {
+                let _ = e.sender.send(approved);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Apply a verified callback decision (`Approve` or `Deny`) to `txn_id`,
+    /// enforcing the entry's TTL and `require` quorum.
+    pub async fn apply_callback(
+        &self,
+        txn_id: &str,
+        decision: crate::hitl::daemon::CallbackDecision,
+        approver_id: i64,
+    ) -> TuiCoordOutcome {
+        let now = std::time::Instant::now();
+        let mut guard = self.pending.lock().await;
+        let Some(entry) = guard.get_mut(txn_id) else {
+            return TuiCoordOutcome::ExpiredOrUnknown;
+        };
+        if now >= entry.expires_at {
+            guard.remove(txn_id);
+            return TuiCoordOutcome::ExpiredOrUnknown;
+        }
+        if decision == crate::hitl::daemon::CallbackDecision::Deny {
+            let removed = guard.remove(txn_id);
+            drop(guard);
+            if let Some(e) = removed {
+                let _ = e.sender.send(false);
+            }
+            return TuiCoordOutcome::Denied;
+        }
+        let fresh = entry.approvers.insert(approver_id);
+        let have = entry.approvers.len();
+        let need = entry.require.max(1) as usize;
+        if have >= need {
+            let removed = guard.remove(txn_id);
+            drop(guard);
+            if let Some(e) = removed {
+                let _ = e.sender.send(true);
+            }
+            TuiCoordOutcome::Approved
         } else {
-            false
+            TuiCoordOutcome::AwaitingApprovals {
+                have,
+                need,
+                duplicate: !fresh,
+            }
         }
     }
 }
 
-/// Handle one Telegram `CallbackQuery` in the TUI poller (#336, #337).
+/// Handle one Telegram `CallbackQuery` in the TUI poller (`#336`, `#337`, `#341`).
 ///
 /// Validates the callback with [`crate::hitl::daemon::verify_callback`]
-/// (HMAC tag, originating chat ID, `allowed_approvers`, and payload grammar
-/// including `:r<require>`), enforces multi-approver quorum via
-/// `coord.votes`, and answers Telegram with `"✅ Approved"` / `"🚫 Denied"`
-/// only after a matching pending operation was found and resolved (or
-/// `"⚠️ Expired or unknown request"` when no pending entry matches).
+/// (HMAC tag, originating chat ID, `allowed_approvers`, and `<decision>:<id>`
+/// payload grammar), enforces TTL and multi-approver quorum via `coord`, and
+/// answers Telegram with `"✅ Approved"` / `"🚫 Denied"` only after a matching
+/// pending operation was found and resolved (or `"⚠️ Expired or unknown request"`
+/// when no unexpired pending entry matches).
 pub async fn handle_tui_callback_query(
     tg: &crate::hitl::telegram::TelegramGateway,
     coord: &HitlCoordinator,
@@ -207,27 +308,21 @@ pub async fn handle_tui_callback_query(
         }
     };
 
-    if verified.decision == crate::hitl::daemon::CallbackDecision::Deny {
-        let msg = if coord.resolve(&verified.txn_id, false).await {
-            "🚫 Denied"
-        } else {
-            "⚠️ Expired or unknown request"
-        };
-        let _ = tg.answer_callback(&cb.id, msg).await;
-        return Some(msg.to_string());
-    }
-
-    if !coord.is_pending(&verified.txn_id).await {
-        let msg = "⚠️ Expired or unknown request";
-        let _ = tg.answer_callback(&cb.id, msg).await;
-        return Some(msg.to_string());
-    }
-
     match coord
-        .votes
-        .record_vote(&verified.txn_id, verified.approver_id, verified.require)
+        .apply_callback(&verified.txn_id, verified.decision, verified.approver_id)
+        .await
     {
-        crate::hitl::pending::VoteProgress::Waiting {
+        TuiCoordOutcome::ExpiredOrUnknown => {
+            let msg = "⚠️ Expired or unknown request";
+            let _ = tg.answer_callback(&cb.id, msg).await;
+            Some(msg.to_string())
+        }
+        TuiCoordOutcome::Denied => {
+            let msg = "🚫 Denied";
+            let _ = tg.answer_callback(&cb.id, msg).await;
+            Some(msg.to_string())
+        }
+        TuiCoordOutcome::AwaitingApprovals {
             have,
             need,
             duplicate,
@@ -240,12 +335,8 @@ pub async fn handle_tui_callback_query(
             let _ = tg.answer_callback(&cb.id, &note).await;
             Some(note)
         }
-        crate::hitl::pending::VoteProgress::Satisfied => {
-            let msg = if coord.resolve(&verified.txn_id, true).await {
-                "✅ Approved"
-            } else {
-                "⚠️ Expired or unknown request"
-            };
+        TuiCoordOutcome::Approved => {
+            let msg = "✅ Approved";
             let _ = tg.answer_callback(&cb.id, msg).await;
             Some(msg.to_string())
         }
@@ -1245,11 +1336,13 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                 "TUI HITL intercepted: {} on {} (via {})",
                 action, vmid, channel
             );
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let txn_id = format!("{action}:{vmid}-{now_ms}");
+            let txn_id = crate::hitl::pending::generate_request_id().unwrap_or_else(|_| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                format!("{now_ms:016x}")
+            });
             // #250 — the quorum the matched policy demands. `secure_mode`
             // without a matching policy is the single-approver case.
             let require = policy_match.map_or(1, |pm| pm.require);
@@ -1299,7 +1392,9 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                     return;
                 };
 
-                let receiver = coord_clone.register(txn_id.clone()).await;
+                let receiver = coord_clone
+                    .register_with_quorum(txn_id.clone(), require)
+                    .await;
                 if let Err(e) = tg
                     .request_approval(&action_owned, &target_owned, &reason, &txn_id, require)
                     .await
