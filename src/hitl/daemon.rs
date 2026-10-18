@@ -535,9 +535,11 @@ pub fn verify_callback(
 mod callback_verify_tests {
     use super::*;
 
+    type ExpectedParsed = Option<(CallbackDecision, &'static str, u8)>;
+
     #[test]
     fn parse_callback_payload_table_test() {
-        let cases: &[(&str, Option<(CallbackDecision, &str, u8)>)] = &[
+        let cases: &[(&str, ExpectedParsed)] = &[
             (
                 "approve:stop:100:r2",
                 Some((CallbackDecision::Approve, "stop:100", 2)),
