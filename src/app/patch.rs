@@ -1423,6 +1423,9 @@ mod tests {
         async fn list_users(&self) -> Result<Vec<crate::api::types::User>> {
             Ok(vec![])
         }
+        async fn get_user(&self, _: &str) -> Result<crate::api::types::User> {
+            anyhow::bail!("unused")
+        }
         async fn list_user_tokens(&self, _: &str) -> Result<Vec<crate::api::types::ApiToken>> {
             Ok(vec![])
         }

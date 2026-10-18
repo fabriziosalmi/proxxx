@@ -716,6 +716,9 @@ pub trait ProxmoxGateway: Send + Sync {
 
     async fn list_acl(&self) -> Result<Vec<crate::api::types::AclEntry>>;
     async fn list_users(&self) -> Result<Vec<crate::api::types::User>>;
+    /// Fetch a single user entry (`GET /access/users/{userid}`).
+    /// Surfaces `ApiError::NotFound` when the user does not exist.
+    async fn get_user(&self, userid: &str) -> Result<crate::api::types::User>;
     async fn list_user_tokens(&self, userid: &str) -> Result<Vec<crate::api::types::ApiToken>>;
     async fn list_groups(&self) -> Result<Vec<crate::api::types::Group>>;
     async fn list_roles(&self) -> Result<Vec<crate::api::types::Role>>;

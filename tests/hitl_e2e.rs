@@ -1421,6 +1421,12 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn create_lxc(&self, _node: &str, _params: &[(&str, &str)]) -> anyhow::Result<String> {
         Ok("UPID:pve01:00000000:00000000:create-lxc::root@pam:".into())
     }
+    async fn get_user(&self, userid: &str) -> Result<proxxx::api::types::User> {
+        Ok(proxxx::api::types::User {
+            userid: userid.to_string(),
+            ..Default::default()
+        })
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

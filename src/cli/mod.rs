@@ -1716,7 +1716,7 @@ pub async fn execute(
         Command::Access { action } => access::execute_access(&client, action).await,
         Command::Token { action } => access::execute_token(&client, action).await,
         Command::Perms { userid, path, node } => {
-            access::execute_perms(&config, &userid, path.as_deref(), &node).await
+            access::execute_perms(&client, &config, &userid, path.as_deref(), &node).await
         }
         Command::Serial {
             vmid,

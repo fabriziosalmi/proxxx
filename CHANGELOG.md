@@ -66,6 +66,17 @@ SemVer contract:
   or one world-readable clone away from leaking, and the in-repo copy was
   mode 0644 in practice.
 
+### Fixed
+
+- **`proxxx perms` parses JSON output on PVE 9 and rejects unknown users with exit 5** (#347).
+  `execute_perms` now invokes `pveum user permissions --output-format json -- <userid>`
+  and deserializes the `{path: {privilege: 0|1}}` map with `serde_json` instead of
+  the legacy PVE 7/8 text scanner, which silently returned `paths: []` on PVE 9's
+  box-drawn table. Non-JSON output is rejected as an error with the first 200
+  characters of stdout, and user existence is verified via `GET /access/users/{userid}`
+  so an unknown user returns a typed `ApiError::NotFound` (exit code 5) while an
+  existing user with no privileges returns `paths: []` (exit code 0).
+
 
 ## [0.14.0] — 2026-09-09
 

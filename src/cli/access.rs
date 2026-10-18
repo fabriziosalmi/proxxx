@@ -467,7 +467,84 @@ pub async fn execute_token(
 }
 
 /// Feature #10 — effective permissions via SSH shell-out (Option A).
+/// Narrow read-side view over [`crate::api::ProxmoxGateway`] for checking
+/// whether a user exists (`GET /access/users/{userid}`).
+#[async_trait::async_trait]
+pub trait UserExistsView: Send + Sync {
+    async fn get_user_view(&self, userid: &str) -> Result<crate::api::types::User>;
+}
+
+#[async_trait::async_trait]
+impl<T> UserExistsView for T
+where
+    T: crate::api::ProxmoxGateway + Send + Sync + ?Sized,
+{
+    async fn get_user_view(&self, userid: &str) -> Result<crate::api::types::User> {
+        crate::api::ProxmoxGateway::get_user(self, userid).await
+    }
+}
+
+pub(crate) async fn ensure_user_exists<C: UserExistsView + ?Sized>(
+    client: &C,
+    userid: &str,
+) -> Result<()> {
+    match client.get_user_view(userid).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let is_missing_user =
+                e.downcast_ref::<crate::api::ApiError>()
+                    .is_some_and(|api| match api {
+                        crate::api::ApiError::NotFound(_) => true,
+                        crate::api::ApiError::Other {
+                            status: 400 | 500,
+                            body,
+                            ..
+                        } => {
+                            let lower = body.to_ascii_lowercase();
+                            lower.contains("does not exist") || lower.contains("no such user")
+                        }
+                        _ => false,
+                    });
+            if is_missing_user {
+                return Err(crate::api::ApiError::NotFound(format!(
+                    "/access/users/{userid}: user '{userid}' does not exist"
+                ))
+                .into());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Resolve parsed `pveum user permissions --output-format json` stdout and
+/// verify via `GET /access/users/{userid}` that the user exists.
+pub(crate) async fn resolve_perms_output<C: UserExistsView + ?Sized>(
+    client: &C,
+    userid: &str,
+    pveum_stdout: &str,
+    path_filter: Option<&str>,
+) -> Result<(Value, i32)> {
+    let mut perms = crate::access::parse_user_permissions(userid, pveum_stdout)?;
+    ensure_user_exists(client, userid).await?;
+    if let Some(p) = path_filter {
+        perms.paths.retain(|x| x.path.contains(p));
+    }
+    let json = serde_json::json!({
+        "userid": perms.userid,
+        "paths": perms.paths.iter().map(|pp| {
+            serde_json::json!({
+                "path": pp.path,
+                "privileges": pp.privileges.iter().map(|(n, prop)| {
+                    serde_json::json!({ "name": n, "propagate": prop })
+                }).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>()
+    });
+    Ok((json, 0))
+}
+
 pub async fn execute_perms(
+    client: &Arc<crate::api::PxClient>,
     config: &crate::config::ProfileConfig,
     userid: &str,
     path_filter: Option<&str>,
@@ -501,7 +578,10 @@ pub async fn execute_perms(
     {
         anyhow::bail!("userid contains shell metacharacters — refusing");
     }
-    let cmd = format!("pveum user permissions -- {}", shell_quote(userid));
+    let cmd = format!(
+        "pveum user permissions --output-format json -- {}",
+        shell_quote(userid)
+    );
     let res = pool.exec(node, &cmd, ExecOptions::default()).await?;
     if !res.ok() {
         anyhow::bail!(
@@ -511,24 +591,7 @@ pub async fn execute_perms(
         );
     }
 
-    let mut perms = crate::access::parse_user_permissions(userid, &res.stdout);
-    if let Some(p) = path_filter {
-        perms.paths.retain(|x| x.path.contains(p));
-    }
-    // Render to JSON manually — `EffectivePermissions` isn't Serialize
-    // (pure logic crate), so we shape it inline for the CLI.
-    let json = serde_json::json!({
-        "userid": perms.userid,
-        "paths": perms.paths.iter().map(|pp| {
-            serde_json::json!({
-                "path": pp.path,
-                "privileges": pp.privileges.iter().map(|(n, prop)| {
-                    serde_json::json!({ "name": n, "propagate": prop })
-                }).collect::<Vec<_>>()
-            })
-        }).collect::<Vec<_>>()
-    });
-    Ok((json, 0))
+    resolve_perms_output(client.as_ref(), userid, &res.stdout, path_filter).await
 }
 
 fn shell_quote(s: &str) -> String {
@@ -554,7 +617,87 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod shell_quote_tests {
-    use super::shell_quote;
+    use super::{resolve_perms_output, shell_quote, UserExistsView};
+    use crate::api::types::User;
+    use crate::api::ApiError;
+
+    enum StubUserAnswer {
+        Exists,
+        NotFound404,
+        NotFound500,
+    }
+
+    struct StubUserClient(StubUserAnswer);
+
+    #[async_trait::async_trait]
+    impl UserExistsView for StubUserClient {
+        async fn get_user_view(&self, userid: &str) -> anyhow::Result<User> {
+            match self.0 {
+                StubUserAnswer::Exists => Ok(User {
+                    userid: userid.to_string(),
+                    enable: true,
+                    ..Default::default()
+                }),
+                StubUserAnswer::NotFound404 => Err(ApiError::NotFound(format!(
+                    "/access/users/{userid}: user '{userid}' does not exist"
+                ))
+                .into()),
+                StubUserAnswer::NotFound500 => Err(ApiError::Other {
+                    path: format!("/access/users/{userid}"),
+                    status: 500,
+                    body: format!("user '{userid}' does not exist\n"),
+                }
+                .into()),
+            }
+        }
+    }
+
+    /// Required test 3 (#347): `pveum user permissions` prints `{}` (rc=0)
+    /// for an unknown user; `resolve_perms_output` checks `GET /access/users/{userid}`
+    /// and returns a typed `ApiError::NotFound` (which maps to exit code 5),
+    /// whereas an existing user with `{}` returns `paths: []` and exit code 0.
+    #[tokio::test]
+    async fn unknown_user_maps_to_exit_5() {
+        let err_404 = resolve_perms_output(
+            &StubUserClient(StubUserAnswer::NotFound404),
+            "nosuch@pve",
+            "{}",
+            None,
+        )
+        .await
+        .expect_err("unknown user (404) must fail");
+        let api_404 = err_404
+            .downcast_ref::<ApiError>()
+            .expect("error must downcast to typed ApiError");
+        assert!(api_404.is_not_found(), "expected NotFound, got {api_404:?}");
+        assert_eq!(api_404.exit_code(), 5);
+
+        let err_500 = resolve_perms_output(
+            &StubUserClient(StubUserAnswer::NotFound500),
+            "nosuch@pve",
+            "{}",
+            None,
+        )
+        .await
+        .expect_err("unknown user (PVE 500 does not exist) must fail");
+        let api_500 = err_500
+            .downcast_ref::<ApiError>()
+            .expect("500 user-does-not-exist must normalise to typed ApiError");
+        assert!(api_500.is_not_found(), "expected NotFound, got {api_500:?}");
+        assert_eq!(api_500.exit_code(), 5);
+
+        let (val, code) = resolve_perms_output(
+            &StubUserClient(StubUserAnswer::Exists),
+            "empty@pve",
+            "{}",
+            None,
+        )
+        .await
+        .expect("existing user with no privileges must succeed");
+        assert_eq!(code, 0);
+        assert_eq!(val["userid"], "empty@pve");
+        assert_eq!(val["paths"], serde_json::json!([]));
+    }
 
     /// (Gemini audit) — single-quote wrapping is mathematically
     /// injection-proof. Inside single quotes, bash interprets nothing

@@ -77,17 +77,18 @@ after connecting.
 
 ## Shell injection defence (V3)
 
-`proxxx perms <userid>` shells out to `pveum user permissions <userid>`
-over SSH. The user-supplied `userid` reaches a remote shell — unsafe
+`proxxx perms <userid>` shells out to
+`pveum user permissions --output-format json -- <userid>`
+over SSH. The user-supplied `userid` reaches a remote shell, which is unsafe
 by default. (The newer `proxxx access permissions` hits
-`/access/permissions` directly via REST and has no shell layer at all
-— but the SSH path stays for cases where the Perl evaluator's full
+`/access/permissions` directly via REST and has no shell layer at all,
+but the SSH path stays for cases where the Perl evaluator's full
 grant-tree expansion is needed.)
 
 Three layers protect the shell path:
 
 ```rust
-// src/cli/mod.rs
+// src/cli/access.rs
 fn safe_userid_or_refuse(userid: &str) -> Result<()> {
     // 1. Refuse on metachars
     for ch in userid.chars() {
@@ -105,7 +106,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 let cmd = format!(
-    "pveum user permissions -- {}",
+    "pveum user permissions --output-format json -- {}",
     shell_quote(userid),
     // 3. -- separator means even a leading - is treated as data
 );

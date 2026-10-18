@@ -2271,6 +2271,48 @@ impl ProxmoxGateway for PxClient {
         Ok(resp.data)
     }
 
+    async fn get_user(&self, userid: &str) -> Result<crate::api::types::User> {
+        let path = format!("/access/users/{}", urlenc(userid));
+        match self
+            .get::<ApiResponse<crate::api::types::User>>(&path)
+            .await
+        {
+            Ok(mut resp) => {
+                if resp.data.userid.is_empty() {
+                    resp.data.userid = userid.to_string();
+                }
+                Ok(resp.data)
+            }
+            Err(e) => {
+                // PVE's `GET /access/users/{userid}` calls `check_user_exist`,
+                // which dies with `user '<id>' does not exist` — surfaced by
+                // pvedaemon/pveproxy as HTTP 500 rather than 404. Normalise that
+                // specific response into `ApiError::NotFound` so callers get
+                // the typed not-found variant (exit code 5).
+                let is_missing_user =
+                    e.downcast_ref::<super::ApiError>()
+                        .is_some_and(|api| match api {
+                            super::ApiError::Other {
+                                status: 400 | 500,
+                                body,
+                                ..
+                            } => {
+                                let lower = body.to_ascii_lowercase();
+                                lower.contains("does not exist") || lower.contains("no such user")
+                            }
+                            _ => false,
+                        });
+                if is_missing_user {
+                    return Err(super::ApiError::NotFound(format!(
+                        "{path}: user '{userid}' does not exist"
+                    ))
+                    .into());
+                }
+                Err(e)
+            }
+        }
+    }
+
     async fn create_user(
         &self,
         userid: &str,
