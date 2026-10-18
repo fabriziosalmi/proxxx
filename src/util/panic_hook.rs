@@ -250,10 +250,10 @@ mod tests {
 
     #[test]
     fn scrub_pve_api_token() {
-        let dirty = "PANIC: request failed: Authorization: PVEAPIToken=root@pam!proxxx=0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7 returned 401";
+        let dirty = "PANIC: request failed: Authorization: PVEAPIToken=root@pam!fake=0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7 returned 401";
         let clean = scrub_secrets(dirty);
         assert!(!clean.contains("0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7"));
-        assert!(!clean.contains("root@pam!proxxx"));
+        assert!(!clean.contains("root@pam!fake"));
         assert!(clean.contains("PVEAPIToken=[REDACTED]"));
         assert!(clean.contains(" returned 401"));
     }
@@ -285,10 +285,10 @@ mod tests {
     #[test]
     fn scrub_pve_api_token_at_end_of_string() {
         let dirty =
-            "request header Authorization: PVEAPIToken=root@pam!proxxx=99998888-7777-6666-5555-444433332222";
+            "request header Authorization: PVEAPIToken=root@pam!fake=99998888-7777-6666-5555-444433332222";
         let clean = scrub_secrets(dirty);
         assert!(!clean.contains("99998888-7777-6666-5555-444433332222"));
-        assert!(!clean.contains("root@pam!proxxx"));
+        assert!(!clean.contains("root@pam!fake"));
         assert_eq!(
             clean,
             "request header Authorization: PVEAPIToken=[REDACTED]"
