@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     token_secret_file: Option<std::path::PathBuf>,
 
-    /// Require Telegram 2FA for all destructive operations (Self-HITL)
+    /// Require Telegram 2FA for destructive operations in the TUI; refuse destructive CLI commands (exit 8)
     #[arg(long, global = true)]
     secure: bool,
 }
@@ -301,6 +301,14 @@ fn main() -> Result<()> {
                             .is_some()
                         {
                             return Some(proxxx::incident::FreezeRefusal::EXIT_CODE);
+                        }
+                        // CLI `--secure` destructive-op gate (#338) — exit 8,
+                        // same "mutation refused by a local lock" family.
+                        if cause
+                            .downcast_ref::<proxxx::hitl::SecureModeRefusal>()
+                            .is_some()
+                        {
+                            return Some(proxxx::hitl::SecureModeRefusal::EXIT_CODE);
                         }
                         None
                     });

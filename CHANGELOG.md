@@ -18,6 +18,19 @@ SemVer contract:
 
 ### Security
 
+- **CLI `--secure` now refuses destructive commands with exit code 8 instead of silently ignoring the flag (CLI-surface behaviour change, #338).**
+  `src/cli/mod.rs::execute` previously accepted `--secure` as an unused
+  `_secure: bool` parameter while `--help` and `docs/integrations/hitl.md`
+  advertised `proxxx --secure delete 100 --yes` as requiring Telegram 2FA,
+  causing destructive CLI commands under `--secure` to execute immediately
+  without human approval. Both the TUI and the CLI now consult the shared
+  `hitl::DESTRUCTIVE_ACTIONS` set (`stop`, `delete`, `restart`, `migrate`,
+  `exec`, `move_disk`, `resize_disk`), and `cli::enforce_cli_secure_mode`
+  refuses any destructive CLI command before any API call with
+  `hitl::SecureModeRefusal` (exit code 8, in the same local-lock refusal
+  family as `read_only` and `incident freeze`), while non-destructive CLI
+  commands continue to run normally.
+
 - **All mutating TUI side effects and queued batch operations now pass through the HITL gate (#339).**
   `src/tui/mod.rs` previously called `check_hitl` only inside the `StartGuest`,
   `StopGuest`, and `RestartGuest` arms of `dispatch_side_effect`, leaving

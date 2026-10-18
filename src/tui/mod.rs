@@ -1230,10 +1230,7 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
         // touch storage state and are irreversible (move with delete=1
         // removes the source; resize is grow-only). HITL gate triggers
         // when secure_mode is on or a TOML policy matches.
-        let is_destructive = matches!(
-            action,
-            "stop" | "delete" | "restart" | "migrate" | "exec" | "move_disk" | "resize_disk"
-        );
+        let is_destructive = crate::hitl::is_destructive_action(action);
         let secure_required = state.secure_mode && is_destructive;
 
         if policy_match.is_some() || secure_required {

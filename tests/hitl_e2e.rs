@@ -1802,6 +1802,8 @@ async fn secure_mode_forces_request_approval_for_destructive() {
     ];
 
     for (idx, (method_name, effect)) in effects.into_iter().enumerate() {
+        let target = proxxx::tui::hitl_action(&effect).expect("destructive effect classified");
+        assert!(proxxx::hitl::DESTRUCTIVE_ACTIONS.contains(&target.action));
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         dispatch_side_effect(
             effect,
@@ -2641,4 +2643,257 @@ async fn callback_without_originating_chat_is_rejected() {
             "callback without chat must not execute on gateway"
         );
     }
+}
+
+// ── Issue #338: CLI `--secure` destructive-operation gate ───────────────
+
+fn write_dead_cluster_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let cfg_path = dir.join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "url = \"https://127.0.0.1:1/\"\n\
+         user = \"root@pam\"\n\
+         token_id = \"test\"\n\
+         token_secret = \"00000000-0000-0000-0000-000000000000\"\n\
+         verify_tls = false\n",
+    )
+    .expect("write config.toml");
+    cfg_path
+}
+
+fn run_proxxx_with_dead_config(
+    cfg_path: &std::path::Path,
+    audit_dir: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_proxxx"))
+        .args(args)
+        .env("PROXXX_CONFIG", cfg_path)
+        .env("PROXXX_AUDIT_DIR", audit_dir)
+        .output()
+        .expect("spawn proxxx")
+}
+
+/// #338 Test 1 — End-to-end with the built binary, temp `PROXXX_CONFIG`
+/// pointing at `https://127.0.0.1:1/`, temp `PROXXX_AUDIT_DIR`:
+/// `--secure delete 100 --yes`, `--secure stop 100`, and
+/// `--secure migrate 100 x` exit 8 and do not attempt a connection
+/// (the error is the `--secure` refusal, not a transport error).
+#[test]
+fn cli_secure_refuses_destructive_commands_with_exit_8_before_connecting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let cfg_path = write_dead_cluster_config(dir.path());
+
+    let cases: [(&[&str], &str); 3] = [
+        (&["--secure", "delete", "100", "--yes"], "delete"),
+        (&["--secure", "stop", "100"], "stop"),
+        (&["--secure", "migrate", "100", "x"], "migrate"),
+    ];
+
+    for (args, expected_action) in cases {
+        let out = run_proxxx_with_dead_config(&cfg_path, audit_dir.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(8),
+            "expected exit 8 for `{args:?}`, got {:?}\nstderr: {stderr}",
+            out.status.code()
+        );
+        assert!(
+            stderr.contains(&format!("--secure: {expected_action} requires human approval")),
+            "stderr for `{args:?}` must contain the --secure refusal for `{expected_action}`, got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("127.0.0.1:1") && !stderr.contains("Connection refused"),
+            "`{args:?}` must refuse BEFORE any connection attempt, got:\n{stderr}"
+        );
+    }
+}
+
+/// #338 Test 2 — `--secure ls nodes` (non-destructive) gets past the
+/// `--secure` gate and fails later with the transport error (`exit != 8`).
+#[test]
+fn cli_secure_allows_non_destructive_commands_past_the_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let cfg_path = write_dead_cluster_config(dir.path());
+
+    let out =
+        run_proxxx_with_dead_config(&cfg_path, audit_dir.path(), &["--secure", "ls", "nodes"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "`--secure ls nodes` against 127.0.0.1:1 must fail at transport layer"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(8),
+        "`--secure ls nodes` must NOT be refused with exit 8, stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("requires human approval"),
+        "non-destructive `ls nodes` must not trigger the --secure refusal:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("127.0.0.1:1") || stderr.contains("error sending request"),
+        "`--secure ls nodes` must reach the HTTP transport layer, got:\n{stderr}"
+    );
+}
+
+fn build_tui_destructive_effect(action: &str) -> proxxx::app::SideEffect {
+    use proxxx::app::SideEffect;
+
+    match action {
+        "stop" => SideEffect::StopGuest {
+            vmid: 100,
+            force: false,
+        },
+        "delete" => SideEffect::DeleteGuest { vmid: 100 },
+        "restart" => SideEffect::RestartGuest { vmid: 100 },
+        "migrate" => SideEffect::MigrateGuest {
+            node: "pve1".into(),
+            vmid: 100,
+            target_node: "pve2".into(),
+        },
+        "exec" => SideEffect::ExecuteGuestCommand {
+            node: "pve1".into(),
+            vmid: 100,
+            guest_type: GuestType::Qemu,
+            command: "id".into(),
+        },
+        "move_disk" => SideEffect::MoveDisk {
+            node: "pve1".into(),
+            vmid: 100,
+            guest_type: GuestType::Qemu,
+            disk: "scsi0".into(),
+            target_storage: "ceph".into(),
+            delete_source: true,
+        },
+        "resize_disk" => SideEffect::ResizeDisk {
+            node: "pve1".into(),
+            vmid: 100,
+            guest_type: GuestType::Qemu,
+            disk: "scsi0".into(),
+            size: "+10G".into(),
+        },
+        other => panic!("unmapped destructive action in TUI test helper: {other}"),
+    }
+}
+
+fn build_cli_destructive_command(action: &str) -> proxxx::cli::Command {
+    use proxxx::cli::vm::DiskCommand;
+    use proxxx::cli::Command;
+
+    match action {
+        "stop" => Command::Stop {
+            vmids: vec![100],
+            force: false,
+            strict: false,
+            allow_risk: false,
+            stop_timeout: 60,
+            policy: "continue".into(),
+        },
+        "delete" => Command::Delete {
+            vmids: vec![100],
+            yes: true,
+            strict: false,
+            allow_risk: false,
+        },
+        "restart" => Command::Restart {
+            vmids: vec![100],
+            strict: false,
+            allow_risk: false,
+            policy: "continue".into(),
+        },
+        "migrate" => Command::Migrate {
+            vmid: 100,
+            target: "pve2".into(),
+            yes: true,
+            with_local_disks: false,
+            allow_risk: false,
+            wait: false,
+            stream: false,
+        },
+        "exec" => Command::Exec {
+            vmid: 100,
+            command: vec!["id".into()],
+        },
+        "move_disk" => Command::Disk {
+            action: DiskCommand::Move {
+                vmid: 100,
+                disk: "scsi0".into(),
+                storage: "ceph".into(),
+                delete_source: true,
+                yes: true,
+                allow_risk: false,
+                wait: false,
+            },
+        },
+        "resize_disk" => Command::Disk {
+            action: DiskCommand::Resize {
+                vmid: 100,
+                disk: "scsi0".into(),
+                size: "+10G".into(),
+                yes: true,
+                allow_risk: false,
+            },
+        },
+        other => panic!("unmapped destructive action in CLI test helper: {other}"),
+    }
+}
+
+/// #338 Test 3 — The single shared `proxxx::hitl::DESTRUCTIVE_ACTIONS` set and
+/// `proxxx::hitl::is_destructive_action` helper are consulted by both the TUI
+/// classifier (`proxxx::tui::hitl_action`) and the CLI `--secure` gate
+/// (`proxxx::cli::cli_hitl_action` + `proxxx::cli::enforce_cli_secure_mode`).
+#[test]
+fn shared_destructive_actions_gate_both_tui_and_cli() {
+    use proxxx::cli::Command;
+    use proxxx::hitl::{is_destructive_action, SecureModeRefusal, DESTRUCTIVE_ACTIONS};
+
+    assert_eq!(
+        DESTRUCTIVE_ACTIONS,
+        &[
+            "stop",
+            "delete",
+            "restart",
+            "migrate",
+            "exec",
+            "move_disk",
+            "resize_disk"
+        ]
+    );
+    assert_eq!(SecureModeRefusal::EXIT_CODE, 8);
+
+    for &expected in DESTRUCTIVE_ACTIONS {
+        assert!(is_destructive_action(expected));
+        let effect = build_tui_destructive_effect(expected);
+        let tui_target = proxxx::tui::hitl_action(&effect).expect("TUI classifies destructive op");
+        assert_eq!(tui_target.action, expected);
+        assert!(is_destructive_action(tui_target.action));
+
+        let cmd = build_cli_destructive_command(expected);
+        assert_eq!(proxxx::cli::cli_hitl_action(&cmd), Some(expected));
+        assert!(
+            proxxx::cli::enforce_cli_secure_mode(&cmd, false).is_ok(),
+            "without --secure, `{expected}` is not refused by enforce_cli_secure_mode"
+        );
+        let err = proxxx::cli::enforce_cli_secure_mode(&cmd, true)
+            .expect_err("with --secure, destructive CLI command must be refused");
+        let refusal = err
+            .downcast_ref::<SecureModeRefusal>()
+            .expect("error must downcast to SecureModeRefusal");
+        assert_eq!(refusal.action, expected);
+    }
+
+    for non_destructive in ["start", "snapshot", "download_iso", "ls"] {
+        assert!(!is_destructive_action(non_destructive));
+    }
+    let start_cmd = Command::Start {
+        vmids: vec![100],
+        strict: false,
+        policy: "continue".into(),
+    };
+    assert!(proxxx::cli::enforce_cli_secure_mode(&start_cmd, true).is_ok());
 }

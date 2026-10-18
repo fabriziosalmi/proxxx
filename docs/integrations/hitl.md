@@ -203,16 +203,26 @@ exhaustive `hitl_action` matcher (which has no wildcard arm, so new
 
 ## Self-HITL (`--secure`)
 
-For unattended scripts or TUI sessions that want belt-and-suspenders:
+Both the TUI and the CLI consult the shared destructive-action set defined in
+`src/hitl/mod.rs` (`DESTRUCTIVE_ACTIONS`: `stop`, `delete`, `restart`,
+`migrate`, `exec`, `move_disk`, `resize_disk`):
 
-```sh
-proxxx --secure delete 100 --yes
-```
+- **In the TUI (`proxxx --secure`)**: every destructive operation is forced
+  through the Telegram HITL approval flow regardless of whether a
+  `[[policies]]` rule matches.
+- **In the CLI (`proxxx --secure <command>`)**: the CLI does not implement
+  interactive HITL approval yet, so every destructive CLI command (`stop`,
+  `delete`, `restart`, `migrate`, `exec`, `disk move`, `disk resize`) fails
+  closed before any API call with `hitl::SecureModeRefusal` and exit code `8`
+  (the same "mutation refused by a local lock" family as `read_only` and
+  `incident freeze`):
 
-`--secure` forces every destructive operation (`stop`, `delete`, `restart`,
-`migrate`, `exec`, `move_disk`, `resize_disk`) through the HITL gate
-regardless of policy match. Use this in CI or production sessions to require
-human approval on destructive mutations.
+  ```text
+  Fatal Error: --secure: delete requires human approval, which the CLI does not implement yet; run it from the TUI with --secure, or drop --secure
+  ```
+
+  Non-destructive CLI commands (for example `proxxx --secure ls nodes` or
+  `proxxx --secure start 100`) run normally.
 
 ## Limits
 

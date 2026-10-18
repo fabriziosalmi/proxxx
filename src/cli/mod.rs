@@ -998,18 +998,58 @@ pub enum McpCommand {
     },
 }
 
-/// Execute a CLI command — returns JSON-serializable result and exit code.
+/// Map a CLI [`Command`] to its canonical HITL action name (#338).
+#[must_use]
+pub const fn cli_hitl_action(cmd: &Command) -> Option<&'static str> {
+    match cmd {
+        Command::Start { .. } => Some("start"),
+        Command::Stop { .. } => Some("stop"),
+        Command::Restart { .. } => Some("restart"),
+        Command::Delete { .. } => Some("delete"),
+        Command::Migrate { .. } => Some("migrate"),
+        Command::Exec { .. } => Some("exec"),
+        Command::Disk {
+            action: vm::DiskCommand::Move { .. },
+        } => Some("move_disk"),
+        Command::Disk {
+            action: vm::DiskCommand::Resize { .. },
+        } => Some("resize_disk"),
+        Command::Snapshot {
+            action: vm::SnapshotCommand::Create { .. },
+        } => Some("snapshot"),
+        _ => None,
+    }
+}
+
+/// Fail-closed `--secure` gate for the CLI (#338).
 ///
-/// `_secure` is reserved for future per-command HITL gating in pipelines;
-/// it's currently honoured by the TUI only (see `state.secure_mode`).
+/// When `secure` is `true`, every destructive CLI command (as classified by
+/// [`crate::hitl::is_destructive_action`]) refuses before any API call with a
+/// typed [`crate::hitl::SecureModeRefusal`] (exit code 8). Non-destructive
+/// commands pass through unchanged.
+pub fn enforce_cli_secure_mode(cmd: &Command, secure: bool) -> Result<()> {
+    if !secure {
+        return Ok(());
+    }
+    if let Some(action) = cli_hitl_action(cmd) {
+        if crate::hitl::is_destructive_action(action) {
+            return Err(crate::hitl::SecureModeRefusal { action }.into());
+        }
+    }
+    Ok(())
+}
+
+/// Execute a CLI command — returns JSON-serializable result and exit code.
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute(
     cmd: Command,
     profile: Option<&str>,
     cli_secret: Option<&str>,
-    _secure: bool,
+    secure: bool,
     format: crate::util::format::OutputFormat,
 ) -> Result<(Value, i32)> {
+    enforce_cli_secure_mode(&cmd, secure)?;
+
     // MCP introspection commands don't need a Proxmox connection
     if let Command::Mcp {
         action: McpCommand::Tools { checksum, .. },

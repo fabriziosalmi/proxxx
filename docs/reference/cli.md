@@ -25,7 +25,11 @@ within a major version.
 --token-secret-file <PATH> Read the token secret from a file. Leaves
                            nothing in argv. Wins over --token-secret
                            when both are given.
---secure                   Require Telegram approval for every destructive op
+--secure                   Require Telegram approval for destructive operations
+                           in the TUI; refuse destructive CLI commands
+                           (stop, delete, restart, migrate, exec, disk move,
+                           disk resize) before any API call with exit code 8.
+                           Non-destructive CLI commands run normally.
 ```
 
 ## Read commands
