@@ -96,6 +96,7 @@ fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
 ///
 /// Patterns covered:
 /// - `PVEAuthCookie=<value>` (PVE ticket cookie — bearer token)
+/// - `PVEAPIToken=<user>!<id>=<secret>` (PVE API token header)
 /// - `PBSAPIToken=<user>!<id>:<secret>` (PBS API token header)
 /// - `tokenid=<value>` (Telegram bot token URL parameter; PVE token id)
 /// - `password=<value>` (login form field — never logged in normal
@@ -179,6 +180,7 @@ fn skip_value_run(bytes: &[u8], mut i: usize, out: &mut String) -> usize {
 /// doesn't flag `items_after_statements`.
 const KEY_VALUE_MARKERS: &[&str] = &[
     "PVEAuthCookie=",
+    "PVEAPIToken=",
     "PBSAPIToken=",
     "tokenid=",
     "password=",
@@ -244,6 +246,53 @@ mod tests {
         assert!(!clean.contains("root@pam!proxxx"));
         assert!(clean.contains("PBSAPIToken=[REDACTED]"));
         assert!(clean.contains("returned 401"));
+    }
+
+    #[test]
+    fn scrub_pve_api_token() {
+        let dirty = "PANIC: request failed: Authorization: PVEAPIToken=root@pam!proxxx=0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7 returned 401";
+        let clean = scrub_secrets(dirty);
+        assert!(!clean.contains("0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7"));
+        assert!(!clean.contains("root@pam!proxxx"));
+        assert!(clean.contains("PVEAPIToken=[REDACTED]"));
+        assert!(clean.contains(" returned 401"));
+    }
+
+    #[test]
+    fn scrub_pve_api_token_lowercase() {
+        let dirty = "header: authorization: pveapitoken=auditor@pve!ci=11112222-3333-4444-5555-666677778888 failed";
+        let clean = scrub_secrets(dirty);
+        assert!(!clean.contains("11112222-3333-4444-5555-666677778888"));
+        assert!(!clean.contains("auditor@pve!ci"));
+        assert!(clean.contains("pveapitoken=[REDACTED]"));
+        assert!(clean.contains(" failed"));
+    }
+
+    #[test]
+    fn scrub_pve_api_token_multiple_in_one_message() {
+        let dirty = "primary PVEAPIToken=root@pam!tok1=aaaa1111-bbbb-2222-cccc-3333dddd4444 fallback PVEAPIToken=ops@pve!tok2=eeee5555-ffff-6666-0000-111122223333 aborted";
+        let clean = scrub_secrets(dirty);
+        assert!(!clean.contains("aaaa1111-bbbb-2222-cccc-3333dddd4444"));
+        assert!(!clean.contains("root@pam!tok1"));
+        assert!(!clean.contains("eeee5555-ffff-6666-0000-111122223333"));
+        assert!(!clean.contains("ops@pve!tok2"));
+        assert_eq!(
+            clean,
+            "primary PVEAPIToken=[REDACTED] fallback PVEAPIToken=[REDACTED] aborted"
+        );
+    }
+
+    #[test]
+    fn scrub_pve_api_token_at_end_of_string() {
+        let dirty =
+            "request header Authorization: PVEAPIToken=root@pam!proxxx=99998888-7777-6666-5555-444433332222";
+        let clean = scrub_secrets(dirty);
+        assert!(!clean.contains("99998888-7777-6666-5555-444433332222"));
+        assert!(!clean.contains("root@pam!proxxx"));
+        assert_eq!(
+            clean,
+            "request header Authorization: PVEAPIToken=[REDACTED]"
+        );
     }
 
     #[test]

@@ -18,6 +18,15 @@ SemVer contract:
 
 ### Security
 
+- **The panic hook scrubs `PVEAPIToken=` headers before writing to stderr and the log file (#377).**
+  `src/util/panic_hook.rs` redacted `PVEAuthCookie=`, `PBSAPIToken=`,
+  `tokenid=`, `password=`, `token_secret=`, `csrfpreventiontoken=`,
+  `vncticket=`, and `Authorization: Bearer `, but omitted `PVEAPIToken=`,
+  the `Authorization` header format sent on PVE API requests
+  (`PVEAPIToken=<user>!<tokenid>=<uuid>`). Adding `"PVEAPIToken="` to
+  `KEY_VALUE_MARKERS` masks the entire `<user>!<tokenid>=<uuid>` value run
+  with `[REDACTED]` (case-insensitively).
+
 - **The docs workflow moved off the self-hosted runner.** `docs.yml`
   declared `runs-on: [self-hosted, Linux, X64]` — labels that name no
   particular machine, so the job matched *any* self-hosted runner
