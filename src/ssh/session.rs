@@ -619,13 +619,13 @@ mod hardening_tests {
     impl russh::server::Handler for InProcessSshServer {
         type Error = russh::Error;
 
-        fn auth_publickey(
+        #[allow(clippy::unused_async_trait_impl)]
+        async fn auth_publickey(
             &mut self,
             _user: &str,
             _public_key: &russh::keys::ssh_key::PublicKey,
-        ) -> impl std::future::Future<Output = Result<russh::server::Auth, Self::Error>> + Send
-        {
-            async { Ok(russh::server::Auth::Accept) }
+        ) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
         }
     }
 
