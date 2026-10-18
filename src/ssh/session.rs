@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use russh::client::{self, AuthResult, Config, Handle, Handler};
-// russh 0.60: `russh::keys::key::PublicKey` is private; the public
-// type is re-exported at `russh::keys::PublicKey`. The `ssh-key`
-// trait `PublicKeyBase64` lives in the re-exported `ssh_key` module.
-use russh::keys::ssh_key::public::PublicKey;
+// russh 0.64: `check_server_key` receives `PublicKeyOrCertificate`.
+// Plain host keys are matched via `PublicKeyOrCertificate::PublicKey`;
+// certificates are rejected because `proxxx` pins bare host keys in its
+// own `KnownHosts` store and does not configure an OpenSSH CA trust list.
 use russh::keys::ssh_key::Algorithm;
-use russh::keys::PrivateKeyWithHashAlg;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::Preferred;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -110,26 +110,40 @@ pub(crate) struct SshHandler {
     verifier: Arc<dyn HostKeyVerifier>,
 }
 
-// russh 0.60 switched `Handler` to native AFIT (async fn in trait
-// via RPIT), so we can NOT use the `#[async_trait]` macro here —
-// that would generate a `Box<dyn Future>` signature that doesn't
-// match the trait's `impl Future<Output = …> + Send`. Plain
-// `async fn` in the impl works since Rust 1.75.
-impl Handler for SshHandler {
-    type Error = russh::Error;
+impl SshHandler {
+    /// Verify an encoded server public key blob against `KnownHosts` and the
+    /// configured [`HostKeyVerifier`].
+    ///
+    /// Rejects (`Ok(false)`) any serialization error or empty key blob before
+    /// consulting `KnownHosts` or the policy verifier, so a failed `to_bytes()`
+    /// can never be compared against or pinned as an empty key.
+    async fn verify_server_key_bytes(
+        &self,
+        key_type: &str,
+        key_bytes: std::result::Result<Vec<u8>, russh::keys::ssh_key::Error>,
+    ) -> Result<bool, russh::Error> {
+        let key_blob = match key_bytes {
+            Ok(blob) if !blob.is_empty() => blob,
+            Ok(_) => {
+                warn!(
+                    "ssh host key verification: rejecting {}:{} due to empty serialized key blob",
+                    self.host, self.port
+                );
+                return Ok(false);
+            }
+            Err(e) => {
+                warn!(
+                    "ssh host key verification: rejecting {}:{} due to public key serialization failure: {e}",
+                    self.host, self.port
+                );
+                return Ok(false);
+            }
+        };
 
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
-        // russh 0.60: PublicKey is now ssh_key::PublicKey (a re-export
-        // of the `ssh-key` crate type). Method names changed:
-        //   `.name()` → `.algorithm().as_str()`
-        //   `.public_key_bytes()` → `.to_bytes()` (returns the wire-
-        //                           format SSH public key blob).
-        let key_type = server_public_key.algorithm().as_str().to_string();
-        let key_blob = server_public_key.to_bytes().unwrap_or_default();
-        let key = HostKey { key_type, key_blob };
+        let key = HostKey {
+            key_type: key_type.to_string(),
+            key_blob,
+        };
 
         let status = {
             let store = self.known.read().await;
@@ -153,6 +167,36 @@ impl Handler for SshHandler {
                 Ok(true)
             }
         }
+    }
+}
+
+// russh 0.60 switched `Handler` to native AFIT (async fn in trait
+// via RPIT), so we can NOT use the `#[async_trait]` macro here —
+// that would generate a `Box<dyn Future>` signature that doesn't
+// match the trait's `impl Future<Output = …> + Send`. Plain
+// `async fn` in the impl works since Rust 1.75.
+impl Handler for SshHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        // russh 0.64 passes `PublicKeyOrCertificate`. `proxxx` does not
+        // advertise host certificate algorithms (`host_key_certificates`
+        // is empty) and does not validate OpenSSH CA signatures, so any
+        // `Certificate` variant is rejected unconditionally.
+        let PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key else {
+            warn!(
+                "ssh host key verification: rejecting {}:{} because server presented a certificate instead of a plain host key",
+                self.host, self.port
+            );
+            return Ok(false);
+        };
+
+        let algorithm = key.algorithm();
+        self.verify_server_key_bytes(algorithm.as_str(), key.to_bytes())
+            .await
     }
 }
 
@@ -323,6 +367,10 @@ const fn hardened_algorithms() -> Preferred {
             russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
         ]),
         key: Cow::Borrowed(&[Algorithm::Ed25519]),
+        // Do not advertise `*-cert-v01@openssh.com`: proxxx pins plain
+        // Ed25519 keys in its own `known_hosts` store and does not
+        // validate OpenSSH host certificates against a trusted CA list.
+        host_key_certificates: Cow::Borrowed(&[]),
         cipher: Cow::Borrowed(&[russh::cipher::CHACHA20_POLY1305, russh::cipher::AES_256_GCM]),
         mac: Cow::Borrowed(&[russh::mac::HMAC_SHA512_ETM, russh::mac::HMAC_SHA256_ETM]),
         compression: Cow::Borrowed(&[russh::compression::NONE]),
@@ -331,7 +379,35 @@ const fn hardened_algorithms() -> Preferred {
 
 #[cfg(test)]
 mod hardening_tests {
-    use super::hardened_algorithms;
+    use std::sync::Arc;
+
+    use russh::client::Handler as _;
+    use russh::keys::ssh_key::private::Ed25519Keypair;
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+    use russh::keys::PublicKeyOrCertificate;
+    use tokio::net::TcpListener;
+    use tokio::sync::RwLock;
+
+    use super::{
+        hardened_algorithms, HostKey, HostKeyPolicy, HostKeyVerifier, KnownHosts, PolicyVerifier,
+        SshHandler, SshSession,
+    };
+    use crate::ssh::known_hosts::HostMatch;
+
+    fn sample_private_key(seed_byte: u8) -> PrivateKey {
+        let kp = Ed25519Keypair::from_seed(&[seed_byte; 32]);
+        PrivateKey::from(kp)
+    }
+
+    fn make_handler(policy: HostKeyPolicy, known: Arc<RwLock<KnownHosts>>) -> SshHandler {
+        let verifier: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier { policy });
+        SshHandler {
+            host: "127.0.0.1".to_string(),
+            port: 2222,
+            known,
+            verifier,
+        }
+    }
 
     #[test]
     fn whitelist_excludes_sha1_kex() {
@@ -387,6 +463,269 @@ mod hardening_tests {
         assert!(
             joined.contains("kex-strict-c"),
             "strict-kex client marker missing: {joined}"
+        );
+    }
+
+    #[test]
+    fn whitelist_disables_host_key_certificates() {
+        let p = hardened_algorithms();
+        assert_eq!(
+            p.host_key_certificates.as_ref(),
+            &[] as &[Algorithm],
+            "host_key_certificates must be empty when no CA validation is configured"
+        );
+        assert_eq!(p.key.as_ref(), &[Algorithm::Ed25519]);
+    }
+
+    #[tokio::test]
+    async fn host_key_policy_verification_matrix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let known_path = dir.path().join("known_hosts");
+        let key_a = sample_private_key(0x11).public_key().clone();
+        let key_b = sample_private_key(0x22).public_key().clone();
+        let host_key_a = HostKey {
+            key_type: key_a.algorithm().as_str().to_string(),
+            key_blob: key_a.to_bytes().expect("key_a bytes"),
+        };
+
+        // 1. strict + unknown -> reject
+        let known = Arc::new(RwLock::new(
+            KnownHosts::load(known_path.clone()).expect("load"),
+        ));
+        let mut strict_handler = make_handler(HostKeyPolicy::Strict, Arc::clone(&known));
+        let accepted = strict_handler
+            .check_server_key(&PublicKeyOrCertificate::from(key_a.clone()))
+            .await
+            .expect("check_server_key");
+        assert!(!accepted, "strict + unknown must reject");
+        assert_eq!(
+            known.read().await.check("127.0.0.1", 2222, &host_key_a),
+            HostMatch::Unknown
+        );
+
+        // 2. tofu + unknown -> accept and pinned
+        let mut tofu_handler = make_handler(HostKeyPolicy::Tofu, Arc::clone(&known));
+        let accepted = tofu_handler
+            .check_server_key(&PublicKeyOrCertificate::from(key_a.clone()))
+            .await
+            .expect("check_server_key");
+        assert!(accepted, "tofu + unknown must accept");
+        assert_eq!(
+            known.read().await.check("127.0.0.1", 2222, &host_key_a),
+            HostMatch::Match,
+            "tofu must pin the newly accepted key"
+        );
+
+        // 3. strict + known match -> accept
+        let accepted = strict_handler
+            .check_server_key(&PublicKeyOrCertificate::from(key_a.clone()))
+            .await
+            .expect("check_server_key");
+        assert!(accepted, "strict + known match must accept");
+
+        // 4. strict + changed key -> reject; tofu + changed key -> reject
+        let accepted_strict_mismatch = strict_handler
+            .check_server_key(&PublicKeyOrCertificate::from(key_b.clone()))
+            .await
+            .expect("check_server_key");
+        assert!(
+            !accepted_strict_mismatch,
+            "strict + changed key must reject"
+        );
+
+        let accepted_tofu_mismatch = tofu_handler
+            .check_server_key(&PublicKeyOrCertificate::from(key_b))
+            .await
+            .expect("check_server_key");
+        assert!(!accepted_tofu_mismatch, "tofu + changed key must reject");
+    }
+
+    #[tokio::test]
+    async fn host_key_serialization_failure_and_certificates_are_rejected() {
+        use russh::keys::ssh_key::certificate::{Builder, CertType};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let known_path = dir.path().join("known_hosts");
+        let known = Arc::new(RwLock::new(KnownHosts::load(known_path).expect("load")));
+
+        let subject_key = sample_private_key(0x66);
+        let ca_key = sample_private_key(0x77);
+        let mut cert_builder = Builder::new(
+            [0xAAu8; 32],
+            subject_key.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .expect("cert builder");
+        cert_builder.serial(1).expect("serial");
+        cert_builder.key_id("host-cert").expect("key_id");
+        cert_builder.cert_type(CertType::Host).expect("cert_type");
+        cert_builder
+            .valid_principal("127.0.0.1")
+            .expect("valid_principal");
+        let cert = cert_builder.sign(&ca_key).expect("sign cert");
+
+        for policy in [
+            HostKeyPolicy::Strict,
+            HostKeyPolicy::Tofu,
+            HostKeyPolicy::Off,
+        ] {
+            let mut handler = make_handler(policy, Arc::clone(&known));
+            let accepted_err = handler
+                .verify_server_key_bytes(
+                    "ssh-ed25519",
+                    Err(russh::keys::ssh_key::Error::AlgorithmUnknown),
+                )
+                .await
+                .expect("verify_server_key_bytes");
+            assert!(
+                !accepted_err,
+                "serialization failure must be rejected under {policy:?}"
+            );
+
+            let accepted_empty = handler
+                .verify_server_key_bytes("ssh-ed25519", Ok(Vec::new()))
+                .await
+                .expect("verify_server_key_bytes");
+            assert!(
+                !accepted_empty,
+                "empty serialized key blob must be rejected under {policy:?}"
+            );
+
+            let accepted_cert = handler
+                .check_server_key(&PublicKeyOrCertificate::Certificate(cert.clone()))
+                .await
+                .expect("check_server_key cert");
+            assert!(
+                !accepted_cert,
+                "host certificate must be rejected under {policy:?} when CA validation is not configured"
+            );
+        }
+
+        // Verify nothing was pinned to known_hosts even under Tofu.
+        let empty_key = HostKey {
+            key_type: "ssh-ed25519".to_string(),
+            key_blob: Vec::new(),
+        };
+        assert_eq!(
+            known.read().await.check("127.0.0.1", 2222, &empty_key),
+            HostMatch::Unknown,
+            "failed serialization must never pin an empty blob in KnownHosts"
+        );
+    }
+
+    struct InProcessSshServer;
+
+    impl russh::server::Handler for InProcessSshServer {
+        type Error = russh::Error;
+
+        fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> impl std::future::Future<Output = Result<russh::server::Auth, Self::Error>> + Send
+        {
+            async { Ok(russh::server::Auth::Accept) }
+        }
+    }
+
+    async fn spawn_in_process_server(host_key: PrivateKey) -> u16 {
+        let mut server_config = russh::server::Config::default();
+        server_config.keys.push(host_key);
+        let server_config = Arc::new(server_config);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                let _ = russh::server::run_stream(server_config, socket, InProcessSshServer).await;
+            }
+        });
+
+        port
+    }
+
+    #[tokio::test]
+    async fn in_process_russh_server_accepts_matching_key_and_refuses_swapped_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client_key = sample_private_key(0x33);
+        let client_key_openssh = client_key
+            .to_openssh(LineEnding::LF)
+            .expect("encode client key");
+        let client_key_path = dir.path().join("id_ed25519");
+        std::fs::write(&client_key_path, client_key_openssh.as_bytes()).expect("write client key");
+
+        let server_key_a = sample_private_key(0x44);
+        let server_pub_a = server_key_a.public_key().clone();
+        let server_key_b = sample_private_key(0x55);
+
+        // 1. Server with key A: pre-trusted in KnownHosts under Strict policy -> connects.
+        let port_ok = spawn_in_process_server(server_key_a).await;
+        let known_ok_path = dir.path().join("known_hosts_ok");
+        let mut known_ok = KnownHosts::load(known_ok_path).expect("load known_hosts");
+        known_ok
+            .trust(
+                "127.0.0.1",
+                port_ok,
+                &HostKey {
+                    key_type: server_pub_a.algorithm().as_str().to_string(),
+                    key_blob: server_pub_a.to_bytes().expect("server_pub_a bytes"),
+                },
+            )
+            .expect("trust key A");
+        let known_ok = Arc::new(RwLock::new(known_ok));
+        let strict_verifier: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier {
+            policy: HostKeyPolicy::Strict,
+        });
+
+        let session = SshSession::connect(
+            "127.0.0.1".to_string(),
+            port_ok,
+            "root".to_string(),
+            &client_key_path,
+            None,
+            known_ok,
+            Arc::clone(&strict_verifier),
+        )
+        .await
+        .expect("matching host key must connect and authenticate");
+        assert_eq!(session.port, port_ok);
+
+        // 2. Server with swapped key B while KnownHosts pins key A -> refused.
+        let port_bad = spawn_in_process_server(server_key_b).await;
+        let known_bad_path = dir.path().join("known_hosts_bad");
+        let mut known_bad = KnownHosts::load(known_bad_path).expect("load known_hosts");
+        known_bad
+            .trust(
+                "127.0.0.1",
+                port_bad,
+                &HostKey {
+                    key_type: server_pub_a.algorithm().as_str().to_string(),
+                    key_blob: server_pub_a.to_bytes().expect("server_pub_a bytes"),
+                },
+            )
+            .expect("trust key A for port_bad");
+        let known_bad = Arc::new(RwLock::new(known_bad));
+
+        let err = SshSession::connect(
+            "127.0.0.1".to_string(),
+            port_bad,
+            "root".to_string(),
+            &client_key_path,
+            None,
+            known_bad,
+            strict_verifier,
+        )
+        .await
+        .err()
+        .expect("swapped host key must be refused");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Unknown server key"),
+            "expected Unknown server key error in chain, got: {chain}"
         );
     }
 }

@@ -26,6 +26,18 @@ SemVer contract:
   (`PVEAPIToken=<user>!<tokenid>=<uuid>`). Adding `"PVEAPIToken="` to
   `KEY_VALUE_MARKERS` masks the entire `<user>!<tokenid>=<uuid>` value run
   with `[REDACTED]` (case-insensitively).
+- **Upgraded `russh` from `0.62.5` to `0.64.1` (#315).** Closes five GitHub
+  Security Advisories against `russh`: `GHSA-47hw-gvq5-r2gm` (high, client-side
+  channel-scoped `Handler` callbacks firing for channel IDs the client never
+  opened), `GHSA-w3jg-pjxf-73p4` (medium, missing X25519 low-order point
+  validation in hybrid ML-KEM key exchange), `GHSA-35g8-35p8-c8fw` (medium,
+  unbounded memory growth via `CHANNEL_OPEN` flood during a stalled rekey),
+  `GHSA-p8qx-h547-fjw9` (low, strict-kex enforcement before initial KEX
+  completion), and `GHSA-g6xm-f9xp-qq35` (low, server/agent handling).
+  `SshHandler::check_server_key` now adapts to `PublicKeyOrCertificate` while
+  keeping `host_key_certificates` empty (plain `Ed25519` keys only) and
+  rejecting public-key serialization failures instead of falling back to an
+  empty key blob.
 
 - **The docs workflow moved off the self-hosted runner.** `docs.yml`
   declared `runs-on: [self-hosted, Linux, X64]` — labels that name no
