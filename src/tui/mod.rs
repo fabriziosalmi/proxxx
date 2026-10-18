@@ -1660,18 +1660,8 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
             crate::util::spawn_traced::spawn_traced("execute_queue", async move {
                 for op in immediate_ops {
                     let id = op.id.clone();
+                    let target_vmid = queued_action_hitl_target(&op.action).map(|t| t.vmid);
                     let action = *op.action;
-                    let target_vmid = match action {
-                        app::Action::StartGuest { vmid } => Some(vmid),
-                        app::Action::StopGuest { vmid, .. } => Some(vmid),
-                        app::Action::RestartGuest { vmid } => Some(vmid),
-                        app::Action::DeleteGuest { vmid } => Some(vmid),
-                        app::Action::MigrateGuest { vmid, .. } => Some(vmid),
-                        app::Action::ExecuteGuestCommand { vmid, .. } => Some(vmid),
-                        app::Action::MoveDisk { vmid, .. } => Some(vmid),
-                        app::Action::ResizeDisk { vmid, .. } => Some(vmid),
-                        _ => None,
-                    };
 
                     if let Some(vmid) = target_vmid {
                         // find node + capture the full Guest for pre-flight

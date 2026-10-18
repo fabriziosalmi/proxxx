@@ -768,8 +768,12 @@ impl ProxmoxGateway for HitlMockGateway {
     ) -> Result<Vec<proxxx::api::types::ClusterLogEntry>> {
         Ok(vec![])
     }
-    async fn create_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
-        anyhow::bail!("unused")
+    async fn create_snapshot(&self, _: &str, vmid: u32, _: GuestType, _: &str) -> Result<String> {
+        self.record("create_snapshot", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:snapshot:{vmid}"))
     }
     async fn delete_snapshot(&self, _: &str, _: u32, _: GuestType, _: &str) -> Result<String> {
         anyhow::bail!("unused")
@@ -1953,6 +1957,72 @@ async fn execute_queue_gates_destructive_op_while_dispatching_non_gated_op_immed
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(client.calls_for("delete_guest"), vec![200]);
+}
+
+/// #339 queue fixup — The queue dispatcher derives `target_vmid` solely from
+/// `queued_action_hitl_target`: any `Action` not known to that HITL classifier
+/// fails closed (`OpStatus::Error("Invalid Action")`) and is not dispatched to
+/// the API gateway.
+#[tokio::test]
+async fn execute_queue_refuses_unclassified_action_without_dispatching() {
+    use proxxx::app::queue::{OpStatus, QueuedOp};
+    use proxxx::app::{update as app_update, Action, AppState};
+    use proxxx::tui::{dispatch_side_effect, DataMsg, HitlCoordinator};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let coord = Arc::new(HitlCoordinator::new());
+    let mut g = guest(100, "vm-dev");
+    g.node = "pve01".to_string();
+    let client = Arc::new(HitlMockGateway::new().with_node_and_guest("pve01", g.clone()));
+
+    let mut state = AppState::new();
+    state.guests = vec![g];
+    state.op_queue = vec![QueuedOp {
+        id: "op-unclassified-snap".into(),
+        action: Box::new(Action::CreateSnapshot {
+            vmid: 100,
+            name: "snap".into(),
+        }),
+        description: "Snapshot 100".into(),
+        diff: String::new(),
+        status: OpStatus::Pending,
+        created_at_secs: 1,
+        bypass_preflight: false,
+    }];
+
+    let effect = app_update(&mut state, Action::ExecuteQueue).expect("ExecuteQueue side effect");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    dispatch_side_effect(
+        effect,
+        &state,
+        &client,
+        &tx,
+        &[],
+        false,
+        None,
+        &coord,
+        Some("hitl_e2e_unclassified_queue_test"),
+    )
+    .await;
+
+    let mut invalid_status_seen = false;
+    while let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await {
+        if let DataMsg::QueueOpStatusChanged(id, OpStatus::Error(err)) = msg {
+            if id == "op-unclassified-snap" && err.contains("Invalid Action") {
+                invalid_status_seen = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        invalid_status_seen,
+        "unclassified queued action must fail closed with OpStatus::Error(\"Invalid Action\")"
+    );
+    assert!(
+        client.calls_for("create_snapshot").is_empty(),
+        "unclassified queued action must not dispatch to the gateway"
+    );
 }
 
 /// Bonus: invalid callback data is rejected without invoking the gateway.
