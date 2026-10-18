@@ -114,6 +114,13 @@ pub async fn handle_callback_update(
                     warn!("HITL callback failed HMAC verify: {data}");
                     CallbackOutcome::InvalidFormat { data }
                 }
+                CallbackRejection::MissingChat => {
+                    warn!(
+                        "HITL callback without originating chat (configured chat is {}) — refused",
+                        tg_gateway.chat_id()
+                    );
+                    CallbackOutcome::WrongChat { chat_id: 0 }
+                }
                 CallbackRejection::WrongChat { chat_id } => {
                     warn!(
                         "HITL callback from chat {} but configured chat is {} — refused",
@@ -405,6 +412,7 @@ pub enum CallbackRejection {
     MissingData,
     Unsigned { data: String },
     InvalidSignature { data: String },
+    MissingChat,
     WrongChat { chat_id: i64 },
     NoApproversConfigured { user_id: i64 },
     UnauthorizedApprover { user_id: i64 },
@@ -419,7 +427,7 @@ impl CallbackRejection {
             Self::MissingData => None,
             Self::Unsigned { .. } => Some("❌ Unsigned callback refused — daemon upgrade needed"),
             Self::InvalidSignature { .. } => Some("❌ Signature verification failed"),
-            Self::WrongChat { .. } => Some("❌ Wrong chat — refused"),
+            Self::MissingChat | Self::WrongChat { .. } => Some("❌ Wrong chat — refused"),
             Self::NoApproversConfigured { .. } => {
                 Some("❌ No approver allowlist configured — refused. See `allowed_approvers`.")
             }
@@ -480,7 +488,7 @@ pub fn parse_callback_payload(payload: &str) -> Result<ParsedCallback> {
 ///
 /// Performs four checks in fail-closed order:
 /// 1. 16-hex-char HMAC tag present at the last `:` and valid under `gateway.hmac_key()`.
-/// 2. Originating chat ID matches `gateway.chat_id()` (when `cb.message.chat` is present).
+/// 2. Originating chat (`cb.message.chat.id`) is present and matches `gateway.chat_id()`.
 /// 3. `cb.from.id` is listed in `gateway.allowed_approvers()` (empty allowlist refuses all).
 /// 4. Payload parses via [`parse_callback_payload`].
 ///
@@ -504,10 +512,11 @@ pub fn verify_callback(
     if !crate::hitl::hmac_key::verify(gateway.hmac_key(), head_payload, tail_tag) {
         return Err(CallbackRejection::InvalidSignature { data: data.clone() });
     }
-    if let Some(chat) = cb.message.as_ref().and_then(|m| m.chat.as_ref()) {
-        if gateway.chat_id() != chat.id.to_string() {
-            return Err(CallbackRejection::WrongChat { chat_id: chat.id });
-        }
+    let Some(chat) = cb.message.as_ref().and_then(|m| m.chat.as_ref()) else {
+        return Err(CallbackRejection::MissingChat);
+    };
+    if gateway.chat_id() != chat.id.to_string() {
+        return Err(CallbackRejection::WrongChat { chat_id: chat.id });
     }
     let approvers = gateway.allowed_approvers();
     if approvers.is_empty() {

@@ -71,6 +71,7 @@ fn callback_query(id: &str, data: &str) -> CallbackQuery {
         "id": id,
         "from": { "id": TEST_APPROVER, "first_name": "tester" },
         "data": data,
+        "message": { "message_id": 1_i64, "chat": { "id": 12345_i64 } },
     });
     serde_json::from_value(json).expect("CallbackQuery deserializes")
 }
@@ -83,6 +84,7 @@ fn update(update_id: i64, cb: CallbackQuery) -> Update {
             "id": "fallback",
             "from": { "id": TEST_APPROVER, "first_name": "tester" },
             "data": "approve:start:1",
+            "message": { "message_id": 1_i64, "chat": { "id": 12345_i64 } },
         })
     });
     let json = serde_json::json!({
@@ -170,7 +172,7 @@ async fn callback_from_unlisted_user_is_refused() {
         "id": "cb-intruder",
         "from": { "id": 9999_i64, "first_name": "intruder" },
         "data": data,
-        "message": { "message_id": 1_i64 },
+        "message": { "message_id": 1_i64, "chat": { "id": 12345_i64 } },
     }))
     .expect("CallbackQuery deserializes");
     let gw = HitlMockGateway::new();
@@ -301,7 +303,7 @@ async fn quorum_of_two_needs_two_distinct_approvers() {
         "id": "cb-q2",
         "from": { "id": SECOND, "first_name": "second" },
         "data": data,
-        "message": { "message_id": 1_i64 },
+        "message": { "message_id": 1_i64, "chat": { "id": 12345_i64 } },
     }))
     .expect("CallbackQuery deserializes");
     let done = handle_callback_update(&update(3, cb2), &pending, &gw, &tg)
@@ -1680,7 +1682,7 @@ async fn fast_op_skips_intermediate_executing_edit() {
         "id": "cb-fast",
         "from": { "id": TEST_APPROVER, "first_name": "tester" },
         "data": data,
-        "message": { "message_id": 42 },
+        "message": { "message_id": 42, "chat": { "id": 12345_i64 } },
     });
     let upd: Update = serde_json::from_value(serde_json::json!({
         "update_id": 99,
@@ -2140,4 +2142,68 @@ async fn daemon_verify_callback_and_handle_callback_update_round_trip() {
         matches!(out, CallbackOutcome::Executed { vmid: 100, .. }),
         "daemon must execute after verify_callback, got {out:?}"
     );
+}
+
+/// A callback without an originating chat (`message: None` or `message.chat: None`)
+/// must be rejected by `verify_callback`, the daemon, and the TUI poller.
+#[tokio::test]
+async fn callback_without_originating_chat_is_rejected() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let coord = proxxx::tui::HitlCoordinator::new();
+    let txn_id = "stop:100".to_string();
+    let mut rx = coord.register(txn_id.clone()).await;
+
+    let keyboard = tg.build_approval_keyboard(&txn_id, 1);
+    let approve_data = keyboard.inline_keyboard[0][0].callback_data.clone();
+
+    let cb_no_message: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "cb-no-msg",
+        "from": { "id": TEST_APPROVER, "first_name": "tester" },
+        "data": approve_data,
+    }))
+    .expect("CallbackQuery");
+
+    let cb_no_chat: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "cb-no-chat",
+        "from": { "id": TEST_APPROVER, "first_name": "tester" },
+        "data": approve_data,
+        "message": { "message_id": 1_i64 },
+    }))
+    .expect("CallbackQuery");
+
+    for cb in [&cb_no_message, &cb_no_chat] {
+        let verified = proxxx::hitl::daemon::verify_callback(&tg, cb);
+        assert_eq!(
+            verified,
+            Err(proxxx::hitl::daemon::CallbackRejection::MissingChat),
+            "verify_callback must reject callback without chat as MissingChat"
+        );
+
+        let ans = proxxx::tui::handle_tui_callback_query(&tg, &coord, cb)
+            .await
+            .expect("answer");
+        assert!(
+            ans.to_ascii_lowercase().contains("wrong chat"),
+            "TUI rejection for missing chat must explain wrong chat, got: {ans}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "callback without chat must not resolve TUI pending op"
+        );
+
+        let pending = PendingApprovals::new();
+        let gw = HitlMockGateway::new().with_node_and_guest("pve1", guest(100, "vm-100"));
+        let out = handle_callback_update(&update(1, cb.clone()), &pending, &gw, &tg)
+            .await
+            .expect("handle_callback_update");
+        assert!(
+            matches!(out, CallbackOutcome::WrongChat { .. }),
+            "daemon must reject callback without chat as WrongChat, got: {out:?}"
+        );
+        assert!(
+            gw.calls_for("shutdown_guest").is_empty(),
+            "callback without chat must not execute on gateway"
+        );
+    }
 }
