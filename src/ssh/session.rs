@@ -619,7 +619,6 @@ mod hardening_tests {
     impl russh::server::Handler for InProcessSshServer {
         type Error = russh::Error;
 
-        #[allow(clippy::unused_async_trait_impl)]
         async fn auth_publickey(
             &mut self,
             _user: &str,
