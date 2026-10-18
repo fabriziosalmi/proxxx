@@ -39,7 +39,7 @@ use crate::app::{self, Action, AppState, SideEffect, View};
 use crate::config;
 
 // ── Data messages from the API worker back to the controller ──
-enum DataMsg {
+pub enum DataMsg {
     Nodes(Vec<Node>),
     Guests(Vec<Guest>),
     Storage(Vec<StoragePool>),
@@ -1066,16 +1066,129 @@ fn spawn_ssh_open<B: ratatui::backend::Backend>(
     });
 }
 
+/// HITL classification for a [`SideEffect`]: the canonical policy action
+/// name and the target guest VMID (`0` for node/storage-scoped mutations
+/// like ISO downloads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitlTarget {
+    pub action: &'static str,
+    pub vmid: u32,
+}
+
+/// Classify a [`SideEffect`] for the TUI HITL gate (#339).
+///
+/// Uses an exhaustive `match` with no wildcard arm so adding a new
+/// [`SideEffect`] variant fails to compile until it is explicitly
+/// classified here. Every variant that directly mutates PVE state returns
+/// `Some(HitlTarget)`; pure UI, local, read-only, and batch-wrapper
+/// (`ExecuteQueue`, which gates per queued operation) effects return `None`.
+#[must_use]
+pub const fn hitl_action(effect: &SideEffect) -> Option<HitlTarget> {
+    match effect {
+        SideEffect::StartGuest { vmid } => Some(HitlTarget {
+            action: "start",
+            vmid: *vmid,
+        }),
+        SideEffect::StopGuest { vmid, .. } => Some(HitlTarget {
+            action: "stop",
+            vmid: *vmid,
+        }),
+        SideEffect::RestartGuest { vmid } => Some(HitlTarget {
+            action: "restart",
+            vmid: *vmid,
+        }),
+        SideEffect::DeleteGuest { vmid } => Some(HitlTarget {
+            action: "delete",
+            vmid: *vmid,
+        }),
+        SideEffect::CreateSnapshot { vmid, .. } => Some(HitlTarget {
+            action: "snapshot",
+            vmid: *vmid,
+        }),
+        SideEffect::MigrateGuest { vmid, .. } => Some(HitlTarget {
+            action: "migrate",
+            vmid: *vmid,
+        }),
+        SideEffect::ExecuteGuestCommand { vmid, .. } => Some(HitlTarget {
+            action: "exec",
+            vmid: *vmid,
+        }),
+        SideEffect::DownloadIso { .. } => Some(HitlTarget {
+            action: "download_iso",
+            vmid: 0,
+        }),
+        SideEffect::MoveDisk { vmid, .. } => Some(HitlTarget {
+            action: "move_disk",
+            vmid: *vmid,
+        }),
+        SideEffect::ResizeDisk { vmid, .. } => Some(HitlTarget {
+            action: "resize_disk",
+            vmid: *vmid,
+        }),
+        SideEffect::Quit
+        | SideEffect::FetchTaskLog { .. }
+        | SideEffect::ExecuteQueue(_)
+        | SideEffect::ConfigGrep { .. }
+        | SideEffect::OpenSshSession { .. }
+        | SideEffect::SetSshPassphraseAndOpen { .. }
+        | SideEffect::CloseSshSession
+        | SideEffect::FetchSnapshotTree { .. }
+        | SideEffect::FetchHaConsoleData
+        | SideEffect::FetchHardwareData { .. }
+        | SideEffect::SwitchProfile(_) => None,
+    }
+}
+
+/// Map a queued [`app::Action`] inside `SideEffect::ExecuteQueue` to its
+/// [`HitlTarget`] (#339).
+const fn queued_action_hitl_target(action: &app::Action) -> Option<HitlTarget> {
+    match action {
+        app::Action::StartGuest { vmid } => Some(HitlTarget {
+            action: "start",
+            vmid: *vmid,
+        }),
+        app::Action::StopGuest { vmid, .. } => Some(HitlTarget {
+            action: "stop",
+            vmid: *vmid,
+        }),
+        app::Action::RestartGuest { vmid } => Some(HitlTarget {
+            action: "restart",
+            vmid: *vmid,
+        }),
+        app::Action::DeleteGuest { vmid } => Some(HitlTarget {
+            action: "delete",
+            vmid: *vmid,
+        }),
+        app::Action::MigrateGuest { vmid, .. } => Some(HitlTarget {
+            action: "migrate",
+            vmid: *vmid,
+        }),
+        app::Action::ExecuteGuestCommand { vmid, .. } => Some(HitlTarget {
+            action: "exec",
+            vmid: *vmid,
+        }),
+        app::Action::MoveDisk { vmid, .. } => Some(HitlTarget {
+            action: "move_disk",
+            vmid: *vmid,
+        }),
+        app::Action::ResizeDisk { vmid, .. } => Some(HitlTarget {
+            action: "resize_disk",
+            vmid: *vmid,
+        }),
+        _ => None,
+    }
+}
+
 /// Dispatch a side effect to the API. Async because most arms await
 /// the API client; some early-return arms (e.g. `SshSession` lifecycle
 /// passthroughs, MoveDisk/ResizeDisk warn-and-skip) don't, so clippy
 /// flags the function as unused-async on a per-branch basis.
 #[allow(clippy::unused_async)]
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
-async fn dispatch_side_effect(
+pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
     effect: SideEffect,
     state: &AppState,
-    client: &Arc<PxClient>,
+    client: &Arc<G>,
     tx: &mpsc::Sender<DataMsg>,
     policies: &[crate::hitl::policy::Policy],
     skip_hitl: bool,
@@ -1099,9 +1212,9 @@ async fn dispatch_side_effect(
             .map(|g| g.guest_type)
     };
 
-    let check_hitl = |action: &str, vmid: u32, effect: SideEffect| -> bool {
+    let check_hitl = |action: &str, vmid: u32, effect: SideEffect| -> Option<SideEffect> {
         if skip_hitl {
-            return false;
+            return Some(effect);
         }
 
         let tags = state
@@ -1152,10 +1265,6 @@ async fn dispatch_side_effect(
             let coord_clone = Arc::clone(hitl_coord);
             let tg_clone = tg_gateway.cloned();
             crate::util::spawn_traced::spawn_traced("hitl_approval", async move {
-                let _ = tx_cloned
-                    .send(DataMsg::HitlRequested(txn_id.clone(), desc))
-                    .await;
-
                 // P0 reviewer fix: real Telegram round-trip, no
                 // simulation. Three terminal outcomes:
                 //   1. Telegram not configured → DENY (secure_mode
@@ -1168,10 +1277,25 @@ async fn dispatch_side_effect(
                 //   4. Timeout → DENY (the user didn't decide; we
                 //      err on safety).
                 let Some(tg) = tg_clone else {
+                    let _ = tx_cloned
+                        .send(DataMsg::HitlRequested(txn_id.clone(), desc))
+                        .await;
                     error!(
                         "TUI HITL on {action_owned}/{target_owned} requires Telegram, \
                          but [telegram] is not configured — denying"
                     );
+                    if let SideEffect::ExecuteQueue(ref ops) = effect {
+                        for op in ops {
+                            let _ = tx_cloned
+                                .send(DataMsg::QueueOpStatusChanged(
+                                    op.id.clone(),
+                                    crate::app::queue::OpStatus::Error(
+                                        "HITL approval denied or timed out".into(),
+                                    ),
+                                ))
+                                .await;
+                        }
+                    }
                     let _ = tx_cloned
                         .send(DataMsg::HitlApproved(txn_id, false, Box::new(effect)))
                         .await;
@@ -1183,13 +1307,32 @@ async fn dispatch_side_effect(
                     .request_approval(&action_owned, &target_owned, &reason, &txn_id, require)
                     .await
                 {
+                    let _ = tx_cloned
+                        .send(DataMsg::HitlRequested(txn_id.clone(), desc))
+                        .await;
                     error!("Telegram request_approval failed: {e:#} — denying");
                     coord_clone.unregister(&txn_id).await;
+                    if let SideEffect::ExecuteQueue(ref ops) = effect {
+                        for op in ops {
+                            let _ = tx_cloned
+                                .send(DataMsg::QueueOpStatusChanged(
+                                    op.id.clone(),
+                                    crate::app::queue::OpStatus::Error(
+                                        "HITL approval denied or timed out".into(),
+                                    ),
+                                ))
+                                .await;
+                        }
+                    }
                     let _ = tx_cloned
                         .send(DataMsg::HitlApproved(txn_id, false, Box::new(effect)))
                         .await;
                     return;
                 }
+
+                let _ = tx_cloned
+                    .send(DataMsg::HitlRequested(txn_id.clone(), desc))
+                    .await;
 
                 let approved = if let Ok(Ok(b)) =
                     tokio::time::timeout(Duration::from_mins(2), receiver).await
@@ -1200,23 +1343,43 @@ async fn dispatch_side_effect(
                     coord_clone.unregister(&txn_id).await;
                     false
                 };
+                if !approved {
+                    if let SideEffect::ExecuteQueue(ref ops) = effect {
+                        for op in ops {
+                            let _ = tx_cloned
+                                .send(DataMsg::QueueOpStatusChanged(
+                                    op.id.clone(),
+                                    crate::app::queue::OpStatus::Error(
+                                        "HITL approval denied or timed out".into(),
+                                    ),
+                                ))
+                                .await;
+                        }
+                    }
+                }
                 let _ = tx_cloned
                     .send(DataMsg::HitlApproved(txn_id, approved, Box::new(effect)))
                     .await;
             });
-            true
+            None
         } else {
-            false
+            Some(effect)
         }
+    };
+
+    let effect = if let Some(target) = hitl_action(&effect) {
+        let Some(effect) = check_hitl(target.action, target.vmid, effect) else {
+            return;
+        };
+        effect
+    } else {
+        effect
     };
 
     match effect {
         SideEffect::Quit => {}             // handled in caller
         SideEffect::SwitchProfile(_) => {} // handled in caller (breaks the event loop)
         SideEffect::StartGuest { vmid } => {
-            if check_hitl("start", vmid, SideEffect::StartGuest { vmid }) {
-                return;
-            }
             if let (Some(node), Some(gt)) = (get_node(vmid), get_type(vmid)) {
                 info!("Starting guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
@@ -1235,9 +1398,6 @@ async fn dispatch_side_effect(
             }
         }
         SideEffect::StopGuest { vmid, force } => {
-            if check_hitl("stop", vmid, SideEffect::StopGuest { vmid, force }) {
-                return;
-            }
             if let (Some(node), Some(gt)) = (get_node(vmid), get_type(vmid)) {
                 info!("Stopping guest {vmid} on {node} (force={force})");
                 let client_cloned = Arc::clone(client);
@@ -1301,9 +1461,6 @@ async fn dispatch_side_effect(
             }
         }
         SideEffect::RestartGuest { vmid } => {
-            if check_hitl("restart", vmid, SideEffect::RestartGuest { vmid }) {
-                return;
-            }
             if let (Some(node), Some(gt)) = (get_node(vmid), get_type(vmid)) {
                 info!("Restarting guest {vmid} on {node}");
                 let client_cloned = Arc::clone(client);
@@ -1473,11 +1630,35 @@ async fn dispatch_side_effect(
                 return;
             }
 
+            // #339 — Gate each queued op individually before batch dispatch.
+            // Any op that requires HITL approval is sent through `check_hitl`
+            // as a single-op `ExecuteQueue` and excluded from the immediate
+            // batch; on approval it re-enters `dispatch_side_effect` with
+            // `skip_hitl = true`.
+            let mut immediate_ops = Vec::with_capacity(ops.len());
+            for op in ops {
+                if let Some(target) = queued_action_hitl_target(&op.action) {
+                    let Some(SideEffect::ExecuteQueue(mut unblocked)) = check_hitl(
+                        target.action,
+                        target.vmid,
+                        SideEffect::ExecuteQueue(vec![op]),
+                    ) else {
+                        continue;
+                    };
+                    immediate_ops.append(&mut unblocked);
+                } else {
+                    immediate_ops.push(op);
+                }
+            }
+            if immediate_ops.is_empty() {
+                return;
+            }
+
             let client_cloned = Arc::clone(client);
             let tx_cloned = tx.clone();
 
             crate::util::spawn_traced::spawn_traced("execute_queue", async move {
-                for op in ops {
+                for op in immediate_ops {
                     let id = op.id.clone();
                     let action = *op.action;
                     let target_vmid = match action {

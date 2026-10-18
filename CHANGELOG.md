@@ -18,6 +18,20 @@ SemVer contract:
 
 ### Security
 
+- **All mutating TUI side effects and queued batch operations now pass through the HITL gate (#339).**
+  `src/tui/mod.rs` previously called `check_hitl` only inside the `StartGuest`,
+  `StopGuest`, and `RestartGuest` arms of `dispatch_side_effect`, leaving
+  `DeleteGuest`, `MigrateGuest`, `ExecuteGuestCommand`, `CreateSnapshot`,
+  `DownloadIso`, `MoveDisk`, `ResizeDisk`, and `ExecuteQueue` ungated even when
+  `--secure` was enabled or a matching `[[policies]]` rule was configured.
+  `tui::hitl_action` now exhaustively classifies every `SideEffect` variant
+  with no wildcard arm so new variants fail to compile until classified, a
+  single `check_hitl` gate runs before the `match effect` dispatch for all
+  mutating variants (`start`, `stop`, `restart`, `delete`, `snapshot`,
+  `migrate`, `exec`, `download_iso`, `move_disk`, `resize_disk`), and
+  `ExecuteQueue` gates each queued operation individually while preserving
+  write-ahead persistence and immediate dispatch for non-gated operations.
+
 - **Unified HITL Telegram callback verification and quorum enforcement across the daemon and TUI (#336, #337).**
   `TelegramGateway::request_approval` mints approve callbacks with a trailing
   `:r<require>` quorum segment (`approve:<txn_id>:r<require>:<hmac>`), while

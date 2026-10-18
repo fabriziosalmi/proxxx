@@ -386,8 +386,13 @@ impl HitlMockGateway {
         Self::default()
     }
 
-    fn with_node_and_guest(mut self, node_name: &str, g: Guest) -> Self {
-        self.nodes.push(node(node_name));
+    fn with_node_and_guest(mut self, node_name: &str, mut g: Guest) -> Self {
+        if !self.nodes.iter().any(|n| n.node == node_name) {
+            self.nodes.push(node(node_name));
+        }
+        if g.node.is_empty() {
+            g.node = node_name.to_string();
+        }
         self.guests_by_node
             .entry(node_name.to_string())
             .or_default()
@@ -601,32 +606,52 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn get_task_status(&self, _: &str, _: &str) -> Result<TaskStatus> {
         anyhow::bail!("unused")
     }
-    async fn stop_guest(&self, _: &str, _: u32, _: GuestType, _: bool) -> Result<String> {
-        anyhow::bail!("unused")
+    async fn stop_guest(&self, _: &str, vmid: u32, _: GuestType, _: bool) -> Result<String> {
+        self.record("stop_guest", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:stop:{vmid}"))
     }
     async fn migrate_guest(
         &self,
         _: &str,
-        _: u32,
+        vmid: u32,
         _: GuestType,
         _: &str,
         _: bool,
         _: bool,
         _: bool,
     ) -> Result<String> {
-        anyhow::bail!("unused")
+        self.record("migrate_guest", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:migrate:{vmid}"))
     }
-    async fn delete_guest(&self, _: &str, _: u32, _: GuestType) -> Result<String> {
-        anyhow::bail!("unused")
+    async fn delete_guest(&self, _: &str, vmid: u32, _: GuestType) -> Result<String> {
+        self.record("delete_guest", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:delete:{vmid}"))
     }
     async fn execute_guest_command(
         &self,
         _: &str,
-        _: u32,
+        vmid: u32,
         _: &GuestType,
         _: &str,
     ) -> Result<proxxx::api::types::GuestExecResult> {
-        anyhow::bail!("unused")
+        self.record("execute_guest_command", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(proxxx::api::types::GuestExecResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
     }
     async fn qemu_agent_file_read(
         &self,
@@ -1386,16 +1411,31 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn move_disk(
         &self,
         _: &str,
-        _: u32,
+        vmid: u32,
         _: GuestType,
         _: &str,
         _: &str,
         _: bool,
     ) -> Result<String> {
-        anyhow::bail!("unused")
+        self.record("move_disk", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:move_disk:{vmid}"))
     }
-    async fn resize_disk(&self, _: &str, _: u32, _: GuestType, _: &str, _: &str) -> Result<String> {
-        anyhow::bail!("unused")
+    async fn resize_disk(
+        &self,
+        _: &str,
+        vmid: u32,
+        _: GuestType,
+        _: &str,
+        _: &str,
+    ) -> Result<String> {
+        self.record("resize_disk", vmid);
+        if let Some(ref e) = self.fail_with {
+            anyhow::bail!("{e}")
+        }
+        Ok(format!("UPID:resize_disk:{vmid}"))
     }
     async fn list_snapshots(
         &self,
@@ -1528,66 +1568,391 @@ async fn pve_403_during_execute_surfaces_as_failure() {
     assert_eq!(starts, vec![200], "start_guest must be invoked once");
 }
 
-/// Invariant 2 (matrix row 9) — `secure_mode` forces HITL on destructive.
-///
-/// Set-up: a `secure_mode = true` flag is communicated by the SENDER
-/// path (the TUI/CLI/MCP code that decides whether to call
-/// `request_approval` before queuing the op). The receiver-side
-/// `handle_callback_update` does not own the `secure_mode` decision —
-/// it only processes callbacks that the sender chose to dispatch.
-///
-/// What we verify here: when a sender is properly using `TelegramGateway`,
-/// secure_mode-classified destructive ops (delete/stop/restart/migrate)
-/// produce a `request_approval` POST to Telegram. We assert by
-/// counting `sendMessage` hits on the wiremock when the sender side
-/// gates via `is_destructive`.
-///
-/// This test exercises the sender contract — the receiver behaviour
-/// is covered by the other two tests.
+/// #339 Test 1 — Every mutating `SideEffect` variant maps to `Some(HitlTarget)`
+/// with the canonical action string, and every local/read-only/batch-wrapper
+/// variant maps to `None`.
+#[test]
+fn hitl_action_classifies_every_mutating_side_effect() {
+    use proxxx::app::SideEffect;
+    use proxxx::tui::{hitl_action, HitlTarget};
+
+    let n = || "pve01".to_string();
+    let check = |eff: SideEffect, action: &'static str, vmid: u32| {
+        assert_eq!(hitl_action(&eff), Some(HitlTarget { action, vmid }));
+    };
+    check(SideEffect::StartGuest { vmid: 101 }, "start", 101);
+    check(
+        SideEffect::StopGuest {
+            vmid: 102,
+            force: false,
+        },
+        "stop",
+        102,
+    );
+    check(SideEffect::RestartGuest { vmid: 103 }, "restart", 103);
+    check(SideEffect::DeleteGuest { vmid: 104 }, "delete", 104);
+    check(
+        SideEffect::CreateSnapshot {
+            vmid: 105,
+            name: "s".into(),
+        },
+        "snapshot",
+        105,
+    );
+    check(
+        SideEffect::MigrateGuest {
+            node: n(),
+            vmid: 106,
+            target_node: "pve02".into(),
+        },
+        "migrate",
+        106,
+    );
+    check(
+        SideEffect::ExecuteGuestCommand {
+            node: n(),
+            vmid: 107,
+            guest_type: GuestType::Qemu,
+            command: "uname -a".into(),
+        },
+        "exec",
+        107,
+    );
+    check(
+        SideEffect::DownloadIso {
+            node: n(),
+            storage: "local".into(),
+            url: "https://example.invalid/debian.iso".into(),
+            filename: "debian.iso".into(),
+            checksum: None,
+            content: "iso".into(),
+        },
+        "download_iso",
+        0,
+    );
+    check(
+        SideEffect::MoveDisk {
+            node: n(),
+            vmid: 108,
+            guest_type: GuestType::Qemu,
+            disk: "scsi0".into(),
+            target_storage: "ceph".into(),
+            delete_source: true,
+        },
+        "move_disk",
+        108,
+    );
+    check(
+        SideEffect::ResizeDisk {
+            node: n(),
+            vmid: 109,
+            guest_type: GuestType::Qemu,
+            disk: "scsi0".into(),
+            size: "+10G".into(),
+        },
+        "resize_disk",
+        109,
+    );
+
+    assert_non_mutating_side_effects_classify_as_none();
+}
+
+fn assert_non_mutating_side_effects_classify_as_none() {
+    use proxxx::app::SideEffect;
+    use proxxx::tui::hitl_action;
+
+    let n = || "pve01".to_string();
+    for effect in [
+        SideEffect::Quit,
+        SideEffect::FetchTaskLog {
+            upid: "UPID:1".into(),
+            node: n(),
+        },
+        SideEffect::ExecuteQueue(vec![]),
+        SideEffect::ConfigGrep {
+            query: "net0".into(),
+        },
+        SideEffect::OpenSshSession { vmid: 100 },
+        SideEffect::SetSshPassphraseAndOpen {
+            vmid: 100,
+            passphrase: proxxx::util::secret::SecretString::new("secret".into()),
+        },
+        SideEffect::CloseSshSession,
+        SideEffect::FetchSnapshotTree { vmid: 100 },
+        SideEffect::FetchHaConsoleData,
+        SideEffect::FetchHardwareData { node: n() },
+        SideEffect::SwitchProfile("prod".into()),
+    ] {
+        assert_eq!(
+            hitl_action(&effect),
+            None,
+            "{effect:?} must classify as None"
+        );
+    }
+}
+
+/// Approve `txn_id` via `TelegramGateway::build_approval_keyboard` +
+/// `handle_tui_callback_query` and await `DataMsg::HitlApproved(txn_id, true, effect)`.
+async fn approve_pending_tui_txn(
+    tg: &TelegramGateway,
+    coord: &proxxx::tui::HitlCoordinator,
+    rx: &mut tokio::sync::mpsc::Receiver<proxxx::tui::DataMsg>,
+    cb_id: &str,
+    txn_id: &str,
+) -> proxxx::app::SideEffect {
+    let kb = tg.build_approval_keyboard(txn_id, 1);
+    let approve_data = &kb.inline_keyboard[0][0].callback_data;
+    let cb = callback_query(cb_id, approve_data);
+    let ans = proxxx::tui::handle_tui_callback_query(tg, coord, &cb).await;
+    assert_eq!(ans.as_deref(), Some("✅ Approved"));
+
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+    {
+        if let proxxx::tui::DataMsg::HitlApproved(t, true, eff) = msg {
+            assert_eq!(t, txn_id);
+            return *eff;
+        }
+    }
+    panic!("approval for {txn_id} must emit DataMsg::HitlApproved(..., true, _)");
+}
+
+/// Await `DataMsg::HitlRequested` on `rx` and return its `txn_id`.
+async fn recv_hitl_requested(
+    rx: &mut tokio::sync::mpsc::Receiver<proxxx::tui::DataMsg>,
+    method_name: &str,
+) -> String {
+    while let Ok(Some(msg)) =
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+    {
+        if let proxxx::tui::DataMsg::HitlRequested(txn_id, _) = msg {
+            return txn_id;
+        }
+    }
+    panic!("{method_name} under secure_mode must emit DataMsg::HitlRequested");
+}
+
+/// #339 Test 2 — Through the real `dispatch_side_effect` path (not a surrogate),
+/// with `secure_mode = true` and Telegram stubbed: `DeleteGuest`, `MigrateGuest`,
+/// `ExecuteGuestCommand`, `MoveDisk`, and `ResizeDisk` do NOT reach the API stub
+/// before approval, and DO reach the API stub after Telegram approval.
 #[tokio::test]
 async fn secure_mode_forces_request_approval_for_destructive() {
-    use wiremock::matchers::body_string_contains;
+    use proxxx::app::{AppState, SideEffect};
+    use proxxx::tui::{dispatch_side_effect, HitlCoordinator};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    let server = MockServer::start().await;
-    // Match on a body fragment unique to the approval request: the
-    // "HITL Approval Required" header with action+target inline.
-    Mock::given(method("POST"))
-        .and(path("/botfaketoken/sendMessage"))
-        .and(body_string_contains("HITL Approval Required"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "ok": true,
-            "result": { "message_id": 1 },
-        })))
-        .expect(3) // three destructive actions below MUST each hit sendMessage
-        .mount(&server)
+    let server = setup_telegram_mock().await;
+    let tg = Arc::new(fake_gateway(&server));
+    let coord = Arc::new(HitlCoordinator::new());
+
+    let mut g = guest(200, "vm-prod");
+    g.node = "pve01".to_string();
+    let client = Arc::new(HitlMockGateway::new().with_node_and_guest("pve01", g.clone()));
+
+    let mut state = AppState::new();
+    state.secure_mode = true;
+    state.guests = vec![g];
+
+    let effects: [(&str, SideEffect); 5] = [
+        ("delete_guest", SideEffect::DeleteGuest { vmid: 200 }),
+        (
+            "migrate_guest",
+            SideEffect::MigrateGuest {
+                node: "pve01".into(),
+                vmid: 200,
+                target_node: "pve02".into(),
+            },
+        ),
+        (
+            "execute_guest_command",
+            SideEffect::ExecuteGuestCommand {
+                node: "pve01".into(),
+                vmid: 200,
+                guest_type: GuestType::Qemu,
+                command: "id".into(),
+            },
+        ),
+        (
+            "move_disk",
+            SideEffect::MoveDisk {
+                node: "pve01".into(),
+                vmid: 200,
+                guest_type: GuestType::Qemu,
+                disk: "scsi0".into(),
+                target_storage: "ceph".into(),
+                delete_source: true,
+            },
+        ),
+        (
+            "resize_disk",
+            SideEffect::ResizeDisk {
+                node: "pve01".into(),
+                vmid: 200,
+                guest_type: GuestType::Qemu,
+                disk: "scsi0".into(),
+                size: "+10G".into(),
+            },
+        ),
+    ];
+
+    for (idx, (method_name, effect)) in effects.into_iter().enumerate() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        dispatch_side_effect(
+            effect,
+            &state,
+            &client,
+            &tx,
+            &[],
+            false,
+            Some(&tg),
+            &coord,
+            None,
+        )
         .await;
 
-    let tg = fake_gateway(&server);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            client.calls_for(method_name).is_empty(),
+            "{method_name} must NOT reach the API stub before HITL approval"
+        );
 
-    // Surrogate for the sender-side gate: when secure_mode is on AND the
-    // op is destructive, request_approval is called. We invoke directly
-    // here — the production gate logic lives in tui::mod and cli::mod.
-    let secure_mode = true;
-    let destructive_ops: &[(&str, u32)] = &[("stop", 100), ("restart", 100), ("delete", 200)];
-    for (action, vmid) in destructive_ops {
-        let is_destructive = matches!(*action, "stop" | "restart" | "delete" | "migrate");
-        if secure_mode && is_destructive {
-            tg.request_approval(
-                action,
-                &vmid.to_string(),
-                "test",
-                &format!("{action}:{vmid}"),
-                1,
-            )
-            .await
-            .expect("request_approval");
+        let txn_id = recv_hitl_requested(&mut rx, method_name).await;
+        let eff =
+            approve_pending_tui_txn(&tg, &coord, &mut rx, &format!("cb-sec-{idx}"), &txn_id).await;
+        dispatch_side_effect(
+            eff,
+            &state,
+            &client,
+            &tx,
+            &[],
+            true,
+            Some(&tg),
+            &coord,
+            None,
+        )
+        .await;
+
+        for _ in 0..40 {
+            if !client.calls_for(method_name).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(client.calls_for(method_name), vec![200]);
+    }
+}
+
+/// #339 Test 3 — `ExecuteQueue` with one gated op (`delete`) and one non-gated
+/// op (`start`, no policy, `secure_mode` does not gate `start`): `start` reaches
+/// the API immediately, `delete` does not until approved.
+#[tokio::test]
+async fn execute_queue_gates_destructive_op_while_dispatching_non_gated_op_immediately() {
+    use proxxx::app::queue::{OpStatus, QueuedOp};
+    use proxxx::app::{update as app_update, Action, AppState};
+    use proxxx::tui::{dispatch_side_effect, DataMsg, HitlCoordinator};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let server = setup_telegram_mock().await;
+    let tg = Arc::new(fake_gateway(&server));
+    let coord = Arc::new(HitlCoordinator::new());
+
+    let mut g_start = guest(100, "vm-dev");
+    g_start.node = "pve01".to_string();
+    let mut g_delete = guest(200, "vm-prod");
+    g_delete.node = "pve01".to_string();
+    let client = Arc::new(
+        HitlMockGateway::new()
+            .with_node_and_guest("pve01", g_start.clone())
+            .with_node_and_guest("pve01", g_delete.clone()),
+    );
+
+    let mut state = AppState::new();
+    state.secure_mode = true;
+    state.guests = vec![g_start, g_delete];
+    state.op_queue = vec![
+        QueuedOp {
+            id: "op-start-100".into(),
+            action: Box::new(Action::StartGuest { vmid: 100 }),
+            description: "Start 100".into(),
+            diff: String::new(),
+            status: OpStatus::Pending,
+            created_at_secs: 1,
+            bypass_preflight: false,
+        },
+        QueuedOp {
+            id: "op-delete-200".into(),
+            action: Box::new(Action::DeleteGuest { vmid: 200 }),
+            description: "Delete 200".into(),
+            diff: String::new(),
+            status: OpStatus::Pending,
+            created_at_secs: 2,
+            bypass_preflight: false,
+        },
+    ];
+
+    let effect = app_update(&mut state, Action::ExecuteQueue).expect("ExecuteQueue side effect");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    dispatch_side_effect(
+        effect,
+        &state,
+        &client,
+        &tx,
+        &[],
+        false,
+        Some(&tg),
+        &coord,
+        Some("hitl_e2e_queue_test"),
+    )
+    .await;
+
+    let mut start_succeeded = false;
+    let mut delete_txn_id = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while tokio::time::Instant::now() < deadline && (!start_succeeded || delete_txn_id.is_none()) {
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(25), rx.recv()).await {
+            match msg {
+                DataMsg::QueueOpStatusChanged(id, OpStatus::Success) if id == "op-start-100" => {
+                    start_succeeded = true;
+                }
+                DataMsg::HitlRequested(txn_id, _) => {
+                    delete_txn_id = Some(txn_id);
+                }
+                _ => {}
+            }
         }
     }
 
-    // Drop forces wiremock to verify the .expect(3) — if any call was
-    // missed, the panic surfaces here with a clear "expected 3, got N"
-    // message.
-    drop(server);
+    assert_eq!(client.calls_for("start_guest"), vec![100]);
+    assert!(
+        client.calls_for("delete_guest").is_empty(),
+        "gated delete op in ExecuteQueue must NOT reach the API before approval"
+    );
+    let txn_id = delete_txn_id.expect("gated delete op must emit DataMsg::HitlRequested");
+
+    let eff = approve_pending_tui_txn(&tg, &coord, &mut rx, "cb-queue-del", &txn_id).await;
+    dispatch_side_effect(
+        eff,
+        &state,
+        &client,
+        &tx,
+        &[],
+        true,
+        Some(&tg),
+        &coord,
+        Some("hitl_e2e_queue_test"),
+    )
+    .await;
+
+    for _ in 0..40 {
+        if !client.calls_for("delete_guest").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(client.calls_for("delete_guest"), vec![200]);
 }
 
 /// Bonus: invalid callback data is rejected without invoking the gateway.

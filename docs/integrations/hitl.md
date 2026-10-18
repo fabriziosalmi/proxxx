@@ -182,17 +182,37 @@ Every callback is logged at `INFO` level in the proxxx audit log
 Telegram itself preserves the chat history with the responder's
 identity. proxxx writes the audit-side correlation.
 
+## TUI gated actions
+
+In the TUI (`src/tui/mod.rs`), every `SideEffect` is classified by the
+exhaustive `hitl_action` matcher (which has no wildcard arm, so new
+`SideEffect` variants must be classified at compile time) before dispatch:
+
+- **Policy-matchable TUI actions (`[[policies]]`)**: `start`, `stop`,
+  `restart`, `delete`, `snapshot` (`CreateSnapshot`), `migrate`, `exec`
+  (`ExecuteGuestCommand`), `download_iso` (`DownloadIso`, target `0`),
+  `move_disk`, and `resize_disk`.
+- **Destructive TUI actions gated by `--secure`**: `stop`, `delete`,
+  `restart`, `migrate`, `exec`, `move_disk`, and `resize_disk`.
+- **Operation queue (`ExecuteQueue`)**: queued operations are gated
+  individually before batch dispatch. Operations that do not require
+  approval keep their write-ahead persistence and run immediately with the
+  batch; operations that require HITL approval are sent through the same
+  Telegram approval flow and execute only after approval (or are marked as
+  failed on denial or timeout).
+
 ## Self-HITL (`--secure`)
 
-For unattended scripts that want belt-and-suspenders:
+For unattended scripts or TUI sessions that want belt-and-suspenders:
 
 ```sh
 proxxx --secure delete 100 --yes
 ```
 
-`--secure` forces every destructive operation through the HITL gate
-regardless of policy match. Use this in CI to require human approval
-on mutations.
+`--secure` forces every destructive operation (`stop`, `delete`, `restart`,
+`migrate`, `exec`, `move_disk`, `resize_disk`) through the HITL gate
+regardless of policy match. Use this in CI or production sessions to require
+human approval on destructive mutations.
 
 ## Limits
 
