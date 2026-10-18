@@ -379,9 +379,11 @@ mod tests {
             for arg in sub.get_arguments() {
                 let id = arg.get_id().as_str();
                 // `incident freeze` and `incident thaw` (`src/cli/incident.rs:50,64`)
-                // have a pre-existing local `--profile` argument that shadows the
-                // global `--profile` flag; per Rule 1 that is out of scope for Step 1
-                // (#345) and reported in Notes for Claude.
+                // declare a local `profile` with the same id and the same type
+                // (`Option<String>`) as the global `--profile`. Clap fills both fields
+                // from either position (verified by parse assertions below), so it does
+                // not panic and does not misroute; it is exempted as a deliberate,
+                // harmless duplicate.
                 if (sub_path == "proxxx incident freeze" || sub_path == "proxxx incident thaw")
                     && id == "profile"
                 {
@@ -442,6 +444,46 @@ mod tests {
         assert!(
             bad_import.is_err(),
             "expected --source-format iso to be rejected by clap"
+        );
+
+        let freeze_before = Cli::try_parse_from([
+            "proxxx",
+            "--profile",
+            "prod",
+            "incident",
+            "freeze",
+            "--reason",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(freeze_before.profile.as_deref(), Some("prod"));
+        assert_eq!(
+            format!("{:?}", freeze_before.command),
+            "Some(Incident { action: Freeze { reason: \"x\", ttl: None, profile: Some(\"prod\") } })"
+        );
+
+        let freeze_after = Cli::try_parse_from([
+            "proxxx",
+            "incident",
+            "freeze",
+            "--reason",
+            "x",
+            "--profile",
+            "prod",
+        ])
+        .unwrap();
+        assert_eq!(freeze_after.profile.as_deref(), Some("prod"));
+        assert_eq!(
+            format!("{:?}", freeze_after.command),
+            "Some(Incident { action: Freeze { reason: \"x\", ttl: None, profile: Some(\"prod\") } })"
+        );
+
+        let freeze_none =
+            Cli::try_parse_from(["proxxx", "incident", "freeze", "--reason", "x"]).unwrap();
+        assert_eq!(freeze_none.profile, None);
+        assert_eq!(
+            format!("{:?}", freeze_none.command),
+            "Some(Incident { action: Freeze { reason: \"x\", ttl: None, profile: None } })"
         );
     }
 }
