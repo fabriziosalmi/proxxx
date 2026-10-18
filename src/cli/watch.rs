@@ -90,12 +90,7 @@ async fn check_guest_condition(
     let vmid = vmid_str
         .parse::<u32>()
         .map_err(|_| anyhow::anyhow!("Invalid VMID format: {target}"))?;
-    let guest = client
-        .get_all_guests()
-        .await?
-        .into_iter()
-        .find(|g| g.vmid == vmid)
-        .ok_or_else(|| anyhow::anyhow!("Target guest {target} not found"))?;
+    let guest = crate::cli::common::find_guest_full(client, vmid).await?;
     let current_val = match key {
         "status" => format!("{:?}", guest.status).to_lowercase(),
         _ => anyhow::bail!("Unsupported condition key: {key}"),
@@ -116,7 +111,9 @@ async fn check_storage_condition(
         .await?
         .into_iter()
         .find(|p| p.storage == pool_id)
-        .ok_or_else(|| anyhow::anyhow!("Target storage {target} not found"))?;
+        .ok_or_else(|| {
+            crate::api::ApiError::NotFound(format!("Target storage {target} not found"))
+        })?;
     if key != "usage" {
         anyhow::bail!("Unsupported condition key for storage: {key}");
     }

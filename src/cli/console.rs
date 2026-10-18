@@ -621,21 +621,12 @@ pub async fn execute_vnc(
         // route /qemu/ vs /lxc/. One get_guests call is the
         // cheapest way to determine it (filtering one node).
         let guests = client.get_guests(&n).await?;
-        let g = guests
-            .iter()
-            .find(|g| g.vmid == vmid)
-            .ok_or_else(|| anyhow::anyhow!("vmid {vmid} not on node {n}"))?;
+        let g = guests.iter().find(|g| g.vmid == vmid).ok_or_else(|| {
+            crate::api::ApiError::NotFound(format!("vmid {vmid} not on node {n}"))
+        })?;
         (n, g.guest_type)
     } else {
-        client
-            .find_guest(vmid)
-            .await?
-            .map(|g| (g.node, g.guest_type))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vmid {vmid} not found on any node — pass --node X to skip discovery"
-                )
-            })?
+        find_guest(client, vmid).await?
     };
 
     let ticket = client.get_guest_vncproxy(&node_name, vmid, gt).await?;

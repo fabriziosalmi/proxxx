@@ -8,9 +8,9 @@ instead of grepping stderr.
 | `0` | Success | Operation completed |
 | `1` | Generic failure | Catch-all; check stderr for the message |
 | `2` | Usage error / diff present | clap rejected the arguments **OR** a read-only check found drift (`state diff`, `reconcile run`) **OR** a mutation had a failed change (`state apply`, `reconcile converge`) |
-| `3` | Configuration error | TOML invalid, required field missing, profile not found |
+| `3` | Configuration error | TOML invalid, required field missing, profile not found, no default profile, invalid enum-like setting, or `proxxx pbs` without a `[pbs]` / `[profiles.<name>.pbs]` section |
 | `4` | Authentication / authorization | `Unauthorized` (401) or `Forbidden` (403) — see [errors](/reference/errors) |
-| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc. Also `proxxx find <vmid>` when no profile owns the VMID. |
+| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc., a VMID absent from `GET /cluster/resources?type=vm`, or `proxxx find <vmid>` when no profile owns the VMID. A guest listed in `/cluster/resources?type=vm` whose hosting node is offline or unreachable does **not** exit `5` (exits `1`, or `7` on transient `RateLimited` / `StorageHang`), so teardown scripts never treat an unreachable node as "already gone". |
 | `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from per-guest pre-flight (running guest, etc.) and state-apply / `reconcile converge` pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). The unmanned daemon `auto_converge` always runs as if `--allow-risk` were absent, so a Severe drift is left for a human (no exit code — it alerts + skips). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
 | `8` | Mutation refused by a local lock | A mutation was refused by a proxxx-side lock before reaching PVE. Either `proxxx incident freeze` is in effect (run `proxxx incident thaw` first, or wait for the TTL), or the active profile is configured `read_only = true` (point at a writable profile, or remove the flag from `config.toml`). |
@@ -67,15 +67,36 @@ chain via `Error::chain().find_map(downcast_ref::<ApiError>)` and
 calls `ApiError::exit_code()`. Non-API anyhow errors (or `ApiError`
 variants not in the table) fall through to `1`.
 
+Guest lookups (`cli::common::find_guest` and `find_guest_full`) treat
+`GET /cluster/resources?type=vm` (backed by `pmxcfs` `/etc/pve/.vmlist`)
+as the authoritative cluster inventory. A VMID is surfaced as
+`ApiError::NotFound` (`guest <vmid> not found in cluster`, exit `5`)
+only when it is absent from `/cluster/resources?type=vm`. When a guest
+is listed in `/cluster/resources` (even with status `"unknown"` while
+its node is offline) and the per-node status query fails, the error
+names the node and its cluster status and preserves the underlying
+error chain (`1`, or `7` when the node returned `RateLimited` or
+`StorageHang`), never `5`. When `/cluster/resources` itself is
+unavailable and a per-node walk is used as fallback, any node query
+error aborts the lookup with a summary of node failures rather than
+reporting the guest as missing.
+
 Pre-flight refusal is surfaced as a typed `app::preflight::PreflightRefusal`
 error carried via anyhow; the same chain walker maps it to `6`.
 
-Configuration-load errors are typed via `config::ConfigError` with
-three variants — `NotFound` (no `config.toml`), `Io` (read failure
-once file exists), `Toml` (parse / missing-required-field). All
-three currently map to exit `3` per the `Configuration error` slot
-above. Splitting individual variants to distinct codes later is an
-additive (minor) bump as long as `3` stays in the set.
+Configuration errors are typed via `config::ConfigError` with eight
+variants: `NotFound` (no `config.toml`), `Io` (read failure once the
+file exists), `Toml` (invalid TOML syntax), `UnknownProfile` (requested
+`--profile` or `PROXXX_PROFILE` not in `[profiles]`),
+`NoDefaultProfile` (multi-profile config without `default_profile` or
+`--profile`), `ProfileParse` (missing required field or invalid type in
+a profile block), `InvalidValue` (unsupported enum-like setting in
+`validate_enum_like_fields`), and `MissingPbsConfig` (`proxxx pbs`
+invoked when the active profile has no `[pbs]` /
+`[profiles.<name>.pbs]` block). All eight map to exit `3` per the
+`Configuration error` slot above. Splitting individual variants to
+distinct codes later is an additive (minor) bump as long as `3` stays
+in the set.
 
 ## Stability
 

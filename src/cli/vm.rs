@@ -756,11 +756,7 @@ pub async fn execute_snapshot(
     };
 
     // Locate the guest to get its node + type (bug #1 dispatch).
-    let (node, gt) = client
-        .find_guest(vmid)
-        .await?
-        .map(|g| (g.node, g.guest_type))
-        .ok_or_else(|| anyhow::anyhow!("Guest {vmid} not found"))?;
+    let (node, gt) = find_guest(client, vmid).await?;
 
     let upid = if is_create {
         client.create_snapshot(&node, vmid, gt, &name).await?

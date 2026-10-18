@@ -1034,11 +1034,13 @@ pub async fn execute_pbs(
 ) -> Result<(Value, i32)> {
     use crate::pbs::{PbsClient, PbsGateway};
 
-    let pbs_cfg = config.pbs.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no [profiles.X.pbs] block configured — add url, user, token_id, token_secret(_file)"
-        )
-    })?;
+    let pbs_cfg =
+        config
+            .pbs
+            .clone()
+            .ok_or_else(|| crate::config::ConfigError::MissingPbsConfig {
+                profile: config.profile_name.clone(),
+            })?;
 
     match action {
         PbsCommand::Ping => {
@@ -1258,5 +1260,37 @@ pub async fn execute_iso(
                 0,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod pbs_config_error_tests {
+    use super::{execute_pbs, PbsCommand};
+    use crate::config::{ConfigError, ProfileConfig};
+
+    #[tokio::test]
+    async fn missing_pbs_block_downcasts_to_config_error_and_names_real_profile() {
+        let mut cfg: ProfileConfig =
+            toml::from_str("url = \"https://pve.example:8006\"\nuser = \"root@pam\"\n")
+                .expect("parse profile");
+        cfg.profile_name = Some("prod".to_string());
+
+        let err = execute_pbs(&cfg, PbsCommand::Ping, None)
+            .await
+            .expect_err("missing [profiles.prod.pbs] block must fail");
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "missing pbs block must downcast to ConfigError (exit 3), got: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("[profiles.prod.pbs]"),
+            "must name the real profile in [profiles.prod.pbs], got: {msg}"
+        );
+        assert!(
+            !msg.contains("[profiles.X.pbs]"),
+            "must not contain literal placeholder [profiles.X.pbs], got: {msg}"
+        );
     }
 }

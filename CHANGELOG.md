@@ -106,6 +106,31 @@ SemVer contract:
   so an unknown user returns a typed `ApiError::NotFound` (exit code 5) while an
   existing user with no privileges returns `paths: []` (exit code 0).
 
+- **Guest-targeted CLI commands now exit `5` (`NotFound`) when a VMID is absent from the cluster (#358).**
+  `cli::common::find_guest` and `find_guest_full` (plus `metrics vm|ct`,
+  `watch -t vm-<id>`, `snapshot`, and `console vnc`) previously returned
+  untyped `anyhow!` errors when a guest could not be found, falling
+  through to generic exit `1`. They now treat
+  `GET /cluster/resources?type=vm` (`pmxcfs` `/etc/pve/.vmlist`) as
+  authoritative and return `ApiError::NotFound` (`guest <vmid> not found
+  in cluster`, exit `5`) only when the VMID is absent from the cluster
+  resource list. When a VMID is present in `/cluster/resources` (even
+  with status `"unknown"` while its hosting node is offline) and the
+  node cannot be queried, the error names the node and its cluster
+  status and exits `1` (or `7` if the underlying failure is transient
+  `RateLimited` / `StorageHang`), so teardown scripts never mistake an
+  unreachable node for an already-deleted guest.
+- **Configuration errors now consistently exit `3` (`ConfigError`) (#359).**
+  Unknown `--profile` / `PROXXX_PROFILE`, missing `default_profile` in a
+  multi-profile config, missing required fields or profile parse errors,
+  invalid enum-like values in `validate_enum_like_fields`, and invoking
+  `proxxx pbs ...` without a PBS configuration block now return typed
+  `ConfigError` variants (`UnknownProfile`, `NoDefaultProfile`,
+  `ProfileParse`, `InvalidValue`, `MissingPbsConfig`) instead of plain
+  `anyhow!` strings, exiting `3` per the documented exit-code contract.
+  `MissingPbsConfig` also names the active profile section
+  (`[profiles.<name>.pbs]`, or `[pbs]` for flat configs) instead of the
+  literal placeholder `[profiles.X.pbs]`.
 
 ## [0.14.0] — 2026-09-09
 

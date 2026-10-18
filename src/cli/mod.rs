@@ -1116,6 +1116,9 @@ pub async fn execute(
     }
 
     let config = crate::config::load_config(profile)?;
+    if let Command::Pbs { action } = cmd {
+        return storage::execute_pbs(&config, action, cli_secret).await;
+    }
     let client = std::sync::Arc::new(crate::api::PxClient::new(config.clone(), cli_secret).await?);
 
     use crate::api::ProxmoxGateway;

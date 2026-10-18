@@ -859,22 +859,24 @@ impl ProfileConfig {
     pub fn validate_enum_like_fields(&self) -> Result<()> {
         const AUTH_VALUES: &[&str] = &["token", "password"];
         if !AUTH_VALUES.contains(&self.auth.as_str()) {
-            anyhow::bail!(
+            return Err(ConfigError::InvalidValue(format!(
                 "config key `auth` is {:?}, which is not a recognised value. \
                  Accepted: {}. Note the comparison is case-sensitive.",
                 self.auth,
                 AUTH_VALUES.join(" | ")
-            );
+            ))
+            .into());
         }
         if let Some(mode) = self.tls_pin_mode.as_deref() {
             if !mode.trim().is_empty() && !mode.eq_ignore_ascii_case("tofu") {
-                anyhow::bail!(
+                return Err(ConfigError::InvalidValue(format!(
                     "config key `tls_pin_mode` is {mode:?}, which is not a recognised \
                      value. Accepted: \"tofu\" (case-insensitive), or omit the key \
                      entirely for no pinning. Refusing rather than silently running \
                      unpinned — you set this key because the default trust posture \
                      was not enough."
-                );
+                ))
+                .into());
             }
         }
         Ok(())
@@ -1029,6 +1031,47 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    /// The requested `--profile <name>` (or `default = "<name>"`) does
+    /// not exist under `[profiles]` in `config.toml`.
+    #[error("Profile '{profile}' not found in config. Known profiles: {known}")]
+    UnknownProfile { profile: String, known: String },
+
+    /// Multi-profile `config.toml` with no flat top-level `url`/`user`,
+    /// no `default = "<name>"`, and no `--profile <name>` passed.
+    #[error(
+        "no default profile and this config has no flat top-level connection. \
+         Available profiles: {available}. Re-run with `--profile <name>` (e.g. \
+         `proxxx --profile {example} ls nodes`), aggregate all of them read-only with \
+         `proxxx fleet`, or set a top-level `default = \"<name>\"` in config.toml."
+    )]
+    NoDefaultProfile { available: String, example: String },
+
+    /// Deserializing the selected profile table (or flat config) into
+    /// [`ProfileConfig`] failed — e.g. a required field (`url`, `user`)
+    /// is missing or has the wrong type.
+    #[error(
+        "Failed to parse{} profile from {path}: {source}",
+        profile.as_deref().map_or_else(String::new, |n| format!(" '{n}'"))
+    )]
+    ProfileParse {
+        profile: Option<String>,
+        path: std::path::PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+
+    /// A configuration field holds a value outside its documented set
+    /// (e.g. `auth` or `tls_pin_mode`).
+    #[error("{0}")]
+    InvalidValue(String),
+
+    /// `proxxx pbs ...` was invoked on a profile that has no PBS table.
+    #[error(
+        "no [{}] block configured — add url, user, token_id, token_secret(_file)",
+        profile.as_deref().map_or_else(|| "pbs".to_string(), |p| format!("profiles.{p}.pbs"))
+    )]
+    MissingPbsConfig { profile: Option<String> },
 }
 
 impl ConfigError {
@@ -1130,18 +1173,27 @@ fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<std::path::
 /// profile names so the user knows what to pass to `--profile`.
 pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     let config_path = config_path();
+    load_config_from_path(&config_path, profile_name)
+}
 
+pub(crate) fn load_config_from_path(
+    config_path: &std::path::Path,
+    profile_name: Option<&str>,
+) -> Result<ProfileConfig> {
     if !config_path.exists() {
-        return Err(ConfigError::NotFound { path: config_path }.into());
+        return Err(ConfigError::NotFound {
+            path: config_path.to_path_buf(),
+        }
+        .into());
     }
 
-    let content = std::fs::read_to_string(&config_path).map_err(|source| ConfigError::Io {
-        path: config_path.clone(),
+    let content = std::fs::read_to_string(config_path).map_err(|source| ConfigError::Io {
+        path: config_path.to_path_buf(),
         source,
     })?;
 
     let raw: toml::Value = toml::from_str(&content).map_err(|source| ConfigError::Toml {
-        path: config_path.clone(),
+        path: config_path.to_path_buf(),
         source,
     })?;
 
@@ -1180,11 +1232,10 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
                 } else {
                     known.join(", ")
                 };
-                anyhow::anyhow!(
-                    "Profile '{}' not found in config. Known profiles: {}",
-                    name,
-                    known_str,
-                )
+                ConfigError::UnknownProfile {
+                    profile: name.to_string(),
+                    known: known_str,
+                }
             })?
     } else {
         // No profile resolved. If the config is profile-only (no flat
@@ -1196,14 +1247,11 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
         if !flat_present {
             let names = profile_names(&raw);
             if !names.is_empty() {
-                anyhow::bail!(
-                    "no default profile and this config has no flat top-level connection. \
-                     Available profiles: {}. Re-run with `--profile <name>` (e.g. \
-                     `proxxx --profile {} ls nodes`), aggregate all of them read-only with \
-                     `proxxx fleet`, or set a top-level `default = \"<name>\"` in config.toml.",
-                    names.join(", "),
-                    names[0],
-                );
+                return Err(ConfigError::NoDefaultProfile {
+                    available: names.join(", "),
+                    example: names[0].clone(),
+                }
+                .into());
             }
         }
         // Flat top-level config (backwards compat). Strip the [profiles]
@@ -1216,16 +1264,14 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
         v
     };
 
-    let mut cfg: ProfileConfig = profile_value.try_into().map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse{} profile from {}: {}",
-            effective
-                .as_deref()
-                .map_or(String::new(), |n| format!(" '{n}'")),
-            config_path.display(),
-            e,
-        )
-    })?;
+    let mut cfg: ProfileConfig =
+        profile_value
+            .try_into()
+            .map_err(|source| ConfigError::ProfileParse {
+                profile: effective.clone(),
+                path: config_path.to_path_buf(),
+                source,
+            })?;
     // Stamp the resolved profile name so a client built from this config
     // knows which cluster it talks to (used by the per-profile incident
     // freeze). `None` for the flat/default config — that client respects
@@ -1460,6 +1506,106 @@ mod config_error_tests {
         let msg = format!("{e}");
         assert!(msg.contains("Run `proxxx init`"), "got: {msg}");
         assert!(msg.contains("/var/empty/config.toml"));
+    }
+
+    fn write_temp_config(tag: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "proxxx-cfg-err-test-{}-{tag}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, body).expect("write temp config");
+        path
+    }
+
+    #[test]
+    fn unknown_profile_downcasts_to_config_error() {
+        let path = write_temp_config(
+            "unknown-profile",
+            "[profiles.prod]\nurl = \"https://pve.example:8006\"\nuser = \"root@pam\"\n",
+        );
+        let err = load_config_from_path(&path, Some("typo")).expect_err("unknown profile");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "unknown profile error must downcast to ConfigError (exit 3), got: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Profile 'typo' not found in config") && msg.contains("prod"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_default_profile_downcasts_to_config_error() {
+        let path = write_temp_config(
+            "no-default",
+            "[profiles.alpha]\nurl = \"https://a:8006\"\nuser = \"root@pam\"\n\
+             [profiles.beta]\nurl = \"https://b:8006\"\nuser = \"root@pam\"\n",
+        );
+        let err = load_config_from_path(&path, None).expect_err("no default profile");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "no-default-profile error must downcast to ConfigError (exit 3), got: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no default profile") && msg.contains("alpha, beta"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_required_field_downcasts_to_config_error() {
+        let path = write_temp_config(
+            "missing-field",
+            "[profiles.incomplete]\nurl = \"https://pve.example:8006\"\n",
+        );
+        let err =
+            load_config_from_path(&path, Some("incomplete")).expect_err("missing required field");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "missing required field error must downcast to ConfigError (exit 3), got: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to parse 'incomplete' profile") && msg.contains("user"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_enum_like_fields_downcasts_to_config_error() {
+        let path = write_temp_config(
+            "bad-auth",
+            "[profiles.prod]\nurl = \"https://pve.example:8006\"\nuser = \"root@pam\"\nauth = \"Password\"\n",
+        );
+        let err = load_config_from_path(&path, Some("prod")).expect_err("invalid auth enum");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "validate_enum_like_fields auth error must downcast to ConfigError (exit 3), got: {err:#}"
+        );
+
+        let path_tls = write_temp_config(
+            "bad-tls-pin",
+            "[profiles.prod]\nurl = \"https://pve.example:8006\"\nuser = \"root@pam\"\ntls_pin_mode = \"invalid\"\n",
+        );
+        let err_tls =
+            load_config_from_path(&path_tls, Some("prod")).expect_err("invalid tls_pin_mode");
+        let _ = std::fs::remove_file(&path_tls);
+        assert!(
+            err_tls
+                .chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "validate_enum_like_fields tls_pin_mode error must downcast to ConfigError (exit 3), got: {err_tls:#}"
+        );
     }
 }
 

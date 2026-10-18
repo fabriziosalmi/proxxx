@@ -788,15 +788,7 @@ pub async fn execute_metrics(
         client: &Arc<crate::api::PxClient>,
         vmid: u32,
     ) -> Result<(String, GuestType)> {
-        client
-            .find_guest(vmid)
-            .await?
-            .map(|g| (g.node, g.guest_type))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "vmid {vmid} not found on any node — pass --node X to skip discovery"
-                )
-            })
+        crate::cli::common::find_guest(client, vmid).await
     }
 
     let (label, points, field) = match action {

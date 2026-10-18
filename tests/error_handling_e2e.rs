@@ -589,6 +589,33 @@ mod cli_contract {
             "SIGPIPE must not produce a panic trace, got stderr:\n{stderr}"
         );
     }
+
+    #[test]
+    fn unknown_profile_exits_with_code_3() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg_path = dir.path().join("config.toml");
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).expect("create temp audit dir");
+        std::fs::write(
+            &cfg_path,
+            "[profiles.prod]\nurl = \"https://127.0.0.1:8006\"\nuser = \"root@pam\"\n",
+        )
+        .expect("write temp config");
+
+        let output = Command::new(proxxx_binary())
+            .env("PROXXX_CONFIG", &cfg_path)
+            .env("PROXXX_AUDIT_DIR", &audit_dir)
+            .args(["--profile", "typo", "ls", "nodes"])
+            .output()
+            .expect("spawn proxxx --profile typo ls nodes");
+
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "unknown profile must exit 3 (ConfigError); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
