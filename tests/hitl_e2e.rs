@@ -416,8 +416,12 @@ struct HitlMockGateway {
     calls: Mutex<Vec<(String, u32)>>,
     /// Detailed `"method:arg1:arg2:..."` strings for parameter assertions (`#340`).
     detailed_calls: Mutex<Vec<String>>,
+    /// Count of read/lookup calls (`get_nodes` / `get_guests`).
+    lookup_calls: Mutex<usize>,
     /// When set, mutations return Err(this string).
     fail_with: Option<String>,
+    /// When set, guest lookups (`get_nodes` / `get_guests`) return Err(this string).
+    fail_lookup_with: Option<String>,
 }
 
 impl HitlMockGateway {
@@ -442,6 +446,15 @@ impl HitlMockGateway {
     fn fail_mutations(mut self, error: &str) -> Self {
         self.fail_with = Some(error.to_string());
         self
+    }
+
+    fn fail_lookups(mut self, error: &str) -> Self {
+        self.fail_lookup_with = Some(error.to_string());
+        self
+    }
+
+    fn lookup_call_count(&self) -> usize {
+        *self.lookup_calls.lock().unwrap()
     }
 
     fn calls_for(&self, method: &str) -> Vec<u32> {
@@ -474,9 +487,17 @@ impl HitlMockGateway {
 #[async_trait]
 impl ProxmoxGateway for HitlMockGateway {
     async fn get_nodes(&self) -> Result<Vec<Node>> {
+        *self.lookup_calls.lock().unwrap() += 1;
+        if let Some(ref e) = self.fail_lookup_with {
+            anyhow::bail!("{e}");
+        }
         Ok(self.nodes.clone())
     }
     async fn get_guests(&self, node: &str) -> Result<Vec<Guest>> {
+        *self.lookup_calls.lock().unwrap() += 1;
+        if let Some(ref e) = self.fail_lookup_with {
+            anyhow::bail!("{e}");
+        }
         Ok(self.guests_by_node.get(node).cloned().unwrap_or_default())
     }
     async fn start_guest(&self, node: &str, vmid: u32, gt: GuestType) -> Result<String> {
@@ -3898,5 +3919,175 @@ async fn undecodable_params_json_marks_failed_and_makes_no_gateway_call() {
         gw.all_calls().is_empty(),
         "undecodable rows must never invoke the PVE gateway, got {:?}",
         gw.all_calls()
+    );
+}
+
+/// #340 Rev. 14 — An existing-guest request row with `node = NULL` or
+/// `guest_type = NULL` is refused before any gateway call, marked `failed` with
+/// `"request has no recorded guest binding (node/type); request again"`, and
+/// never executes against the cluster.
+#[tokio::test]
+async fn unbound_row_missing_node_or_guest_type_marks_failed_and_makes_no_gateway_call() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(100, "vm-100"));
+
+    // Case 1: `node = NULL`, `guest_type = Some(Qemu)` for `delete_guest`.
+    let req_no_node = pending
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new("delete_guest", Some(100), 1)
+                .with_guest_type(GuestType::Qemu)
+                .with_params(serde_json::json!({"guest_id": 100})),
+        )
+        .expect("insert row without node");
+    let data_no_node = signed(tg.hmac_key(), &format!("approve:{}", req_no_node.id));
+    let out_no_node = handle_callback_update(
+        &update(1, callback_query("cb-no-node", &data_no_node)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("handle row without node");
+    let CallbackOutcome::ExecuteFailed {
+        error: ref err_no_node,
+        ..
+    } = out_no_node
+    else {
+        panic!("row with node=NULL must fail, got {out_no_node:?}");
+    };
+    assert_eq!(
+        err_no_node,
+        "request has no recorded guest binding (node/type); request again"
+    );
+    let stored_no_node = pending.get(&req_no_node.id).unwrap().unwrap();
+    assert_eq!(
+        stored_no_node.status,
+        proxxx::hitl::pending::RequestStatus::Failed
+    );
+    assert_eq!(
+        stored_no_node.error.as_deref(),
+        Some("request has no recorded guest binding (node/type); request again")
+    );
+
+    // Case 2: `node = Some("pve01")`, `guest_type = NULL` for `delete_guest`.
+    let req_no_type = pending
+        .insert(
+            &proxxx::hitl::pending::NewPendingRequest::new("delete_guest", Some(100), 1)
+                .with_node("pve01")
+                .with_params(serde_json::json!({"guest_id": 100})),
+        )
+        .expect("insert row without guest_type");
+    let data_no_type = signed(tg.hmac_key(), &format!("approve:{}", req_no_type.id));
+    let out_no_type = handle_callback_update(
+        &update(2, callback_query("cb-no-type", &data_no_type)),
+        &pending,
+        &gw,
+        &tg,
+    )
+    .await
+    .expect("handle row without guest_type");
+    let CallbackOutcome::ExecuteFailed {
+        error: ref err_no_type,
+        ..
+    } = out_no_type
+    else {
+        panic!("row with guest_type=NULL must fail, got {out_no_type:?}");
+    };
+    assert_eq!(
+        err_no_type,
+        "request has no recorded guest binding (node/type); request again"
+    );
+    let stored_no_type = pending.get(&req_no_type.id).unwrap().unwrap();
+    assert_eq!(
+        stored_no_type.status,
+        proxxx::hitl::pending::RequestStatus::Failed
+    );
+    assert_eq!(
+        stored_no_type.error.as_deref(),
+        Some("request has no recorded guest binding (node/type); request again")
+    );
+
+    assert!(
+        gw.all_calls().is_empty(),
+        "unbound rows must not invoke any mutation on the gateway"
+    );
+    assert_eq!(
+        gw.lookup_call_count(),
+        0,
+        "unbound rows must be rejected before any gateway lookup call"
+    );
+}
+
+/// #340 Rev. 14 — When the MCP sender cannot resolve an existing guest at
+/// request time (either because `find_guest` returns a lookup error or because
+/// the guest does not exist), `handle_tool_call_with_store` returns an `Err` to
+/// the caller (not swallowed) and inserts NO row into `PendingStore`.
+#[tokio::test]
+async fn mcp_delete_guest_with_failing_lookup_inserts_no_row_and_returns_error() {
+    let (_dir, pending) = temp_pending_store();
+    let cfg: proxxx::config::ProfileConfig = toml::from_str(
+        r#"
+        url = "https://127.0.0.1:8006/"
+        user = "root@pam"
+        token_id = "test"
+        token_secret = "00000000-0000-0000-0000-000000000000"
+
+        [[policies]]
+        action = "delete_guest"
+        target = "*"
+        require = 1
+        channel = "telegram"
+        "#,
+    )
+    .expect("parse ProfileConfig");
+
+    // Case 1: `find_guest` fails with a transient lookup error. Even if caller
+    // passes extra `node`/`type` fields in `args`, the sender must NOT fall back
+    // to them or swallow the lookup error.
+    let gw_err = HitlMockGateway::new()
+        .with_node_and_guest("pve01", guest(500, "vm-500"))
+        .fail_lookups("PVE cluster unreachable");
+    let args = serde_json::json!({ "guest_id": 500, "node": "pve01", "type": "qemu" });
+    let err = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw_err,
+        &cfg,
+        "delete_guest",
+        &args,
+        Some(&pending),
+    )
+    .await
+    .expect_err("failing guest lookup must return Err, not swallow it");
+    assert!(
+        err.to_string().contains("PVE cluster unreachable"),
+        "expected lookup error to be propagated, got: {err:#}"
+    );
+    assert_eq!(
+        pending.total_count(),
+        0,
+        "no row may be inserted when guest lookup fails"
+    );
+    assert!(gw_err.all_calls().is_empty());
+
+    // Case 2: `find_guest` succeeds but guest 500 does not exist on the cluster.
+    let gw_missing = HitlMockGateway::new();
+    let err_missing = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw_missing,
+        &cfg,
+        "delete_guest",
+        &serde_json::json!({ "guest_id": 500 }),
+        Some(&pending),
+    )
+    .await
+    .expect_err("missing guest must return Err at request time");
+    assert!(
+        err_missing.to_string().contains("Guest 500 not found"),
+        "expected missing guest error, got: {err_missing:#}"
+    );
+    assert_eq!(
+        pending.total_count(),
+        0,
+        "no row may be inserted when guest is missing"
     );
 }

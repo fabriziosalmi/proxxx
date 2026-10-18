@@ -158,44 +158,51 @@ pub async fn handle_tool_call_with_store(
             let target = vmid.map(|v| v.to_string()).unwrap_or_default();
 
             let txn_id = if config.telegram.is_some() || pending_store.is_some() {
-                if fetched_guest.is_none() {
-                    if let Some(v) = guest_id_arg {
-                        fetched_guest = client.find_guest(v).await.ok().flatten();
+                let (resolved_node, resolved_gt) = if let Some(v) = guest_id_arg {
+                    let g = match fetched_guest {
+                        Some(g) => g,
+                        None => client
+                            .find_guest(v)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("Guest {v} not found"))?,
+                    };
+                    if g.node.is_empty() {
+                        anyhow::bail!(
+                            "cannot record HITL request for guest {v}: guest has no resolved node"
+                        );
                     }
-                }
-                let resolved_node = fetched_guest
-                    .as_ref()
-                    .map(|g| g.node.clone())
-                    .or_else(|| args.get("node").and_then(Value::as_str).map(String::from));
-                let resolved_gt =
-                    fetched_guest.as_ref().map(|g| g.guest_type).or_else(|| {
-                        match args.get("type").and_then(Value::as_str) {
-                            Some("qemu") => Some(crate::api::types::GuestType::Qemu),
-                            Some("lxc") => Some(crate::api::types::GuestType::Lxc),
-                            _ => None,
+                    (g.node, g.guest_type)
+                } else {
+                    let node = args
+                        .get("node")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Missing required 'node' for HITL request '{name}'")
+                        })?;
+                    let gt = match args.get("type").and_then(Value::as_str) {
+                        Some("qemu") => crate::api::types::GuestType::Qemu,
+                        Some("lxc") => crate::api::types::GuestType::Lxc,
+                        other => {
+                            anyhow::bail!(
+                                "Invalid or missing guest type {other:?} for HITL request '{name}'"
+                            );
                         }
-                    });
-                let mut new_req =
+                    };
+                    (node, gt)
+                };
+                let new_req =
                     crate::hitl::pending::NewPendingRequest::new(name, vmid, policy.require)
+                        .with_node(resolved_node)
+                        .with_guest_type(resolved_gt)
                         .with_params(args.clone());
-                if let Some(n) = resolved_node {
-                    new_req = new_req.with_node(n);
-                }
-                if let Some(gt) = resolved_gt {
-                    new_req = new_req.with_guest_type(gt);
-                }
-                let insert_res = match pending_store {
-                    Some(store) => store.insert(&new_req),
+                let row = match pending_store {
+                    Some(store) => store.insert(&new_req)?,
                     None => crate::hitl::pending::PendingStore::open_default()
-                        .and_then(|store| store.insert(&new_req)),
+                        .and_then(|store| store.insert(&new_req))?,
                 };
-                let id = match insert_res {
-                    Ok(row) => row.id,
-                    Err(e) => {
-                        tracing::warn!("Failed to record MCP HITL request in pending store: {e:#}");
-                        crate::hitl::pending::generate_request_id()?
-                    }
-                };
+                let id = row.id;
                 if let Some(ref tg) = config.telegram {
                     match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
                         Ok(tg_gateway) => {

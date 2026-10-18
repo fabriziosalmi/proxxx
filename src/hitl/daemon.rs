@@ -297,11 +297,21 @@ pub async fn handle_callback_update(
     let effective_vmid = op.target_vmid(&request);
 
     // Guest binding (#340 Decision 3):
-    // - For operations on an existing guest, resolve `find_guest(vmid)` now and
-    //   verify that the guest still exists on `request.node` with `request.guest_type`.
+    // - For operations on an existing guest, `request.node` and `request.guest_type`
+    //   are mandatory; if either is missing, refuse before making any gateway call.
+    //   Then resolve `find_guest(vmid)` and verify that the guest still exists on
+    //   `request.node` with `request.guest_type`.
     // - For `create_guest` / `clone_guest` / `clone_with_cloudinit`, verify that any
     //   explicit target VMID (`vmid` / `newid`) is still free on the cluster.
     let bound_existing = if let Some(source_vmid) = op.existing_guest_vmid(&request) {
+        let (Some(exp_node), Some(exp_gt)) = (
+            request.node.as_deref().filter(|s| !s.is_empty()),
+            request.guest_type,
+        ) else {
+            let err_str =
+                "request has no recorded guest binding (node/type); request again".to_string();
+            return Ok(fail_before_exec(err_str, source_vmid).await);
+        };
         let live = match client.find_guest(source_vmid).await {
             Ok(g) => g,
             Err(e) => {
@@ -309,42 +319,24 @@ pub async fn handle_callback_update(
                 return Err(e);
             }
         };
-        if request.node.is_none() && request.guest_type.is_none() {
-            let Some(g) = live else {
-                let _ = pending.mark_failed(&request.id, "node not found");
-                let _ = tg_gateway
-                    .answer_callback(&cb.id, "❌ Node not found")
-                    .await;
-                edit_status(action, source_vmid, "❌ Node not found", &user_label).await;
-                return Ok(CallbackOutcome::NodeNotFound { vmid: source_vmid });
-            };
-            Some((source_vmid, g.node, g.guest_type))
-        } else {
-            let exp_node = request.node.as_deref().unwrap_or("<any>");
-            let exp_gt = request
-                .guest_type
-                .map_or("<any>", crate::api::types::GuestType::as_str);
-            match live {
-                Some(g)
-                    if request.node.as_deref().is_none_or(|n| n == g.node)
-                        && request.guest_type.is_none_or(|t| t == g.guest_type) =>
-                {
-                    Some((source_vmid, g.node, g.guest_type))
-                }
-                Some(g) => {
-                    let err_str = format!(
-                        "guest changed since the request (expected {exp_node}/{exp_gt}, found {}/{})",
-                        g.node,
-                        g.guest_type.as_str()
-                    );
-                    return Ok(fail_before_exec(err_str, source_vmid).await);
-                }
-                None => {
-                    let err_str = format!(
-                        "guest changed since the request (expected {exp_node}/{exp_gt}, found missing)"
-                    );
-                    return Ok(fail_before_exec(err_str, source_vmid).await);
-                }
+        let exp_gt_str = exp_gt.as_str();
+        match live {
+            Some(g) if g.node == exp_node && g.guest_type == exp_gt => {
+                Some((source_vmid, g.node, g.guest_type))
+            }
+            Some(g) => {
+                let err_str = format!(
+                    "guest changed since the request (expected {exp_node}/{exp_gt_str}, found {}/{})",
+                    g.node,
+                    g.guest_type.as_str()
+                );
+                return Ok(fail_before_exec(err_str, source_vmid).await);
+            }
+            None => {
+                let err_str = format!(
+                    "guest changed since the request (expected {exp_node}/{exp_gt_str}, found missing)"
+                );
+                return Ok(fail_before_exec(err_str, source_vmid).await);
             }
         }
     } else {

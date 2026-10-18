@@ -857,6 +857,11 @@ async fn execute_batch_op_full(
                 );
 
                 let txn_id = if let Some(ref tg) = tg_gateway {
+                    if guest.node.is_empty() {
+                        anyhow::bail!(
+                            "cannot record HITL request for guest {vmid}: guest has no resolved node"
+                        );
+                    }
                     let params = match op {
                         BatchOp::Stop {
                             force,
@@ -878,15 +883,9 @@ async fn execute_batch_op_full(
                     .with_guest_type(guest.guest_type)
                     .with_params(params);
 
-                    let id = match crate::hitl::pending::PendingStore::open_default()
-                        .and_then(|store| store.insert(&new_req))
-                    {
-                        Ok(row) => row.id,
-                        Err(e) => {
-                            error!("Failed to record HITL request in pending store: {e:#}");
-                            crate::hitl::pending::generate_request_id()?
-                        }
-                    };
+                    let row = crate::hitl::pending::PendingStore::open_default()
+                        .and_then(|store| store.insert(&new_req))?;
+                    let id = row.id;
 
                     let reason = format!("CLI requested batch op: {action_str}");
                     if let Err(e) = tg

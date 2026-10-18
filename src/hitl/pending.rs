@@ -735,6 +735,22 @@ impl PendingStore {
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(0)
     }
+
+    /// Count the total number of rows currently stored in `hitl_pending_requests`.
+    #[must_use]
+    pub fn total_count(&self) -> usize {
+        let guard = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .query_row("SELECT COUNT(*) FROM hitl_pending_requests", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
