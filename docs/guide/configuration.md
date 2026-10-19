@@ -65,16 +65,43 @@ the heap on `Drop` . They are never written to logs.
 ## TLS
 
 ```toml
-verify_tls = true   # default in production
-verify_tls = false  # accept self-signed (homelab)
+verify_tls = true         # default in production (WebPKI + standard CA roots)
+tls_pin_mode = "tofu"     # Trust-On-First-Use leaf-certificate SHA-256 pinning (recommended for homelabs)
+verify_tls = false        # disable TLS verification (not recommended)
 ```
 
-Setting `verify_tls = false` enables `danger_accept_invalid_certs` on
-the reqwest client AND mirrors the bypass into the WebSocket client
-used for serial console (`wsterm::tls::dangerous_no_verify_config`).
+### Leaf-certificate pinning (`tls_pin_mode = "tofu"`)
+
+With `verify_tls = true` and `tls_pin_mode = "tofu"`, proxxx pins the exact
+end-entity (leaf) certificate by its SHA-256 DER digest:
+
+- **First connect**: if `<config_dir>/known_certs/<host>_<port>.der` does not
+  exist, proxxx fetches the server's leaf certificate, logs a warning with its
+  colon-separated SHA-256 fingerprint, writes `<host>_<port>.der` atomically
+  (`0600` inside `0700` `known_certs/`), and pins that leaf for the session.
+- **Subsequent connects**: every PVE HTTPS request and serial-console WebSocket
+  connection (`wsterm`) uses a custom `rustls` `PinnedLeafVerifier` that accepts
+  the handshake if and only if `SHA-256(end_entity DER)` matches the pinned
+  32-byte digest in constant time and the server proves possession of the
+  leaf's private key (`CertificateVerify`). This works with Proxmox VE's
+  default `pve-root-ca.pem` → `pve-ssl.pem` hierarchy as well as self-signed
+  certificates or IP literal URLs without weakening `verify_tls` to `false`.
+- **Re-trusting after a certificate renewal**: if the server's leaf certificate
+  changes, proxxx aborts immediately (no retry) and prints both the pinned and
+  presented SHA-256 fingerprints along with the `<host>_<port>.der` path. Verify
+  the new fingerprint on the Proxmox node (`pvenode cert info` or
+  `openssl x509 -noout -fingerprint -sha256 -in /etc/pve/local/pve-ssl.pem`),
+  then delete `<config_dir>/known_certs/<host>_<port>.der` and reconnect.
+
+### Disabling verification (`verify_tls = false`)
+
+Setting `verify_tls = false` (with `tls_pin_mode` unset or `"disabled"`)
+enables `danger_accept_invalid_certs` on the reqwest client AND mirrors the
+bypass into the WebSocket client used for serial console
+(`wsterm::tls::dangerous_no_verify_config`).
 
 It does NOT disable SSH host key verification. SSH uses its own
-TOFU `known_hosts` at `$XDG_CONFIG_HOME/proxxx/known_hosts` (separate
+TOFU `known_hosts` at `<config_dir>/known_hosts` (separate
 from `~/.ssh/known_hosts`).
 
 ## Profiles
@@ -209,9 +236,17 @@ url               = "https://pbs.lan:8007/"
 user              = "proxxx@pbs"
 token_id          = "reader"
 token_secret_file = "~/.config/proxxx/secrets/pbs.token"   # ~ expanded; 0600 on Unix (or inline token_secret)
-verify_tls        = false
+verify_tls        = true
+fingerprint       = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
 rate_limit        = 10        # max requests/second
 ```
+
+When `fingerprint` is set (taken from `proxmox-backup-manager cert info`, either
+32 colon-separated hex octets `AA:BB:...` or 64 hex chars), `PbsClient` and
+`proxxx doctor` pin the PBS leaf certificate's SHA-256 DER digest via the same
+`PinnedLeafVerifier` used by PVE TOFU pinning — even when `verify_tls = true`
+against a self-signed PBS certificate. Malformed fingerprints are rejected at
+config load with exit code `3`.
 
 ::: warning
 PBS uses `PBSAPIToken=user!tokenid:secret` — note the **colon**

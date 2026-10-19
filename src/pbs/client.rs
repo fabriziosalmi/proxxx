@@ -46,6 +46,7 @@ impl PbsClient {
     /// avoids a breaking change if password auth ever lands.
     #[allow(clippy::unused_async)]
     pub async fn new(cfg: PbsConfig, cli_secret: Option<&str>) -> Result<Self> {
+        let pinned_verifier = cfg.pinned_verifier()?;
         let secret = cfg.resolve_token_secret(cli_secret).await?;
         // PBS uses `PBSAPIToken=user@realm!tokenid:secret` — note the
         // **colon** between token id and secret. PVE uses `=` in the
@@ -60,14 +61,17 @@ impl PbsClient {
             cfg.user, cfg.token_id, secret_ref
         ));
 
-        let http = Client::builder()
-            .danger_accept_invalid_certs(!cfg.verify_tls)
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             // — TCP keepalive against firewall half-open
             // drops. Same rationale as PxClient.
-            .tcp_keepalive(Some(std::time::Duration::from_mins(1)))
-            .build()
-            .context("building PBS HTTP client")?;
+            .tcp_keepalive(Some(std::time::Duration::from_mins(1)));
+        if let Some(verifier) = pinned_verifier {
+            builder = builder.use_preconfigured_tls(verifier.into_client_config());
+        } else {
+            builder = builder.danger_accept_invalid_certs(!cfg.verify_tls);
+        }
+        let http = builder.build().context("building PBS HTTP client")?;
 
         let rate = cfg.rate_limit.unwrap_or(10);
         // SAFETY: const non-zero, never panics — see api/client.rs.

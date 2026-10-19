@@ -172,8 +172,16 @@ pub async fn run() -> Result<(Value, i32)> {
                 }
                 Err(init_err) => {
                     overall_ok = false;
-                    match crate::cli::init_wizard::send_anon_version_probe(&cfg.url, cfg.verify_tls)
+                    let pve_pin = crate::api::resolve_tofu_verifier(&cfg, None)
                         .await
+                        .ok()
+                        .flatten();
+                    match crate::cli::init_wizard::send_anon_version_probe_with_pin(
+                        &cfg.url,
+                        cfg.verify_tls,
+                        pve_pin,
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             checks.push(Check {
@@ -280,21 +288,24 @@ pub async fn run() -> Result<(Value, i32)> {
                         }
                     }
                     Err(init_err) => {
-                        let reach_note = match crate::cli::init_wizard::send_anon_version_probe(
-                            &pbs.url,
-                            pbs.verify_tls,
-                        )
-                        .await
-                        {
-                            Ok(resp) => format!(
-                                "PBS reachable at {} (HTTP {})",
-                                pbs.url,
-                                resp.status().as_u16()
-                            ),
-                            Err(probe_err) => {
-                                format!("PBS unreachable at {} ({probe_err})", pbs.url)
-                            }
-                        };
+                        let pbs_pin = pbs.pinned_verifier().ok().flatten();
+                        let reach_note =
+                            match crate::cli::init_wizard::send_anon_version_probe_with_pin(
+                                &pbs.url,
+                                pbs.verify_tls,
+                                pbs_pin,
+                            )
+                            .await
+                            {
+                                Ok(resp) => format!(
+                                    "PBS reachable at {} (HTTP {})",
+                                    pbs.url,
+                                    resp.status().as_u16()
+                                ),
+                                Err(probe_err) => {
+                                    format!("PBS unreachable at {} ({probe_err})", pbs.url)
+                                }
+                            };
                         checks.push(Check {
                             name: "pbs",
                             status: CheckStatus::Warn,

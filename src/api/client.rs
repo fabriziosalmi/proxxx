@@ -192,18 +192,21 @@ where
     deserializer.deserialize_any(Vis)
 }
 
-/// (audit) — TOFU (Trust On First Use) cert resolution.
+/// (audit / `#320`) — TOFU (Trust On First Use) leaf verifier resolution.
 ///
 /// Returns `Ok(None)` when TOFU is not enabled for the profile — the
-/// caller then falls back to `verify_tls`. Returns `Ok(Some(der))`
+/// caller then falls back to `verify_tls`. Returns `Ok(Some(verifier))`
 /// when TOFU is active: either loaded from disk (subsequent connects)
-/// or freshly probed and saved (first connect).
+/// or freshly probed and saved (first connect), wrapped in a
+/// [`crate::api::tls_pin::PinnedLeafVerifier`].
 ///
 /// Activation is opt-in via `tls_pin_mode = "tofu"` in the profile
-/// (case-insensitive). Any other value is treated as "off" and
-/// reported as a warning, on the theory that a typo here should not
+/// (case-insensitive). Any other value is refused so a typo cannot
 /// silently downgrade security.
-async fn resolve_tofu_cert(config: &ProfileConfig) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn resolve_tofu_verifier(
+    config: &ProfileConfig,
+    known_certs_dir: Option<&std::path::Path>,
+) -> Result<Option<Arc<crate::api::tls_pin::PinnedLeafVerifier>>> {
     let mode = match config.tls_pin_mode.as_deref() {
         Some(s) => s.to_ascii_lowercase(),
         None => return Ok(None),
@@ -222,15 +225,19 @@ async fn resolve_tofu_cert(config: &ProfileConfig) -> Result<Option<Vec<u8>>> {
             config.tls_pin_mode
         );
     }
-    if let Some(der) =
-        crate::api::tls_pin::load_pinned_cert(&config.url).context("loading pinned TLS cert")?
+    let path = crate::api::tls_pin::pinned_cert_path_in(&config.url, known_certs_dir)
+        .context("resolving pinned TLS cert path")?;
+    if let Some(der) = crate::api::tls_pin::load_pinned_cert_in(&config.url, known_certs_dir)
+        .context("loading pinned TLS cert")?
     {
         debug!(
             "TOFU: using pinned cert for {} (fingerprint sha256={})",
             config.url,
             crate::api::tls_pin::fingerprint_sha256(&der)
         );
-        return Ok(Some(der));
+        return Ok(Some(Arc::new(
+            crate::api::tls_pin::PinnedLeafVerifier::from_der(&der, &config.url, path),
+        )));
     }
     info!(
         "TOFU: no pinned cert for {} — probing leaf cert",
@@ -239,17 +246,17 @@ async fn resolve_tofu_cert(config: &ProfileConfig) -> Result<Option<Vec<u8>>> {
     let der = crate::api::tls_pin::probe_leaf_cert(&config.url)
         .await
         .with_context(|| format!("TOFU probe for {}", config.url))?;
-    crate::api::tls_pin::save_pinned_cert(&config.url, &der).context("saving pinned TLS cert")?;
-    let path = crate::api::tls_pin::pinned_cert_path(&config.url)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+    let saved_path = crate::api::tls_pin::save_pinned_cert_in(&config.url, &der, known_certs_dir)
+        .context("saving pinned TLS cert")?;
     info!(
         "TOFU: pinned new cert for {} at {} (fingerprint sha256={})",
         config.url,
-        path,
+        saved_path.display(),
         crate::api::tls_pin::fingerprint_sha256(&der)
     );
-    Ok(Some(der))
+    Ok(Some(Arc::new(
+        crate::api::tls_pin::PinnedLeafVerifier::from_der(&der, &config.url, saved_path),
+    )))
 }
 
 /// Production Proxmox API client with rate limiting and auth refresh.
@@ -259,21 +266,32 @@ pub struct PxClient {
     auth: Arc<RwLock<AuthMethod>>,
     limiter: Arc<Limiter>,
     profile_config: ProfileConfig,
+    pinned_verifier: Option<Arc<crate::api::tls_pin::PinnedLeafVerifier>>,
     audit_dir: Option<std::path::PathBuf>,
     max_attempts: u32,
 }
 
 impl PxClient {
-    /// Create a new client for a given profile configuration
+    /// Create a new client for a given profile configuration.
     pub async fn new(config: ProfileConfig, cli_secret: Option<&str>) -> Result<Self> {
-        // Phase 13 audit fix: TOFU (Trust On First Use) TLS pinning.
-        // When `tls_pin_mode = "tofu"` is set in the profile, fetch
-        // the leaf cert on first connect, persist it to disk, and
-        // build the reqwest client with that cert as the ONLY trusted
-        // root. Subsequent connects use the same cert; if the cluster
-        // rotates (legit renewal or MITM), reqwest's standard verifier
-        // rejects the new cert.
-        let pinned_cert = resolve_tofu_cert(&config).await?;
+        Self::new_with_known_certs_dir(config, cli_secret, None).await
+    }
+
+    /// Create a new client using an explicit `known_certs_dir` override for
+    /// TOFU certificate pinning (`#320`). Passing `None` uses the default
+    /// directory (`PROXXX_KNOWN_CERTS_DIR` or `<config_dir>/known_certs`).
+    pub async fn new_with_known_certs_dir(
+        config: ProfileConfig,
+        cli_secret: Option<&str>,
+        known_certs_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        // Phase 13 / #320: TOFU (Trust On First Use) leaf-certificate pinning.
+        // When `tls_pin_mode = "tofu"` is set in the profile, fetch the leaf
+        // cert on first connect, persist it to disk, and configure rustls with
+        // `PinnedLeafVerifier` via `use_preconfigured_tls`. Subsequent connects
+        // compare the presented leaf's SHA-256 digest in constant time and
+        // verify the TLS handshake signature with `ring`.
+        let pinned_verifier = resolve_tofu_verifier(&config, known_certs_dir).await?;
 
         let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -293,17 +311,10 @@ impl PxClient {
             // idle timeouts (90–600 s), longer than the server's
             // own keepalive grace, low enough overhead.
             .tcp_keepalive(Some(std::time::Duration::from_mins(1)));
-        if let Some(cert_der) = pinned_cert {
-            // TOFU mode: trust ONLY the pinned cert. Disable built-in
-            // roots so a rogue CA-signed cert from the cluster also
-            // fails — the only valid cert is the one we pinned.
-            let cert = reqwest::Certificate::from_der(&cert_der)
-                .context("decoding pinned cert as reqwest Certificate")?;
-            builder = builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(cert);
+        if let Some(ref verifier) = pinned_verifier {
+            builder = builder.use_preconfigured_tls(Arc::clone(verifier).into_client_config());
         } else {
-            // No TOFU pin — fall back to the legacy `verify_tls` boolean.
+            // No TOFU pin — fall back to the `verify_tls` boolean.
             builder = builder.danger_accept_invalid_certs(!config.verify_tls);
         }
         let http = builder.build().context("Failed to build HTTP client")?;
@@ -346,9 +357,20 @@ impl PxClient {
             auth: Arc::new(RwLock::new(auth)),
             limiter,
             profile_config: config,
+            pinned_verifier,
             audit_dir: None,
             max_attempts: RETRY_MAX_ATTEMPTS,
         })
+    }
+
+    /// Return the active TOFU [`crate::api::tls_pin::PinnedLeafVerifier`] when
+    /// `tls_pin_mode = "tofu"` is configured on this profile (`#320`).
+    ///
+    /// Passed to outbound WebSocket connections (`wsterm::connect`) so serial
+    /// console sessions enforce the exact same leaf pin as the REST client.
+    #[must_use]
+    pub fn pinned_verifier(&self) -> Option<Arc<crate::api::tls_pin::PinnedLeafVerifier>> {
+        self.pinned_verifier.as_ref().map(Arc::clone)
     }
 
     /// Override the audit directory used for write-ahead and outcome entries

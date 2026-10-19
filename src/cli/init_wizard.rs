@@ -298,26 +298,38 @@ fn normalise_url(raw: &str) -> Result<String> {
 }
 
 /// Send an unauthenticated `GET {url}/api2/json/version` honouring `verify_tls`
-/// and return the raw [`reqwest::Response`] without decoding the body.
+/// (or an explicit [`crate::api::tls_pin::PinnedLeafVerifier`] when `Some`) and
+/// return the raw [`reqwest::Response`] without decoding the body.
 ///
 /// Shared between `proxxx init --interactive` ([`probe_pve_anon`]) and
 /// `proxxx doctor`'s fallback reachability check when client construction
-/// fails before a request can be sent (`#321`). Errors are scrubbed with
-/// [`reqwest::Error::without_url`].
-pub(crate) async fn send_anon_version_probe(
+/// fails before a request can be sent (`#321`, `#320`, `#414`). Errors are
+/// scrubbed with [`reqwest::Error::without_url`].
+pub(crate) async fn send_anon_version_probe_with_pin(
     url: &str,
     verify_tls: bool,
+    pinned_verifier: Option<std::sync::Arc<crate::api::tls_pin::PinnedLeafVerifier>>,
 ) -> Result<reqwest::Response> {
     let base = url.trim_end_matches('/');
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(!verify_tls)
-        .timeout(std::time::Duration::from_secs(8))
-        .build()?;
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8));
+    if let Some(verifier) = pinned_verifier {
+        builder = builder.use_preconfigured_tls(verifier.into_client_config());
+    } else {
+        builder = builder.danger_accept_invalid_certs(!verify_tls);
+    }
+    let client = builder.build()?;
     client
         .get(format!("{base}/api2/json/version"))
         .send()
         .await
         .map_err(|e| anyhow::Error::from(e.without_url()))
+}
+
+pub(crate) async fn send_anon_version_probe(
+    url: &str,
+    verify_tls: bool,
+) -> Result<reqwest::Response> {
+    send_anon_version_probe_with_pin(url, verify_tls, None).await
 }
 
 async fn probe_pve_anon(url: &str, verify_tls: bool) -> Result<String> {

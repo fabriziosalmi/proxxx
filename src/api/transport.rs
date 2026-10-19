@@ -20,10 +20,44 @@ pub(super) const fn is_retryable_status(s: StatusCode) -> bool {
     )
 }
 
+/// Return `true` when `err`'s cause chain includes a TLS or certificate
+/// verification failure (`rustls::Error` or an `std::io::Error` wrapping one).
+///
+/// `reqwest::Error::is_connect()` returns `true` for TLS handshake errors
+/// because they happen while establishing the connection, but a certificate
+/// rejection or TOFU pin mismatch (`#320`) is deterministic and must fail
+/// immediately on the first attempt without 4x retry backoff.
+pub(super) fn is_tls_or_cert_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(cause) = current {
+        if cause.is::<rustls::Error>() {
+            return true;
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if let Some(inner) = io_err.get_ref() {
+                if inner.is::<rustls::Error>() {
+                    return true;
+                }
+            }
+        }
+        current = cause.source();
+    }
+    let chain = super::ApiError::format_error_chain(err).to_ascii_lowercase();
+    chain.contains("certificate")
+        || chain.contains("pin mismatch")
+        || chain.contains("unknownissuer")
+        || chain.contains("badsignature")
+        || chain.contains("handshakefailure")
+        || chain.contains("invalid peer certificate")
+}
+
 /// Connection-level errors worth retrying. We deliberately do NOT retry
-/// on body-decode errors or 4xx (other than 429) — those signal a real
-/// problem with the request shape, not a transient cluster wobble.
+/// on TLS/certificate errors (`#320`), body-decode errors, or 4xx (other than
+/// 429) — those signal a deterministic problem, not a transient cluster wobble.
 pub(super) fn is_retryable_error(e: &reqwest::Error) -> bool {
+    if is_tls_or_cert_error(e) {
+        return false;
+    }
     e.is_timeout() || e.is_connect()
 }
 

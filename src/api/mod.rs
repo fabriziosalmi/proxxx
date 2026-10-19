@@ -8,6 +8,7 @@ pub mod tls_pin;
 mod transport;
 pub mod types;
 
+pub(crate) use client::resolve_tofu_verifier;
 pub use client::PxClient;
 pub use error::ApiError;
 

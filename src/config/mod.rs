@@ -33,12 +33,13 @@ pub struct ProfileConfig {
     /// two.
     #[serde(default = "default_verify_tls")]
     pub verify_tls: bool,
-    /// Phase 13 audit fix: opt-in TLS pinning. Set to `"tofu"` (case
+    /// Phase 13 / #320: opt-in TLS pinning. Set to `"tofu"` (case
     /// insensitive) to snapshot the cluster's leaf cert on first connect
-    /// and refuse any subsequent cert that doesn't match. When unset
-    /// (the default), behaviour is unchanged — `verify_tls` alone
-    /// controls trust. The cert is persisted at
-    /// `<config_dir>/known_certs/<profile>.der`; delete the file to
+    /// and refuse any subsequent cert that doesn't match via
+    /// [`crate::api::tls_pin::PinnedLeafVerifier`]. When unset (the
+    /// default), behaviour is unchanged — `verify_tls` alone controls
+    /// trust. The cert is persisted at
+    /// `<config_dir>/known_certs/<host>_<port>.der`; delete the file to
     /// re-trust on the next connect.
     #[serde(default)]
     pub tls_pin_mode: Option<String>,
@@ -249,13 +250,11 @@ pub struct PbsConfig {
     #[serde(default = "default_verify_tls_pbs")]
     pub verify_tls: bool,
     /// SHA-256 certificate fingerprint of the PBS server, e.g.
-    /// `"AB:CD:…:23"`. Needed by `proxmox-backup-client` (the restore
-    /// shell-out) to trust a self-signed PBS cert: the client has no
-    /// "insecure" switch — it verifies against the system trust store
-    /// OR an explicit `PBS_FINGERPRINT`. Without it, restore against a
-    /// self-signed PBS fails with "certificate fingerprint was not
-    /// confirmed". Get it from the PBS UI (Certificates) or
-    /// `proxmox-backup-manager cert info`.
+    /// `"AB:CD:…:23"`. When set, both [`crate::pbs::PbsClient`] (`#414`)
+    /// and the `proxmox-backup-client` restore shell-out pin the server's
+    /// leaf certificate via this fingerprint (allowing `verify_tls = true`
+    /// against a self-signed PBS certificate). Get it from the PBS UI
+    /// (Certificates) or `proxmox-backup-manager cert info`.
     #[serde(default)]
     pub fingerprint: Option<String>,
     /// Optional API rate limit (req/s). Default 10.
@@ -421,6 +420,23 @@ impl PbsConfig {
             }
         }
         anyhow::bail!("PBS token secret not found. Check CLI flag, PROXXX_PBS_TOKEN_SECRET, token_secret_file, or keychain.")
+    }
+
+    /// Build a [`crate::api::tls_pin::PinnedLeafVerifier`] when
+    /// `fingerprint = "..."` is configured (`#414`).
+    ///
+    /// # Errors
+    /// Returns an error if `fingerprint` is set to a malformed SHA-256 value.
+    pub fn pinned_verifier(
+        &self,
+    ) -> Result<Option<std::sync::Arc<crate::api::tls_pin::PinnedLeafVerifier>>> {
+        let Some(ref fp) = self.fingerprint else {
+            return Ok(None);
+        };
+        let digest = crate::api::tls_pin::parse_sha256_fingerprint(fp)?;
+        Ok(Some(std::sync::Arc::new(
+            crate::api::tls_pin::PinnedLeafVerifier::from_fingerprint(digest),
+        )))
     }
 }
 
@@ -879,6 +895,10 @@ impl ProfileConfig {
                 ))
                 .into());
             }
+        }
+        if let Some(ref pbs) = self.pbs {
+            pbs.pinned_verifier()
+                .map_err(|e| ConfigError::InvalidValue(e.to_string()))?;
         }
         Ok(())
     }

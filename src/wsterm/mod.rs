@@ -34,14 +34,22 @@ pub use url::{build_ws_target, WsTarget};
 
 /// Connect to a termproxy WebSocket and perform the auth handshake.
 /// Returns a `WsStream` ready for bidirectional I/O.
+///
+/// When `pinned_verifier` is `Some` (`tls_pin_mode = "tofu"`, `#320`), the
+/// WebSocket TLS handshake enforces the exact same [`crate::api::tls_pin::PinnedLeafVerifier`]
+/// as the REST client (taking precedence over `verify_tls`).
 pub async fn connect(
     target: &WsTarget,
     verify_tls: bool,
+    pinned_verifier: Option<Arc<crate::api::tls_pin::PinnedLeafVerifier>>,
     headers: &[(String, String)],
 ) -> Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
-    let connector = if verify_tls {
+    let connector = if let Some(verifier) = pinned_verifier {
+        let cfg = verifier.into_client_config();
+        Some(Connector::Rustls(Arc::new(cfg)))
+    } else if verify_tls {
         // Default rustls connector with webpki-roots — pulled in by
         // tokio-tungstenite's rustls-tls-webpki-roots feature.
         None

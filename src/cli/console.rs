@@ -163,7 +163,13 @@ pub async fn execute_serial(
     // that's about to expire would 401 the handshake otherwise. Token
     // auth is a no-op refresh.
     let headers = client.auth_headers().await?;
-    let mut ws = crate::wsterm::connect(&target, config.verify_tls, &headers).await?;
+    let mut ws = crate::wsterm::connect(
+        &target,
+        config.verify_tls,
+        client.pinned_verifier(),
+        &headers,
+    )
+    .await?;
 
     // Put the local terminal in raw mode + alternate screen so the
     // remote shell controls every keystroke. The global panic hook
