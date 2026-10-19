@@ -174,6 +174,7 @@ impl AuditLogger {
     }
 
     pub fn verify(&self) -> Result<(usize, usize)> {
+        FULL_VERIFY_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut stmt = self.conn.prepare(
             "SELECT ts,action,user,vmid,node,params_json,result,chain_hmac,chain_version,key_id
              FROM audit_log ORDER BY id ASC",
@@ -181,20 +182,7 @@ impl AuditLogger {
         let mut prev = String::new();
         let mut ok = 0usize;
         let mut fail = 0usize;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,         // ts
-                r.get::<_, String>(1)?,         // action
-                r.get::<_, String>(2)?,         // user
-                r.get::<_, Option<i64>>(3)?,    // vmid
-                r.get::<_, Option<String>>(4)?, // node
-                r.get::<_, Option<String>>(5)?, // params_json
-                r.get::<_, String>(6)?,         // result
-                r.get::<_, String>(7)?,         // chain_hmac
-                r.get::<_, i64>(8)?,            // chain_version
-                r.get::<_, String>(9)?,         // key_id
-            ))
-        })?;
+        let rows = stmt.query_map([], map_raw_audit_row)?;
         // #281 — a row is verified with the key it was signed with, so a
         // rotation does not invalidate everything written before it. The
         // primary key is already loaded; retired ones are read on first
@@ -202,51 +190,71 @@ impl AuditLogger {
         let mut retired: std::collections::HashMap<String, Option<Vec<u8>>> =
             std::collections::HashMap::new();
         for row in rows {
-            let (ts, action, user, vmid, node, params, result, stored_hmac, version, key_id) = row?;
+            let row = row?;
+            let key_id = &row.9;
             let key: &[u8] = if key_id == PRIMARY_KEY_ID {
                 &self.key
             } else {
                 let entry = retired
                     .entry(key_id.clone())
-                    .or_insert_with(|| load_retired_key(&key_id).ok());
+                    .or_insert_with(|| load_retired_key(key_id).ok());
                 let Some(k) = entry else {
                     // The key this row was signed with is gone, so its
                     // MAC cannot be recomputed. Count it as a failure
                     // rather than silently skipping: an unverifiable row
                     // IS a gap in the trail.
                     fail += 1;
-                    prev = stored_hmac;
+                    prev.clone_from(&row.7);
                     continue;
                 };
                 k.as_slice()
             };
-            let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
-            // Recompute under each row's OWN chain format, so legacy v1 rows
-            // keep verifying after the migration while new v2 rows get the
-            // stronger who/what coverage.
-            let expected = if version == CHAIN_V2 {
-                compute_hmac_v2(
-                    key,
-                    &prev,
-                    &ts,
-                    &action,
-                    &user,
-                    &vmid_str,
-                    node.as_deref().unwrap_or(""),
-                    params.as_deref().unwrap_or(""),
-                    &result,
-                )
-            } else {
-                compute_hmac(key, &prev, &ts, &action, &vmid_str, &result)
-            };
-            if expected == stored_hmac {
+            if verify_raw_row(&row, &prev, key) {
                 ok += 1;
             } else {
                 fail += 1;
             }
-            prev = stored_hmac;
+            prev = row.7;
         }
         Ok((ok, fail))
+    }
+
+    /// O(1) tail-link verification (`#344` Rev. 16): checks only that the last
+    /// row in `audit_log` (if any) verifies against its immediate predecessor
+    /// (`ORDER BY id DESC LIMIT 2`).
+    ///
+    /// # Errors
+    /// Returns an error if querying `audit_log` fails or if the tail row's
+    /// signing key is missing or its MAC does not match.
+    pub fn verify_tail(&self) -> Result<()> {
+        TAIL_VERIFY_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut stmt = self.conn.prepare(
+            "SELECT ts,action,user,vmid,node,params_json,result,chain_hmac,chain_version,key_id
+             FROM audit_log ORDER BY id DESC LIMIT 2",
+        )?;
+        let rows: Vec<RawAuditRow> = stmt
+            .query_map([], map_raw_audit_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let Some(last) = rows.first() else {
+            return Ok(());
+        };
+        let prev = rows.get(1).map_or("", |r| r.7.as_str());
+        let retired_key;
+        let key: &[u8] = if last.9 == PRIMARY_KEY_ID {
+            &self.key
+        } else {
+            let Ok(k) = load_retired_key(&last.9) else {
+                anyhow::bail!(
+                    "audit chain integrity check failed (1 tampered or unverifiable row(s))"
+                );
+            };
+            retired_key = k;
+            retired_key.as_slice()
+        };
+        if !verify_raw_row(last, prev, key) {
+            anyhow::bail!("audit chain integrity check failed (1 tampered or unverifiable row(s))");
+        }
+        Ok(())
     }
 
     fn last_chain_hmac(&self) -> Result<String> {
@@ -262,6 +270,75 @@ impl AuditLogger {
             Err(e) => Err(anyhow::Error::from(e).context("read last chain hmac")),
         }
     }
+}
+
+static FULL_VERIFY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TAIL_VERIFY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Number of times [`AuditLogger::verify`] (the O(N) full-chain walk) has been
+/// called in this process (`#344` Rev. 16).
+#[must_use]
+pub fn full_verify_call_count() -> usize {
+    FULL_VERIFY_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Number of times [`AuditLogger::verify_tail`] (the O(1) tail-link check) has
+/// been called in this process (`#344` Rev. 16).
+#[must_use]
+pub fn tail_verify_call_count() -> usize {
+    TAIL_VERIFY_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+type RawAuditRow = (
+    String,         // ts
+    String,         // action
+    String,         // user
+    Option<i64>,    // vmid
+    Option<String>, // node
+    Option<String>, // params_json
+    String,         // result
+    String,         // chain_hmac
+    i64,            // chain_version
+    String,         // key_id
+);
+
+fn map_raw_audit_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawAuditRow> {
+    Ok((
+        r.get::<_, String>(0)?,         // ts
+        r.get::<_, String>(1)?,         // action
+        r.get::<_, String>(2)?,         // user
+        r.get::<_, Option<i64>>(3)?,    // vmid
+        r.get::<_, Option<String>>(4)?, // node
+        r.get::<_, Option<String>>(5)?, // params_json
+        r.get::<_, String>(6)?,         // result
+        r.get::<_, String>(7)?,         // chain_hmac
+        r.get::<_, i64>(8)?,            // chain_version
+        r.get::<_, String>(9)?,         // key_id
+    ))
+}
+
+fn verify_raw_row(row: &RawAuditRow, prev: &str, key: &[u8]) -> bool {
+    let (ts, action, user, vmid, node, params, result, stored_hmac, version, _key_id) = row;
+    let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
+    // Recompute under each row's OWN chain format, so legacy v1 rows
+    // keep verifying after the migration while new v2 rows get the
+    // stronger who/what coverage.
+    let expected = if *version == CHAIN_V2 {
+        compute_hmac_v2(
+            key,
+            prev,
+            ts,
+            action,
+            user,
+            &vmid_str,
+            node.as_deref().unwrap_or(""),
+            params.as_deref().unwrap_or(""),
+            result,
+        )
+    } else {
+        compute_hmac(key, prev, ts, action, &vmid_str, result)
+    };
+    expected == *stored_hmac
 }
 
 fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
@@ -478,6 +555,18 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     Ok(key)
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_TASK_AUDIT_DIR: PathBuf;
+}
+
+/// Scope an async unit test to an isolated audit directory without mutating
+/// the process-global `PROXXX_AUDIT_DIR` environment variable (`#344`).
+#[cfg(test)]
+pub async fn with_test_audit_dir<F: std::future::Future>(dir: PathBuf, fut: F) -> F::Output {
+    TEST_TASK_AUDIT_DIR.scope(dir, fut).await
+}
+
 /// Directory holding the audit DB + key. Honors `PROXXX_AUDIT_DIR` (for
 /// hermetic tests, and for relocating the trail onto a dedicated volume in
 /// ops); otherwise the platform data-local dir. Mirrors the `PROXXX_CONFIG` /
@@ -490,6 +579,25 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
 /// perms is out of scope — `create_dir_all` no-ops if it exists; operators who
 /// pre-create a lax `PROXXX_AUDIT_DIR` own that choice (see ACCEPTED-RISKS AR-5).
 fn audit_data_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Ok(dir) = TEST_TASK_AUDIT_DIR.try_with(Clone::clone) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .with_context(|| format!("create audit dir {}", dir.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("create audit dir {}", dir.display()))?;
+        }
+        return Ok(dir);
+    }
+
     let dir = if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
         PathBuf::from(dir)
     } else {
@@ -641,24 +749,26 @@ struct CachedAuditLogger {
     db_path: PathBuf,
     key_path: PathBuf,
     logger: AuditLogger,
+    initial_fail_count: usize,
 }
 
 static PROCESS_AUDIT_LOGGER: std::sync::Mutex<Option<CachedAuditLogger>> =
     std::sync::Mutex::new(None);
 
-/// Access the process-wide lazy [`AuditLogger`] (`#344`, Decision 4).
-///
-/// Opens `SQLite` once per process (reopening only when `PROXXX_AUDIT_DIR` or
-/// `PROXXX_AUDIT_KEY` resolves to a different path, after key rotation, or
-/// after an I/O failure). If the callback returns `Err`, the cached handle
-/// is evicted so the next call re-validates on disk.
-///
-/// # Errors
-/// Returns an error if the audit directory, database, or signing key cannot
-/// be opened or validated, or if `f` returns an error.
-pub fn with_process_logger<F, R>(f: F) -> Result<R>
+fn open_cached_logger(db_path: PathBuf, key_path: PathBuf) -> Result<CachedAuditLogger> {
+    let logger = AuditLogger::open()?;
+    let (_ok, initial_fail_count) = logger.verify()?;
+    Ok(CachedAuditLogger {
+        db_path,
+        key_path,
+        logger,
+        initial_fail_count,
+    })
+}
+
+fn with_cached_logger<F, R>(f: F) -> Result<R>
 where
-    F: FnOnce(&mut AuditLogger) -> Result<R>,
+    F: FnOnce(&mut CachedAuditLogger) -> Result<R>,
 {
     let mut guard = PROCESS_AUDIT_LOGGER
         .lock()
@@ -682,12 +792,7 @@ where
         Some(cached) => cached.db_path != db_path || cached.key_path != key_path,
     };
     if needs_reopen {
-        let logger = AuditLogger::open()?;
-        *guard = Some(CachedAuditLogger {
-            db_path,
-            key_path,
-            logger,
-        });
+        *guard = Some(open_cached_logger(db_path, key_path)?);
     } else if let Some(cached) = guard.as_ref() {
         let disk_key = match load_existing_key(&cached.key_path, PRIMARY_KEY_ID) {
             Ok(k) => k,
@@ -698,22 +803,30 @@ where
         };
         if disk_key != cached.logger.key || !cached.db_path.exists() {
             *guard = None;
-            let logger = AuditLogger::open()?;
-            *guard = Some(CachedAuditLogger {
-                db_path,
-                key_path,
-                logger,
-            });
+            *guard = Some(open_cached_logger(db_path, key_path)?);
         }
     }
     let Some(cached) = guard.as_mut() else {
         anyhow::bail!("process audit logger unavailable");
     };
-    let res = f(&mut cached.logger);
-    if res.is_err() {
-        *guard = None;
-    }
-    res
+    f(cached)
+}
+
+/// Access the process-wide lazy [`AuditLogger`] (`#344`, Decision 4 & Rev. 16).
+///
+/// Opens `SQLite` and runs a full [`AuditLogger::verify`] at most once per
+/// process (reopening only when `PROXXX_AUDIT_DIR` or `PROXXX_AUDIT_KEY`
+/// resolves to a different path, after key rotation, or if the key/DB file is
+/// replaced on disk).
+///
+/// # Errors
+/// Returns an error if the audit directory, database, or signing key cannot
+/// be opened or validated, or if `f` returns an error.
+pub fn with_process_logger<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce(&mut AuditLogger) -> Result<R>,
+{
+    with_cached_logger(|cached| f(&mut cached.logger))
 }
 
 /// Extract `(node, vmid)` from a Proxmox API path when present (`#344`,
@@ -869,14 +982,17 @@ fn log_mutation_sent(
     node: Option<&str>,
     params_json: &str,
 ) -> Result<()> {
-    with_process_logger(|logger| {
-        let (_ok, fail) = logger.verify()?;
-        if fail > 0 {
+    with_cached_logger(|cached| {
+        if cached.initial_fail_count > 0 {
             anyhow::bail!(
-                "audit chain integrity check failed ({fail} tampered or unverifiable row(s))"
+                "audit chain integrity check failed ({} tampered or unverifiable row(s))",
+                cached.initial_fail_count
             );
         }
-        logger.log(action, user, vmid, node, Some(params_json), "sent")
+        cached.logger.verify_tail()?;
+        cached
+            .logger
+            .log(action, user, vmid, node, Some(params_json), "sent")
     })
     .map_err(|e| {
         anyhow::Error::from(AuditWriteRefusal {

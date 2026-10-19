@@ -484,3 +484,106 @@ async fn get_requests_write_nothing_to_audit_log() {
         "GET requests must not even open/create audit.db"
     );
 }
+
+/// Step 11 (`#344` Rev. 16), Test 6:
+/// With N = 2000 rows already in `audit.db`, opening the process-wide logger
+/// runs full `verify()` once, and N = 2000 subsequent mutations do NOT call
+/// the full verifier again (only the O(1) tail-link check runs per write).
+#[tokio::test]
+async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mutations() {
+    const N: usize = 2000;
+
+    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
+    std::env::remove_var("PROXXX_AUDIT_KEY");
+
+    // Seed N = 2000 valid chained rows before the process-wide logger opens
+    // this directory.
+    {
+        let mut seed_logger = AuditLogger::open().expect("open seed logger");
+        for i in 0..N {
+            seed_logger
+                .log(
+                    "POST /nodes/pve1/qemu/100/status/start",
+                    "root@pam",
+                    Some(100),
+                    Some("pve1"),
+                    Some("{\"profile\":\"prod\"}"),
+                    if i % 2 == 0 { "sent" } else { "ok 200" },
+                )
+                .expect("seed row");
+        }
+    }
+
+    let full_before = proxxx::audit::full_verify_call_count();
+    let tail_before = proxxx::audit::tail_verify_call_count();
+
+    // Perform N = 2000 subsequent mutations through the write-ahead gate.
+    for i in 0..N {
+        let ctx = proxxx::audit::MutationAuditCtx::write_ahead(
+            "POST",
+            "/nodes/pve1/qemu/100/status/start",
+            &[],
+            Some("prod"),
+        )
+        .expect("write_ahead must succeed");
+        if i == 0 {
+            assert_eq!(
+                proxxx::audit::full_verify_call_count(),
+                full_before + 1,
+                "first mutation must run full verify() exactly once when opening the process logger"
+            );
+        }
+        ctx.record_outcome("ok 200");
+    }
+
+    assert_eq!(
+        proxxx::audit::full_verify_call_count(),
+        full_before + 1,
+        "2000 subsequent mutations must NOT call full verify() again after initial open"
+    );
+    assert_eq!(
+        proxxx::audit::tail_verify_call_count(),
+        tail_before + N,
+        "each of the 2000 mutations must check the tail link once"
+    );
+
+    // Confirm all 6000 rows (2000 seeded + 2000 * 2 mutation rows) form an
+    // intact chain.
+    let verifier = AuditLogger::open().expect("open verifier");
+    assert_eq!(verifier.verify().expect("full verify"), (N + 2 * N, 0));
+    drop(verifier);
+
+    // Tamper with the tail row (id = 6000) while the process logger is still
+    // open: the next mutation must fail closed via `verify_tail()` without
+    // calling full `verify()`.
+    let full_before_tamper = proxxx::audit::full_verify_call_count();
+    let conn = rusqlite::Connection::open(dir.path().join("audit.db")).unwrap();
+    let updated = conn
+        .execute(
+            "UPDATE audit_log SET result = 'tampered-tail' WHERE id = ?1",
+            rusqlite::params![(N + 2 * N) as i64],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+    drop(conn);
+
+    let err = proxxx::audit::MutationAuditCtx::write_ahead(
+        "POST",
+        "/nodes/pve1/qemu/100/status/start",
+        &[],
+        Some("prod"),
+    )
+    .expect_err("tampered tail row must be caught by O(1) verify_tail");
+    let refusal = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<AuditWriteRefusal>())
+        .expect("must downcast to AuditWriteRefusal");
+    assert!(refusal.reason.contains("tampered"));
+    assert_eq!(
+        proxxx::audit::full_verify_call_count(),
+        full_before_tamper,
+        "catching a tampered tail row must use verify_tail(), not full verify()"
+    );
+}
