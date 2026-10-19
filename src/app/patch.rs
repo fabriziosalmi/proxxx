@@ -218,6 +218,7 @@ pub struct Orchestrator {
     api: Arc<dyn ProxmoxGateway>,
     ssh: Arc<dyn SshGateway>,
     strategy: PatchStrategy,
+    audit_dir: Option<std::path::PathBuf>,
 }
 
 impl Orchestrator {
@@ -227,7 +228,21 @@ impl Orchestrator {
         ssh: Arc<dyn SshGateway>,
         strategy: PatchStrategy,
     ) -> Self {
-        Self { api, ssh, strategy }
+        Self {
+            api,
+            ssh,
+            strategy,
+            audit_dir: None,
+        }
+    }
+
+    /// Override the audit directory used for write-ahead and outcome entries
+    /// (`#344` Rev. 17). Defaults to `None` (process environment / platform
+    /// data directory).
+    #[must_use]
+    pub fn with_audit_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.audit_dir = Some(dir.into());
+        self
     }
 
     /// Build a plan: refresh apt on each node, list upgradable, classify.
@@ -456,12 +471,13 @@ impl Orchestrator {
                    -o Dpkg::Options::=\"--force-confold\" \
                    -o Dpkg::Options::=\"--force-confdef\" \
                    dist-upgrade";
-        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_custom(
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_custom_at(
             "SSH patch apply",
             Some(node),
             None,
             &[("command", cmd)],
             None,
+            self.audit_dir.as_deref(),
         )?;
         let opts = ExecOptions {
             timeout: Some(self.strategy.upgrade_timeout),
@@ -1928,10 +1944,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_runs_upgrade_then_no_reboot_on_userspace_only() {
-        let _guard = PATCH_AUDIT_LOCK.lock().await;
         let dir = tempfile::tempdir().expect("temp audit dir");
-        std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-        std::env::remove_var("PROXXX_AUDIT_KEY");
 
         let mut api = MockApi::default();
         api.nodes = vec![online("pve1")];
@@ -1942,7 +1955,8 @@ mod tests {
             Arc::new(api),
             Arc::clone(&ssh) as Arc<dyn SshGateway>,
             PatchStrategy::default(),
-        );
+        )
+        .with_audit_dir(dir.path());
 
         let plan = orch.plan(None).await.unwrap();
         let applied = orch.apply(plan, |_, _| {}).await.unwrap();
@@ -1962,10 +1976,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_aborts_remaining_nodes_on_failure() {
-        let _guard = PATCH_AUDIT_LOCK.lock().await;
         let dir = tempfile::tempdir().expect("temp audit dir");
-        std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-        std::env::remove_var("PROXXX_AUDIT_KEY");
 
         let mut api = MockApi::default();
         api.nodes = vec![online("pve1"), online("pve2")];
@@ -1982,7 +1993,8 @@ mod tests {
             Arc::new(api),
             Arc::clone(&ssh) as Arc<dyn SshGateway>,
             PatchStrategy::default(),
-        );
+        )
+        .with_audit_dir(dir.path());
         let plan = orch.plan(None).await.unwrap();
         let applied = orch.apply(plan, |_, _| {}).await.unwrap();
 
@@ -2078,97 +2090,94 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    static PATCH_AUDIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     #[tokio::test]
     async fn patch_apply_writes_sent_and_outcome_entries_and_fails_closed() {
-        let _guard = PATCH_AUDIT_LOCK.lock().await;
         let dir = tempfile::tempdir().expect("temp audit dir");
 
-        crate::audit::with_test_audit_dir(dir.path().to_path_buf(), async {
-            // 1. Successful upgrade on pve1 writes `sent` then `ok 0`.
-            let mut api = MockApi::default();
-            api.nodes = vec![online("pve1")];
-            api.upgradable
-                .insert("pve1".into(), vec![upg("vim", "9.0", "9.1")]);
-            let ssh = Arc::new(MockSsh::default());
-            let orch = Orchestrator::new(
-                Arc::new(api),
-                Arc::clone(&ssh) as Arc<dyn SshGateway>,
-                PatchStrategy::default(),
-            );
-            let plan = orch.plan(None).await.unwrap();
-            let _applied = orch.apply(plan, |_, _| {}).await.unwrap();
+        // 1. Successful upgrade on pve1 writes `sent` then `ok 0`.
+        let mut api = MockApi::default();
+        api.nodes = vec![online("pve1")];
+        api.upgradable
+            .insert("pve1".into(), vec![upg("vim", "9.0", "9.1")]);
+        let ssh = Arc::new(MockSsh::default());
+        let orch = Orchestrator::new(
+            Arc::new(api),
+            Arc::clone(&ssh) as Arc<dyn SshGateway>,
+            PatchStrategy::default(),
+        )
+        .with_audit_dir(dir.path());
+        let plan = orch.plan(None).await.unwrap();
+        let _applied = orch.apply(plan, |_, _| {}).await.unwrap();
 
-            let logger = crate::audit::AuditLogger::open().expect("open audit log");
-            let entries = logger.query(10, None).expect("query");
-            assert_eq!(entries.len(), 2, "expected sent + ok 0 entries");
-            assert_eq!(entries[1].action, "SSH patch apply");
-            assert_eq!(entries[1].node.as_deref(), Some("pve1"));
-            assert_eq!(entries[1].user, crate::incident::operator_label());
-            assert_eq!(entries[1].result, "sent");
-            assert_eq!(entries[0].action, "SSH patch apply");
-            assert_eq!(entries[0].node.as_deref(), Some("pve1"));
-            assert_eq!(entries[0].result, "ok 0");
-            assert_eq!(logger.verify().expect("verify"), (2, 0));
+        let logger = crate::audit::AuditLogger::open_in(dir.path()).expect("open audit log");
+        let entries = logger.query(10, None).expect("query");
+        assert_eq!(entries.len(), 2, "expected sent + ok 0 entries");
+        assert_eq!(entries[1].action, "SSH patch apply");
+        assert_eq!(entries[1].node.as_deref(), Some("pve1"));
+        assert_eq!(entries[1].user, crate::incident::operator_label());
+        assert_eq!(entries[1].result, "sent");
+        assert_eq!(entries[0].action, "SSH patch apply");
+        assert_eq!(entries[0].node.as_deref(), Some("pve1"));
+        assert_eq!(entries[0].result, "ok 0");
+        assert_eq!(logger.verify().expect("verify"), (2, 0));
 
-            // 2. Failing SSH upgrade (exit 100) appends `sent` then `error 100`.
-            let mut api_fail = MockApi::default();
-            api_fail.nodes = vec![online("pve2")];
-            api_fail
-                .upgradable
-                .insert("pve2".into(), vec![upg("htop", "3.0", "3.1")]);
-            let mut ssh_fail = MockSsh::default();
-            ssh_fail.scripted_exit.insert("pve2".into(), 100);
-            let orch_fail = Orchestrator::new(
-                Arc::new(api_fail),
-                Arc::new(ssh_fail) as Arc<dyn SshGateway>,
-                PatchStrategy::default(),
-            );
-            let plan_fail = orch_fail.plan(None).await.unwrap();
-            let _ = orch_fail.apply(plan_fail, |_, _| {}).await.unwrap();
+        // 2. Failing SSH upgrade (exit 100) appends `sent` then `error 100`.
+        let mut api_fail = MockApi::default();
+        api_fail.nodes = vec![online("pve2")];
+        api_fail
+            .upgradable
+            .insert("pve2".into(), vec![upg("htop", "3.0", "3.1")]);
+        let mut ssh_fail = MockSsh::default();
+        ssh_fail.scripted_exit.insert("pve2".into(), 100);
+        let orch_fail = Orchestrator::new(
+            Arc::new(api_fail),
+            Arc::new(ssh_fail) as Arc<dyn SshGateway>,
+            PatchStrategy::default(),
+        )
+        .with_audit_dir(dir.path());
+        let plan_fail = orch_fail.plan(None).await.unwrap();
+        let _ = orch_fail.apply(plan_fail, |_, _| {}).await.unwrap();
 
-            let entries_after = logger.query(10, None).expect("query");
-            assert_eq!(entries_after.len(), 4);
-            assert_eq!(entries_after[1].node.as_deref(), Some("pve2"));
-            assert_eq!(entries_after[1].result, "sent");
-            assert_eq!(entries_after[0].node.as_deref(), Some("pve2"));
-            assert_eq!(entries_after[0].result, "error 100");
-            assert_eq!(logger.verify().expect("verify"), (4, 0));
+        let entries_after = logger.query(10, None).expect("query");
+        assert_eq!(entries_after.len(), 4);
+        assert_eq!(entries_after[1].node.as_deref(), Some("pve2"));
+        assert_eq!(entries_after[1].result, "sent");
+        assert_eq!(entries_after[0].node.as_deref(), Some("pve2"));
+        assert_eq!(entries_after[0].result, "error 100");
+        assert_eq!(logger.verify().expect("verify"), (4, 0));
 
-            // 3. Tampered tail link -> fail-closed with AuditWriteRefusal before SSH exec.
-            let conn = rusqlite::Connection::open(dir.path().join("audit.db")).unwrap();
-            conn.execute("UPDATE audit_log SET user = 'mallory' WHERE id = 4", [])
-                .unwrap();
-            drop(conn);
+        // 3. Tampered tail link -> fail-closed with AuditWriteRefusal before SSH exec.
+        let conn = rusqlite::Connection::open(dir.path().join("audit.db")).unwrap();
+        conn.execute("UPDATE audit_log SET user = 'mallory' WHERE id = 4", [])
+            .unwrap();
+        drop(conn);
 
-            let mut api_refused = MockApi::default();
-            api_refused.nodes = vec![online("pve3")];
-            api_refused
-                .upgradable
-                .insert("pve3".into(), vec![upg("curl", "8.0", "8.1")]);
-            let ssh_refused = Arc::new(MockSsh::default());
-            let orch_refused = Orchestrator::new(
-                Arc::new(api_refused),
-                Arc::clone(&ssh_refused) as Arc<dyn SshGateway>,
-                PatchStrategy::default(),
-            );
-            let plan_refused = orch_refused.plan(None).await.unwrap();
-            let err = orch_refused
-                .apply(plan_refused, |_, _| {})
-                .await
-                .expect_err("broken audit chain must refuse SSH patch apply");
-            assert!(
-                err.chain().any(|c| c
-                    .downcast_ref::<crate::audit::AuditWriteRefusal>()
-                    .is_some()),
-                "expected AuditWriteRefusal, got: {err:#}"
-            );
-            assert!(
-                ssh_refused.calls.lock().unwrap().is_empty(),
-                "SSH upgrade must not run when write-ahead audit fails"
-            );
-        })
-        .await;
+        let mut api_refused = MockApi::default();
+        api_refused.nodes = vec![online("pve3")];
+        api_refused
+            .upgradable
+            .insert("pve3".into(), vec![upg("curl", "8.0", "8.1")]);
+        let ssh_refused = Arc::new(MockSsh::default());
+        let orch_refused = Orchestrator::new(
+            Arc::new(api_refused),
+            Arc::clone(&ssh_refused) as Arc<dyn SshGateway>,
+            PatchStrategy::default(),
+        )
+        .with_audit_dir(dir.path());
+        let plan_refused = orch_refused.plan(None).await.unwrap();
+        let err = orch_refused
+            .apply(plan_refused, |_, _| {})
+            .await
+            .expect_err("broken audit chain must refuse SSH patch apply");
+        assert!(
+            err.chain().any(|c| c
+                .downcast_ref::<crate::audit::AuditWriteRefusal>()
+                .is_some()),
+            "expected AuditWriteRefusal, got: {err:#}"
+        );
+        assert!(
+            ssh_refused.calls.lock().unwrap().is_empty(),
+            "SSH upgrade must not run when write-ahead audit fails"
+        );
     }
 }

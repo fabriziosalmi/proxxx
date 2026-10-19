@@ -63,9 +63,25 @@ impl AuditLogger {
     pub fn open() -> Result<Self> {
         let path = audit_db_path()?;
         let key_path = audit_key_path()?;
+        Self::open_at(&path, &key_path)
+    }
+
+    /// Open an [`AuditLogger`] rooted in an explicit directory (`dir/audit.db`
+    /// + `dir/audit.key`) without reading or mutating `PROXXX_AUDIT_DIR`
+    /// (`#344` Rev. 17).
+    ///
+    /// # Errors
+    /// Returns an error if the directory, key, or database cannot be created
+    /// or opened.
+    pub fn open_in(dir: &std::path::Path) -> Result<Self> {
+        ensure_audit_dir_exists(dir)?;
+        Self::open_at(&dir.join("audit.db"), &dir.join("audit.key"))
+    }
+
+    fn open_at(path: &std::path::Path, key_path: &std::path::Path) -> Result<Self> {
         let key_existed = key_path.exists();
-        let key = load_or_create_key(&key_path)?;
-        let conn = Connection::open(&path)
+        let key = load_or_create_key(&key_path.to_path_buf())?;
+        let conn = Connection::open(path)
             .with_context(|| format!("open audit db at {}", path.display()))?;
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         conn.execute_batch(
@@ -94,7 +110,7 @@ impl AuditLogger {
                 )
                 .unwrap_or(0);
             if existing_primary_rows > 0 {
-                let _ = std::fs::remove_file(&key_path);
+                let _ = std::fs::remove_file(key_path);
                 anyhow::bail!(
                     "audit key at {} was missing while {} already contains {existing_primary_rows} \
                      row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
@@ -555,22 +571,29 @@ fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
     Ok(key)
 }
 
-#[cfg(test)]
-tokio::task_local! {
-    static TEST_TASK_AUDIT_DIR: PathBuf;
-}
-
-/// Scope an async unit test to an isolated audit directory without mutating
-/// the process-global `PROXXX_AUDIT_DIR` environment variable (`#344`).
-#[cfg(test)]
-pub async fn with_test_audit_dir<F: std::future::Future>(dir: PathBuf, fut: F) -> F::Output {
-    TEST_TASK_AUDIT_DIR.scope(dir, fut).await
+fn ensure_audit_dir_exists(dir: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("create audit dir {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create audit dir {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Directory holding the audit DB + key. Honors `PROXXX_AUDIT_DIR` (for
-/// hermetic tests, and for relocating the trail onto a dedicated volume in
-/// ops); otherwise the platform data-local dir. Mirrors the `PROXXX_CONFIG` /
-/// `PROXXX_FREEZE_PATH` override convention. The directory is created if absent.
+/// relocating the trail onto a dedicated volume in ops, or for subprocess CLI
+/// tests); otherwise the platform data-local dir (or a process-local temp dir
+/// in `#[cfg(test)]`). Mirrors the `PROXXX_CONFIG` / `PROXXX_FREEZE_PATH`
+/// override convention. The directory is created if absent.
 ///
 /// Custody: on unix the dir is created `0700`. Dir-write is the precondition for
 /// *replacing* the HMAC key with an attacker-owned `0600` key (which the
@@ -579,25 +602,6 @@ pub async fn with_test_audit_dir<F: std::future::Future>(dir: PathBuf, fut: F) -
 /// perms is out of scope — `create_dir_all` no-ops if it exists; operators who
 /// pre-create a lax `PROXXX_AUDIT_DIR` own that choice (see ACCEPTED-RISKS AR-5).
 fn audit_data_dir() -> Result<PathBuf> {
-    #[cfg(test)]
-    if let Ok(dir) = TEST_TASK_AUDIT_DIR.try_with(Clone::clone) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&dir)
-                .with_context(|| format!("create audit dir {}", dir.display()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("create audit dir {}", dir.display()))?;
-        }
-        return Ok(dir);
-    }
-
     let dir = if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
         PathBuf::from(dir)
     } else {
@@ -618,20 +622,7 @@ fn audit_data_dir() -> Result<PathBuf> {
                 .to_path_buf()
         }
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("create audit dir {}", dir.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create audit dir {}", dir.display()))?;
-    }
+    ensure_audit_dir_exists(&dir)?;
     Ok(dir)
 }
 
@@ -736,10 +727,12 @@ pub fn rotate_key() -> Result<String> {
 
     // Generating the new primary is the last step.
     let _new = load_or_create_key(&primary)?;
-    // Evict the process-wide cached logger so subsequent writes pick up the
-    // newly generated primary key.
-    if let Ok(mut guard) = PROCESS_AUDIT_LOGGER.lock() {
-        *guard = None;
+    // Evict cached loggers so subsequent writes pick up the newly generated
+    // primary key.
+    if let Some(mutex) = PROCESS_AUDIT_LOGGERS.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            guard.clear();
+        }
     }
     info!(key_id = %key_id, "audit key rotated");
     Ok(key_id)
@@ -752,11 +745,17 @@ struct CachedAuditLogger {
     initial_fail_count: usize,
 }
 
-static PROCESS_AUDIT_LOGGER: std::sync::Mutex<Option<CachedAuditLogger>> =
-    std::sync::Mutex::new(None);
+type LoggerCacheMap = std::collections::HashMap<(PathBuf, PathBuf), CachedAuditLogger>;
+
+static PROCESS_AUDIT_LOGGERS: std::sync::OnceLock<std::sync::Mutex<LoggerCacheMap>> =
+    std::sync::OnceLock::new();
+
+fn logger_cache() -> &'static std::sync::Mutex<LoggerCacheMap> {
+    PROCESS_AUDIT_LOGGERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 fn open_cached_logger(db_path: PathBuf, key_path: PathBuf) -> Result<CachedAuditLogger> {
-    let logger = AuditLogger::open()?;
+    let logger = AuditLogger::open_at(&db_path, &key_path)?;
     let (_ok, initial_fail_count) = logger.verify()?;
     Ok(CachedAuditLogger {
         db_path,
@@ -766,47 +765,41 @@ fn open_cached_logger(db_path: PathBuf, key_path: PathBuf) -> Result<CachedAudit
     })
 }
 
-fn with_cached_logger<F, R>(f: F) -> Result<R>
+fn resolve_db_and_key_paths(audit_dir: Option<&std::path::Path>) -> Result<(PathBuf, PathBuf)> {
+    if let Some(dir) = audit_dir {
+        ensure_audit_dir_exists(dir)?;
+        Ok((dir.join("audit.db"), dir.join("audit.key")))
+    } else {
+        Ok((audit_db_path()?, audit_key_path()?))
+    }
+}
+
+fn with_cached_logger_at<F, R>(audit_dir: Option<&std::path::Path>, f: F) -> Result<R>
 where
     F: FnOnce(&mut CachedAuditLogger) -> Result<R>,
 {
-    let mut guard = PROCESS_AUDIT_LOGGER
+    let mut guard = logger_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let db_path = match audit_db_path() {
-        Ok(p) => p,
-        Err(e) => {
-            *guard = None;
-            return Err(e);
-        }
-    };
-    let key_path = match audit_key_path() {
-        Ok(p) => p,
-        Err(e) => {
-            *guard = None;
-            return Err(e);
-        }
-    };
-    let needs_reopen = match guard.as_ref() {
-        None => true,
-        Some(cached) => cached.db_path != db_path || cached.key_path != key_path,
-    };
-    if needs_reopen {
-        *guard = Some(open_cached_logger(db_path, key_path)?);
-    } else if let Some(cached) = guard.as_ref() {
+    let (db_path, key_path) = resolve_db_and_key_paths(audit_dir)?;
+    let cache_key = (db_path.clone(), key_path.clone());
+    if let Some(cached) = guard.get(&cache_key) {
         let disk_key = match load_existing_key(&cached.key_path, PRIMARY_KEY_ID) {
             Ok(k) => k,
             Err(e) => {
-                *guard = None;
+                guard.remove(&cache_key);
                 return Err(e);
             }
         };
         if disk_key != cached.logger.key || !cached.db_path.exists() {
-            *guard = None;
-            *guard = Some(open_cached_logger(db_path, key_path)?);
+            guard.remove(&cache_key);
         }
     }
-    let Some(cached) = guard.as_mut() else {
+    if !guard.contains_key(&cache_key) {
+        let opened = open_cached_logger(db_path, key_path)?;
+        guard.insert(cache_key.clone(), opened);
+    }
+    let Some(cached) = guard.get_mut(&cache_key) else {
         anyhow::bail!("process audit logger unavailable");
     };
     f(cached)
@@ -815,9 +808,8 @@ where
 /// Access the process-wide lazy [`AuditLogger`] (`#344`, Decision 4 & Rev. 16).
 ///
 /// Opens `SQLite` and runs a full [`AuditLogger::verify`] at most once per
-/// process (reopening only when `PROXXX_AUDIT_DIR` or `PROXXX_AUDIT_KEY`
-/// resolves to a different path, after key rotation, or if the key/DB file is
-/// replaced on disk).
+/// `(db_path, key_path)` in the process (reopening only after key rotation or
+/// if the key/DB file is replaced on disk).
 ///
 /// # Errors
 /// Returns an error if the audit directory, database, or signing key cannot
@@ -826,7 +818,7 @@ pub fn with_process_logger<F, R>(f: F) -> Result<R>
 where
     F: FnOnce(&mut AuditLogger) -> Result<R>,
 {
-    with_cached_logger(|cached| f(&mut cached.logger))
+    with_cached_logger_at(None, |cached| f(&mut cached.logger))
 }
 
 /// Extract `(node, vmid)` from a Proxmox API path when present (`#344`,
@@ -898,6 +890,7 @@ pub struct MutationAuditCtx {
     pub node: Option<String>,
     pub vmid: Option<u32>,
     pub params_json: String,
+    pub audit_dir: Option<PathBuf>,
 }
 
 impl MutationAuditCtx {
@@ -915,6 +908,22 @@ impl MutationAuditCtx {
         params: &[(&str, &str)],
         profile: Option<&str>,
     ) -> Result<Self> {
+        Self::write_ahead_at(method, path, params, profile, None)
+    }
+
+    /// Like [`Self::write_ahead`], but writes to an explicit `audit_dir` when
+    /// `Some(dir)` is supplied (`#344` Rev. 17).
+    ///
+    /// # Errors
+    /// Fails closed with [`AuditWriteRefusal`] (exit code 8) if the write-ahead
+    /// entry cannot be persisted.
+    pub fn write_ahead_at(
+        method: &str,
+        path: &str,
+        params: &[(&str, &str)],
+        profile: Option<&str>,
+        audit_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let action = format!("{method} {path}");
         let (node, mut vmid) = parse_pve_path(path);
         if vmid.is_none() {
@@ -923,7 +932,7 @@ impl MutationAuditCtx {
                 .find(|(k, _)| k.eq_ignore_ascii_case("vmid"))
                 .and_then(|(_, v)| v.parse::<u32>().ok());
         }
-        Self::write_ahead_custom(&action, node.as_deref(), vmid, params, profile)
+        Self::write_ahead_custom_at(&action, node.as_deref(), vmid, params, profile, audit_dir)
     }
 
     /// Write-ahead `"sent"` audit entry for non-REST mutations such as
@@ -939,15 +948,33 @@ impl MutationAuditCtx {
         params: &[(&str, &str)],
         profile: Option<&str>,
     ) -> Result<Self> {
+        Self::write_ahead_custom_at(action, node, vmid, params, profile, None)
+    }
+
+    /// Like [`Self::write_ahead_custom`], but writes to an explicit `audit_dir`
+    /// when `Some(dir)` is supplied (`#344` Rev. 17).
+    ///
+    /// # Errors
+    /// Fails closed with [`AuditWriteRefusal`] (exit code 8) if the write-ahead
+    /// entry cannot be persisted.
+    pub fn write_ahead_custom_at(
+        action: &str,
+        node: Option<&str>,
+        vmid: Option<u32>,
+        params: &[(&str, &str)],
+        profile: Option<&str>,
+        audit_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let user = crate::incident::operator_label();
         let params_json = redact_params_json(params, profile);
-        log_mutation_sent(action, &user, vmid, node, &params_json)?;
+        log_mutation_sent(action, &user, vmid, node, &params_json, audit_dir)?;
         Ok(Self {
             action: action.to_string(),
             user,
             node: node.map(str::to_string),
             vmid,
             params_json,
+            audit_dir: audit_dir.map(std::path::Path::to_path_buf),
         })
     }
 
@@ -956,8 +983,8 @@ impl MutationAuditCtx {
     /// outcome write fails after the mutation has already completed, logs
     /// `tracing::error!` without altering the caller's result.
     pub fn record_outcome(&self, outcome: &str) {
-        if let Err(e) = with_process_logger(|logger| {
-            logger.log(
+        if let Err(e) = with_cached_logger_at(self.audit_dir.as_deref(), |cached| {
+            cached.logger.log(
                 &self.action,
                 &self.user,
                 self.vmid,
@@ -981,8 +1008,9 @@ fn log_mutation_sent(
     vmid: Option<u32>,
     node: Option<&str>,
     params_json: &str,
+    audit_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    with_cached_logger(|cached| {
+    with_cached_logger_at(audit_dir, |cached| {
         if cached.initial_fail_count > 0 {
             anyhow::bail!(
                 "audit chain integrity check failed ({} tampered or unverifiable row(s))",
@@ -1556,5 +1584,67 @@ mod key_rotation_tests {
         assert_eq!(parsed["keys"], "[REDACTED]");
         assert_eq!(parsed["comment"], "normal comment");
         assert_eq!(super::AuditWriteRefusal::EXIT_CODE, 8);
+    }
+
+    /// `#344` Rev. 17 regression guard: no file under `src/` or `tests/` may
+    /// mutate the process-global `PROXXX_AUDIT_DIR` or `PROXXX_AUDIT_KEY` env
+    /// vars at runtime (`set_var` / `remove_var`). Tests must inject an
+    /// explicit audit directory via `with_audit_dir` / `open_in` /
+    /// `write_ahead_at` (or pass `.env(...)` to child `Command` processes).
+    #[test]
+    fn no_source_or_test_file_mutates_proxxx_audit_env() {
+        fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        collect_rs_files(&root.join("src"), &mut files);
+        collect_rs_files(&root.join("tests"), &mut files);
+        assert!(
+            !files.is_empty(),
+            "expected to scan .rs files under src/ and tests/"
+        );
+
+        let forbidden: Vec<String> = ["set_var", "remove_var"]
+            .into_iter()
+            .flat_map(|op| {
+                ["PROXXX_AUDIT_DIR", "PROXXX_AUDIT_KEY"]
+                    .into_iter()
+                    .map(move |var| format!("{op}(\"{var}\""))
+            })
+            .collect();
+
+        let mut violations = Vec::new();
+        for file in files {
+            let content = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+            for (line_no, line) in content.lines().enumerate() {
+                for pat in &forbidden {
+                    if line.contains(pat) {
+                        violations.push(format!(
+                            "{}:{}: forbidden `{}` (inject audit_dir instead of mutating process env)",
+                            file.strip_prefix(root).unwrap_or(&file).display(),
+                            line_no + 1,
+                            pat
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "process-global PROXXX_AUDIT_DIR / PROXXX_AUDIT_KEY mutation found:\n{}",
+            violations.join("\n")
+        );
     }
 }

@@ -20,9 +20,12 @@
 //! `src/audit/mod.rs`; this pins the CLI exit-code contract an operator's cron
 //! job actually depends on.
 //!
-//! Single test per binary: it sets the process-global `PROXXX_AUDIT_DIR`, so it
-//! must not race a sibling. Its own subprocesses inherit the same dir explicitly.
+//! Each test injects its own temporary `audit_dir` via `PxClient::with_audit_dir`,
+//! `AuditLogger::open_in`, or `MutationAuditCtx::write_ahead_at` (and passes
+//! `PROXXX_AUDIT_DIR` only to child processes via `Command::env`), so the
+//! process-global environment is never mutated.
 
+use std::path::Path;
 use std::process::Command;
 
 use proxxx::api::types::GuestType;
@@ -36,11 +39,16 @@ const fn proxxx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_proxxx")
 }
 
-/// Process-wide lock serialising all tests in this binary that mutate
-/// `PROXXX_AUDIT_DIR` or `PROXXX_AUDIT_KEY`.
-static AUDIT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serialises tests in this binary so the process-wide verify call-count
+/// metrics (`full_verify_call_count` / `tail_verify_call_count`) are not
+/// incremented concurrently by sibling tests.
+static AUDIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn mock_client_with_profile(server: &MockServer, profile_name: Option<&str>) -> PxClient {
+async fn mock_client_with_profile(
+    server: &MockServer,
+    profile_name: Option<&str>,
+    audit_dir: &Path,
+) -> PxClient {
     let cfg = ProfileConfig {
         url: server.uri(),
         user: "root@pam".into(),
@@ -65,22 +73,18 @@ async fn mock_client_with_profile(server: &MockServer, profile_name: Option<&str
     PxClient::new(cfg, Some("fake-secret"))
         .await
         .expect("client builds")
+        .with_audit_dir(audit_dir)
 }
 
 #[tokio::test]
 async fn audit_verify_exit_code_reflects_tampering() {
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
     let audit_dir = dir.path().to_str().unwrap().to_string();
 
-    // Point the in-process logger at the temp dir; co-locate the key (no
-    // PROXXX_AUDIT_KEY) so the subprocess resolves the same key file.
-    std::env::set_var("PROXXX_AUDIT_DIR", &audit_dir);
-    std::env::remove_var("PROXXX_AUDIT_KEY");
-
-    // Write a short chain via the real logger.
+    // Write a short chain via the real logger in `dir`.
     {
-        let mut logger = AuditLogger::open().expect("open audit logger");
+        let mut logger = AuditLogger::open_in(dir.path()).expect("open audit logger");
         logger
             .log(
                 "delete",
@@ -140,15 +144,13 @@ async fn audit_verify_exit_code_reflects_tampering() {
 }
 
 /// Step 11 (`#344`), Test 1:
-/// With `PROXXX_AUDIT_DIR` set to a temp dir and a wiremock PVE: a
+/// With a temp audit dir injected on `PxClient` and a wiremock PVE: a
 /// `delete_guest` produces two entries (`sent`, then `ok 200`) with the right
 /// `action`, `node`, `vmid`, `user`; `audit verify` reports the chain intact.
 #[tokio::test]
 async fn delete_guest_writes_sent_and_ok_200_and_verifies_clean() {
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
-    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-    std::env::remove_var("PROXXX_AUDIT_KEY");
 
     let server = MockServer::start().await;
     // Pre-flight status check inside `delete_guest` (GET — must not log).
@@ -174,14 +176,14 @@ async fn delete_guest_writes_sent_and_ok_200_and_verifies_clean() {
         .mount(&server)
         .await;
 
-    let client = mock_client_with_profile(&server, Some("prod")).await;
+    let client = mock_client_with_profile(&server, Some("prod"), dir.path()).await;
     let upid = client
         .delete_guest("pve1", 100, GuestType::Qemu)
         .await
         .expect("delete_guest succeeds");
     assert!(upid.starts_with("UPID:pve1:"));
 
-    let logger = AuditLogger::open().expect("open audit logger");
+    let logger = AuditLogger::open_in(dir.path()).expect("open audit logger");
     // `query` returns DESC order by `id`; reverse for chronological (`id=1`, `id=2`).
     let mut entries = logger.query(10, None).expect("query entries");
     entries.reverse();
@@ -224,10 +226,8 @@ async fn delete_guest_writes_sent_and_ok_200_and_verifies_clean() {
 /// A failing PVE call (500) produces `sent` then `error 500`.
 #[tokio::test]
 async fn failing_pve_call_500_writes_sent_then_error_500() {
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
-    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-    std::env::remove_var("PROXXX_AUDIT_KEY");
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -237,13 +237,13 @@ async fn failing_pve_call_500_writes_sent_then_error_500() {
         .mount(&server)
         .await;
 
-    let client = mock_client_with_profile(&server, Some("prod")).await;
+    let client = mock_client_with_profile(&server, Some("prod"), dir.path()).await;
     let _err = client
         .stop_guest("pve1", 100, GuestType::Qemu, false)
         .await
         .expect_err("HTTP 500 must fail");
 
-    let logger = AuditLogger::open().expect("open audit logger");
+    let logger = AuditLogger::open_in(dir.path()).expect("open audit logger");
     let mut entries = logger.query(10, None).expect("query entries");
     entries.reverse();
     assert_eq!(entries.len(), 2, "expected sent + error 500");
@@ -264,10 +264,8 @@ async fn failing_pve_call_500_writes_sent_then_error_500() {
 /// `"[REDACTED]"` and `"hunter2"` appears nowhere in the DB file bytes.
 #[tokio::test]
 async fn post_with_secret_params_redacts_values_and_never_writes_plaintext_to_db_bytes() {
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
-    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-    std::env::remove_var("PROXXX_AUDIT_KEY");
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -279,7 +277,7 @@ async fn post_with_secret_params_redacts_values_and_never_writes_plaintext_to_db
         .mount(&server)
         .await;
 
-    let client = mock_client_with_profile(&server, Some("prod")).await;
+    let client = mock_client_with_profile(&server, Some("prod"), dir.path()).await;
     client
         .create_user(
             "alice@pve",
@@ -295,7 +293,7 @@ async fn post_with_secret_params_redacts_values_and_never_writes_plaintext_to_db
         .await
         .expect("create_user succeeds");
 
-    let logger = AuditLogger::open().expect("open audit logger");
+    let logger = AuditLogger::open_in(dir.path()).expect("open audit logger");
     let mut entries = logger.query(10, None).expect("query entries");
     entries.reverse();
     assert_eq!(entries.len(), 2);
@@ -333,18 +331,15 @@ async fn fail_closed_unwritable_audit_dir_or_broken_chain_refuses_mutation_with_
 ) {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let outer = tempfile::tempdir().expect("temp dir");
     let readonly_parent = outer.path().join("readonly");
     std::fs::create_dir_all(&readonly_parent).unwrap();
     std::fs::set_permissions(&readonly_parent, std::fs::Permissions::from_mode(0o500)).unwrap();
     let unwritable_audit_dir = readonly_parent.join("cannot_create");
 
-    std::env::set_var("PROXXX_AUDIT_DIR", &unwritable_audit_dir);
-    std::env::remove_var("PROXXX_AUDIT_KEY");
-
     let server = MockServer::start().await;
-    let client = mock_client_with_profile(&server, Some("prod")).await;
+    let client = mock_client_with_profile(&server, Some("prod"), &unwritable_audit_dir).await;
     let err = client
         .start_guest("pve1", 100, GuestType::Qemu)
         .await
@@ -406,8 +401,7 @@ async fn fail_closed_unwritable_audit_dir_or_broken_chain_refuses_mutation_with_
     // also fail closed (AuditWriteRefusal / exit 8) and send NO request.
     let broken_dir = outer.path().join("broken_chain");
     std::fs::create_dir_all(&broken_dir).unwrap();
-    std::env::set_var("PROXXX_AUDIT_DIR", &broken_dir);
-    let mut logger = AuditLogger::open().expect("open broken_dir logger");
+    let mut logger = AuditLogger::open_in(&broken_dir).expect("open broken_dir logger");
     logger
         .log(
             "POST /nodes/pve1/qemu/100/status/start",
@@ -424,7 +418,8 @@ async fn fail_closed_unwritable_audit_dir_or_broken_chain_refuses_mutation_with_
         .unwrap();
     drop(conn);
 
-    let broken_err = client
+    let broken_client = mock_client_with_profile(&server, Some("prod"), &broken_dir).await;
+    let broken_err = broken_client
         .start_guest("pve1", 100, GuestType::Qemu)
         .await
         .expect_err("broken audit chain must refuse mutation");
@@ -447,10 +442,8 @@ async fn fail_closed_unwritable_audit_dir_or_broken_chain_refuses_mutation_with_
 /// GET requests write nothing.
 #[tokio::test]
 async fn get_requests_write_nothing_to_audit_log() {
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
-    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-    std::env::remove_var("PROXXX_AUDIT_KEY");
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -470,7 +463,7 @@ async fn get_requests_write_nothing_to_audit_log() {
         .mount(&server)
         .await;
 
-    let client = mock_client_with_profile(&server, Some("prod")).await;
+    let client = mock_client_with_profile(&server, Some("prod"), dir.path()).await;
     let nodes = client.get_nodes().await.expect("get_nodes");
     assert!(nodes.is_empty());
     let resources = client
@@ -493,15 +486,13 @@ async fn get_requests_write_nothing_to_audit_log() {
 async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mutations() {
     const N: usize = 2000;
 
-    let _guard = AUDIT_ENV_LOCK.lock().await;
+    let _guard = AUDIT_TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().expect("temp dir");
-    std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
-    std::env::remove_var("PROXXX_AUDIT_KEY");
 
     // Seed N = 2000 valid chained rows before the process-wide logger opens
     // this directory.
     {
-        let mut seed_logger = AuditLogger::open().expect("open seed logger");
+        let mut seed_logger = AuditLogger::open_in(dir.path()).expect("open seed logger");
         for i in 0..N {
             seed_logger
                 .log(
@@ -521,13 +512,14 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
 
     // Perform N = 2000 subsequent mutations through the write-ahead gate.
     for i in 0..N {
-        let ctx = proxxx::audit::MutationAuditCtx::write_ahead(
+        let ctx = proxxx::audit::MutationAuditCtx::write_ahead_at(
             "POST",
             "/nodes/pve1/qemu/100/status/start",
             &[],
             Some("prod"),
+            Some(dir.path()),
         )
-        .expect("write_ahead must succeed");
+        .expect("write_ahead_at must succeed");
         if i == 0 {
             assert_eq!(
                 proxxx::audit::full_verify_call_count(),
@@ -551,7 +543,7 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
 
     // Confirm all 6000 rows (2000 seeded + 2000 * 2 mutation rows) form an
     // intact chain.
-    let verifier = AuditLogger::open().expect("open verifier");
+    let verifier = AuditLogger::open_in(dir.path()).expect("open verifier");
     assert_eq!(verifier.verify().expect("full verify"), (N + 2 * N, 0));
     drop(verifier);
 
@@ -569,11 +561,12 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
     assert_eq!(updated, 1);
     drop(conn);
 
-    let err = proxxx::audit::MutationAuditCtx::write_ahead(
+    let err = proxxx::audit::MutationAuditCtx::write_ahead_at(
         "POST",
         "/nodes/pve1/qemu/100/status/start",
         &[],
         Some("prod"),
+        Some(dir.path()),
     )
     .expect_err("tampered tail row must be caught by O(1) verify_tail");
     let refusal = err

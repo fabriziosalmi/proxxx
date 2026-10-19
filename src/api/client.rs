@@ -254,6 +254,7 @@ pub struct PxClient {
     auth: Arc<RwLock<AuthMethod>>,
     limiter: Arc<Limiter>,
     profile_config: ProfileConfig,
+    audit_dir: Option<std::path::PathBuf>,
 }
 
 impl PxClient {
@@ -335,7 +336,17 @@ impl PxClient {
             auth: Arc::new(RwLock::new(auth)),
             limiter,
             profile_config: config,
+            audit_dir: None,
         })
+    }
+
+    /// Override the audit directory used for write-ahead and outcome entries
+    /// (`#344` Rev. 17). Defaults to `None` (process environment / platform
+    /// data directory).
+    #[must_use]
+    pub fn with_audit_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.audit_dir = Some(dir.into());
+        self
     }
 
     /// Read-only handle to the profile config the client was built with.
@@ -553,11 +564,12 @@ impl PxClient {
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         // Write-ahead audit log gate (#344) — fails closed (exit 8) if
         // the `"sent"` entry cannot be persisted before the request leaves.
-        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "POST",
             path,
             params,
             self.profile_config.profile_name.as_deref(),
+            self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {}", url);
@@ -606,11 +618,12 @@ impl PxClient {
     ) -> Result<T> {
         self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
-        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "PUT",
             path,
             params,
             self.profile_config.profile_name.as_deref(),
+            self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("PUT {}", url);
@@ -646,11 +659,12 @@ impl PxClient {
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
         self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
-        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "DELETE",
             path,
             &[],
             self.profile_config.profile_name.as_deref(),
+            self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("DELETE {}", url);
@@ -2683,11 +2697,12 @@ impl ProxmoxGateway for PxClient {
         );
         self.guard_read_only(&path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
-        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "POST",
             &path,
             &[("content", content_type), ("filename", &filename)],
             self.profile_config.profile_name.as_deref(),
+            self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {} (streaming upload, {} bytes)", url, file_size);
