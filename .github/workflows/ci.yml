@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: ruff (Python)
-        uses: astral-sh/ruff-action@0c50076f12c38c3d0115b7b519b54a91cb9cf0ad  # v3.5.1
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v3.5.1
 
       - name: shellcheck
         # `-S error` only: the tree currently carries style and warning
