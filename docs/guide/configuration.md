@@ -92,6 +92,9 @@ end-entity (leaf) certificate by its SHA-256 DER digest:
   the new fingerprint on the Proxmox node (`pvenode cert info` or
   `openssl x509 -noout -fingerprint -sha256 -in /etc/pve/local/pve-ssl.pem`),
   then delete `<config_dir>/known_certs/<host>_<port>.der` and reconnect.
+- **Directory override (`PROXXX_KNOWN_CERTS_DIR`)**: set `PROXXX_KNOWN_CERTS_DIR=/path/to/dir`
+  to override the directory where TOFU `<host>_<port>.der` files are read and
+  written (defaults to `<config_dir>/known_certs`).
 
 ### Disabling verification (`verify_tls = false`)
 

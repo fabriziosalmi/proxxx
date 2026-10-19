@@ -874,10 +874,10 @@ mod tests {
         );
     }
 
-    /// Test 3 (#320):
-    /// Key check: a server presenting the exact pinned certificate DER but
-    /// holding a DIFFERENT private key is rejected during `verify_tls13_signature` /
-    /// `verify_tls12_signature`. Fails if signature verification returns
+    /// Test 3a (#320 — TLS 1.3):
+    /// Key check over TLS 1.3: a server presenting the exact pinned certificate
+    /// DER but holding a DIFFERENT private key is rejected during
+    /// `verify_tls13_signature`. Fails if `verify_tls13_signature` returns
     /// `HandshakeSignatureValid::assertion()`.
     #[tokio::test]
     async fn server_presenting_pinned_cert_with_wrong_private_key_is_rejected() {
@@ -928,6 +928,95 @@ mod tests {
             srv.accept_count(),
             1,
             "bad handshake signature must not be retried"
+        );
+    }
+
+    /// Test 3b (#320 — TLS 1.2):
+    /// Key check over TLS 1.2: a MITM holding the public pinned certificate can
+    /// force TLS 1.2 in `ServerHello` so `verify_tls12_signature` (not 1.3) runs.
+    /// Verifies that:
+    /// 1. A TLS 1.2-only server with the matching private key succeeds when pinned.
+    /// 2. A TLS 1.2-only server presenting the pinned certificate DER but signing
+    ///    `ServerKeyExchange` with a DIFFERENT private key is rejected during
+    ///    `verify_tls12_signature` on the first attempt (`accept_count() == 1`).
+    /// Fails if `verify_tls12_signature` returns `HandshakeSignatureValid::assertion()`.
+    #[tokio::test]
+    async fn server_presenting_pinned_cert_with_wrong_private_key_over_tls12_is_rejected() {
+        use crate::api::ProxmoxGateway;
+
+        let ca = generate_pve_ca();
+        let leaf1 = issue_leaf(&ca, "pve-test-1.lab");
+        let wrong_leaf = issue_leaf(&ca, "impostor.lab");
+
+        // 1. Control check: TLS 1.2-only server with the legitimate private key succeeds.
+        let valid_tls12_cfg =
+            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![leaf1.cert_der.clone(), ca.ca_der.clone()],
+                    leaf1.key_der.clone_key(),
+                )
+                .expect("valid TLS 1.2 server config");
+        let valid_srv = LocalTlsServer::start(valid_tls12_cfg).await;
+        let valid_tmp = tempfile::tempdir().expect("tempdir");
+        save_pinned_cert_in(
+            &valid_srv.url,
+            leaf1.cert_der.as_ref(),
+            Some(valid_tmp.path()),
+        )
+        .expect("pin leaf1 for valid TLS 1.2 server");
+        let valid_client = crate::api::PxClient::new_with_known_certs_dir(
+            test_profile_config(&valid_srv.url, true, Some("tofu")),
+            None,
+            Some(valid_tmp.path()),
+        )
+        .await
+        .expect("client builds");
+        let ver = valid_client
+            .get_api_version()
+            .await
+            .expect("TLS 1.2 server with matching key must succeed");
+        assert_eq!(ver.version, "9.1.1");
+
+        // 2. Forged TLS 1.2-only server presenting `leaf1.cert_der` with `wrong_leaf.key_der`.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let wrong_signing_key = provider
+            .key_provider
+            .load_private_key(wrong_leaf.key_der.clone_key())
+            .expect("load wrong private key");
+        let forged_certified_key = rustls::sign::CertifiedKey::new(
+            vec![leaf1.cert_der.clone(), ca.ca_der.clone()],
+            wrong_signing_key,
+        );
+        let rogue_tls12_cfg =
+            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(
+                    forged_certified_key,
+                )));
+
+        let srv = LocalTlsServer::start(rogue_tls12_cfg).await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        save_pinned_cert_in(&srv.url, leaf1.cert_der.as_ref(), Some(tmp.path()))
+            .expect("pin leaf1");
+
+        let cfg = test_profile_config(&srv.url, true, Some("tofu"));
+        let client = crate::api::PxClient::new_with_known_certs_dir(cfg, None, Some(tmp.path()))
+            .await
+            .expect("client builds");
+
+        let err = client.get_api_version().await.expect_err(
+            "TLS 1.2 server without the pinned certificate's private key must be rejected",
+        );
+        let full = format!("{err:#}");
+        assert!(
+            !full.contains("pin mismatch"),
+            "cert bytes matched, so TLS 1.2 rejection must come from verify_tls12_signature, got: {full}"
+        );
+        assert_eq!(
+            srv.accept_count(),
+            1,
+            "TLS 1.2 bad handshake signature must not be retried"
         );
     }
 

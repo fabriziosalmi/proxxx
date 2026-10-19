@@ -172,6 +172,10 @@ pub async fn run() -> Result<(Value, i32)> {
                 }
                 Err(init_err) => {
                     overall_ok = false;
+                    // Best-effort pin resolution for the credential-less `/version`
+                    // reachability probe: if `PxClient::new` failed because the TOFU
+                    // probe itself failed, fall back to `cfg.verify_tls` so `doctor`
+                    // can still classify connectivity vs. auth failure.
                     let pve_pin = crate::api::resolve_tofu_verifier(&cfg, None)
                         .await
                         .ok()
