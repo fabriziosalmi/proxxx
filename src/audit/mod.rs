@@ -36,6 +36,23 @@ pub struct AuditEntry {
     pub chain_hmac: String,
 }
 
+/// Refusal returned when the write-ahead `"sent"` audit record cannot be
+/// persisted before a mutation (`#344`). Carried via `anyhow` so `main.rs`
+/// downcasts it to exit code 8 ("mutation refused by a local lock", shared
+/// with `ReadOnlyRefusal`, `FreezeRefusal`, and `SecureModeRefusal`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("audit log refused mutation `{action}`: {reason}")]
+pub struct AuditWriteRefusal {
+    pub action: String,
+    pub reason: String,
+}
+
+impl AuditWriteRefusal {
+    /// Process exit code — matches the "mutation refused by a local lock"
+    /// family (`read_only` / `incident freeze` / `--secure`, exit code 8).
+    pub const EXIT_CODE: i32 = 8;
+}
+
 /// Append-only SQLite-backed audit logger.
 pub struct AuditLogger {
     conn: Connection,
@@ -45,9 +62,12 @@ pub struct AuditLogger {
 impl AuditLogger {
     pub fn open() -> Result<Self> {
         let path = audit_db_path()?;
-        let key = load_or_create_key(&audit_key_path()?)?;
+        let key_path = audit_key_path()?;
+        let key_existed = key_path.exists();
+        let key = load_or_create_key(&key_path)?;
         let conn = Connection::open(&path)
             .with_context(|| format!("open audit db at {}", path.display()))?;
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +85,24 @@ impl AuditLogger {
         )?;
         migrate_chain_version(&conn)?;
         migrate_key_id(&conn)?;
+        if !key_existed {
+            let existing_primary_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE key_id = ?1",
+                    params![PRIMARY_KEY_ID],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if existing_primary_rows > 0 {
+                let _ = std::fs::remove_file(&key_path);
+                anyhow::bail!(
+                    "audit key at {} was missing while {} already contains {existing_primary_rows} \
+                     row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
+                    key_path.display(),
+                    path.display()
+                );
+            }
+        }
         Ok(Self { conn, key })
     }
 
@@ -77,7 +115,7 @@ impl AuditLogger {
         params_json: Option<&str>,
         result: &str,
     ) -> Result<()> {
-        let prev_hmac = self.last_chain_hmac();
+        let prev_hmac = self.last_chain_hmac()?;
         let ts = chrono_now();
         let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
         // v2: the actor (`user`) and the parameters (`node`, `params_json`)
@@ -211,22 +249,17 @@ impl AuditLogger {
         Ok((ok, fail))
     }
 
-    fn last_chain_hmac(&self) -> String {
+    fn last_chain_hmac(&self) -> Result<String> {
         match self.conn.query_row(
             "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
             [],
             |r| r.get::<_, String>(0),
         ) {
-            Ok(h) => h,
+            Ok(h) => Ok(h),
             // Empty log — this is the first entry; an empty prev-hmac is correct.
-            Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
             // A real read error must not silently start a fresh chain segment.
-            Err(e) => {
-                tracing::warn!(
-                    "audit: could not read last chain hmac ({e}) — starting a new chain segment"
-                );
-                String::new()
-            }
+            Err(e) => Err(anyhow::Error::from(e).context("read last chain hmac")),
         }
     }
 }
@@ -460,10 +493,22 @@ fn audit_data_dir() -> Result<PathBuf> {
     let dir = if let Ok(dir) = std::env::var("PROXXX_AUDIT_DIR") {
         PathBuf::from(dir)
     } else {
-        directories::ProjectDirs::from("dev", "proxxx", "proxxx")
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?
-            .data_local_dir()
-            .to_path_buf()
+        #[cfg(test)]
+        {
+            static TEST_DEFAULT_AUDIT_DIR: std::sync::OnceLock<tempfile::TempDir> =
+                std::sync::OnceLock::new();
+            TEST_DEFAULT_AUDIT_DIR
+                .get_or_init(|| tempfile::tempdir().expect("create fallback test audit dir"))
+                .path()
+                .to_path_buf()
+        }
+        #[cfg(not(test))]
+        {
+            directories::ProjectDirs::from("dev", "proxxx", "proxxx")
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve data dir"))?
+                .data_local_dir()
+                .to_path_buf()
+        }
     };
     #[cfg(unix)]
     {
@@ -519,17 +564,23 @@ fn retired_key_path(key_id: &str) -> Result<PathBuf> {
     Ok(primary.with_file_name(name))
 }
 
+/// Read an existing key (primary or retired) with the 0600 custody check,
+/// failing if the file does not exist instead of auto-generating a replacement.
+fn load_existing_key(path: &PathBuf, label: &str) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        path.exists(),
+        "audit key `{label}` is not present at {} — rows signed with it cannot \
+         be verified",
+        path.display()
+    );
+    load_or_create_key(path)
+}
+
 /// Read a retired key. Same 0600 custody check as the primary — a
 /// retired key still proves every row it signed.
 fn load_retired_key(key_id: &str) -> Result<Vec<u8>> {
     let path = retired_key_path(key_id)?;
-    anyhow::ensure!(
-        path.exists(),
-        "audit key `{key_id}` is not present at {} — rows signed with it cannot \
-         be verified",
-        path.display()
-    );
-    load_or_create_key(&path)
+    load_existing_key(&path, key_id)
 }
 
 /// Rotate the audit HMAC key (audit 2026-09-09, #281).
@@ -577,8 +628,262 @@ pub fn rotate_key() -> Result<String> {
 
     // Generating the new primary is the last step.
     let _new = load_or_create_key(&primary)?;
+    // Evict the process-wide cached logger so subsequent writes pick up the
+    // newly generated primary key.
+    if let Ok(mut guard) = PROCESS_AUDIT_LOGGER.lock() {
+        *guard = None;
+    }
     info!(key_id = %key_id, "audit key rotated");
     Ok(key_id)
+}
+
+struct CachedAuditLogger {
+    db_path: PathBuf,
+    key_path: PathBuf,
+    logger: AuditLogger,
+}
+
+static PROCESS_AUDIT_LOGGER: std::sync::Mutex<Option<CachedAuditLogger>> =
+    std::sync::Mutex::new(None);
+
+/// Access the process-wide lazy [`AuditLogger`] (`#344`, Decision 4).
+///
+/// Opens `SQLite` once per process (reopening only when `PROXXX_AUDIT_DIR` or
+/// `PROXXX_AUDIT_KEY` resolves to a different path, after key rotation, or
+/// after an I/O failure). If the callback returns `Err`, the cached handle
+/// is evicted so the next call re-validates on disk.
+///
+/// # Errors
+/// Returns an error if the audit directory, database, or signing key cannot
+/// be opened or validated, or if `f` returns an error.
+pub fn with_process_logger<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce(&mut AuditLogger) -> Result<R>,
+{
+    let mut guard = PROCESS_AUDIT_LOGGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let db_path = match audit_db_path() {
+        Ok(p) => p,
+        Err(e) => {
+            *guard = None;
+            return Err(e);
+        }
+    };
+    let key_path = match audit_key_path() {
+        Ok(p) => p,
+        Err(e) => {
+            *guard = None;
+            return Err(e);
+        }
+    };
+    let needs_reopen = match guard.as_ref() {
+        None => true,
+        Some(cached) => cached.db_path != db_path || cached.key_path != key_path,
+    };
+    if needs_reopen {
+        let logger = AuditLogger::open()?;
+        *guard = Some(CachedAuditLogger {
+            db_path,
+            key_path,
+            logger,
+        });
+    } else if let Some(cached) = guard.as_ref() {
+        let disk_key = match load_existing_key(&cached.key_path, PRIMARY_KEY_ID) {
+            Ok(k) => k,
+            Err(e) => {
+                *guard = None;
+                return Err(e);
+            }
+        };
+        if disk_key != cached.logger.key || !cached.db_path.exists() {
+            *guard = None;
+            let logger = AuditLogger::open()?;
+            *guard = Some(CachedAuditLogger {
+                db_path,
+                key_path,
+                logger,
+            });
+        }
+    }
+    let Some(cached) = guard.as_mut() else {
+        anyhow::bail!("process audit logger unavailable");
+    };
+    let res = f(&mut cached.logger);
+    if res.is_err() {
+        *guard = None;
+    }
+    res
+}
+
+/// Extract `(node, vmid)` from a Proxmox API path when present (`#344`,
+/// Decision 2):
+/// - `/nodes/<node>/...` -> `node = Some(<node>)`
+/// - `/(qemu|lxc)/<vmid>` -> `vmid = Some(<vmid>)`
+#[must_use]
+pub fn parse_pve_path(path: &str) -> (Option<String>, Option<u32>) {
+    let clean = path.split('?').next().unwrap_or(path);
+    let segments: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
+    let mut node = None;
+    let mut vmid = None;
+    let mut i = 0;
+    while i < segments.len() {
+        if let Some(&seg) = segments.get(i) {
+            match seg {
+                "nodes" => {
+                    if let Some(&n) = segments.get(i + 1) {
+                        if !n.is_empty() {
+                            node = Some(n.to_string());
+                        }
+                    }
+                }
+                "qemu" | "lxc" => {
+                    if let Some(&v) = segments.get(i + 1) {
+                        if let Ok(parsed) = v.parse::<u32>() {
+                            vmid = Some(parsed);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    (node, vmid)
+}
+
+/// Build the `params_json` object for a mutation audit record (`#344`,
+/// Decision 2), redacting secret parameter values and stamping the profile
+/// name.
+#[must_use]
+pub fn redact_params_json(params: &[(&str, &str)], profile: Option<&str>) -> String {
+    let mut map = serde_json::Map::with_capacity(params.len() + 1);
+    map.insert(
+        "profile".to_string(),
+        serde_json::Value::String(profile.unwrap_or("default").to_string()),
+    );
+    for &(k, v) in params {
+        let key = if k == "profile" {
+            "_form_profile".to_string()
+        } else {
+            k.to_string()
+        };
+        map.insert(
+            key,
+            serde_json::Value::String(crate::util::panic_hook::redact_param_value(k, v)),
+        );
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+/// Context for a two-phase (write-ahead `"sent"` + post-call outcome) mutation
+/// audit record (`#344`).
+#[derive(Debug, Clone)]
+pub struct MutationAuditCtx {
+    pub action: String,
+    pub user: String,
+    pub node: Option<String>,
+    pub vmid: Option<u32>,
+    pub params_json: String,
+}
+
+impl MutationAuditCtx {
+    /// Parse `(node, vmid)` from `path` (falling back to a `vmid` form field),
+    /// redact secret parameters, and append the write-ahead `"sent"` audit
+    /// entry before the network request leaves the process.
+    ///
+    /// # Errors
+    /// Fails closed with [`AuditWriteRefusal`] (exit code 8) if the audit DB
+    /// or key cannot be opened, if the existing HMAC chain is broken, or if
+    /// the `"sent"` row cannot be inserted.
+    pub fn write_ahead(
+        method: &str,
+        path: &str,
+        params: &[(&str, &str)],
+        profile: Option<&str>,
+    ) -> Result<Self> {
+        let action = format!("{method} {path}");
+        let (node, mut vmid) = parse_pve_path(path);
+        if vmid.is_none() {
+            vmid = params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("vmid"))
+                .and_then(|(_, v)| v.parse::<u32>().ok());
+        }
+        Self::write_ahead_custom(&action, node.as_deref(), vmid, params, profile)
+    }
+
+    /// Write-ahead `"sent"` audit entry for non-REST mutations such as
+    /// `"SSH patch apply"` (`#344`, Decision 3).
+    ///
+    /// # Errors
+    /// Fails closed with [`AuditWriteRefusal`] (exit code 8) if the write-ahead
+    /// entry cannot be persisted.
+    pub fn write_ahead_custom(
+        action: &str,
+        node: Option<&str>,
+        vmid: Option<u32>,
+        params: &[(&str, &str)],
+        profile: Option<&str>,
+    ) -> Result<Self> {
+        let user = crate::incident::operator_label();
+        let params_json = redact_params_json(params, profile);
+        log_mutation_sent(action, &user, vmid, node, &params_json)?;
+        Ok(Self {
+            action: action.to_string(),
+            user,
+            node: node.map(str::to_string),
+            vmid,
+            params_json,
+        })
+    }
+
+    /// Append the post-operation outcome entry (`"ok <status>"` or
+    /// `"error <status or transport>"`). Best-effort per Decision 1: if the
+    /// outcome write fails after the mutation has already completed, logs
+    /// `tracing::error!` without altering the caller's result.
+    pub fn record_outcome(&self, outcome: &str) {
+        if let Err(e) = with_process_logger(|logger| {
+            logger.log(
+                &self.action,
+                &self.user,
+                self.vmid,
+                self.node.as_deref(),
+                Some(&self.params_json),
+                outcome,
+            )
+        }) {
+            tracing::error!(
+                action = %self.action,
+                outcome = %outcome,
+                "audit: failed to record mutation outcome entry: {e:#}"
+            );
+        }
+    }
+}
+
+fn log_mutation_sent(
+    action: &str,
+    user: &str,
+    vmid: Option<u32>,
+    node: Option<&str>,
+    params_json: &str,
+) -> Result<()> {
+    with_process_logger(|logger| {
+        let (_ok, fail) = logger.verify()?;
+        if fail > 0 {
+            anyhow::bail!(
+                "audit chain integrity check failed ({fail} tampered or unverifiable row(s))"
+            );
+        }
+        logger.log(action, user, vmid, node, Some(params_json), "sent")
+    })
+    .map_err(|e| {
+        anyhow::Error::from(AuditWriteRefusal {
+            action: action.to_string(),
+            reason: format!("{e:#}"),
+        })
+    })
 }
 
 fn now_unix_secs() -> u64 {
@@ -1092,5 +1397,48 @@ mod key_rotation_tests {
             super::audit_key_path().expect("primary").parent(),
             "retired keys live beside the primary, so one backup covers both"
         );
+    }
+
+    #[test]
+    fn parse_pve_path_extracts_node_and_vmid_when_present() {
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve1/qemu/100/status/stop"),
+            (Some("pve1".to_string()), Some(100))
+        );
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve2/lxc/205/snapshot"),
+            (Some("pve2".to_string()), Some(205))
+        );
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve1/qemu/100?purge=1&destroy-unreferenced-disks=1"),
+            (Some("pve1".to_string()), Some(100))
+        );
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve3/apt/update"),
+            (Some("pve3".to_string()), None)
+        );
+        assert_eq!(super::parse_pve_path("/access/users"), (None, None));
+    }
+
+    #[test]
+    fn redact_params_json_redacts_secrets_and_includes_profile() {
+        let json = super::redact_params_json(
+            &[
+                ("userid", "alice@pve"),
+                ("password", "hunter2"),
+                ("keys", "ssh-ed25519 AAAAsecret"),
+                ("comment", "normal comment"),
+            ],
+            Some("prod"),
+        );
+        assert!(!json.contains("hunter2"));
+        assert!(!json.contains("AAAAsecret"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["profile"], "prod");
+        assert_eq!(parsed["userid"], "alice@pve");
+        assert_eq!(parsed["password"], "[REDACTED]");
+        assert_eq!(parsed["keys"], "[REDACTED]");
+        assert_eq!(parsed["comment"], "normal comment");
+        assert_eq!(super::AuditWriteRefusal::EXIT_CODE, 8);
     }
 }

@@ -27,6 +27,14 @@ mod tests {
     }
 
     pub(super) async fn mock_client(server: &MockServer) -> PxClient {
+        static TEST_AUDIT_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        TEST_AUDIT_DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("create temp audit dir for api_test");
+            if std::env::var_os("PROXXX_AUDIT_DIR").is_none() {
+                std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
+            }
+            dir
+        });
         // Pass the secret via the cli_secret parameter (resolver priority
         // #1) instead of `std::env::set_var`. Env vars are process-global
         // and cargo runs integration tests in parallel — set_var would

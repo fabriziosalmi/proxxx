@@ -156,14 +156,12 @@ fn default_operator() -> String {
     crate::incident::operator_label()
 }
 
-/// Open the audit logger, call `f`, then drop it. Encapsulates the
-/// open/close boilerplate so the two audit hooks stay tidy.
+/// Reuse the process-wide audit logger (`#344`, Decision 4).
 fn with_logger<F, R>(f: F) -> Result<R>
 where
     F: FnOnce(&mut crate::audit::AuditLogger) -> Result<R>,
 {
-    let mut logger = crate::audit::AuditLogger::open()?;
-    f(&mut logger)
+    crate::audit::with_process_logger(f)
 }
 
 /// Parse `30s`, `5m`, `2h`, `1d` into seconds. Hand-rolled; the

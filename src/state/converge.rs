@@ -248,8 +248,7 @@ impl Drop for InterruptedRunGuard {
         }
         let action = format!("{}_interrupted", self.action);
         let params = converge_audit_params(&self.profile, &self.source, &self.summary, self.total);
-        let write = (|| -> Result<()> {
-            let mut logger = crate::audit::AuditLogger::open()?;
+        let write = crate::audit::with_process_logger(|logger| {
             logger.log(
                 &action,
                 &self.user,
@@ -258,7 +257,7 @@ impl Drop for InterruptedRunGuard {
                 Some(&params),
                 "INTERRUPTED",
             )
-        })();
+        });
         match write {
             Ok(()) => tracing::error!(
                 "{action}: converge was interrupted mid-apply — changes already \
@@ -302,8 +301,7 @@ fn write_apply_audit(
     report: &ConvergeReport,
 ) {
     let params = converge_audit_params(profile, source, summary, report.total_changes);
-    let write = (|| -> Result<()> {
-        let mut logger = crate::audit::AuditLogger::open()?;
+    let write = crate::audit::with_process_logger(|logger| {
         logger.log(
             action,
             user,
@@ -312,7 +310,7 @@ fn write_apply_audit(
             Some(&params),
             &report.audit_result(),
         )
-    })();
+    });
     if let Err(e) = write {
         tracing::warn!("{action}: audit write failed (non-fatal): {e:#}");
     }

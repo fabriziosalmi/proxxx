@@ -453,13 +453,22 @@ whitelist which resource families are allowed to converge without a human.
 
 ### `[ ]` Keep `audit.key` at 0600, and consider a separate volume
 
-The audit log is HMAC-signed. proxxx creates the audit dir `0700` and
-**refuses to load a group- or world-readable `audit.key`** (Unix), so
-keep it owner-only:
+The audit log is HMAC-signed and **fail-closed on every mutation**. Before
+any PVE `POST`, `PUT`, or `DELETE` request or SSH `patch apply` command
+leaves the process, proxxx verifies the existing HMAC chain and writes a
+write-ahead `"sent"` entry to `audit.db`, followed by an `"ok <status>"` or
+`"error ..."` outcome entry when the call completes (with secret parameters
+redacted). If `audit.db` or `audit.key` is unwritable, missing on a
+non-empty database, has loose permissions, or fails HMAC verification,
+proxxx refuses the mutation with **exit code 8** (`AuditWriteRefusal`) and
+sends no request.
+
+proxxx creates the audit dir `0700` and **refuses to load a group- or
+world-readable `audit.key`** (Unix), so keep it owner-only:
 
 ```bash
 chmod 600 <audit-dir>/audit.key
-ls -l <audit-dir>/audit.key    # → -rw------- (0600)
+ls -l <audit-dir>/audit.key    # -> -rw------- (0600)
 ```
 
 To keep the signing key off the same volume as the database it signs,

@@ -30,6 +30,14 @@ mod http_status {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client_for(server: &MockServer) -> PxClient {
+        static TEST_AUDIT_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        TEST_AUDIT_DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("create temp audit dir for error_handling_e2e");
+            if std::env::var_os("PROXXX_AUDIT_DIR").is_none() {
+                std::env::set_var("PROXXX_AUDIT_DIR", dir.path());
+            }
+            dir
+        });
         let cfg = ProfileConfig {
             url: server.uri(),
             user: "root@pam".into(),

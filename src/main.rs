@@ -310,6 +310,15 @@ fn main() -> Result<()> {
                         {
                             return Some(proxxx::hitl::SecureModeRefusal::EXIT_CODE);
                         }
+                        // Write-ahead audit log failure (#344) — exit 8,
+                        // same "mutation refused by a local lock" family:
+                        // no mutation without a tamper-evident audit record.
+                        if cause
+                            .downcast_ref::<proxxx::audit::AuditWriteRefusal>()
+                            .is_some()
+                        {
+                            return Some(proxxx::audit::AuditWriteRefusal::EXIT_CODE);
+                        }
                         None
                     });
                     let exit_code = typed_exit.unwrap_or(1);

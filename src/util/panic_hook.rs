@@ -192,6 +192,35 @@ const KEY_VALUE_MARKERS: &[&str] = &[
     "vncticket=",
 ];
 
+/// Substrings that mark a parameter key name as secret-bearing (`#344`).
+/// Any key whose ASCII-lowercased name contains one of these substrings has
+/// its entire value replaced with `"[REDACTED]"` before entering the audit log.
+const SECRET_KEY_SUBSTRINGS: &[&str] = &["password", "secret", "token", "ticket", "key", "cookie"];
+
+/// Return `true` if `key` (matched case-insensitively) names a credential or
+/// secret field (`password`, `secret`, `token`, `ticket`, `key`, `cookie`).
+#[must_use]
+pub fn is_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SECRET_KEY_SUBSTRINGS
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Redact a `(key, value)` parameter pair for audit logging (`#344`):
+/// - If [`is_secret_key`] matches `key`, returns `"[REDACTED]"`.
+/// - Otherwise runs [`scrub_secrets`] over `value` so embedded credential
+///   markers (`PVEAPIToken=…`, `password=…`, `Bearer …`, etc.) are still
+///   masked even inside free-form string parameters.
+#[must_use]
+pub fn redact_param_value(key: &str, value: &str) -> String {
+    if is_secret_key(key) {
+        "[REDACTED]".to_string()
+    } else {
+        scrub_secrets(value)
+    }
+}
+
 /// `Authorization` style headers use a multi-char separator.
 const BEARER: &str = "authorization: bearer ";
 
@@ -369,5 +398,44 @@ mod tests {
             String::new()
         };
         assert!(msg.contains("test-panic-payload-abc"));
+    }
+
+    #[test]
+    fn secret_key_detection_and_param_redaction_cover_all_markers() {
+        for secret_key in [
+            "password",
+            "cipassword",
+            "PASSWORD",
+            "token_secret",
+            "secret_id",
+            "csrfpreventiontoken",
+            "api_token",
+            "vncticket",
+            "ticket",
+            "sshkeys",
+            "keys",
+            "private_key",
+            "auth_cookie",
+            "PVEAuthCookie",
+        ] {
+            assert!(
+                is_secret_key(secret_key),
+                "expected `{secret_key}` to be classified as a secret key"
+            );
+            assert_eq!(
+                redact_param_value(secret_key, "hunter2"),
+                "[REDACTED]",
+                "secret key `{secret_key}` must redact value completely"
+            );
+        }
+
+        assert!(!is_secret_key("userid"));
+        assert!(!is_secret_key("cores"));
+        assert_eq!(redact_param_value("userid", "alice@pve"), "alice@pve");
+        // Embedded secret markers inside a non-secret key's value are still
+        // scrubbed via `scrub_secrets`.
+        let embedded = redact_param_value("comment", "note PVEAPIToken=root@pam!t=hunter2 end");
+        assert!(!embedded.contains("hunter2"));
+        assert!(embedded.contains("PVEAPIToken=[REDACTED]"));
     }
 }

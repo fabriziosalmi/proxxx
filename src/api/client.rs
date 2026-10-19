@@ -551,15 +551,34 @@ impl PxClient {
         // freeze lock is active. Reads (GET) intentionally skip this
         // check; investigators need observation during an incident.
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
+        // Write-ahead audit log gate (#344) — fails closed (exit 8) if
+        // the `"sent"` entry cannot be persisted before the request leaves.
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+            "POST",
+            path,
+            params,
+            self.profile_config.profile_name.as_deref(),
+        )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {}", url);
 
-        let resp = self
+        let resp = match self
             .send_with_retry(path, |http| http.post(&url).form(params))
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                audit_ctx.record_outcome(&format!(
+                    "error transport: {}",
+                    crate::util::panic_hook::scrub_secrets(&format!("{e:#}"))
+                ));
+                return Err(e);
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
+            audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — typed `ApiError` on write paths too. Previously
             // POST/PUT/DELETE bailed with plain anyhow strings, so the
@@ -569,6 +588,7 @@ impl PxClient {
             return Err(super::ApiError::from_status(status, path, body).into());
         }
 
+        audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
         let bytes = read_bounded_body(resp, path).await?;
         // route large parses through spawn_blocking so a
         // 16 ms parse doesn't stall the reactor for that long.
@@ -586,20 +606,38 @@ impl PxClient {
     ) -> Result<T> {
         self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+            "PUT",
+            path,
+            params,
+            self.profile_config.profile_name.as_deref(),
+        )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("PUT {}", url);
 
-        let resp = self
+        let resp = match self
             .send_with_retry(path, |http| http.put(&url).form(params))
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                audit_ctx.record_outcome(&format!(
+                    "error transport: {}",
+                    crate::util::panic_hook::scrub_secrets(&format!("{e:#}"))
+                ));
+                return Err(e);
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
+            audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
             return Err(super::ApiError::from_status(status, path, body).into());
         }
 
+        audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
         let bytes = read_bounded_body(resp, path).await?;
         parse_json_maybe_blocking::<T>(bytes, path).await
     }
@@ -608,18 +646,35 @@ impl PxClient {
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
         self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+            "DELETE",
+            path,
+            &[],
+            self.profile_config.profile_name.as_deref(),
+        )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("DELETE {}", url);
 
-        let resp = self.send_with_retry(path, |http| http.delete(&url)).await?;
+        let resp = match self.send_with_retry(path, |http| http.delete(&url)).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                audit_ctx.record_outcome(&format!(
+                    "error transport: {}",
+                    crate::util::panic_hook::scrub_secrets(&format!("{e:#}"))
+                ));
+                return Err(e);
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
+            audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
             return Err(super::ApiError::from_status(status, path, body).into());
         }
 
+        audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
         let bytes = read_bounded_body(resp, path).await?;
         // route large parses through spawn_blocking so a
         // 16 ms parse doesn't stall the reactor for that long.
@@ -2626,6 +2681,14 @@ impl ProxmoxGateway for PxClient {
             node = urlenc_segment(node),
             storage = urlenc_segment(storage)
         );
+        self.guard_read_only(&path)?;
+        crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
+        let audit_ctx = crate::audit::MutationAuditCtx::write_ahead(
+            "POST",
+            &path,
+            &[("content", content_type), ("filename", &filename)],
+            self.profile_config.profile_name.as_deref(),
+        )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("POST {} (streaming upload, {} bytes)", url, file_size);
 
@@ -2635,16 +2698,27 @@ impl ProxmoxGateway for PxClient {
         self.limiter.until_ready().await;
         let auth = self.auth.read().await;
         let req = auth.apply(self.http.post(&url).multipart(form));
-        let resp = req.send().await?;
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                audit_ctx.record_outcome(&format!(
+                    "error transport: {}",
+                    crate::util::panic_hook::scrub_secrets(&format!("{e:#}"))
+                ));
+                return Err(e.into());
+            }
+        };
         drop(auth);
 
         let status = resp.status();
         if !status.is_success() {
+            audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — typed error so callers can downcast 403/4xx
             // on multipart upload, same as the generic helpers.
             return Err(super::ApiError::from_status(status, &path, body).into());
         }
+        audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
         let bytes = read_bounded_body(resp, &path).await?;
         let parsed: ApiResponse<String> = parse_json_maybe_blocking(bytes, &path).await?;
         Ok(parsed.data)
@@ -3831,43 +3905,16 @@ impl ProxmoxGateway for PxClient {
     ) -> Result<String> {
         // Proxmox uses PUT for resize, not POST (yes, it's inconsistent
         // with the rest of the API). Both QEMU and LXC accept the same
-        // params and same path suffix.
+        // params and same path suffix. Route through `self.put` so
+        // `read_only`, `incident freeze`, and the write-ahead audit log
+        // (#344) apply uniformly.
         let kind = type_path(guest_type);
         let params = vec![("disk", disk), ("size", size)];
-        // The trait helpers we have are GET/POST/DELETE; resize uses PUT.
-        // We inline a request rather than refactor the helpers — keeping
-        // the bug #1 fix surface narrow.
-        self.ensure_auth().await?;
-        self.limiter.until_ready().await;
-        let url = format!(
-            "{}/api2/json/nodes/{node}/{kind}/{vmid}/resize",
-            self.base_url
-        );
-        let auth = self.auth.read().await;
         let path = format!(
             "/nodes/{node}/{kind}/{vmid}/resize",
             node = urlenc_segment(node)
         );
-        let resp = auth
-            .apply(self.http.put(&url))
-            .form(&params)
-            .send()
-            .await
-            // Transport-typed so a dead node on the resize path routes
-            // like every other request (it predated the typed-error pass).
-            .map_err(|e| super::ApiError::from_transport(format!("PUT {path}"), &e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(super::ApiError::from_status(status, &path, body).into());
-        }
-        // Route through the shared bounded-read + typed-parse helpers so
-        // the resize PUT is no longer the one REST read with an unbounded
-        // body and an untyped (`anyhow`) parse error. A hostile node can
-        // no longer OOM proxxx on this path, and a non-JSON body now
-        // yields `ApiError::Parse`.
-        let bytes = read_bounded_body(resp, &path).await?;
-        let parsed: ApiResponse<Option<String>> = parse_json_maybe_blocking(bytes, &path).await?;
+        let parsed: ApiResponse<Option<String>> = self.put(&path, &params).await?;
         // Proxmox returns null UPID for synchronous resizes (e.g. a
         // small grow that completes inline). Surface a synthetic marker
         // so callers don't have to special-case Option.
