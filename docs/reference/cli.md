@@ -305,7 +305,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 
 | Command | What it does |
 | :--- | :--- |
-| `proxxx doctor`                  | Self-diagnostic: config, cluster connectivity, auth, Telegram HITL, PBS, SSH key, audit log. Exits 0 if all critical checks pass |
+| `proxxx doctor`                  | Self-diagnostic: config, TLS posture, authenticated PVE connectivity + `/version` and `/nodes` auth check (PVE 8+/9 compatible; HTTP 401/403 reported as reachable with `auth = fail`), Telegram HITL `getMe` check (`2xx` + `ok == true`, URL/token scrubbed), authenticated PBS `/version` check, SSH key (`~` expanded), and audit HMAC chain verification. Exits 0 if all critical checks pass |
 | `proxxx dev-panic [--message X]` | Flight-recorder smoke — trigger a controlled panic to test the flight-recorder hook |
 | `proxxx version --json`          | Test count, vector framework hash, audit ignores, build metadata |
 | `proxxx completions {bash\|zsh\|fish\|powershell}` | Print shell completion script to stdout — pipe to your shell's completions dir |

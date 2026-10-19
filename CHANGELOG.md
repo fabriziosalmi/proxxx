@@ -18,6 +18,9 @@ SemVer contract:
 
 ### Security
 
+- **`proxxx doctor` no longer prints the plaintext Telegram bot token on transport or proxy failures (#410).**
+  `src/cli/doctor.rs` previously constructed `https://api.telegram.org/bot{token}/getMe` directly and formatted any `reqwest::Error` with `{e}`, whose `Display` implementation appends `for url (https://api.telegram.org/bot<token>/getMe)`. `doctor` now routes its Telegram check through `TelegramGateway::new_for_probe` and `TelegramGateway::get_me`, which strip the request URL via `reqwest::Error::without_url()` and redact both the configured token and secret patterns via `panic_hook::scrub_secrets`, ensuring no `doctor` stdout or stderr output (JSON or table) contains the bot token on any path.
+
 - **The MCP HTTP server (`proxxx mcp serve-http`) now enforces fail-closed `Host` and `Origin` validation on every route before Bearer auth (#342) and keeps `--token` across `SIGHUP` config reloads (#343).**
   `src/mcp/http_server.rs` previously accepted any `Host` and `Origin` header on `POST /mcp`, `GET /mcp` (SSE), and `GET /health`, leaving loopback listeners open to browser DNS-rebinding attacks, and `src/cli/mod.rs` wrote the `--token` CLI argument directly into the reloadable `ProfileConfig` (`cfg.mcp_token = Some(...)`) so a `SIGHUP` config reload from a file without `mcp_token` overwrote the CLI token (dropping authentication on loopback or locking out all callers with `401` on an exposed bind). A router-wide `require_allowed_host_and_origin` layer now runs before `require_authorized` on every route: missing or empty `Host` headers return `400 Bad Request`; `Host` must match one of the allowed authorities (`127.0.0.1:<port>`, `localhost:<port>`, and `[::1]:<port>` on loopback binds, or `<bind>:<port>` plus each repeatable `--allowed-host <host[:port]>` entry on exposed binds) or is refused with `403 Forbidden` naming the rejected host; if an `Origin` header is present it must be `http://` or `https://` followed by an allowed authority or is refused with `403 Forbidden` (requests without `Origin` remain allowed and no CORS headers are emitted). For `#343`, the CLI `--token` is no longer written into `ProfileConfig`: it is stored as `cli_token: Option<SecretString>` in `McpState` at startup and takes precedence over the reloadable `config.mcp_token`, so `SIGHUP` reloads can still rotate `mcp_token` from disk when `--token` was not given but can never clear or replace a CLI-supplied token.
 
@@ -134,6 +137,12 @@ SemVer contract:
   private host, and the deploy job additionally holds the `github-pages`
   credential.
 
+- **Live-cluster credentials now live outside the working tree.** The
+  `tests/live/*.sh` harnesses resolve `~/.config/proxxx/live-env` before
+  the gitignored in-repo `env.local` (`PROXXX_E2E_ENV_FILE` still
+  overrides both). A real PVE token inside a checkout is one `git add -f`
+  or one world-readable clone away from leaking, and the in-repo copy was
+  mode 0644 in practice.
 
 ### Changed
 
@@ -171,16 +180,10 @@ SemVer contract:
   - `proxxx events stream`: the local `--format` flag is removed; output now follows the global `--format` (`json` and `json-envelope` emit NDJSON, `table` and `plain` emit text).
   - `proxxx import`: `--format` is now `--source-format <raw|qcow2|vmdk|vdi|vhdx|vhd>` (validated as a `ValueEnum`).
 
-### Security
-
-- **Live-cluster credentials now live outside the working tree.** The
-  `tests/live/*.sh` harnesses resolve `~/.config/proxxx/live-env` before
-  the gitignored in-repo `env.local` (`PROXXX_E2E_ENV_FILE` still
-  overrides both). A real PVE token inside a checkout is one `git add -f`
-  or one world-readable clone away from leaking, and the in-repo copy was
-  mode 0644 in practice.
-
 ### Fixed
+
+- **`proxxx doctor` now probes PVE 8+/9 connectivity and authentication through `PxClient`, validates Telegram `getMe` responses (`2xx` and `"ok": true`), and probes PBS through `PbsClient` (#321, #411).**
+  `src/cli/doctor.rs` previously called an unauthenticated `probe_url` helper on `/api2/json/version` and decoded the body as JSON: because PVE 8+/9 and PBS return HTTP `401` to anonymous `/version` requests, JSON decoding failed, `connectivity` was reported as `fail`, and the `auth` check was skipped (`#321`). In addition, `probe_url` treated any JSON body as success, so an invalid Telegram bot token returning `401 {"ok":false,"description":"Unauthorized"}` was reported as `ok` (`#411`), and the PBS probe hardcoded `skip_tls = true` regardless of `pbs.verify_tls`. `doctor` now deletes `probe_url` and: (1) builds `PxClient::new(cfg.clone(), None).map(PxClient::with_single_attempt)` and calls `get_api_version()` + `get_nodes()` (reporting `connectivity` `ok` with `PVE reachable, version <v>` and `auth` `ok` on valid credentials; `connectivity` `ok` with `PVE reachable (HTTP 401|403)` and `auth` `fail` when matched against typed `ApiError::Unauthorized | Forbidden`; `connectivity` `fail` and `auth` `warn` `skipped` on transport/TLS errors; and when `PxClient::new` itself fails, `auth` `fail` `client init failed: ...` paired with `init_wizard::send_anon_version_probe` treating any HTTP response as reachable without decoding the body); (2) calls `TelegramGateway::get_me` and reports `ok` only when HTTP `2xx` **and** `"ok": true` in the `getMe` payload, otherwise `warn` with the HTTP status code and Telegram's `"description"`; and (3) probes PBS via `PbsClient::new(pbs.clone(), None)` + `version()` (honouring `pbs.verify_tls` and the three-way `ok` / reachable with rejected credentials / unreachable mapping under `Warn` severity).
 
 - **Cross-profile fan-out (`ls <kind> --all-profiles` and `find <vmid>`) now exits `1` when any profile fails (#322), and `token_secret_file` (PVE and PBS) plus `doctor`'s `ssh_key` check now expand `~` via a single shared helper (#324, #325).**
   `src/cli/mod.rs` previously returned exit code `0` unconditionally from `ls <nodes|guests|storage> --all-profiles` even when every profile failed with a `ProfileRowPayload::Error` row, and `find <vmid>` checked only `rows.is_empty()` while `fanout_find_vmid` labelled error rows as `"(unknown)"` instead of the failing profile's name. `ls --all-profiles` now exits `1` whenever any row is an error row (still printing all data and error rows in both table and JSON modes) and `0` when all profiles succeed; `find <vmid>` preserves each failing profile's name on error rows, exits `5` (`NotFound`) only when every profile answered without error and none owns the VMID, and exits `1` (including the error rows) when any profile failed. For `#324` and `#325`, the three duplicate tilde helpers (`src/config/mod.rs::expand_tilde`, `src/cli/vm.rs::expand_tilde`, and `src/cli/init_wizard.rs::expand_tilde_str`) are consolidated into `proxxx::util::path::expand_tilde` / `expand_tilde_with_home`, which expands `"~"` and `"~/..."` while leaving `"/abs"`, `"rel"`, and `"~user"` untouched, and is now wired into `ProfileConfig::resolve_token_secret`, `PbsConfig::resolve_token_secret`, `TelegramConfig::resolve_bot_token`, `SshConfig`, `CloudInitProfile::from_toml_file`, `init --interactive`, and `proxxx doctor`'s `ssh_key` check, with diagnostic and error messages preserving both the user-written `~/...` path and the expanded path.

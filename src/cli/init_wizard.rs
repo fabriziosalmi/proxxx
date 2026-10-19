@@ -297,14 +297,31 @@ fn normalise_url(raw: &str) -> Result<String> {
     Ok(final_url)
 }
 
-async fn probe_pve_anon(url: &str, verify_tls: bool) -> Result<String> {
+/// Send an unauthenticated `GET {url}/api2/json/version` honouring `verify_tls`
+/// and return the raw [`reqwest::Response`] without decoding the body.
+///
+/// Shared between `proxxx init --interactive` ([`probe_pve_anon`]) and
+/// `proxxx doctor`'s fallback reachability check when client construction
+/// fails before a request can be sent (`#321`). Errors are scrubbed with
+/// [`reqwest::Error::without_url`].
+pub(crate) async fn send_anon_version_probe(
+    url: &str,
+    verify_tls: bool,
+) -> Result<reqwest::Response> {
+    let base = url.trim_end_matches('/');
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(!verify_tls)
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
-    let res = client
-        .get(format!("{url}/api2/json/version"))
+    client
+        .get(format!("{base}/api2/json/version"))
         .send()
+        .await
+        .map_err(|e| anyhow::Error::from(e.without_url()))
+}
+
+async fn probe_pve_anon(url: &str, verify_tls: bool) -> Result<String> {
+    let res = send_anon_version_probe(url, verify_tls)
         .await
         .context("HTTP request failed (cluster unreachable, wrong URL, or TLS rejection)")?;
     let status = res.status();

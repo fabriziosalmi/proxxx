@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use governor::{
-    clock::DefaultClock,
+    clock::MonotonicClock,
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
@@ -22,7 +22,12 @@ use super::types::{Guest, GuestType, Node, StoragePool, TaskLog};
 use super::ProxmoxGateway;
 use crate::config::ProfileConfig;
 
-type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+type Limiter = RateLimiter<
+    NotKeyed,
+    InMemoryState,
+    MonotonicClock,
+    governor::middleware::NoOpMiddleware<std::time::Instant>,
+>;
 
 /// URL path segment for the two Proxmox guest hierarchies.
 /// Forgetting this dispatch was bug #1 — the entire LXC API surface
@@ -255,6 +260,7 @@ pub struct PxClient {
     limiter: Arc<Limiter>,
     profile_config: ProfileConfig,
     audit_dir: Option<std::path::PathBuf>,
+    max_attempts: u32,
 }
 
 impl PxClient {
@@ -326,7 +332,11 @@ impl PxClient {
             None => unreachable!(),
         };
         let quota = Quota::per_second(NonZeroU32::new(rate).unwrap_or(TEN));
-        let limiter = Arc::new(RateLimiter::direct(quota));
+        // Use `MonotonicClock` (`std::time::Instant`) rather than `DefaultClock`
+        // (`QuantaClock`): `quanta::Clock::new()` runs a 200 ms busy-loop
+        // calibration on first construction, which otherwise makes one-shot CLI
+        // probes (`proxxx doctor`, `#321`) 20x slower against a closed port.
+        let limiter = Arc::new(RateLimiter::direct_with_clock(quota, MonotonicClock));
 
         info!("Connected to {} as {}", config.url, config.user);
 
@@ -337,6 +347,7 @@ impl PxClient {
             limiter,
             profile_config: config,
             audit_dir: None,
+            max_attempts: RETRY_MAX_ATTEMPTS,
         })
     }
 
@@ -346,6 +357,19 @@ impl PxClient {
     #[must_use]
     pub fn with_audit_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.audit_dir = Some(dir.into());
+        self
+    }
+
+    /// Disable transient retry (`max_attempts = 1`) and reactive 401 re-auth
+    /// for single-shot diagnostic probes (`proxxx doctor`, `#321`).
+    ///
+    /// `send_with_retry` normally retries `is_connect()` / `is_timeout()` /
+    /// 502/503/504/429 up to `RETRY_MAX_ATTEMPTS` (4) times with ~700 ms of
+    /// exponential backoff. Against a closed port, that turns a ~10 ms
+    /// diagnostic probe into a ~710 ms wait.
+    #[must_use]
+    pub const fn with_single_attempt(mut self) -> Self {
+        self.max_attempts = 1;
         self
     }
 
@@ -432,7 +456,10 @@ impl PxClient {
                     // server's authoritative answer is `401`. Detect it,
                     // force-refresh once, retry once. ONE retry budget
                     // — if it still fails, surface the auth error.
-                    if status == StatusCode::UNAUTHORIZED && !auth_retry_done {
+                    if status == StatusCode::UNAUTHORIZED
+                        && !auth_retry_done
+                        && self.max_attempts > 1
+                    {
                         auth_retry_done = true;
                         warn!("401 from {path} — forcing auth refresh and retrying once");
                         if let Err(e) = self.force_reauth().await {
@@ -441,23 +468,23 @@ impl PxClient {
                         }
                         continue;
                     }
-                    if is_retryable_status(status) && attempt < RETRY_MAX_ATTEMPTS {
+                    if is_retryable_status(status) && attempt < self.max_attempts {
                         let delay = backoff_delay(attempt, retry_after_secs(&resp));
                         warn!(
                             "transient {status} from {path}, retry {attempt}/{} after {:?}",
-                            RETRY_MAX_ATTEMPTS, delay
+                            self.max_attempts, delay
                         );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
                     return Ok(resp);
                 }
-                Err(e) if is_retryable_error(&e) && attempt < RETRY_MAX_ATTEMPTS => {
+                Err(e) if is_retryable_error(&e) && attempt < self.max_attempts => {
                     let delay = backoff_delay(attempt, None);
                     warn!(
                         "transient connection error on {path}: {}, retry {attempt}/{} after {:?}",
                         super::ApiError::format_error_chain(&e),
-                        RETRY_MAX_ATTEMPTS,
+                        self.max_attempts,
                         delay
                     );
                     tokio::time::sleep(delay).await;

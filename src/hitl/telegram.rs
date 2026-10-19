@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -130,7 +130,7 @@ pub struct CallbackQuery {
     pub data: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct User {
     /// Telegram numeric user id. This is the ONLY stable identifier for
     /// a Telegram account: `username` is mutable and reassignable, so an
@@ -139,6 +139,7 @@ pub struct User {
     #[serde(default)]
     pub id: i64,
     pub username: Option<String>,
+    #[serde(default)]
     pub first_name: String,
 }
 
@@ -192,6 +193,27 @@ impl TelegramGateway {
             // wedged connection. The long-poll path sets its own (longer)
             // per-request timeout, which overrides this client default.
             http: Client::builder().timeout(Duration::from_secs(30)).build()?,
+            bot_token: bot_token.into(),
+            chat_id,
+            base_url: DEFAULT_TG_API.to_string(),
+            hmac_key,
+            allowed_approvers: Vec::new(),
+        })
+    }
+
+    /// Construct a gateway for read-only connectivity and credential probing
+    /// (`proxxx doctor`, `#410`, `#411`).
+    ///
+    /// Unlike [`Self::new`], this seeds a fresh 32-byte random HMAC key in
+    /// memory via `getrandom::fill` without reading or writing
+    /// `telegram_hmac.key` on disk (a diagnostic run must not create
+    /// side-effect files, while keeping `hmac_key` non-empty and unforgeable)
+    /// and uses an 8 s request timeout suited to interactive health checks.
+    pub fn new_for_probe(bot_token: impl Into<SecretString>, chat_id: String) -> Result<Self> {
+        let mut hmac_key = vec![0u8; 32];
+        getrandom::fill(&mut hmac_key).context("getrandom failed seeding probe HMAC key")?;
+        Ok(Self {
+            http: Client::builder().timeout(Duration::from_secs(8)).build()?,
             bot_token: bot_token.into(),
             chat_id,
             base_url: DEFAULT_TG_API.to_string(),
@@ -276,6 +298,73 @@ impl TelegramGateway {
         let token = config.resolve_bot_token().await?;
         let gw = Self::new(token, config.chat_id.clone())?;
         Ok(gw.with_allowed_approvers(config.allowed_approvers.clone().unwrap_or_default()))
+    }
+
+    /// Redact any occurrence of `self.bot_token` and pass through
+    /// [`crate::util::panic_hook::scrub_secrets`] so no error string returned
+    /// by this gateway can ever carry the plaintext bot token (`#410`).
+    fn scrub_text(&self, s: impl std::fmt::Display) -> String {
+        let raw = s.to_string();
+        let tok = self.bot_token.expose();
+        let without_tok = if tok.is_empty() {
+            raw
+        } else {
+            raw.replace(tok, "[REDACTED]")
+        };
+        crate::util::panic_hook::scrub_secrets(&without_tok)
+    }
+
+    /// Call `getMe` against the configured Telegram Bot API base URL (`#410`, `#411`).
+    ///
+    /// Succeeds **only** when the HTTP status is `2xx` **and** the JSON body
+    /// carries `"ok": true`. Otherwise fails with the HTTP status code and
+    /// Telegram's `"description"` (never the request URL or bot token).
+    pub async fn get_me(&self) -> Result<User> {
+        let url = format!("{}{}/getMe", self.base_url, self.bot_token.expose());
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(scrub_url)
+            .map_err(|e| anyhow::anyhow!("{}", self.scrub_text(e)))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(scrub_url)
+            .map_err(|e| anyhow::anyhow!("{}", self.scrub_text(e)))?;
+        let parsed: Option<TgResponse<User>> = serde_json::from_slice(&bytes).ok();
+        if status.is_success() {
+            if let Some(tg) = parsed {
+                if tg.ok {
+                    return Ok(tg.result.unwrap_or_default());
+                }
+                let desc = tg
+                    .description
+                    .unwrap_or_else(|| "ok=false in getMe response".to_string());
+                anyhow::bail!(
+                    "HTTP {} from Telegram getMe: {}",
+                    status.as_u16(),
+                    self.scrub_text(desc)
+                );
+            }
+            anyhow::bail!(
+                "HTTP {} from Telegram getMe: non-JSON response",
+                status.as_u16()
+            );
+        }
+        let desc = parsed.and_then(|tg| tg.description).unwrap_or_else(|| {
+            status
+                .canonical_reason()
+                .unwrap_or("request failed")
+                .to_string()
+        });
+        anyhow::bail!(
+            "HTTP {} from Telegram getMe: {}",
+            status.as_u16(),
+            self.scrub_text(desc)
+        )
     }
 
     /// Build the signed inline keyboard for an approval request (`#336`, `#341`).
@@ -544,5 +633,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn new_for_probe_seeds_distinct_non_zero_32_byte_hmac_keys_in_memory() {
+        let gw1 =
+            TelegramGateway::new_for_probe("token-1", "100".to_string()).expect("new_for_probe 1");
+        let gw2 =
+            TelegramGateway::new_for_probe("token-2", "100".to_string()).expect("new_for_probe 2");
+        assert_eq!(gw1.hmac_key.len(), 32);
+        assert_eq!(gw2.hmac_key.len(), 32);
+        assert!(
+            gw1.hmac_key.iter().any(|&b| b != 0),
+            "probe HMAC key 1 must not be all zeros"
+        );
+        assert!(
+            gw2.hmac_key.iter().any(|&b| b != 0),
+            "probe HMAC key 2 must not be all zeros"
+        );
+        assert_ne!(
+            gw1.hmac_key, gw2.hmac_key,
+            "two probe gateways must generate distinct random 32-byte keys"
+        );
     }
 }

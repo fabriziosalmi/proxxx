@@ -14,7 +14,7 @@ mod console;
 mod ct;
 mod daemon;
 mod describe;
-mod doctor;
+pub mod doctor;
 mod events;
 pub mod explain;
 mod fanout;
