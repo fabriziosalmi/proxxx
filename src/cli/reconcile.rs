@@ -98,6 +98,12 @@ pub enum ReconcileCommand {
         #[arg(long)]
         interactive: bool,
 
+        /// Allow converging toward a state file whose `[meta] profile`
+        /// differs from the resolved target profile (`#346`). Without this
+        /// flag, a profile mismatch refuses with exit code 3 before touching PVE.
+        #[arg(long)]
+        allow_profile_mismatch: bool,
+
         /// Emit the apply outcomes as a JSON array instead of text lines.
         #[arg(long)]
         json: bool,
@@ -106,13 +112,10 @@ pub enum ReconcileCommand {
 
 pub async fn execute_reconcile(
     client: &Arc<PxClient>,
-    profile: Option<&str>,
     action: ReconcileCommand,
 ) -> Result<(Value, i32)> {
     match action {
-        ReconcileCommand::Run { source, path, json } => {
-            run(client, profile, &source, &path, json).await
-        }
+        ReconcileCommand::Run { source, path, json } => run(client, &source, &path, json).await,
         ReconcileCommand::Converge {
             source,
             path,
@@ -121,11 +124,11 @@ pub async fn execute_reconcile(
             continue_on_error,
             allow_risk,
             interactive,
+            allow_profile_mismatch,
             json,
         } => {
             converge_cmd(
                 client,
-                profile,
                 &source,
                 &path,
                 dry_run,
@@ -133,6 +136,7 @@ pub async fn execute_reconcile(
                 continue_on_error,
                 allow_risk,
                 interactive,
+                allow_profile_mismatch,
                 json,
             )
             .await
@@ -142,12 +146,11 @@ pub async fn execute_reconcile(
 
 async fn run(
     client: &Arc<PxClient>,
-    profile: Option<&str>,
     source: &str,
     path: &Path,
     json: bool,
 ) -> Result<(Value, i32)> {
-    let profile_label = profile.unwrap_or("default");
+    let profile_label = client.profile_config().profile_label();
     let changes = compute_drift(client.as_ref(), profile_label, source, path).await?;
 
     if json {
@@ -168,13 +171,13 @@ async fn run(
 /// like `reconcile run`, then apply it through the shared converge core (same
 /// pre-flight safety gate as `state apply`). Exit codes mirror `state apply`:
 /// 0 ok, 2 any change Failed, 6 Severe-risk refusal, 8 read-only / freeze lock.
-// The six flag args mirror the `state apply` CLI surface 1:1 (dry_run / prune /
-// continue_on_error / allow_risk / interactive / json); bundling them into a
-// struct only to satisfy the lint would obscure that deliberate parallel.
+// The seven flag args mirror the `state apply` CLI surface 1:1 (dry_run / prune /
+// continue_on_error / allow_risk / interactive / allow_profile_mismatch / json);
+// bundling them into a struct only to satisfy the lint would obscure that
+// deliberate parallel.
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 async fn converge_cmd(
     client: &Arc<PxClient>,
-    profile: Option<&str>,
     source: &str,
     path: &Path,
     dry_run: bool,
@@ -182,9 +185,10 @@ async fn converge_cmd(
     continue_on_error: bool,
     allow_risk: bool,
     interactive: bool,
+    allow_profile_mismatch: bool,
     json: bool,
 ) -> Result<(Value, i32)> {
-    let profile_label = profile.unwrap_or("default");
+    let profile_label = client.profile_config().profile_label();
     let audit_user = client.profile_config().user.clone();
     let opts = state::apply::ApplyOptions {
         dry_run,
@@ -197,8 +201,15 @@ async fn converge_cmd(
         // first (a Severe change without --allow-risk refuses here, exit 6),
         // then prompt per-Severe, then apply the approved subset WITHOUT
         // re-gating (`apply_and_audit`). Keeps stdin out of the shared core.
-        let (changes, live) =
-            compute_drift_with_live(client.as_ref(), profile_label, source, path).await?;
+        let (changes, live) = compute_drift_checked(
+            client.as_ref(),
+            profile_label,
+            source,
+            path,
+            true,
+            allow_profile_mismatch,
+        )
+        .await?;
         state::preflight::enforce_state_preflight(&changes, &live, allow_risk)?;
         let approved = super::state::interactive_hitl_filter(&changes, &live);
         state::converge::apply_and_audit(
@@ -212,13 +223,14 @@ async fn converge_cmd(
         )
         .await
     } else {
-        state::converge::converge(
+        state::converge::converge_with_mismatch_policy(
             client.as_ref(),
             profile_label,
             source,
             path,
             opts,
             allow_risk,
+            allow_profile_mismatch,
             &audit_user,
         )
         .await?
@@ -256,30 +268,45 @@ fn print_converge_text(source: &str, profile: &str, report: &state::converge::Co
 /// the `reconcile watch` daemon pillar: resolve + read the desired-state
 /// source, export live state across every family, and diff. Read-only.
 ///
-/// A thin wrapper over [`compute_drift_with_live`] that drops the live state —
-/// the detect-only callers don't need it. The converge core uses the tuple
-/// form so it can run the pre-flight risk gate without a second export.
+/// A thin wrapper over [`compute_drift_checked`] that warns on `[meta] profile`
+/// mismatch (`enforce_profile_match = false`) and drops the live state —
+/// the detect-only callers don't need it.
 pub(crate) async fn compute_drift(
     client: &PxClient,
     profile: &str,
     source: &str,
     path: &Path,
 ) -> Result<Vec<Change>> {
-    Ok(compute_drift_with_live(client, profile, source, path)
-        .await?
-        .0)
+    Ok(
+        compute_drift_checked(client, profile, source, path, false, false)
+            .await?
+            .0,
+    )
 }
 
 /// Like [`compute_drift`] but also hands back the live [`state::model::ClusterState`]
-/// it exported. The converge core ([`crate::state::converge`]) needs `live` for the
-/// pre-flight risk assessment ([`crate::state::preflight::assess`]), and re-exporting
-/// it would double the cluster round-trips on every converge. Still read-only — this
-/// only *reads* live state; the caller decides whether to mutate.
+/// it exported, and refuses (exit 3) when `[meta] profile` is present and differs
+/// from `profile` (`#346`, Decision 3). Used by [`crate::state::converge::converge`]
+/// and the daemon's `run_auto_converge` (which never overrides a profile mismatch).
 pub(crate) async fn compute_drift_with_live(
     client: &PxClient,
     profile: &str,
     source: &str,
     path: &Path,
+) -> Result<(Vec<Change>, state::model::ClusterState)> {
+    compute_drift_checked(client, profile, source, path, true, false).await
+}
+
+/// Inner drift computation with explicit profile-mismatch policy (`#346`):
+/// checks `declared.check_profile_match` BEFORE calling `export_state` so a
+/// refused converge sends zero PVE requests.
+pub(crate) async fn compute_drift_checked(
+    client: &PxClient,
+    profile: &str,
+    source: &str,
+    path: &Path,
+    enforce_profile_match: bool,
+    allow_profile_mismatch: bool,
 ) -> Result<(Vec<Change>, state::model::ClusterState)> {
     let toml_str = load_desired_toml(source, path).await?;
     let declared = state::model::ClusterState::from_toml_str(&toml_str).with_context(|| {
@@ -287,6 +314,12 @@ pub(crate) async fn compute_drift_with_live(
             "parsing desired state from `{source}` — is it the output of `proxxx state export`?"
         )
     })?;
+    declared.check_profile_match(
+        profile,
+        source,
+        enforce_profile_match,
+        allow_profile_mismatch,
+    )?;
 
     // `Resource::all()` is the single source of truth, so a newly-added
     // family is never silently omitted (which would diff as perpetual creates).

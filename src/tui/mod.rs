@@ -471,10 +471,11 @@ pub async fn run(
 
     info!("TUI started — connected to Proxmox");
 
-    let profile_name = profile.map(std::string::ToString::to_string);
+    let profile_label = client.profile_config().profile_label().to_string();
 
     // ── State ───────────────────────────────────────────
     let mut state = AppState::new();
+    state.profile_label.clone_from(&profile_label);
     // Populate available named profiles for the P-key profile picker.
     // Best-effort: if the config file can't be read, the picker is empty
     // (silently degrades — no popup rather than a hard error at startup).
@@ -488,7 +489,7 @@ pub async fn run(
     }
 
     // Load state from cache for instant startup
-    if let Ok(cached) = crate::app::cache::load_state(profile_name.as_deref()) {
+    if let Ok(cached) = crate::app::cache::load_state(&profile_label) {
         state.nodes = cached.nodes;
         state.guests = cached.guests;
         state.storage = cached.storage;
@@ -500,7 +501,7 @@ pub async fn run(
     // If proxxx crashed or the user quit mid-disk-move, the in-flight
     // ops surface again with their last-known status (Running/Error/etc.)
     // so the user can inspect, retry, or dismiss.
-    if let Ok(persisted) = crate::app::cache::load_queue(profile_name.as_deref()) {
+    if let Ok(persisted) = crate::app::cache::load_queue(&profile_label) {
         if !persisted.is_empty() {
             info!(
                 "Restored {} queue entries from previous session",
@@ -519,7 +520,7 @@ pub async fn run(
         .unwrap_or_default()
         .as_secs();
     let past = now.saturating_sub(24 * 3600);
-    if let Ok(past_cache) = crate::app::cache::load_state_at(profile_name.as_deref(), past) {
+    if let Ok(past_cache) = crate::app::cache::load_state_at(&profile_label, past) {
         for pool in past_cache.storage {
             state
                 .storage_trend
@@ -629,7 +630,8 @@ pub async fn run(
                 .iter()
                 .filter_map(super::app::queue::QueuedOp::to_persisted)
                 .collect();
-            if let Err(e) = crate::app::cache::save_queue_async(profile_name.clone(), entries).await
+            if let Err(e) =
+                crate::app::cache::save_queue_async(profile_label.clone(), entries).await
             {
                 warn!("queue persistence write failed: {e:#}");
             }
@@ -753,7 +755,7 @@ pub async fn run(
                                             false,
                                             tg_gateway.as_ref(),
                                             &hitl_coord,
-                                            profile_name.as_deref(),
+                                            &profile_label,
                                         ).await;
                                     }
                                     None => {}
@@ -794,7 +796,7 @@ pub async fn run(
                             // write doesn't pin this runtime worker through
                             // the busy_timeout under WAL-checkpoint contention.
                             let _ = crate::app::cache::save_state_async(
-                                profile_name.clone(),
+                                profile_label.clone(),
                                 state.nodes.clone(),
                                 state.guests.clone(),
                                 state.storage.clone(),
@@ -845,7 +847,7 @@ pub async fn run(
                                     true,
                                     tg_gateway.as_ref(),
                                     &hitl_coord,
-                                    profile_name.as_deref(),
+                                    &profile_label,
                                 ).await;
                             }
                         }
@@ -1285,7 +1287,7 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
     skip_hitl: bool,
     tg_gateway: Option<&Arc<crate::hitl::telegram::TelegramGateway>>,
     hitl_coord: &Arc<HitlCoordinator>,
-    profile_name: Option<&str>,
+    profile_label: &str,
 ) {
     let get_node = |vmid: u32| -> Option<String> {
         state
@@ -1712,7 +1714,7 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                 .filter_map(super::app::queue::QueuedOp::to_persisted)
                 .collect();
             if let Err(e) =
-                crate::app::cache::save_queue_async(profile_name.map(str::to_owned), entries).await
+                crate::app::cache::save_queue_async(profile_label.to_owned(), entries).await
             {
                 // Fail CLOSED: if we can't durably record intent-to-dispatch, do
                 // NOT dispatch — a silent double-execute risk is worse than not

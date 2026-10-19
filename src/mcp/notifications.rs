@@ -293,7 +293,7 @@ const fn should_publish_reconcile(last: Option<(bool, u64)>, in_sync: bool, ts: 
 /// quiet while nothing changes, and silent until the watch first reports.
 #[must_use = "spawning a watcher without holding the handle leaks the background task"]
 pub fn spawn_reconcile_watcher(
-    profile: Option<String>,
+    profile_label: String,
     broker: Broker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -301,7 +301,7 @@ pub fn spawn_reconcile_watcher(
         let mut last: Option<(bool, u64)> = None;
         loop {
             tokio::time::sleep(interval).await;
-            let status = match crate::app::cache::load_reconcile_status(profile.as_deref()) {
+            let status = match crate::app::cache::load_reconcile_status(&profile_label) {
                 Ok(Some(s)) => s,
                 Ok(None) => continue, // watch hasn't reported yet
                 Err(e) => {
@@ -312,7 +312,7 @@ pub fn spawn_reconcile_watcher(
             if should_publish_reconcile(last, status.in_sync, status.last_check_ts) {
                 broker.publish(McpNotification::Reconciliation {
                     event: if status.in_sync { "in_sync" } else { "drifted" },
-                    profile: profile.as_deref().unwrap_or("default").to_owned(),
+                    profile: profile_label.clone(),
                     drift_total: status.total_changes,
                     summary: status.summary.clone(),
                 });

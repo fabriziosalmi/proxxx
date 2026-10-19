@@ -58,6 +58,7 @@ pub struct AppState {
     pub cluster_tasks: Vec<crate::api::types::TaskInfo>,
 
     // Timeline state
+    pub profile_label: String,
     pub timeline_timestamps: Vec<u64>,
     pub timeline_index: usize,
     pub timeline_snapshot: Option<crate::app::cache::ClusterStateCache>,
@@ -534,6 +535,7 @@ impl Default for AppState {
             selected_guests: std::collections::HashSet::new(),
             storage_trend: std::collections::HashMap::new(),
             cluster_tasks: Vec::new(),
+            profile_label: "default".to_string(),
             timeline_timestamps: Vec::new(),
             timeline_index: 0,
             timeline_snapshot: None,
@@ -1498,7 +1500,7 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
         }
 
         Action::EnterTimeline => {
-            if let Ok(ts) = crate::app::cache::get_all_snapshots(None) {
+            if let Ok(ts) = crate::app::cache::get_all_snapshots(&state.profile_label) {
                 if ts.is_empty() {
                     state.error = Some("No historical snapshots found".to_string());
                     state.error_time = Some(std::time::Instant::now());
@@ -1506,14 +1508,14 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
                     state.timeline_timestamps = ts;
                     state.timeline_index = state.timeline_timestamps.len() - 1;
                     if let Ok(snap) = crate::app::cache::load_state_at(
-                        None,
+                        &state.profile_label,
                         state.timeline_timestamps[state.timeline_index],
                     ) {
                         state.timeline_snapshot = Some(snap);
                     }
                     if state.timeline_index > 0 {
                         if let Ok(prev) = crate::app::cache::load_state_at(
-                            None,
+                            &state.profile_label,
                             state.timeline_timestamps[state.timeline_index - 1],
                         ) {
                             state.timeline_prev_snapshot = Some(prev);
@@ -1529,14 +1531,14 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             if state.timeline_index > 0 {
                 state.timeline_index -= 1;
                 if let Ok(snap) = crate::app::cache::load_state_at(
-                    None,
+                    &state.profile_label,
                     state.timeline_timestamps[state.timeline_index],
                 ) {
                     state.timeline_snapshot = Some(snap);
                 }
                 if state.timeline_index > 0 {
                     if let Ok(prev) = crate::app::cache::load_state_at(
-                        None,
+                        &state.profile_label,
                         state.timeline_timestamps[state.timeline_index - 1],
                     ) {
                         state.timeline_prev_snapshot = Some(prev);
@@ -1550,14 +1552,14 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             if state.timeline_index + 1 < state.timeline_timestamps.len() {
                 state.timeline_index += 1;
                 if let Ok(snap) = crate::app::cache::load_state_at(
-                    None,
+                    &state.profile_label,
                     state.timeline_timestamps[state.timeline_index],
                 ) {
                     state.timeline_snapshot = Some(snap);
                 }
                 if state.timeline_index > 0 {
                     if let Ok(prev) = crate::app::cache::load_state_at(
-                        None,
+                        &state.profile_label,
                         state.timeline_timestamps[state.timeline_index - 1],
                     ) {
                         state.timeline_prev_snapshot = Some(prev);

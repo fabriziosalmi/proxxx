@@ -219,6 +219,7 @@ pub struct Orchestrator {
     ssh: Arc<dyn SshGateway>,
     strategy: PatchStrategy,
     audit_dir: Option<std::path::PathBuf>,
+    profile_label: String,
 }
 
 impl Orchestrator {
@@ -233,6 +234,7 @@ impl Orchestrator {
             ssh,
             strategy,
             audit_dir: None,
+            profile_label: "default".to_string(),
         }
     }
 
@@ -242,6 +244,13 @@ impl Orchestrator {
     #[must_use]
     pub fn with_audit_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.audit_dir = Some(dir.into());
+        self
+    }
+
+    /// Set the resolved profile label recorded in audit entries (`#346`).
+    #[must_use]
+    pub fn with_profile_label(mut self, label: impl Into<String>) -> Self {
+        self.profile_label = label.into();
         self
     }
 
@@ -476,7 +485,7 @@ impl Orchestrator {
             Some(node),
             None,
             &[("command", cmd)],
-            None,
+            &self.profile_label,
             self.audit_dir.as_deref(),
         )?;
         let opts = ExecOptions {

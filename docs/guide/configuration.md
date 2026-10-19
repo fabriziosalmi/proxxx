@@ -103,6 +103,16 @@ Switch with `proxxx --profile prod ls nodes`. The flat top-level
 profile (no `[profiles.X]`) is treated as the default if no `default`
 key is set.
 
+Every subsystem uses the **resolved** profile label (`ProfileConfig::profile_label()`):
+the explicit `--profile <name>`, the `default = "<name>"` key, or the
+sole `[profiles.<name>]` section — falling back to `"default"` only when
+the configuration is a flat top-level file with no `[profiles]` table.
+That resolved label names the SQLite state/queue/dedup/drift cache file
+(`<cache_dir>/proxxx/<profile>_state.db`), the `[meta] profile` header
+written by `proxxx state export`, the `"profile"` field in `audit.db`
+`params_json`, the `profile` label on Prometheus reconcile metrics, and
+MCP reconciliation notifications.
+
 ### Read-only profiles (`read_only`)
 
 Set `read_only = true` on a profile to make proxxx refuse **every**

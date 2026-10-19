@@ -257,9 +257,8 @@ pub async fn scrape(client: &PxClient) -> String {
     // no series, which is correct: drift gauges appear only once a check has
     // reported. Read failures degrade silently — these metrics are best-effort
     // and must never fail an otherwise-healthy scrape.
-    let profile = client.profile_config().profile_name.as_deref();
-    if let Ok(Some(drift)) = crate::app::cache::load_reconcile_status(profile) {
-        let prof = profile.unwrap_or("default");
+    let prof = client.profile_config().profile_label();
+    if let Ok(Some(drift)) = crate::app::cache::load_reconcile_status(prof) {
         w.help(
             "proxxx_reconcile_in_sync",
             "1 if live state matched declared at the last reconcile check, else 0",

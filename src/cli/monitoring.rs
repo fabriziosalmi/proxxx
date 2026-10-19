@@ -465,7 +465,6 @@ pub enum ReplicationCommand {
 pub async fn execute_alerts(
     client: &Arc<crate::api::PxClient>,
     config: crate::config::ConfigHandle,
-    profile: Option<&str>,
     action: AlertsCommand,
 ) -> Result<(Value, i32)> {
     use crate::alerts::engine::{evaluate, ClusterSnapshot, EngineState};
@@ -517,6 +516,7 @@ pub async fn execute_alerts(
             ))
         }
         AlertsCommand::Watch { interval } => {
+            let profile_label = client.profile_config().profile_label();
             // Bail immediately if no rules are configured at startup.
             // After that, an empty-rules reload is handled gracefully per-tick.
             {
@@ -548,7 +548,7 @@ pub async fn execute_alerts(
             // update, accidental SIGHUP) does NOT re-fire every active
             // alert. Best-effort: a missing/corrupt cache yields an
             // empty DedupCache rather than failing the daemon.
-            let mut dedup = match crate::app::cache::load_alert_dedup(profile) {
+            let mut dedup = match crate::app::cache::load_alert_dedup(profile_label) {
                 Ok(rows) => {
                     if !rows.is_empty() {
                         tracing::info!(
@@ -581,7 +581,7 @@ pub async fn execute_alerts(
                         // SQLite flush at shutdown can't pin the runtime
                         // and delay the systemd 90s SIGKILL window.
                         if let Err(e) = crate::app::cache::save_alert_dedup_async(
-                            profile.map(str::to_owned),
+                            profile_label.to_owned(),
                             dedup.entries(),
                         )
                         .await
@@ -672,7 +672,7 @@ pub async fn execute_alerts(
                         // Phase 12 audit fix: async wrapper — see the
                         // shutdown branch above for rationale.
                         if let Err(e) = crate::app::cache::save_alert_dedup_async(
-                            profile.map(str::to_owned),
+                            profile_label.to_owned(),
                             dedup.entries(),
                         )
                         .await

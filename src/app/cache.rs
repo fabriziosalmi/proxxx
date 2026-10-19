@@ -242,10 +242,10 @@ fn get_db_dir() -> PathBuf {
     path
 }
 
-fn get_db_path(profile_name: Option<&str>) -> PathBuf {
+#[must_use]
+pub fn get_db_path(profile_label: &str) -> PathBuf {
     let mut path = get_db_dir();
-    let profile = profile_name.unwrap_or("default");
-    path.push(format!("{profile}_state.db"));
+    path.push(format!("{profile_label}_state.db"));
     path
 }
 
@@ -261,8 +261,8 @@ fn init_db(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn load_state(profile_name: Option<&str>) -> anyhow::Result<ClusterStateCache> {
-    let path = get_db_path(profile_name);
+pub fn load_state(profile_label: &str) -> anyhow::Result<ClusterStateCache> {
+    let path = get_db_path(profile_label);
     let conn = open_db(&path)?;
     init_db(&conn)?;
 
@@ -283,25 +283,23 @@ pub fn load_state(profile_name: Option<&str>) -> anyhow::Result<ClusterStateCach
 /// `AppState` and live across iterations of the TUI run loop, so the
 /// caller clones into owned Vecs before handing them off here.
 pub async fn save_state_async(
-    profile_name: Option<String>,
+    profile_label: String,
     nodes: Vec<Node>,
     guests: Vec<Guest>,
     storage: Vec<StoragePool>,
 ) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || {
-        save_state(profile_name.as_deref(), &nodes, &guests, &storage)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("save_state spawn_blocking join error: {e}"))?
+    tokio::task::spawn_blocking(move || save_state(&profile_label, &nodes, &guests, &storage))
+        .await
+        .map_err(|e| anyhow::anyhow!("save_state spawn_blocking join error: {e}"))?
 }
 
 pub fn save_state(
-    profile_name: Option<&str>,
+    profile_label: &str,
     nodes: &[Node],
     guests: &[Guest],
     storage: &[StoragePool],
 ) -> anyhow::Result<()> {
-    let path = get_db_path(profile_name);
+    let path = get_db_path(profile_label);
     let mut conn = open_db(&path)?;
     init_db(&conn)?;
 
@@ -347,11 +345,8 @@ pub fn save_state(
     Ok(())
 }
 
-pub fn load_state_at(
-    profile_name: Option<&str>,
-    timestamp: u64,
-) -> anyhow::Result<ClusterStateCache> {
-    let path = get_db_path(profile_name);
+pub fn load_state_at(profile_label: &str, timestamp: u64) -> anyhow::Result<ClusterStateCache> {
+    let path = get_db_path(profile_label);
     let conn = open_db(&path)?;
     init_db(&conn)?;
 
@@ -465,21 +460,18 @@ fn init_queue_table(conn: &Connection) -> anyhow::Result<()> {
 /// caller clones if they need the values afterwards (cheap — the cache
 /// types are small Vecs).
 pub async fn save_queue_async(
-    profile_name: Option<String>,
+    profile_label: String,
     entries: Vec<PersistedQueueEntry>,
 ) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || save_queue(profile_name.as_deref(), &entries))
+    tokio::task::spawn_blocking(move || save_queue(&profile_label, &entries))
         .await
         .map_err(|e| anyhow::anyhow!("save_queue spawn_blocking join error: {e}"))?
 }
 
 /// Replace the persisted queue with the given entries (full overwrite).
 /// Cheap with WAL on a few-dozen-row table; called on every queue mutation.
-pub fn save_queue(
-    profile_name: Option<&str>,
-    entries: &[PersistedQueueEntry],
-) -> anyhow::Result<()> {
-    let path = get_db_path(profile_name);
+pub fn save_queue(profile_label: &str, entries: &[PersistedQueueEntry]) -> anyhow::Result<()> {
+    let path = get_db_path(profile_label);
     let mut conn = open_db(&path)?;
     init_queue_table(&conn)?;
 
@@ -502,8 +494,8 @@ pub fn save_queue(
 
 /// Load the most recently persisted queue entries, oldest-first
 /// (preserves user's enqueue order).
-pub fn load_queue(profile_name: Option<&str>) -> anyhow::Result<Vec<PersistedQueueEntry>> {
-    let path = get_db_path(profile_name);
+pub fn load_queue(profile_label: &str) -> anyhow::Result<Vec<PersistedQueueEntry>> {
+    let path = get_db_path(profile_label);
     let conn = open_db(&path)?;
     init_queue_table(&conn)?;
 
@@ -552,19 +544,19 @@ fn init_alert_dedup_table(conn: &Connection) -> anyhow::Result<()> {
 /// path is async, so wrapping moves the `SQLite` I/O off the runtime
 /// worker.
 pub async fn save_alert_dedup_async(
-    profile_name: Option<String>,
+    profile_label: String,
     entries: Vec<(String, String, u64)>,
 ) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || save_alert_dedup(profile_name.as_deref(), &entries))
+    tokio::task::spawn_blocking(move || save_alert_dedup(&profile_label, &entries))
         .await
         .map_err(|e| anyhow::anyhow!("save_alert_dedup spawn_blocking join error: {e}"))?
 }
 
 pub fn save_alert_dedup(
-    profile_name: Option<&str>,
+    profile_label: &str,
     entries: &[(String, String, u64)],
 ) -> anyhow::Result<()> {
-    let path = get_db_path(profile_name);
+    let path = get_db_path(profile_label);
     let mut conn = open_db(&path)?;
     init_alert_dedup_table(&conn)?;
 
@@ -583,8 +575,8 @@ pub fn save_alert_dedup(
 /// Load persisted alert-dedup entries. Returns an empty Vec if the
 /// table is empty or missing — callers treat that as "fresh state",
 /// matching `DedupCache::default()` semantics.
-pub fn load_alert_dedup(profile_name: Option<&str>) -> anyhow::Result<Vec<(String, String, u64)>> {
-    let path = get_db_path(profile_name);
+pub fn load_alert_dedup(profile_label: &str) -> anyhow::Result<Vec<(String, String, u64)>> {
+    let path = get_db_path(profile_label);
     let conn = open_db(&path)?;
     init_alert_dedup_table(&conn)?;
 
@@ -650,19 +642,16 @@ fn init_reconcile_tables(conn: &Connection) -> anyhow::Result<()> {
 /// Async wrapper — the watch loop is on the Tokio runtime, and `SQLite`
 /// I/O can block (`busy_timeout`). Mirrors [`save_alert_dedup_async`].
 pub async fn save_reconcile_status_async(
-    profile_name: Option<String>,
+    profile_label: String,
     status: ReconcileStatus,
 ) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || save_reconcile_status(profile_name.as_deref(), &status))
+    tokio::task::spawn_blocking(move || save_reconcile_status(&profile_label, &status))
         .await
         .map_err(|e| anyhow::anyhow!("save_reconcile_status spawn_blocking join error: {e}"))?
 }
 
-pub fn save_reconcile_status(
-    profile_name: Option<&str>,
-    status: &ReconcileStatus,
-) -> anyhow::Result<()> {
-    let mut conn = open_db(&get_db_path(profile_name))?;
+pub fn save_reconcile_status(profile_label: &str, status: &ReconcileStatus) -> anyhow::Result<()> {
+    let mut conn = open_db(&get_db_path(profile_label))?;
     write_reconcile_status(&mut conn, status)
 }
 
@@ -696,10 +685,8 @@ fn write_reconcile_status(conn: &mut Connection, status: &ReconcileStatus) -> an
 /// Load the latest reconcile drift result. `Ok(None)` when the watch has
 /// never reported (table empty / DB absent) — readers show no series, which
 /// is correct: a drift gauge should appear only once a check has run.
-pub fn load_reconcile_status(
-    profile_name: Option<&str>,
-) -> anyhow::Result<Option<ReconcileStatus>> {
-    let conn = open_db(&get_db_path(profile_name))?;
+pub fn load_reconcile_status(profile_label: &str) -> anyhow::Result<Option<ReconcileStatus>> {
+    let conn = open_db(&get_db_path(profile_label))?;
     read_reconcile_status(&conn)
 }
 
@@ -743,8 +730,8 @@ fn read_reconcile_status(conn: &Connection) -> anyhow::Result<Option<ReconcileSt
     }))
 }
 
-pub fn get_all_snapshots(profile_name: Option<&str>) -> anyhow::Result<Vec<u64>> {
-    let path = get_db_path(profile_name);
+pub fn get_all_snapshots(profile_label: &str) -> anyhow::Result<Vec<u64>> {
+    let path = get_db_path(profile_label);
     let conn = open_db(&path)?;
     init_db(&conn)?;
 
@@ -1010,9 +997,9 @@ mod concurrency_tests {
                 2000_u64,
             ),
         ];
-        save_alert_dedup(Some(&profile), &entries).expect("save");
+        save_alert_dedup(&profile, &entries).expect("save");
 
-        let loaded = load_alert_dedup(Some(&profile)).expect("load");
+        let loaded = load_alert_dedup(&profile).expect("load");
         assert_eq!(loaded.len(), 3);
         // Output is ordered by (rule, target) ASC — pin that for
         // determinism. Reorder the input to match.
@@ -1023,7 +1010,7 @@ mod concurrency_tests {
         assert_eq!(got, expected);
 
         // Cleanup — `get_db_path` derives the file from profile name.
-        let path = get_db_path(Some(&profile));
+        let path = get_db_path(&profile);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -1040,7 +1027,7 @@ mod concurrency_tests {
     // don't try to measure latency here.
 
     fn cleanup_profile(profile: &str) {
-        let path = get_db_path(Some(profile));
+        let path = get_db_path(profile);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
@@ -1070,11 +1057,11 @@ mod concurrency_tests {
                 created_at_secs: 1_700_000_500,
             },
         ];
-        super::save_queue_async(Some(profile.clone()), entries.clone())
+        super::save_queue_async(profile.clone(), entries.clone())
             .await
             .expect("async save");
 
-        let loaded = load_queue(Some(&profile)).expect("sync load");
+        let loaded = load_queue(&profile).expect("sync load");
         assert_eq!(loaded.len(), 2);
         // Both rows share saved_at (we save in one transaction) so the
         // tiebreaker is id ASC: "op-restart-200" < "op-stop-100".
@@ -1107,7 +1094,7 @@ mod concurrency_tests {
             ..Default::default()
         }];
         super::save_state_async(
-            Some(profile.clone()),
+            profile.clone(),
             nodes.clone(),
             guests.clone(),
             storage.clone(),
@@ -1115,7 +1102,7 @@ mod concurrency_tests {
         .await
         .expect("async save");
 
-        let loaded = load_state(Some(&profile)).expect("sync load");
+        let loaded = load_state(&profile).expect("sync load");
         assert_eq!(loaded.nodes.len(), 1);
         assert_eq!(loaded.nodes[0].node, "pve1");
         assert_eq!(loaded.guests.len(), 1);
@@ -1142,11 +1129,11 @@ mod concurrency_tests {
                 1_700_000_100_u64,
             ),
         ];
-        super::save_alert_dedup_async(Some(profile.clone()), entries.clone())
+        super::save_alert_dedup_async(profile.clone(), entries.clone())
             .await
             .expect("async save");
 
-        let mut loaded = load_alert_dedup(Some(&profile)).expect("sync load");
+        let mut loaded = load_alert_dedup(&profile).expect("sync load");
         loaded.sort();
         let mut expected = entries;
         expected.sort();
@@ -1175,10 +1162,10 @@ mod concurrency_tests {
             node: "pve-root".into(),
             ..Default::default()
         }];
-        save_state(Some(&root_profile), &nodes, &[], &[]).expect("save root state");
+        save_state(&root_profile, &nodes, &[], &[]).expect("save root state");
 
         // Load under the auditor profile — MUST find nothing.
-        let auditor_result = load_state(Some(&auditor_profile));
+        let auditor_result = load_state(&auditor_profile);
         assert!(
             auditor_result.is_err(),
             "auditor profile must not see root's state, got: {:?}",
@@ -1186,7 +1173,7 @@ mod concurrency_tests {
         );
 
         // Root profile load must still succeed and contain the correct node.
-        let root_cache = load_state(Some(&root_profile)).expect("root state round-trips");
+        let root_cache = load_state(&root_profile).expect("root state round-trips");
         assert_eq!(root_cache.nodes.len(), 1);
         assert_eq!(root_cache.nodes[0].node, "pve-root");
 
@@ -1208,10 +1195,10 @@ mod concurrency_tests {
             node: "pve1".into(),
             ..Default::default()
         }];
-        save_state(Some(&auditor_profile), &[], &auditor_guests, &[]).expect("save auditor state");
+        save_state(&auditor_profile, &[], &auditor_guests, &[]).expect("save auditor state");
 
         // Root never wrote — its load must return Err.
-        let root_result = load_state(Some(&root_profile));
+        let root_result = load_state(&root_profile);
         assert!(
             root_result.is_err(),
             "root profile must not see auditor's VMs"
@@ -1227,7 +1214,7 @@ mod concurrency_tests {
         cleanup_profile(&profile);
 
         // Never reported → None (no series until the watch runs once).
-        assert!(load_reconcile_status(Some(&profile)).unwrap().is_none());
+        assert!(load_reconcile_status(&profile).unwrap().is_none());
 
         // A drift result persists with its per-family counts.
         let drift = ReconcileStatus {
@@ -1237,11 +1224,8 @@ mod concurrency_tests {
             summary: "3 change(s) across 2 families".into(),
             by_family: vec![("pool".into(), 2), ("storage".into(), 1)],
         };
-        save_reconcile_status(Some(&profile), &drift).unwrap();
-        assert_eq!(
-            load_reconcile_status(Some(&profile)).unwrap().unwrap(),
-            drift
-        );
+        save_reconcile_status(&profile, &drift).unwrap();
+        assert_eq!(load_reconcile_status(&profile).unwrap().unwrap(), drift);
 
         // A later in-sync check overwrites the single status row AND clears
         // the per-family drift rows — no stale `proxxx_drift_resources` gauges.
@@ -1252,8 +1236,8 @@ mod concurrency_tests {
             summary: "in sync".into(),
             by_family: vec![],
         };
-        save_reconcile_status(Some(&profile), &synced).unwrap();
-        let got = load_reconcile_status(Some(&profile)).unwrap().unwrap();
+        save_reconcile_status(&profile, &synced).unwrap();
+        let got = load_reconcile_status(&profile).unwrap().unwrap();
         assert_eq!(got, synced);
         assert!(got.by_family.is_empty(), "drift rows must be cleared");
 

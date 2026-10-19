@@ -293,6 +293,51 @@ impl ClusterState {
             self.declared_families = Some(table.keys().cloned().collect());
         }
     }
+
+    /// Check whether this state document's `[meta] profile` matches the
+    /// resolved target `profile_label` (`#346`, Decision 3):
+    /// - When `[meta]` or `profile` is absent/empty, or matches `target_profile`,
+    ///   returns `Ok(())`.
+    /// - On mismatch, if `enforce_match && !allow_mismatch`, refuses with a
+    ///   typed [`crate::config::ConfigError::ProfileMismatch`] (exit code 3)
+    ///   before any PVE call is made.
+    /// - On mismatch when `enforce_match == false` (`state diff`,
+    ///   `reconcile run` / `watch`) or `allow_mismatch == true`
+    ///   (`--allow-profile-mismatch`), prints a warning to stderr and
+    ///   continues.
+    ///
+    /// # Errors
+    /// Returns [`crate::config::ConfigError::ProfileMismatch`] when
+    /// `enforce_match && !allow_mismatch` and `[meta] profile` is non-empty
+    /// and differs from `target_profile`.
+    pub fn check_profile_match(
+        &self,
+        target_profile: &str,
+        source_desc: &str,
+        enforce_match: bool,
+        allow_mismatch: bool,
+    ) -> anyhow::Result<()> {
+        let Some(meta) = &self.meta else {
+            return Ok(());
+        };
+        if meta.profile.is_empty() || meta.profile == target_profile {
+            return Ok(());
+        }
+        if enforce_match && !allow_mismatch {
+            return Err(crate::config::ConfigError::ProfileMismatch {
+                source_desc: source_desc.to_string(),
+                declared: meta.profile.clone(),
+                target: target_profile.to_string(),
+            }
+            .into());
+        }
+        eprintln!(
+            "warning: state document `{source_desc}` declares [meta] profile = \"{}\", \
+             which differs from target profile \"{target_profile}\"",
+            meta.profile
+        );
+        Ok(())
+    }
 }
 
 /// Metadata header emitted by the export layer. Captures *which*

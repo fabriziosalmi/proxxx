@@ -516,7 +516,7 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
             "POST",
             "/nodes/pve1/qemu/100/status/start",
             &[],
-            Some("prod"),
+            "prod",
             Some(dir.path()),
         )
         .expect("write_ahead_at must succeed");
@@ -565,7 +565,7 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
         "POST",
         "/nodes/pve1/qemu/100/status/start",
         &[],
-        Some("prod"),
+        "prod",
         Some(dir.path()),
     )
     .expect_err("tampered tail row must be caught by O(1) verify_tail");

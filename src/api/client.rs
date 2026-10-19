@@ -568,7 +568,7 @@ impl PxClient {
             "POST",
             path,
             params,
-            self.profile_config.profile_name.as_deref(),
+            self.profile_config.profile_label(),
             self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
@@ -622,7 +622,7 @@ impl PxClient {
             "PUT",
             path,
             params,
-            self.profile_config.profile_name.as_deref(),
+            self.profile_config.profile_label(),
             self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
@@ -663,7 +663,7 @@ impl PxClient {
             "DELETE",
             path,
             &[],
-            self.profile_config.profile_name.as_deref(),
+            self.profile_config.profile_label(),
             self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);
@@ -2701,7 +2701,7 @@ impl ProxmoxGateway for PxClient {
             "POST",
             &path,
             &[("content", content_type), ("filename", &filename)],
-            self.profile_config.profile_name.as_deref(),
+            self.profile_config.profile_label(),
             self.audit_dir.as_deref(),
         )?;
         let url = format!("{}/api2/json{}", self.base_url, path);

@@ -133,7 +133,8 @@ pub async fn execute(
                 reboot_wait_timeout: std::time::Duration::from_secs(reboot_wait),
                 ..Default::default()
             };
-            let orch = Orchestrator::new(api, ssh, strategy);
+            let orch =
+                Orchestrator::new(api, ssh, strategy).with_profile_label(config.profile_label());
             let only = if node.is_empty() {
                 None
             } else {

@@ -117,8 +117,34 @@ pub async fn converge(
     force: bool,
     audit_user: &str,
 ) -> Result<ConvergeReport> {
-    let (changes, live) =
-        crate::cli::reconcile::compute_drift_with_live(client, profile, source, path).await?;
+    converge_with_mismatch_policy(
+        client, profile, source, path, opts, force, false, audit_user,
+    )
+    .await
+}
+
+/// Like [`converge`], with an explicit `allow_profile_mismatch` flag from the
+/// CLI (`reconcile converge --allow-profile-mismatch`, `#346` Decision 3).
+#[allow(clippy::too_many_arguments)]
+pub async fn converge_with_mismatch_policy(
+    client: &PxClient,
+    profile: &str,
+    source: &str,
+    path: &Path,
+    opts: ApplyOptions,
+    force: bool,
+    allow_profile_mismatch: bool,
+    audit_user: &str,
+) -> Result<ConvergeReport> {
+    let (changes, live) = crate::cli::reconcile::compute_drift_checked(
+        client,
+        profile,
+        source,
+        path,
+        true,
+        allow_profile_mismatch,
+    )
+    .await?;
     converge_with_changes(
         client, profile, source, changes, &live, opts, force, audit_user,
     )

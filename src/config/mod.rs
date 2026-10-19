@@ -983,6 +983,18 @@ impl ProfileConfig {
 
         anyhow::bail!("Password not found. Set it via PROXXX_PASSWORD env var, inline `password =` in config.toml, or `proxxx auth login`")
     }
+
+    /// Resolved profile label (`#346`, Decision 1): returns the effective
+    /// profile name (`--profile <name>`, top-level `default = "<name>"`, or
+    /// the sole `[profiles.<name>]` entry), falling back to `"default"` ONLY
+    /// for a flat top-level config (no `[profiles]` table selected).
+    #[must_use]
+    pub fn profile_label(&self) -> &str {
+        match self.profile_name.as_deref() {
+            Some(name) if !name.is_empty() => name,
+            _ => "default",
+        }
+    }
 }
 
 /// Phase 15 audit fix: typed errors for the config-load path.
@@ -1072,6 +1084,20 @@ pub enum ConfigError {
         profile.as_deref().map_or_else(|| "pbs".to_string(), |p| format!("profiles.{p}.pbs"))
     )]
     MissingPbsConfig { profile: Option<String> },
+
+    /// `state apply` or `reconcile converge` was invoked with a declared
+    /// state file whose `[meta] profile` differs from the resolved target
+    /// profile (`#346`, Decision 3), without `--allow-profile-mismatch`.
+    #[error(
+        "refusing to apply state from `{source_desc}`: [meta] declares profile '{declared}', \
+         but the active target profile is '{target}'. Pass `--profile {declared}` to target \
+         that cluster, or `--allow-profile-mismatch` if applying across profiles is intentional."
+    )]
+    ProfileMismatch {
+        source_desc: String,
+        declared: String,
+        target: String,
+    },
 }
 
 impl ConfigError {
@@ -1176,7 +1202,7 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     load_config_from_path(&config_path, profile_name)
 }
 
-pub(crate) fn load_config_from_path(
+pub fn load_config_from_path(
     config_path: &std::path::Path,
     profile_name: Option<&str>,
 ) -> Result<ProfileConfig> {

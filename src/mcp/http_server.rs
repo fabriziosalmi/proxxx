@@ -603,7 +603,7 @@ pub async fn run_http_server_with_options(
     let _incident_watcher =
         crate::mcp::notifications::spawn_incident_watcher(notifications.clone());
     let _reconcile_watcher = crate::mcp::notifications::spawn_reconcile_watcher(
-        client.profile_config().profile_name.clone(),
+        client.profile_config().profile_label().to_owned(),
         notifications.clone(),
     );
 

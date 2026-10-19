@@ -2034,7 +2034,7 @@ async fn secure_mode_forces_request_approval_for_destructive() {
             false,
             Some(&tg),
             &coord,
-            None,
+            "default",
         )
         .await;
 
@@ -2056,7 +2056,7 @@ async fn secure_mode_forces_request_approval_for_destructive() {
             true,
             Some(&tg),
             &coord,
-            None,
+            "default",
         )
         .await;
 
@@ -2130,7 +2130,7 @@ async fn execute_queue_gates_destructive_op_while_dispatching_non_gated_op_immed
         false,
         Some(&tg),
         &coord,
-        Some("hitl_e2e_queue_test"),
+        "hitl_e2e_queue_test",
     )
     .await;
 
@@ -2168,7 +2168,7 @@ async fn execute_queue_gates_destructive_op_while_dispatching_non_gated_op_immed
         true,
         Some(&tg),
         &coord,
-        Some("hitl_e2e_queue_test"),
+        "hitl_e2e_queue_test",
     )
     .await;
 
@@ -2224,7 +2224,7 @@ async fn execute_queue_refuses_unclassified_action_without_dispatching() {
         false,
         None,
         &coord,
-        Some("hitl_e2e_unclassified_queue_test"),
+        "hitl_e2e_unclassified_queue_test",
     )
     .await;
 

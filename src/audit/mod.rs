@@ -861,11 +861,11 @@ pub fn parse_pve_path(path: &str) -> (Option<String>, Option<u32>) {
 /// Decision 2), redacting secret parameter values and stamping the profile
 /// name.
 #[must_use]
-pub fn redact_params_json(params: &[(&str, &str)], profile: Option<&str>) -> String {
+pub fn redact_params_json(params: &[(&str, &str)], profile_label: &str) -> String {
     let mut map = serde_json::Map::with_capacity(params.len() + 1);
     map.insert(
         "profile".to_string(),
-        serde_json::Value::String(profile.unwrap_or("default").to_string()),
+        serde_json::Value::String(profile_label.to_string()),
     );
     for &(k, v) in params {
         let key = if k == "profile" {
@@ -906,9 +906,9 @@ impl MutationAuditCtx {
         method: &str,
         path: &str,
         params: &[(&str, &str)],
-        profile: Option<&str>,
+        profile_label: &str,
     ) -> Result<Self> {
-        Self::write_ahead_at(method, path, params, profile, None)
+        Self::write_ahead_at(method, path, params, profile_label, None)
     }
 
     /// Like [`Self::write_ahead`], but writes to an explicit `audit_dir` when
@@ -921,7 +921,7 @@ impl MutationAuditCtx {
         method: &str,
         path: &str,
         params: &[(&str, &str)],
-        profile: Option<&str>,
+        profile_label: &str,
         audit_dir: Option<&std::path::Path>,
     ) -> Result<Self> {
         let action = format!("{method} {path}");
@@ -932,7 +932,14 @@ impl MutationAuditCtx {
                 .find(|(k, _)| k.eq_ignore_ascii_case("vmid"))
                 .and_then(|(_, v)| v.parse::<u32>().ok());
         }
-        Self::write_ahead_custom_at(&action, node.as_deref(), vmid, params, profile, audit_dir)
+        Self::write_ahead_custom_at(
+            &action,
+            node.as_deref(),
+            vmid,
+            params,
+            profile_label,
+            audit_dir,
+        )
     }
 
     /// Write-ahead `"sent"` audit entry for non-REST mutations such as
@@ -946,9 +953,9 @@ impl MutationAuditCtx {
         node: Option<&str>,
         vmid: Option<u32>,
         params: &[(&str, &str)],
-        profile: Option<&str>,
+        profile_label: &str,
     ) -> Result<Self> {
-        Self::write_ahead_custom_at(action, node, vmid, params, profile, None)
+        Self::write_ahead_custom_at(action, node, vmid, params, profile_label, None)
     }
 
     /// Like [`Self::write_ahead_custom`], but writes to an explicit `audit_dir`
@@ -962,11 +969,11 @@ impl MutationAuditCtx {
         node: Option<&str>,
         vmid: Option<u32>,
         params: &[(&str, &str)],
-        profile: Option<&str>,
+        profile_label: &str,
         audit_dir: Option<&std::path::Path>,
     ) -> Result<Self> {
         let user = crate::incident::operator_label();
-        let params_json = redact_params_json(params, profile);
+        let params_json = redact_params_json(params, profile_label);
         log_mutation_sent(action, &user, vmid, node, &params_json, audit_dir)?;
         Ok(Self {
             action: action.to_string(),
@@ -1573,7 +1580,7 @@ mod key_rotation_tests {
                 ("keys", "ssh-ed25519 AAAAsecret"),
                 ("comment", "normal comment"),
             ],
-            Some("prod"),
+            "prod",
         );
         assert!(!json.contains("hunter2"));
         assert!(!json.contains("AAAAsecret"));

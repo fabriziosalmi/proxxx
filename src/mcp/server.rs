@@ -73,7 +73,7 @@ pub async fn run_server(client: Arc<PxClient>, config: ConfigHandle) -> Result<(
     let _task_poller = notifications::spawn_task_poller(Arc::clone(&client), broker.clone());
     let _incident_watcher = notifications::spawn_incident_watcher(broker.clone());
     let _reconcile_watcher = notifications::spawn_reconcile_watcher(
-        client.profile_config().profile_name.clone(),
+        client.profile_config().profile_label().to_owned(),
         broker.clone(),
     );
     let mut notification_rx = broker.subscribe();

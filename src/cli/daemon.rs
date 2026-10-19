@@ -133,7 +133,6 @@ pub async fn execute_daemon(
     client: &Arc<PxClient>,
     config_handle: ConfigHandle,
     config: ProfileConfig,
-    profile: Option<&str>,
     action: DaemonCommand,
 ) -> Result<(Value, i32)> {
     match action {
@@ -150,7 +149,6 @@ pub async fn execute_daemon(
                 client,
                 config_handle,
                 config,
-                profile,
                 schedule_interval_secs,
                 alerts_interval_secs,
                 !no_schedule,
@@ -177,7 +175,6 @@ async fn run_unified(
     client: &Arc<PxClient>,
     config_handle: ConfigHandle,
     config: ProfileConfig,
-    profile: Option<&str>,
     schedule_secs: u64,
     alerts_secs: u64,
     enable_schedule: bool,
@@ -187,6 +184,7 @@ async fn run_unified(
     enable_converge: bool,
 ) -> Result<(Value, i32)> {
     let mut components: Vec<Component> = Vec::new();
+    let profile_label = config.profile_label().to_owned();
 
     if enable_schedule {
         components.push(Component {
@@ -198,10 +196,9 @@ async fn run_unified(
     if enable_alerts {
         let client = Arc::clone(client);
         let cfg = Arc::clone(&config_handle);
-        let profile = profile.map(str::to_owned);
         components.push(Component {
             name: "alerts",
-            handle: tokio::spawn(alerts_loop(client, cfg, profile, alerts_secs)),
+            handle: tokio::spawn(alerts_loop(client, cfg, alerts_secs)),
         });
     }
 
@@ -221,7 +218,7 @@ async fn run_unified(
     if enable_reconcile {
         if let Some(rec) = config.reconcile.clone() {
             let client = Arc::clone(client);
-            let profile = profile.map(str::to_owned);
+            let profile_label = profile_label.clone();
             // One shared Telegram gateway for drift alerts, if configured. A
             // failure here disables the alert channel but never the loop —
             // drift still hits the logs (and, later, metrics).
@@ -241,7 +238,7 @@ async fn run_unified(
                 name: "reconcile",
                 handle: tokio::spawn(reconcile_loop(
                     client,
-                    profile,
+                    profile_label,
                     rec,
                     telegram,
                     enable_converge,
@@ -389,7 +386,6 @@ async fn schedule_loop(interval_secs: u64) -> Result<()> {
 async fn alerts_loop(
     client: Arc<PxClient>,
     config: ConfigHandle,
-    profile: Option<String>,
     interval_secs: u64,
 ) -> Result<()> {
     let action = crate::cli::monitoring::AlertsCommand::Watch {
@@ -398,8 +394,7 @@ async fn alerts_loop(
     // execute_alerts returns (Value, i32) — we ignore both for
     // the daemon path. The internal loop in `Watch` honours
     // wait_for_shutdown_signal directly.
-    let _ =
-        crate::cli::monitoring::execute_alerts(&client, config, profile.as_deref(), action).await?;
+    let _ = crate::cli::monitoring::execute_alerts(&client, config, action).await?;
     Ok(())
 }
 
@@ -421,14 +416,13 @@ fn unix_secs() -> u64 {
 /// and need a shared drift-state store).
 async fn reconcile_loop(
     client: Arc<PxClient>,
-    profile: Option<String>,
+    profile_label: String,
     rec: crate::config::ReconcileConfig,
     telegram: Option<Arc<crate::hitl::telegram::TelegramGateway>>,
     enable_converge: bool,
 ) -> Result<()> {
     let interval = rec.interval_secs.max(30);
     let path = std::path::PathBuf::from(&rec.path);
-    let profile_label = profile.as_deref().unwrap_or("default").to_owned();
     loop {
         tokio::select! {
             biased;
@@ -455,7 +449,7 @@ async fn reconcile_loop(
                             by_family: super::reconcile::family_counts(&changes),
                         };
                         if let Err(e) = crate::app::cache::save_reconcile_status_async(
-                            Some(profile_label.clone()),
+                            profile_label.clone(),
                             status,
                         )
                         .await
@@ -764,11 +758,9 @@ async fn repersist_drift(
                 summary: super::reconcile::drift_summary(&changes),
                 by_family: super::reconcile::family_counts(&changes),
             };
-            if let Err(e) = crate::app::cache::save_reconcile_status_async(
-                Some(profile_label.to_owned()),
-                status,
-            )
-            .await
+            if let Err(e) =
+                crate::app::cache::save_reconcile_status_async(profile_label.to_owned(), status)
+                    .await
             {
                 tracing::warn!("auto_converge: drift-state re-persist failed: {e:#}");
             }

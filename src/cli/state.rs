@@ -176,6 +176,12 @@ pub enum StateCommand {
         #[arg(long)]
         interactive: bool,
 
+        /// Allow applying a state file whose `[meta] profile` differs
+        /// from the resolved target profile (`#346`). Without this flag,
+        /// a profile mismatch refuses with exit code 3 before touching PVE.
+        #[arg(long)]
+        allow_profile_mismatch: bool,
+
         /// Output format. Default: human-readable per-change line.
         #[arg(long, value_enum, default_value_t = ApplyOutputFormat::Text)]
         output: ApplyOutputFormat,
@@ -221,15 +227,11 @@ pub enum DiffFormat {
 /// `format::print` would either escape the TOML's newlines or wrap
 /// the JSON in an additional outer layer.
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
-pub async fn execute_state(
-    client: &Arc<PxClient>,
-    profile: Option<&str>,
-    action: StateCommand,
-) -> Result<(Value, i32)> {
+pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Result<(Value, i32)> {
+    let profile_label = client.profile_config().profile_label();
     match action {
         StateCommand::Export { resource, output } => {
             let resources = state::export::Resource::parse(&resource)?;
-            let profile_label = profile.unwrap_or("default");
             let exported =
                 state::export::export_state(client.as_ref(), &resources, profile_label).await?;
 
@@ -260,6 +262,12 @@ pub async fn execute_state(
                         declared.display()
                     )
                 })?;
+            declared_state.check_profile_match(
+                profile_label,
+                &declared.display().to_string(),
+                false,
+                false,
+            )?;
 
             // Export live across every supported family — diff
             // ignores anything that's not in BOTH declared and live,
@@ -267,7 +275,6 @@ pub async fn execute_state(
             // is the single source of truth so a newly-added family is
             // never silently omitted here (which would make its
             // declared entries diff as perpetual creates).
-            let profile_label = profile.unwrap_or("default");
             let live_state = state::export::export_state(
                 client.as_ref(),
                 &state::export::Resource::all(),
@@ -308,6 +315,7 @@ pub async fn execute_state(
             continue_on_error,
             allow_risk,
             interactive,
+            allow_profile_mismatch,
             output,
         } => {
             let toml_str = std::fs::read_to_string(&declared)
@@ -319,8 +327,15 @@ pub async fn execute_state(
                         declared.display()
                     )
                 })?;
+            // #346 Decision 3 — refuse profile mismatch (exit 3) BEFORE
+            // exporting live state so zero PVE requests leave the process.
+            declared_state.check_profile_match(
+                profile_label,
+                &declared.display().to_string(),
+                true,
+                allow_profile_mismatch,
+            )?;
 
-            let profile_label = profile.unwrap_or("default");
             let live_state = state::export::export_state(
                 client.as_ref(),
                 &state::export::Resource::all(),

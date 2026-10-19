@@ -1459,7 +1459,7 @@ pub async fn execute(
                 std::sync::Arc::clone(&handle),
                 profile.map(str::to_owned),
             );
-            daemon::execute_daemon(&client, handle, config.clone(), profile, action).await
+            daemon::execute_daemon(&client, handle, config.clone(), action).await
         }
         Command::UpgradeCheck(args) => {
             upgrade_check::execute_upgrade_check(&client, &config, args).await
@@ -1702,7 +1702,7 @@ pub async fn execute(
             _ => unreachable!(),
         },
         Command::Replay { timestamp } => {
-            let state = crate::app::cache::load_state_at(profile, timestamp)?;
+            let state = crate::app::cache::load_state_at(config.profile_label(), timestamp)?;
             Ok((serde_json::to_value(state)?, 0))
         }
         Command::Watch {
@@ -1711,12 +1711,7 @@ pub async fn execute(
             until,
             timeout,
             notify,
-        } => {
-            watch::execute_watch(
-                &client, &config, profile, since, target, until, timeout, notify,
-            )
-            .await
-        }
+        } => watch::execute_watch(&client, &config, since, target, until, timeout, notify).await,
         Command::Search { query, limit } => execute_search(&client, &query, limit).await,
         Command::Hitl { action } => match action {
             HitlCommand::Serve => {
@@ -1766,7 +1761,7 @@ pub async fn execute(
                 std::sync::Arc::clone(&handle),
                 profile.map(str::to_owned),
             );
-            monitoring::execute_alerts(&client, handle, profile, action).await
+            monitoring::execute_alerts(&client, handle, action).await
         }
         Command::Access { action } => access::execute_access(&client, action).await,
         Command::Token { action } => access::execute_token(&client, action).await,
@@ -1847,10 +1842,8 @@ pub async fn execute(
         Command::Fleet => Ok((serde_json::json!({}), 0)),
         Command::Doctor => Ok((serde_json::json!({}), 0)),
         Command::Audit { .. } => Ok((serde_json::json!({}), 0)),
-        Command::State { action } => state::execute_state(&client, profile, action).await,
-        Command::Reconcile { action } => {
-            reconcile::execute_reconcile(&client, profile, action).await
-        }
+        Command::State { action } => state::execute_state(&client, action).await,
+        Command::Reconcile { action } => reconcile::execute_reconcile(&client, action).await,
         Command::Vm { action } => vm::execute_vm(&client, action).await,
         Command::Ct { action } => ct::execute(&client, action).await,
         Command::Firewall { scope } => firewall::execute_firewall(&client, scope).await,

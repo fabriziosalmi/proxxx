@@ -7,7 +7,6 @@ use crate::config::ProfileConfig;
 pub async fn execute_watch(
     client: &std::sync::Arc<PxClient>,
     config: &ProfileConfig,
-    profile: Option<&str>,
     since: Option<String>,
     target: Option<String>,
     until: Option<String>,
@@ -17,7 +16,7 @@ pub async fn execute_watch(
     if let Some(target) = target {
         watch_until(client, config, target, until, timeout, notify).await
     } else if let Some(since) = since {
-        watch_since(profile, &since)
+        watch_since(config.profile_label(), &since)
     } else {
         anyhow::bail!("Watch requires either --since or --target");
     }
@@ -126,7 +125,7 @@ async fn check_storage_condition(
     })
 }
 
-fn watch_since(profile: Option<&str>, since: &str) -> Result<(Value, i32)> {
+fn watch_since(profile_label: &str, since: &str) -> Result<(Value, i32)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -140,8 +139,8 @@ fn watch_since(profile: Option<&str>, since: &str) -> Result<(Value, i32)> {
     };
 
     let past = now.saturating_sub(seconds);
-    let state_past = crate::app::cache::load_state_at(profile, past)?;
-    let state_now = crate::app::cache::load_state(profile)?;
+    let state_past = crate::app::cache::load_state_at(profile_label, past)?;
+    let state_now = crate::app::cache::load_state(profile_label)?;
 
     let mut diff = Vec::new();
     let past_map: std::collections::HashMap<_, _> =
