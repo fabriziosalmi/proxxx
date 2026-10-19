@@ -36,7 +36,7 @@ use crate::mcp::dispatch;
 
 /// Server state shared across handlers.
 #[derive(Clone)]
-struct McpState {
+pub struct McpState {
     client: Arc<PxClient>,
     config: ConfigHandle,
     /// Server-sent notification broker. Cheap to clone (it holds
@@ -50,6 +50,12 @@ struct McpState {
     /// exposed server would otherwise silently drop all auth (the start-time
     /// bind preflight does not re-run on reload).
     require_token: bool,
+    /// Bearer token passed via CLI `--token` (`#343`). Stored outside the
+    /// reloadable [`ConfigHandle`] so a `SIGHUP` config reload can never drop
+    /// or overwrite a token given on the command line.
+    cli_token: Option<crate::util::secret::SecretString>,
+    /// Allowed `Host` and `Origin` authorities in lowercase (`#342`).
+    allowed_authorities: Arc<std::collections::HashSet<String>>,
 }
 
 impl McpState {
@@ -58,35 +64,208 @@ impl McpState {
         config: ConfigHandle,
         notifications: crate::mcp::notifications::Broker,
         require_token: bool,
+        cli_token: Option<crate::util::secret::SecretString>,
+        allowed_authorities: Arc<std::collections::HashSet<String>>,
     ) -> Self {
         Self {
             client,
             config,
             notifications,
             require_token,
+            cli_token,
+            allowed_authorities,
         }
     }
 
-    /// Returns `true` if the request is authorized. Reads `mcp_token` from the
-    /// live config so a SIGHUP token rotation takes effect on the next request.
+    /// Returns `true` if the request is authorized. Uses `cli_token` when set
+    /// on the command line (`#343`), otherwise reads `mcp_token` from the live
+    /// config so a `SIGHUP` token rotation takes effect on the next request.
     /// When `require_token` is set (exposed bind, no `--insecure-bind`), a
     /// missing token denies every request instead of opening — see
     /// [`token_gate`].
     async fn auth_ok(&self, headers: &HeaderMap) -> bool {
-        let expected = self.config.read().await.mcp_token.clone();
+        let cli_tok = self
+            .cli_token
+            .as_ref()
+            .map(crate::util::secret::SecretString::as_str)
+            .filter(|t| !t.trim().is_empty());
+        let cfg_tok = if cli_tok.is_none() {
+            self.config.read().await.mcp_token.clone()
+        } else {
+            None
+        };
+        let expected = cli_tok.or_else(|| {
+            cfg_tok
+                .as_ref()
+                .map(crate::util::secret::SecretString::as_str)
+        });
         let bearer = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        token_gate(
-            expected
-                .as_ref()
-                .map(crate::util::secret::SecretString::as_str),
-            bearer,
-            self.require_token,
-        )
+        token_gate(expected, bearer, self.require_token)
     }
+}
+
+fn format_host_port(host: &str, port: u16) -> String {
+    let h = host.trim().to_ascii_lowercase();
+    if h.starts_with('[') && h.ends_with(']') {
+        format!("{h}:{port}")
+    } else if h.contains(':') {
+        format!("[{h}]:{port}")
+    } else {
+        format!("{h}:{port}")
+    }
+}
+
+fn insert_allowed_host_entry(
+    set: &mut std::collections::HashSet<String>,
+    raw: &str,
+    default_port: u16,
+) {
+    let h = raw.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return;
+    }
+    if h.starts_with('[') {
+        if h.contains("]:") {
+            set.insert(h);
+        } else if h.ends_with(']') {
+            set.insert(format!("{h}:{default_port}"));
+            set.insert(h);
+        }
+        return;
+    }
+    if let Some((host_part, port_part)) = h.rsplit_once(':') {
+        if !host_part.contains(':') && port_part.parse::<u16>().is_ok() {
+            set.insert(h);
+            return;
+        }
+        set.insert(format!("[{h}]:{default_port}"));
+        set.insert(format!("[{h}]"));
+        return;
+    }
+    set.insert(format!("{h}:{default_port}"));
+    set.insert(h);
+}
+
+/// Build the set of lowercase `Host` / `Origin` authorities permitted for a
+/// given `(bind, port, allowed_hosts)` configuration (`#342`):
+/// * Loopback bind: `127.0.0.1:<port>`, `localhost:<port>`, `[::1]::<port>`
+///   (plus `<bind>:<port>` if distinct and any explicit `allowed_hosts`).
+/// * Exposed bind: `<bind>:<port>` plus each value of `--allowed-host`.
+#[must_use]
+pub fn build_allowed_authorities(
+    bind: &str,
+    port: u16,
+    allowed_hosts: &[String],
+) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if is_loopback_bind(bind) {
+        set.insert(format!("127.0.0.1:{port}"));
+        set.insert(format!("localhost:{port}"));
+        set.insert(format!("[::1]:{port}"));
+    }
+    set.insert(format_host_port(bind, port));
+    for entry in allowed_hosts {
+        insert_allowed_host_entry(&mut set, entry, port);
+    }
+    set
+}
+
+/// Pure `Host` + `Origin` check (`#342`), returning `Ok(())` when the request
+/// passes or `Err((StatusCode, message))` when it must be rejected.
+fn check_host_and_origin(
+    allowed_authorities: &std::collections::HashSet<String>,
+    headers: &HeaderMap,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let mut host_values = headers.get_all(axum::http::header::HOST).iter();
+    let Some(raw_host_val) = host_values.next() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Bad Request: missing Host header".to_string(),
+        ));
+    };
+    if host_values.next().is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Bad Request: multiple Host headers are not allowed".to_string(),
+        ));
+    }
+    let Ok(raw_host) = raw_host_val.to_str() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Bad Request: invalid Host header".to_string(),
+        ));
+    };
+    let host_trimmed = raw_host.trim();
+    if host_trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Bad Request: missing Host header".to_string(),
+        ));
+    }
+    if !allowed_authorities.contains(&host_trimmed.to_ascii_lowercase()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Forbidden: rejected Host '{host_trimmed}'"),
+        ));
+    }
+
+    let mut origin_values = headers.get_all(axum::http::header::ORIGIN).iter();
+    if let Some(raw_origin_val) = origin_values.next() {
+        if origin_values.next().is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Forbidden: multiple Origin headers are not allowed".to_string(),
+            ));
+        }
+        let Ok(raw_origin) = raw_origin_val.to_str() else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Forbidden: invalid Origin header".to_string(),
+            ));
+        };
+        let origin_trimmed = raw_origin.trim();
+        let origin_authority = origin_trimmed
+            .get(..7)
+            .filter(|s| s.eq_ignore_ascii_case("http://"))
+            .and_then(|_| origin_trimmed.get(7..))
+            .or_else(|| {
+                origin_trimmed
+                    .get(..8)
+                    .filter(|s| s.eq_ignore_ascii_case("https://"))
+                    .and_then(|_| origin_trimmed.get(8..))
+            });
+        let origin_ok = origin_authority.is_some_and(|auth| {
+            !auth.is_empty() && allowed_authorities.contains(&auth.to_ascii_lowercase())
+        });
+        if !origin_ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Forbidden: rejected Origin '{origin_trimmed}'"),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Fail-closed DNS-rebinding defence middleware (`#342`).
+///
+/// Applied on EVERY route (including `/health` and `GET /mcp` SSE) BEFORE
+/// [`require_authorized`]. No CORS headers are emitted.
+async fn require_allowed_host_and_origin(
+    State(state): State<McpState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err((status, msg)) = check_host_and_origin(&state.allowed_authorities, request.headers())
+    {
+        return (status, msg).into_response();
+    }
+    next.run(request).await
 }
 
 /// Pure authorization decision, split out so the fail-closed logic is unit-
@@ -284,63 +463,8 @@ fn is_loopback_bind(bind: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Start the MCP HTTP server.
-///
-/// Binds to `bind:port` and serves until the process receives SIGTERM/SIGINT.
-/// If `config.mcp_token` is set, all MCP endpoints require Bearer auth.
-///
-/// SECURITY preflight (fail-closed): refuses to start on a non-loopback bind
-/// when no `mcp_token` is configured, unless `allow_insecure_bind` is set. An
-/// unauthenticated MCP endpoint reachable from the network hands any caller
-/// the profile's PVE credentials — the `--insecure-bind` flag is the explicit,
-/// conscious opt-out for a trusted network / reverse-proxy-authenticated setup.
-pub async fn run_http_server(
-    client: Arc<PxClient>,
-    config: ConfigHandle,
-    bind: &str,
-    port: u16,
-    allow_insecure_bind: bool,
-) -> Result<()> {
-    // Exposed = network-reachable without a conscious --insecure-bind opt-in.
-    // Drives BOTH the start-time refusal below AND the per-request fail-closed
-    // gate in `auth_ok` (so a later SIGHUP that clears the token can't reopen).
-    let require_token = !is_loopback_bind(bind) && !allow_insecure_bind;
-    if require_token {
-        // Non-empty, mirroring token_gate: `--token ""` must NOT be treated as
-        // "authenticated" and start an exposed, effectively-open server.
-        let has_token = config
-            .read()
-            .await
-            .mcp_token
-            .as_ref()
-            .is_some_and(|t| !t.trim().is_empty());
-        if !has_token {
-            anyhow::bail!(
-                "Refusing to start the MCP HTTP server on non-loopback bind '{bind}' without auth. \
-                 Set `mcp_token` (or pass --token), bind to 127.0.0.1, or pass --insecure-bind to \
-                 override consciously."
-            );
-        }
-    }
-
-    // Spin up the notification broker + pollers BEFORE the HTTP
-    // server starts. The pollers run for the process lifetime;
-    // when no SSE clients are connected the broker drops messages
-    // silently, so the cost of the pollers is just two periodic
-    // PVE polls (2 s tasks, 5 s incident).
-    let notifications = crate::mcp::notifications::Broker::new();
-    let _task_poller =
-        crate::mcp::notifications::spawn_task_poller(Arc::clone(&client), notifications.clone());
-    let _incident_watcher =
-        crate::mcp::notifications::spawn_incident_watcher(notifications.clone());
-    let _reconcile_watcher = crate::mcp::notifications::spawn_reconcile_watcher(
-        client.profile_config().profile_name.clone(),
-        notifications.clone(),
-    );
-
-    let state = McpState::new(client, config, notifications, require_token);
-    let addr = format!("{bind}:{port}");
-
+#[allow(clippy::let_and_return)]
+fn build_router_from_state(state: McpState) -> Router {
     // #253/#258 — authorization is a LAYER, not a per-handler call.
     //
     // It was previously the first statement of each handler, and two of
@@ -369,7 +493,131 @@ pub async fn run_http_server(
         // before credentials are configured, and it reveals nothing
         // beyond "a proxxx MCP server is listening here".
         .route("/health", get(health))
+        // #342 — DNS rebinding defence runs on EVERY route (including
+        // `/health` and `GET /mcp` SSE) BEFORE `require_authorized`.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_allowed_host_and_origin,
+        ))
         .with_state(state);
+    app
+}
+
+/// Construct the MCP HTTP [`Router`] with the full middleware stack (`#342`,
+/// `#343`) without binding a socket or spawning background pollers.
+pub fn build_http_router(
+    client: Arc<PxClient>,
+    config: ConfigHandle,
+    bind: &str,
+    port: u16,
+    allow_insecure_bind: bool,
+    cli_token: Option<crate::util::secret::SecretString>,
+    allowed_hosts: &[String],
+) -> Router {
+    let require_token = !is_loopback_bind(bind) && !allow_insecure_bind;
+    let allowed_authorities = Arc::new(build_allowed_authorities(bind, port, allowed_hosts));
+    let notifications = crate::mcp::notifications::Broker::new();
+    let state = McpState::new(
+        client,
+        config,
+        notifications,
+        require_token,
+        cli_token,
+        allowed_authorities,
+    );
+    build_router_from_state(state)
+}
+
+/// Start the MCP HTTP server without extra CLI token or `--allowed-host`
+/// overrides.
+///
+/// # Errors
+/// Returns an error if the non-loopback auth preflight fails or if the TCP
+/// listener cannot bind or serve.
+pub async fn run_http_server(
+    client: Arc<PxClient>,
+    config: ConfigHandle,
+    bind: &str,
+    port: u16,
+    allow_insecure_bind: bool,
+) -> Result<()> {
+    run_http_server_with_options(client, config, bind, port, allow_insecure_bind, None, &[]).await
+}
+
+/// Start the MCP HTTP server with explicit CLI `--token` (`#343`) and
+/// `--allowed-host` (`#342`) options.
+///
+/// Binds to `bind:port` and serves until the process receives SIGTERM/SIGINT.
+/// If `cli_token` or `config.mcp_token` is set, all MCP endpoints require
+/// Bearer auth.
+///
+/// SECURITY preflight (fail-closed): refuses to start on a non-loopback bind
+/// when neither `cli_token` nor `mcp_token` is configured, unless
+/// `allow_insecure_bind` is set.
+///
+/// # Errors
+/// Returns an error if the non-loopback auth preflight fails or if the TCP
+/// listener cannot bind or serve.
+pub async fn run_http_server_with_options(
+    client: Arc<PxClient>,
+    config: ConfigHandle,
+    bind: &str,
+    port: u16,
+    allow_insecure_bind: bool,
+    cli_token: Option<crate::util::secret::SecretString>,
+    allowed_hosts: &[String],
+) -> Result<()> {
+    // Exposed = network-reachable without a conscious --insecure-bind opt-in.
+    // Drives BOTH the start-time refusal below AND the per-request fail-closed
+    // gate in `auth_ok` (so a later SIGHUP that clears the token can't reopen).
+    let require_token = !is_loopback_bind(bind) && !allow_insecure_bind;
+    if require_token {
+        // Non-empty, mirroring token_gate: `--token ""` must NOT be treated as
+        // "authenticated" and start an exposed, effectively-open server.
+        let has_cli_token = cli_token
+            .as_ref()
+            .is_some_and(|t| !t.as_str().trim().is_empty());
+        let has_cfg_token = config
+            .read()
+            .await
+            .mcp_token
+            .as_ref()
+            .is_some_and(|t| !t.as_str().trim().is_empty());
+        if !(has_cli_token || has_cfg_token) {
+            anyhow::bail!(
+                "Refusing to start the MCP HTTP server on non-loopback bind '{bind}' without auth. \
+                 Set `mcp_token` (or pass --token), bind to 127.0.0.1, or pass --insecure-bind to \
+                 override consciously."
+            );
+        }
+    }
+
+    // Spin up the notification broker + pollers BEFORE the HTTP
+    // server starts. The pollers run for the process lifetime;
+    // when no SSE clients are connected the broker drops messages
+    // silently, so the cost of the pollers is just two periodic
+    // PVE polls (2 s tasks, 5 s incident).
+    let notifications = crate::mcp::notifications::Broker::new();
+    let _task_poller =
+        crate::mcp::notifications::spawn_task_poller(Arc::clone(&client), notifications.clone());
+    let _incident_watcher =
+        crate::mcp::notifications::spawn_incident_watcher(notifications.clone());
+    let _reconcile_watcher = crate::mcp::notifications::spawn_reconcile_watcher(
+        client.profile_config().profile_name.clone(),
+        notifications.clone(),
+    );
+
+    let allowed_authorities = Arc::new(build_allowed_authorities(bind, port, allowed_hosts));
+    let state = McpState::new(
+        client,
+        config,
+        notifications,
+        require_token,
+        cli_token,
+        allowed_authorities,
+    );
+    let addr = format!("{bind}:{port}");
+    let app = build_router_from_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("MCP HTTP server listening on http://{addr}/mcp");
@@ -492,6 +740,60 @@ mod tests {
         assert!(!is_loopback_bind("mcp.example.com"));
         assert!(!is_loopback_bind(""));
     }
+
+    #[test]
+    fn host_and_origin_gate_enforces_loopback_and_exposed_rules() {
+        use axum::http::{HeaderMap, HeaderValue, StatusCode};
+
+        let loopback_allowed = super::build_allowed_authorities("127.0.0.1", 3000, &[]);
+        assert!(loopback_allowed.contains("127.0.0.1:3000"));
+        assert!(loopback_allowed.contains("localhost:3000"));
+        assert!(loopback_allowed.contains("[::1]:3000"));
+
+        // Missing Host -> 400
+        let empty_headers = HeaderMap::new();
+        let err = super::check_host_and_origin(&loopback_allowed, &empty_headers).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Bad Host -> 403 naming the rejected host
+        let mut bad_host = HeaderMap::new();
+        bad_host.insert("host", HeaderValue::from_static("evil.example"));
+        let err = super::check_host_and_origin(&loopback_allowed, &bad_host).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains("evil.example"), "got: {}", err.1);
+
+        // Allowed Host without Origin -> Ok
+        let mut ok_headers = HeaderMap::new();
+        ok_headers.insert("host", HeaderValue::from_static("localhost:3000"));
+        assert!(super::check_host_and_origin(&loopback_allowed, &ok_headers).is_ok());
+
+        // Allowed Host + evil Origin -> 403
+        let mut bad_origin = ok_headers.clone();
+        bad_origin.insert("origin", HeaderValue::from_static("http://evil.example"));
+        let err = super::check_host_and_origin(&loopback_allowed, &bad_origin).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains("http://evil.example"), "got: {}", err.1);
+
+        // Allowed Host + matching http/https Origin -> Ok
+        let mut ok_origin = ok_headers.clone();
+        ok_origin.insert("origin", HeaderValue::from_static("http://localhost:3000"));
+        assert!(super::check_host_and_origin(&loopback_allowed, &ok_origin).is_ok());
+        ok_origin.insert("origin", HeaderValue::from_static("https://127.0.0.1:3000"));
+        assert!(super::check_host_and_origin(&loopback_allowed, &ok_origin).is_ok());
+
+        // Exposed bind with --allowed-host mcp.lan:3000 accepts that host and rejects localhost
+        let exposed_allowed =
+            super::build_allowed_authorities("0.0.0.0", 3000, &["mcp.lan:3000".to_string()]);
+        let mut mcp_lan = HeaderMap::new();
+        mcp_lan.insert("host", HeaderValue::from_static("mcp.lan:3000"));
+        assert!(super::check_host_and_origin(&exposed_allowed, &mcp_lan).is_ok());
+        assert_eq!(
+            super::check_host_and_origin(&exposed_allowed, &ok_headers)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +832,10 @@ mod router_gate_tests {
         assert!(
             rest.contains("\"/health\""),
             "/health must be registered outside the layer, deliberately"
+        );
+        assert!(
+            rest.contains("require_allowed_host_and_origin"),
+            "the entire router (including /health) must apply require_allowed_host_and_origin"
         );
     }
 }

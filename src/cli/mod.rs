@@ -979,7 +979,7 @@ pub enum McpCommand {
         /// Port to listen on (default: 3000)
         #[arg(long, default_value_t = 3000)]
         port: u16,
-        /// Bearer token for auth (overrides `mcp_token` in config)
+        /// Bearer token for auth (overrides `mcp_token` in config and survives SIGHUP reload)
         #[arg(long)]
         token: Option<String>,
         /// DANGEROUS: allow binding to a non-loopback address WITHOUT auth.
@@ -988,6 +988,10 @@ pub enum McpCommand {
         /// network or behind an auth-enforcing reverse proxy.
         #[arg(long)]
         insecure_bind: bool,
+        /// Additional Host/Origin authority (`<host[:port]>`) allowed on a
+        /// non-loopback bind (repeatable).
+        #[arg(long = "allowed-host", value_name = "HOST[:PORT]")]
+        allowed_hosts: Vec<String>,
     },
     /// List available tools
     Tools {
@@ -1673,23 +1677,24 @@ pub async fn execute(
                 port,
                 token,
                 insecure_bind,
+                allowed_hosts,
             } => {
-                let mut cfg = config;
-                // CLI --token overrides the profile's mcp_token.
-                if let Some(t) = token {
-                    cfg.mcp_token = Some(crate::util::secret::SecretString::new(t));
-                }
-                let handle = crate::config::watcher::new_handle(cfg);
+                // Keep CLI --token OUT of the reloadable config (#343) so a
+                // SIGHUP reload can never drop a token given on the command line.
+                let cli_token = token.map(crate::util::secret::SecretString::new);
+                let handle = crate::config::watcher::new_handle(config);
                 crate::config::watcher::spawn_reload_on_sighup(
                     std::sync::Arc::clone(&handle),
                     profile.map(str::to_owned),
                 );
-                crate::mcp::http_server::run_http_server(
+                crate::mcp::http_server::run_http_server_with_options(
                     std::sync::Arc::clone(&client),
                     handle,
                     &bind,
                     port,
                     insecure_bind,
+                    cli_token,
+                    &allowed_hosts,
                 )
                 .await?;
                 Ok((serde_json::json!({"status": "MCP HTTP server stopped"}), 0))

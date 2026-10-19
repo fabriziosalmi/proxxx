@@ -36,7 +36,7 @@ pub fn new_handle(config: ProfileConfig) -> ConfigHandle {
 /// This is the mitigation AR-1 leans on: a live `mcp_token` rotation via
 /// SIGHUP takes effect here, and a reload that fails to parse must NOT
 /// tear down the running daemon's authentication.
-pub(crate) async fn reload_once<F>(handle: &ConfigHandle, load: F) -> bool
+pub async fn reload_once<F>(handle: &ConfigHandle, load: F) -> bool
 where
     F: FnOnce() -> anyhow::Result<ProfileConfig>,
 {

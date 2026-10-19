@@ -83,7 +83,7 @@ Stdio transport. Speaks JSON-RPC 2.0 framed by Content-Length
 headers — the standard MCP envelope. Pipe-it under whatever client
 your agent uses.
 
-### HTTP transport and `mcp_token`
+### HTTP transport, `mcp_token`, and DNS rebinding defence
 
 For clients that speak MCP over HTTP:
 
@@ -91,17 +91,44 @@ For clients that speak MCP over HTTP:
 proxxx mcp serve-http
 ```
 
-Because an HTTP listener is reachable off the box, it is
-**fail-closed on authentication**. `serve-http` **refuses to start**
-on a non-loopback bind (e.g. `0.0.0.0`) unless an `mcp_token` is set —
-pass `--insecure-bind` to override that consciously.
+Because an HTTP listener is reachable off the box (or from a local browser tab
+via DNS rebinding on `127.0.0.1`), `serve-http` enforces two fail-closed
+router layers:
 
-Set the token as the `mcp_token` profile config field or with the
-`--token` CLI flag. An empty or whitespace-only token counts as
-**absent**. When the server is network-exposed and the token is
-absent, every request is denied — and this fail-closed state survives
-a `SIGHUP` that clears the token, so a reload cannot silently drop
-authentication.
+1. **`Host` and `Origin` validation (DNS rebinding defence, `#342`)** — runs
+   on **every** route (`POST /mcp`, `GET /mcp` SSE, and `GET /health`)
+   **before** Bearer authentication:
+   - **`Host` header**: must be present (a missing or empty `Host` header
+     returns `400 Bad Request`) and must match one of the allowed authorities:
+     - **Loopback bind** (`127.0.0.1`, `localhost`, `::1`, or any `127.0.0.0/8`
+       address): `127.0.0.1:<port>`, `localhost:<port>`, and `[::1]:<port>`
+       (plus `<bind>:<port>` and any explicit `--allowed-host` values).
+     - **Exposed bind** (e.g. `0.0.0.0`, `::`, or a LAN IP): `<bind>:<port>`
+       plus each value passed via the repeatable
+       `--allowed-host <host[:port]>` flag (for example
+       `proxxx mcp serve-http --bind 0.0.0.0 --port 3000 --token ... --allowed-host mcp.lan:3000`).
+     - Any other `Host` returns `403 Forbidden` with a plain-text message naming
+       the rejected host (`Forbidden: rejected Host '<host>'`), blocking DNS
+       rebinding attacks where a rebound browser page sends
+       `Host: attacker.example`.
+   - **`Origin` header**: if present, must be `http://<allowed-authority>` or
+     `https://<allowed-authority>`; otherwise `403 Forbidden` is returned.
+     Requests without an `Origin` header (`curl`, CLI tools, and MCP SDK
+     clients) are allowed.
+   - **No CORS headers**: `serve-http` never emits `Access-Control-Allow-*`
+     headers, as cross-origin browser access is not intended.
+2. **Bearer token authentication and `SIGHUP` reload persistence (`#343`)**:
+   - `serve-http` **refuses to start** on a non-loopback bind (e.g. `0.0.0.0`)
+     unless a non-empty token is configured via `mcp_token` in the profile or
+     `--token` on the CLI — pass `--insecure-bind` to override that consciously.
+   - A token passed via the `--token` CLI flag is kept out of the reloadable
+     `ProfileConfig` (`ConfigHandle`) and stored in `McpState` at startup. When
+     `--token` is set, the auth gate always checks `cli_token`; when `--token`
+     is omitted, it reads `mcp_token` from the live config so a `SIGHUP` reload
+     can rotate the config token without ever dropping a CLI-supplied token.
+   - An empty or whitespace-only token counts as **absent**. When the server is
+     network-exposed without `--insecure-bind` and the effective token is
+     absent, every request is denied (`401 Unauthorized`).
 
 ## Claude Desktop config
 
