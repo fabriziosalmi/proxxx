@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn secret_key_detection_and_param_redaction_cover_all_markers() {
-        for secret_key in [
+        for field in [
             "password",
             "cipassword",
             "PASSWORD",
@@ -419,13 +419,13 @@ mod tests {
             "PVEAuthCookie",
         ] {
             assert!(
-                is_secret_key(secret_key),
-                "expected `{secret_key}` to be classified as a secret key"
+                is_secret_key(field),
+                "expected `{field}` to be classified as a secret key"
             );
             assert_eq!(
-                redact_param_value(secret_key, "hunter2"),
+                redact_param_value(field, "hunter2"),
                 "[REDACTED]",
-                "secret key `{secret_key}` must redact value completely"
+                "field `{field}` must redact value completely"
             );
         }
 
