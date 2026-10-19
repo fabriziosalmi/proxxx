@@ -5,9 +5,8 @@
 //! read-only query across every cluster concurrently. Each row gets
 //! a `profile` field added so the operator can tell where it came
 //! from. Per-cluster failures (unreachable, 401, etc.) surface as
-//! synthetic rows tagged `error: …` — they NEVER fail the whole
-//! command. The MVP rule: investigation should always make progress
-//! against the clusters that *are* reachable.
+//! synthetic rows tagged `error: …` so reachable clusters are still
+//! rendered; the command exits `1` when any error row is present (#322).
 //!
 //! Writes are deliberately NOT plumbed through this fanout — too
 //! easy to footgun ("stop every guest across every cluster"). For
@@ -33,6 +32,14 @@ pub struct ProfileRow {
     /// `{profile, error}`.
     #[serde(flatten)]
     pub payload: ProfileRowPayload,
+}
+
+impl ProfileRow {
+    /// Whether this row represents a per-profile failure (`ProfileRowPayload::Error`).
+    #[must_use]
+    pub const fn is_error(&self) -> bool {
+        matches!(self.payload, ProfileRowPayload::Error { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,8 +114,8 @@ pub async fn fanout_ls(kind: FanoutKind, cli_secret: Option<&str>) -> Result<Vec
     let mut all_rows: Vec<ProfileRow> = Vec::new();
     for h in handles {
         // `join` itself could fail if the task panicked. Convert that
-        // into an error row so the operator sees which profile blew up
-        // rather than the whole command exiting non-zero.
+        // into an error row so the operator still sees all other rows
+        // alongside the panic row (the caller exits 1 on any error row).
         match h.await {
             Ok(rows) => all_rows.extend(rows),
             Err(e) => all_rows.push(ProfileRow {
@@ -141,25 +148,30 @@ pub async fn fanout_find_vmid(vmid: u32, cli_secret: Option<&str>) -> Result<Vec
         .into_iter()
         .map(|profile| {
             let cli_secret = cli_secret_owned.clone();
-            tokio::spawn(
-                async move { find_one_profile(&profile, vmid, cli_secret.as_deref()).await },
-            )
+            tokio::spawn(async move {
+                let res = find_one_profile(&profile, vmid, cli_secret.as_deref()).await;
+                (profile, res)
+            })
         })
         .collect();
 
     let mut rows: Vec<ProfileRow> = Vec::new();
     for h in handles {
-        if let Ok(maybe_row) = h.await {
-            match maybe_row {
-                Ok(Some(row)) => rows.push(row),
-                Ok(None) => {} // VMID not in this profile — silent
-                Err(e) => rows.push(ProfileRow {
-                    profile: "(unknown)".into(),
-                    payload: ProfileRowPayload::Error {
-                        error: format!("{e:#}"),
-                    },
-                }),
-            }
+        match h.await {
+            Ok((_, Ok(Some(row)))) => rows.push(row),
+            Ok((_, Ok(None))) => {} // VMID not in this profile — silent
+            Ok((profile, Err(e))) => rows.push(ProfileRow {
+                profile,
+                payload: ProfileRowPayload::Error {
+                    error: format!("{e:#}"),
+                },
+            }),
+            Err(e) => rows.push(ProfileRow {
+                profile: "(unknown — task panicked)".into(),
+                payload: ProfileRowPayload::Error {
+                    error: format!("task join: {e}"),
+                },
+            }),
         }
     }
     rows.sort_by(|a, b| a.profile.cmp(&b.profile));

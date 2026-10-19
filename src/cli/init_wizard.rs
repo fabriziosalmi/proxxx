@@ -556,16 +556,19 @@ struct SshBlock {
 fn prompt_ssh(api_url: &str) -> Result<Option<SshBlock>> {
     let user = prompt_string_default("  SSH user", "root")?;
     let key_path = prompt_ssh_key_path()?;
-    let expanded = expand_tilde_str(&key_path);
-    if !std::path::Path::new(&expanded).exists() {
+    let expanded = crate::util::path::expand_tilde(&key_path);
+    let expanded_str = expanded.to_string_lossy();
+    if !expanded.exists() {
         warn(&format!(
-            "key not found at {expanded} — config will still be written, but SSH will fail until the file exists"
+            "key not found at {key_path} ({expanded_str}) — config will still be written, but SSH will fail until the file exists"
         ));
     }
     if prompt_yn("  Test connection now?", true)? {
         let host = api_host_only(api_url).unwrap_or_else(|| api_url.to_string());
-        info(&format!("  ssh -i {expanded} {user}@{host} 'uname -a' ..."));
-        match probe_ssh(&user, &host, &expanded) {
+        info(&format!(
+            "  ssh -i {expanded_str} {user}@{host} 'uname -a' ..."
+        ));
+        match probe_ssh(&user, &host, &expanded_str) {
             Ok(line) => ok(&format!("SSH ok ({line})")),
             Err(e) => {
                 warn(&format!(
@@ -698,7 +701,7 @@ fn prompt_ssh_key_path() -> Result<String> {
     let i = prompt_choice("  Private key", &opts, 0)?;
     if i == candidates.len() {
         // "Other" branch — free-form prompt (still tilde-expanded
-        // downstream by expand_tilde_str).
+        // downstream by util::path::expand_tilde).
         let custom = prompt_string("  Custom key path")?;
         Ok(custom)
     } else {
@@ -784,15 +787,6 @@ fn discover_ssh_keys_in(dir: &str) -> Vec<String> {
     }
     keys.sort();
     keys.into_iter().map(|(_, _, p)| p).collect()
-}
-
-fn expand_tilde_str(p: &str) -> String {
-    if let Some(stripped) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{stripped}");
-        }
-    }
-    p.to_string()
 }
 
 fn api_host_only(url: &str) -> Option<String> {

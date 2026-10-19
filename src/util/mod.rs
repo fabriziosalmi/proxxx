@@ -1,6 +1,7 @@
 pub mod durable;
 pub mod format;
 pub mod panic_hook;
+pub mod path;
 pub mod sanitize;
 pub mod secret;
 pub mod shutdown;

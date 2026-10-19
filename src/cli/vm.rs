@@ -14,15 +14,6 @@ use crate::cli::common::{
     require_non_empty_params, wait_and_classify,
 };
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}/{}", home.to_string_lossy(), rest);
-        }
-    }
-    path.to_owned()
-}
-
 /// TOML profile for cloud-init customization at clone time. Every
 /// field is optional — the user file pulls in just the keys they
 /// want to override. `sshkey_file` is a convenience: read a public
@@ -45,9 +36,9 @@ impl CloudInitProfile {
         let mut p: Self = toml::from_str(&raw)
             .with_context(|| format!("parse cloud-init profile {}", path.display()))?;
         if let Some(kf) = &p.sshkey_file {
-            let kp = expand_tilde(kf);
-            let key =
-                std::fs::read_to_string(&kp).with_context(|| format!("read sshkey_file {kp}"))?;
+            let kp = crate::util::path::expand_tilde(kf);
+            let key = std::fs::read_to_string(&kp)
+                .with_context(|| format!("read sshkey_file '{kf}' ({})", kp.display()))?;
             let key = key.trim().to_string();
             if p.sshkey.is_some() {
                 anyhow::bail!("cloud-init profile: set either `sshkey` or `sshkey_file`, not both");

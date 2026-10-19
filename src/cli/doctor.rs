@@ -184,17 +184,24 @@ pub async fn run() -> Result<(Value, i32)> {
 
             if let Some(ref ssh) = cfg.ssh {
                 if let Some(ref key_path) = ssh.key_path {
-                    if std::path::Path::new(key_path.as_str()).exists() {
+                    let expanded = crate::util::path::expand_tilde(key_path);
+                    if expanded.exists() {
                         checks.push(Check {
                             name: "ssh_key",
                             status: CheckStatus::Ok,
-                            message: format!("SSH key readable: {key_path}"),
+                            message: format!(
+                                "SSH key readable: {key_path} ({})",
+                                expanded.display()
+                            ),
                         });
                     } else {
                         checks.push(Check {
                             name: "ssh_key",
                             status: CheckStatus::Fail,
-                            message: format!("SSH key not found: {key_path}"),
+                            message: format!(
+                                "SSH key not found: {key_path} ({})",
+                                expanded.display()
+                            ),
                         });
                         overall_ok = false;
                     }

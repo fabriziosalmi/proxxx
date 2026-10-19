@@ -4,6 +4,7 @@ pub use watcher::ConfigHandle;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::util::path::expand_tilde;
 use crate::util::secret::SecretString;
 
 /// Profile configuration loaded from TOML
@@ -382,7 +383,8 @@ impl PbsConfig {
             }
         }
         if let Some(ref file_path) = self.token_secret_file {
-            let path = std::path::Path::new(file_path);
+            let expanded = expand_tilde(file_path);
+            let path = expanded.as_path();
             if path.exists() {
                 #[cfg(unix)]
                 {
@@ -391,8 +393,9 @@ impl PbsConfig {
                         let mode = meta.permissions().mode();
                         if mode & 0o077 != 0 {
                             anyhow::bail!(
-                                "Security Error: pbs.token_secret_file '{}' has unsafe permissions {:o}. Must be 0600.",
+                                "Security Error: pbs.token_secret_file '{}' ({}) has unsafe permissions {:o}. Must be 0600.",
                                 file_path,
+                                path.display(),
                                 mode & 0o777,
                             );
                         }
@@ -404,6 +407,11 @@ impl PbsConfig {
                         return Ok(SecretString::new(s));
                     }
                 }
+            } else {
+                anyhow::bail!(
+                    "pbs.token_secret_file '{file_path}' (expanded: '{}') not found",
+                    path.display()
+                );
             }
         }
         #[cfg(feature = "keychain")]
@@ -476,7 +484,8 @@ impl TelegramConfig {
             return Ok(val);
         }
         if let Some(ref file_path) = self.bot_token_file {
-            let path = std::path::Path::new(file_path);
+            let expanded = expand_tilde(file_path);
+            let path = expanded.as_path();
             if path.exists() {
                 #[cfg(unix)]
                 {
@@ -485,8 +494,9 @@ impl TelegramConfig {
                         let mode = meta.permissions().mode();
                         if mode & 0o077 != 0 {
                             anyhow::bail!(
-                                "Security Error: telegram.bot_token_file '{}' has unsafe permissions {:o}. Must be 0600.",
+                                "Security Error: telegram.bot_token_file '{}' ({}) has unsafe permissions {:o}. Must be 0600.",
                                 file_path,
+                                path.display(),
                                 mode & 0o777,
                             );
                         }
@@ -765,15 +775,6 @@ impl HostKeyPolicy {
     }
 }
 
-fn expand_tilde(p: &str) -> std::path::PathBuf {
-    if let Some(stripped) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home).join(stripped);
-        }
-    }
-    std::path::PathBuf::from(p)
-}
-
 fn default_auth() -> String {
     "token".to_string()
 }
@@ -912,7 +913,8 @@ impl ProfileConfig {
 
         // 4. Secure File
         if let Some(ref file_path) = self.token_secret_file {
-            let path = std::path::Path::new(file_path);
+            let expanded = expand_tilde(file_path);
+            let path = expanded.as_path();
             if path.exists() {
                 #[cfg(unix)]
                 {
@@ -920,7 +922,12 @@ impl ProfileConfig {
                     if let Ok(meta) = std::fs::metadata(path) {
                         let mode = meta.permissions().mode();
                         if mode & 0o077 != 0 {
-                            anyhow::bail!("Security Error: token_secret_file '{}' has unsafe permissions {:o}. Must be 0600 or stricter.", file_path, mode & 0o777);
+                            anyhow::bail!(
+                                "Security Error: token_secret_file '{}' ({}) has unsafe permissions {:o}. Must be 0600 or stricter.",
+                                file_path,
+                                path.display(),
+                                mode & 0o777
+                            );
                         }
                     }
                 }
@@ -932,7 +939,10 @@ impl ProfileConfig {
                     }
                 }
             } else {
-                anyhow::bail!("token_secret_file '{file_path}' not found");
+                anyhow::bail!(
+                    "token_secret_file '{file_path}' (expanded: '{}') not found",
+                    path.display()
+                );
             }
         }
 

@@ -5,12 +5,12 @@ instead of grepping stderr.
 
 | Exit | Meaning | When |
 | :--- | :--- | :--- |
-| `0` | Success | Operation completed |
-| `1` | Generic failure | Catch-all; check stderr for the message |
+| `0` | Success | Operation completed (for `ls <kind> --all-profiles`, every profile succeeded; for `find <vmid>`, at least one profile owns the VMID and no profile errored) |
+| `1` | Generic failure | Catch-all; check stderr for the message. Also returned by `ls <kind> --all-profiles` and `find <vmid>` when any profile fails (all successful and `error` rows are still printed in table and JSON) |
 | `2` | Usage error / diff present | clap rejected the arguments **OR** a read-only check found drift (`state diff`, `reconcile run`) **OR** a mutation had a failed change (`state apply`, `reconcile converge`) |
 | `3` | Configuration error | TOML invalid, required field missing, profile not found, no default profile, invalid enum-like setting, `proxxx pbs` without a `[pbs]` / `[profiles.<name>.pbs]` section, or `state apply` / `reconcile converge` when `[meta] profile` mismatches the resolved target profile without `--allow-profile-mismatch` |
 | `4` | Authentication / authorization | `Unauthorized` (401) or `Forbidden` (403) — see [errors](/reference/errors) |
-| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc., a VMID absent from `GET /cluster/resources?type=vm`, or `proxxx find <vmid>` when no profile owns the VMID. A guest listed in `/cluster/resources?type=vm` whose hosting node is offline or unreachable does **not** exit `5` (exits `1`, or `7` on transient `RateLimited` / `StorageHang`), so teardown scripts never treat an unreachable node as "already gone". |
+| `5` | Resource not found | `NotFound` (404) — guest, node, snapshot, etc., a VMID absent from `GET /cluster/resources?type=vm`, or `proxxx find <vmid>` when **every** configured profile answered without error and none owns the VMID (if any profile errored, `find` exits `1` and includes the error rows). A guest listed in `/cluster/resources?type=vm` whose hosting node is offline or unreachable does **not** exit `5` (exits `1`, or `7` on transient `RateLimited` / `StorageHang`), so teardown scripts never treat an unreachable node as "already gone". |
 | `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from per-guest pre-flight (running guest, etc.) and state-apply / `reconcile converge` pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). The unmanned daemon `auto_converge` always runs as if `--allow-risk` were absent, so a Severe drift is left for a human (no exit code — it alerts + skips). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
 | `8` | Mutation refused by a local lock | A mutation was refused by a proxxx-side lock before reaching PVE. Either `proxxx incident freeze` is in effect (run `proxxx incident thaw` first, or wait for the TTL), or the active profile is configured `read_only = true` (point at a writable profile, or remove the flag from `config.toml`). |

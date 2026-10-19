@@ -1132,13 +1132,19 @@ pub async fn execute(
             )
         })?;
         let rows = fanout::fanout_ls(kind, cli_secret).await?;
-        return Ok((serde_json::to_value(rows)?, 0));
+        let exit = i32::from(rows.iter().any(fanout::ProfileRow::is_error));
+        return Ok((serde_json::to_value(rows)?, exit));
     }
     if let Command::Find { vmid } = &cmd {
         let rows = fanout::fanout_find_vmid(*vmid, cli_secret).await?;
-        // Exit 5 (NotFound) if no profile owns the vmid — matches the
-        // existing `ls`+grep contract.
-        let exit = if rows.is_empty() { 5 } else { 0 };
+        // #322: exit 5 (NotFound) ONLY when every profile answered without
+        // error and none owns the VMID. If any profile errored, exit 1 and
+        // still return `rows` so the operator sees which profile failed.
+        let exit = if rows.is_empty() {
+            5
+        } else {
+            i32::from(rows.iter().any(fanout::ProfileRow::is_error))
+        };
         return Ok((serde_json::to_value(rows)?, exit));
     }
 

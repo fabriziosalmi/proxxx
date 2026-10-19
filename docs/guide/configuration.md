@@ -50,9 +50,11 @@ The resolution order for token / password / PBS secret is:
    precedence over everything else.
 2. **Environment variable** — `PROXXX_TOKEN_SECRET`,
    `PROXXX_PASSWORD`, or `PROXXX_PBS_TOKEN_SECRET`.
-3. **File reference** — `token_secret_file = "/etc/proxxx/token"`.
-   The file must be readable; mode 0600 is recommended (proxxx does
-   not enforce, but flags non-0600 files in the audit log).
+3. **File reference** — `token_secret_file = "~/.config/proxxx/secrets/pve.token"`
+   (or `/etc/proxxx/token`). Leading `~` and `~/...` are expanded against
+   `$HOME` (`pbs.token_secret_file` and `telegram.bot_token_file` use the
+   same expansion). On Unix the file must have mode `0600` or stricter;
+   proxxx refuses to read files with group or world permissions.
 4. **OS keychain** — last resort. Service `proxxx`, key
    `token_secret` / `password` / `pbs_token_secret`. Disabled if you
    build with `--no-default-features`.
@@ -171,27 +173,31 @@ see the [TUI reference](../reference/tui.md). `proxxx fleet` ignores
 
 ## SSH
 
-For `proxxx ssh <vmid>`, `proxxx perms`, and the patching orchestrator:
+For `proxxx ssh <vmid>`, `proxxx perms`, `proxxx doctor`, and the patching orchestrator:
 
 ```toml
 [ssh]
-key  = "/home/fab/.ssh/proxxx_homelab"      # ed25519 private key, no passphrase
-host = "10.0.0.1"                       # default node for `proxxx perms`
-port = 22                                    # optional, defaults to 22
-user = "root"                                # optional, defaults to "root"
+key_path = "~/.ssh/proxxx_homelab"           # ed25519/RSA private key (~ expanded against $HOME)
+user     = "root"                            # optional, defaults to "root"
+
+[ssh.hosts]
+pve1 = "10.0.0.1:22"
 
 [ssh.guests."100"]
 host = "10.10.10.100"
 user = "fab"
 
 [ssh.guests."200"]
-host = "10.10.10.200"
-key  = "/home/fab/.ssh/k8s_master"
+host     = "10.10.10.200"
+key_path = "~/.ssh/k8s_master"               # optional, falls back to [ssh].key_path (~ expanded)
 ```
 
-SSH uses publickey only — no passphrase prompt, no agent. If your key
-is encrypted, set `PROXXX_SSH_KEY_PASSPHRASE`. The known_hosts file is
-TOFU on first connect with a warning log.
+Both `key_path` (at `[ssh]` and `[ssh.guests."<vmid>"]`) and `known_hosts`
+accept a leading `~` or `~/...` (expanded via `util::path::expand_tilde`,
+shared with `token_secret_file` and `proxxx doctor`). SSH uses publickey
+only — no agent. If your key is encrypted, set `PROXXX_SSH_KEY_PASSPHRASE`
+(or unlock it in the TUI prompt). The `known_hosts` file is TOFU on first
+connect with a warning log.
 
 ## PBS
 
@@ -199,12 +205,12 @@ For `proxxx pbs ...`:
 
 ```toml
 [pbs]
-url          = "https://pbs.lan:8007/"
-user         = "proxxx@pbs"
-token_id     = "reader"
-token_secret = "00000000-0000-0000-0000-000000000000"
-verify_tls   = false
-rate_limit   = 10        # max requests/second
+url               = "https://pbs.lan:8007/"
+user              = "proxxx@pbs"
+token_id          = "reader"
+token_secret_file = "~/.config/proxxx/secrets/pbs.token"   # ~ expanded; 0600 on Unix (or inline token_secret)
+verify_tls        = false
+rate_limit        = 10        # max requests/second
 ```
 
 ::: warning
