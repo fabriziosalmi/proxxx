@@ -24,12 +24,15 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 /// Owns the ratatui Terminal and guarantees teardown via Drop.
 ///
-/// Construction installs raw mode + alternate screen; drop restores
-/// both. The `terminal` field is exposed via `as_mut` / `as_ref` so
-/// callers can render through it. Idempotent: calling `restore()`
-/// explicitly is fine — Drop becomes a no-op afterwards.
+/// Construction acquires the process-wide [`crate::util::term_gate`] (so
+/// `stderr` `tracing` logs are suppressed while the alternate screen is
+/// active, `#333`) and installs raw mode + alternate screen; `restore()` /
+/// `Drop` restores the terminal first and then releases the log gate.
+/// Idempotent: calling `restore()` explicitly is fine — `Drop` becomes a
+/// no-op afterwards.
 pub struct TerminalGuard {
     terminal: Option<Terminal<CrosstermBackend<Stdout>>>,
+    log_guard: Option<crate::util::term_gate::TermGateGuard>,
 }
 
 impl TerminalGuard {
@@ -37,11 +40,12 @@ impl TerminalGuard {
     /// Returns an error WITHOUT modifying terminal state if any step
     /// fails (so the caller's stdout stays usable).
     pub fn install() -> Result<Self> {
+        let log_guard = crate::util::term_gate::acquire();
         enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();
         if let Err(e) = execute!(stdout, EnterAlternateScreen) {
             // Roll back the raw mode we just entered to leave the
-            // shell in the state we found it.
+            // shell in the state we found it. `log_guard` drops on return.
             let _ = disable_raw_mode();
             return Err(e).context("enter alternate screen");
         }
@@ -49,6 +53,7 @@ impl TerminalGuard {
         let terminal = Terminal::new(backend).context("create ratatui Terminal")?;
         Ok(Self {
             terminal: Some(terminal),
+            log_guard: Some(log_guard),
         })
     }
 
@@ -78,6 +83,7 @@ impl TerminalGuard {
                 .context("leave alternate screen")?;
             terminal.show_cursor().context("show cursor")?;
         }
+        self.log_guard.take();
         Ok(())
     }
 }
@@ -100,5 +106,6 @@ impl Drop for TerminalGuard {
                 tracing::warn!("TerminalGuard::drop: show_cursor failed: {e}");
             }
         }
+        self.log_guard.take();
     }
 }

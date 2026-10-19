@@ -168,18 +168,23 @@ pub async fn execute_serial(
     // Put the local terminal in raw mode + alternate screen so the
     // remote shell controls every keystroke. The global panic hook
     // (flight recorder) already restores raw mode on crash; we also do an
-    // explicit cleanup at function end.
+    // explicit cleanup at function end. Hold the terminal log gate (`#333`)
+    // so `stderr` tracing output is suppressed while the alternate screen is
+    // active.
     use anyhow::Context;
     use crossterm::{execute, terminal};
     use std::io::{stdout, Write};
 
+    let term_gate = crate::util::term_gate::acquire();
     terminal::enable_raw_mode().context("enable raw mode")?;
-    execute!(
+    if let Err(e) = execute!(
         stdout(),
         terminal::EnterAlternateScreen,
         crossterm::cursor::Hide,
-    )
-    .context("enter alt screen")?;
+    ) {
+        let _ = terminal::disable_raw_mode();
+        return Err(e).context("enter alt screen");
+    }
 
     let _ = write!(
         stdout(),
@@ -233,6 +238,7 @@ pub async fn execute_serial(
         crossterm::cursor::Show,
     );
     let _ = terminal::disable_raw_mode();
+    drop(term_gate);
 
     Ok((
         serde_json::json!({

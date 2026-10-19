@@ -2,7 +2,10 @@
 
 Run `proxxx` with no arguments to enter the TUI. All views render in
 ratatui over crossterm; the terminal is restored on every exit path
-(happy, `?` early-return, panic).
+(happy, `?` early-return, panic). While any full-screen view owns the
+terminal (`proxxx`, `proxxx fleet`, or `proxxx serial`), `tracing` logs
+are written only to the rotating `proxxx.log.<date>` file and suppressed
+on `stderr`.
 
 ## Views
 

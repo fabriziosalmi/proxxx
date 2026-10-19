@@ -155,7 +155,7 @@ fn main() -> Result<()> {
             .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
             .with(
                 tracing_subscriber::fmt::layer()
-                    .with_writer(std::io::stderr)
+                    .with_writer(util::term_gate::GatedStderrMakeWriter::stderr())
                     .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
             )
             .init();
@@ -201,6 +201,11 @@ fn main() -> Result<()> {
             if matches!(cmd, cli::Command::Fleet) {
                 rt.block_on(async {
                     while let Some(profile) = tui::fleet::run_fleet(cli_secret.as_deref()).await? {
+                        // Hold the terminal gate across the drill-in handoff so
+                        // `tui::run`'s pre-`TerminalGuard` `PxClient::new` log
+                        // cannot write to stderr between leaving the fleet
+                        // alternate screen and entering the single-profile one.
+                        let _drill_gate = util::term_gate::acquire();
                         // Open the selected cluster's full TUI. Its own
                         // profile-switch return value is ignored — on exit
                         // we always come back to the fleet overview.

@@ -7,3 +7,4 @@ pub mod secret;
 pub mod shutdown;
 pub mod sparkline;
 pub mod spawn_traced;
+pub mod term_gate;
