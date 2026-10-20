@@ -77,6 +77,20 @@ impl StoredSecretLocation {
             Self::Keychain { service, account } => format!("{service}:{account}"),
         }
     }
+
+    /// Read the secret back from the exact store location just written (`#330` Rev. 42 F1).
+    ///
+    /// Proves the write-then-read round-trip (including `0600` permission check on
+    /// files) and yields the exact secret to pass as `cli_secret` to [`crate::api::PxClient::new`]
+    /// so `PROXXX_TOKEN_SECRET` or inline config can never shadow it during verification.
+    pub async fn read_back(&self) -> Result<SecretString> {
+        match self {
+            Self::File(path) => crate::config::read_secret_file_checked(path),
+            Self::Keychain { service, account } => {
+                crate::config::read_keychain_secret_checked(service, account).await
+            }
+        }
+    }
 }
 
 /// Abstraction over persisting the bootstrapped token secret so unit tests can
@@ -171,21 +185,31 @@ impl BootstrapVerifier for RealBootstrapVerifier {
         tokenid: &str,
         stored: &StoredSecretLocation,
     ) -> BootstrapVerifyReport {
+        let round_tripped = match stored.read_back().await {
+            Ok(s) => s,
+            Err(e) => {
+                return BootstrapVerifyReport {
+                    ok: false,
+                    version: None,
+                    release: None,
+                    nodes_count: None,
+                    error: Some(format!("reading back stored secret failed: {e:#}")),
+                };
+            }
+        };
+
         let mut verify_cfg = config.clone();
         verify_cfg.auth = "token".to_string();
         verify_cfg.user = userid.to_string();
         verify_cfg.token_id = Some(tokenid.to_string());
         verify_cfg.token_secret = None;
-        match stored {
-            StoredSecretLocation::File(path) => {
-                verify_cfg.token_secret_file = Some(path.display().to_string());
-            }
-            StoredSecretLocation::Keychain { .. } => {
-                verify_cfg.token_secret_file = None;
-            }
-        }
+        verify_cfg.token_secret_file = None;
 
-        let client = match crate::api::PxClient::new(verify_cfg, None).await {
+        // Pass the round-tripped secret explicitly as `cli_secret` (highest precedence
+        // in `ProfileConfig::resolve_token_secret`) so `PROXXX_TOKEN_SECRET` in the
+        // process environment can never shadow or substitute the secret being verified.
+        let client = match crate::api::PxClient::new(verify_cfg, Some(round_tripped.expose())).await
+        {
             Ok(c) => c,
             Err(e) => {
                 return BootstrapVerifyReport {
@@ -1425,5 +1449,115 @@ mod tests {
             Some("pveum user token remove root@pam proxxx-boot"),
             "malformed add output after exit 0 must still attempt rollback remove"
         );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(ref prev) = self.previous {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    /// Test 7 (Rev. 42 F1): `RealBootstrapVerifier` reads back the secret from the store
+    /// just written and passes it explicitly as highest-precedence `cli_secret`, so a
+    /// stale or unrelated `PROXXX_TOKEN_SECRET` in the environment cannot shadow it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_7_real_verifier_reads_stored_secret_ignoring_env_var() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const STORED_CANARY: &str = "STORED-SECRET-11223344-5566-7788-99aa-bbccddeeff00";
+        const WRONG_ENV_SECRET: &str = "WRONG-ENV-SECRET-deadbeef-0000-1111-2222-333344445555";
+
+        let server = MockServer::start().await;
+        let expected_auth = format!("PVEAPIToken=root@pam!proxxx-boot={STORED_CANARY}");
+
+        Mock::given(method("GET"))
+            .and(path("/api2/json/version"))
+            .and(header("Authorization", expected_auth.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "version": "9.1.1",
+                    "release": "9.1",
+                    "repoid": "a1b2c3d4"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .and(header("Authorization", expected_auth.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "node": "pve-test-1",
+                        "status": "online",
+                        "cpu": 0.05,
+                        "maxcpu": 8,
+                        "mem": 1024,
+                        "maxmem": 8192,
+                        "uptime": 3600
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env_guard = EnvVarGuard::set("PROXXX_TOKEN_SECRET", WRONG_ENV_SECRET);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let secret_file = tmp.path().join("pve1.token");
+        let audit_dir = tmp.path().join("audit");
+
+        let mut cfg = sample_profile(false);
+        cfg.url = server.uri();
+        let args = default_args(secret_file.clone());
+
+        let ssh = FakeSsh::new(vec![
+            ok_exec("[]"),
+            ok_exec(&format!(r#"{{"value":"{STORED_CANARY}"}}"#)),
+            ok_exec(""),
+        ]);
+
+        let (out, exit_code) = bootstrap_token_with(
+            &cfg,
+            &args,
+            "10.10.10.181",
+            &ssh,
+            &RealBootstrapSecretStore,
+            &RealBootstrapVerifier,
+            Some(&audit_dir),
+        )
+        .await
+        .expect("bootstrap with RealBootstrapVerifier must succeed");
+
+        assert_eq!(
+            exit_code, 0,
+            "verify must succeed using the stored secret despite PROXXX_TOKEN_SECRET: {out}"
+        );
+        assert_eq!(out["verify"]["ok"], true);
+        assert_eq!(out["verify"]["version"], "9.1.1");
+        assert_eq!(out["verify"]["release"], "9.1");
+        assert_eq!(out["verify"]["nodes_count"], 1);
     }
 }

@@ -1942,6 +1942,91 @@ pub async fn store_keychain_secret_checked(
     }
 }
 
+/// Read back a secret file (`#330`), enforcing `0600` permissions on Unix via
+/// [`check_secret_file`] and returning the trimmed value wrapped in a
+/// [`SecretString`].
+pub fn read_secret_file_checked(path: &std::path::Path) -> Result<SecretString> {
+    let raw_path = path.display().to_string();
+    match check_secret_file("token_secret_file", Some(&raw_path)) {
+        SecretFileCheck::Loaded(secret) => Ok(secret),
+        SecretFileCheck::Failed {
+            security_header: Some(sec),
+            ..
+        } => Err(anyhow::anyhow!("{sec}")),
+        SecretFileCheck::Failed { diagnostic, .. }
+        | SecretFileCheck::NotConfigured { diagnostic } => Err(anyhow::anyhow!("{diagnostic}")),
+    }
+}
+
+/// Read back a specific `(service, account)` entry from the OS keychain (`#330`).
+#[cfg_attr(
+    not(all(feature = "keychain", target_os = "macos")),
+    allow(clippy::unused_async, unused_variables)
+)]
+pub async fn read_keychain_secret_checked(service: &str, account: &str) -> Result<SecretString> {
+    #[cfg(test)]
+    {
+        let mut guard = TEST_KEYCHAIN_STATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(guard.mode, Some(TestKeychainMode::Entries(_))) {
+            guard.consult_count += 1;
+        }
+        if let Some(ref mode) = guard.mode {
+            return match mode {
+                TestKeychainMode::NoStoreCompiled => Err(anyhow::anyhow!(
+                    "no persistent OS keychain store is compiled into this binary"
+                )),
+                TestKeychainMode::Entries(map) => {
+                    match map.get(&(service.to_string(), account.to_string())) {
+                        Some(KeychainEntryOutcome::Found(secret)) if !secret.is_empty() => {
+                            Ok(secret.clone())
+                        }
+                        Some(other) => Err(anyhow::anyhow!(
+                            "keychain entry `{service}` / `{account}` unavailable ({})",
+                            other.diagnostic_reason()
+                        )),
+                        None => Err(anyhow::anyhow!(
+                            "keychain entry `{service}` / `{account}` not found"
+                        )),
+                    }
+                }
+            };
+        }
+    }
+
+    if !keychain_store_info().compiled {
+        anyhow::bail!("no persistent OS keychain store is compiled into this binary");
+    }
+
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
+    {
+        let svc = service.to_string();
+        let acc = account.to_string();
+        tokio::task::spawn_blocking(move || -> Result<SecretString> {
+            let entry = keyring::Entry::new(&svc, &acc).map_err(|e| {
+                anyhow::anyhow!("failed to open keychain entry `{svc}` / `{acc}`: {e}")
+            })?;
+            let mut pw = entry.get_password().map_err(|e| {
+                anyhow::anyhow!("failed to read keychain entry `{svc}` / `{acc}`: {e}")
+            })?;
+            let trimmed = pw.trim().to_string();
+            zeroize::Zeroize::zeroize(&mut pw);
+            if trimmed.is_empty() {
+                anyhow::bail!("keychain entry `{svc}` / `{acc}` is empty");
+            }
+            Ok(SecretString::new(trimmed))
+        })
+        .await
+        .context("joining keychain read task")?
+    }
+
+    #[cfg(not(all(feature = "keychain", target_os = "macos")))]
+    {
+        anyhow::bail!("no persistent OS keychain store is compiled into this binary")
+    }
+}
+
 /// Load configuration from TOML file. Errors carry a typed
 /// [`ConfigError`] through anyhow so main.rs can map them to exit
 /// code `3` ("Configuration error") instead of the generic `1`.
