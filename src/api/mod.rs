@@ -5,12 +5,16 @@ mod auth;
 mod client;
 pub mod error;
 pub mod tls_pin;
-mod transport;
+pub mod transport;
 pub mod types;
 
 pub(crate) use client::resolve_tofu_verifier;
 pub use client::PxClient;
 pub use error::ApiError;
+pub use transport::{
+    should_retry, should_retry_error_flags, should_retry_for_method, should_retry_status,
+    RequestIdempotency, RetryOutcome,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;

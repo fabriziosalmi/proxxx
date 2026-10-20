@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 
 use super::auth::AuthMethod;
 use super::transport::{
-    backoff_delay, is_retryable_error, is_retryable_status, parse_json_maybe_blocking,
-    read_bounded_body, retry_after_secs, RETRY_MAX_ATTEMPTS,
+    backoff_delay, parse_json_maybe_blocking, read_bounded_body, retry_after_secs,
+    should_retry_reqwest_error, should_retry_response, RequestIdempotency, RETRY_MAX_ATTEMPTS,
 };
 use super::types::ApiResponse;
 use super::types::{Guest, GuestType, Node, StoragePool, TaskLog};
@@ -269,6 +269,7 @@ pub struct PxClient {
     pinned_verifier: Option<Arc<crate::api::tls_pin::PinnedLeafVerifier>>,
     audit_dir: Option<std::path::PathBuf>,
     max_attempts: u32,
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl PxClient {
@@ -360,6 +361,7 @@ impl PxClient {
             pinned_verifier,
             audit_dir: None,
             max_attempts: RETRY_MAX_ATTEMPTS,
+            request_timeout: None,
         })
     }
 
@@ -395,6 +397,17 @@ impl PxClient {
         self
     }
 
+    /// Override the per-request timeout applied in `send_with_retry` (`#348`).
+    ///
+    /// Defaults to `None` (inheriting the 30 s client timeout). Tests use this
+    /// knob to exercise request-timeout retry behaviour in milliseconds rather
+    /// than waiting 30 s.
+    #[must_use]
+    pub const fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
     /// Read-only handle to the profile config the client was built with.
     /// Used by the TUI HITL coordinator to fetch the `[telegram]` block
     /// without re-loading config from disk.
@@ -426,18 +439,31 @@ impl PxClient {
         Ok(self.auth.read().await.headers())
     }
 
-    /// Send a request with retry on transient failures (SPOF 2.2 fix).
+    /// Send a request with retry on transient failures (SPOF 2.2 / `#348`).
     ///
     /// `make_req` rebuilds the `RequestBuilder` on each attempt — required
     /// because reqwest's `RequestBuilder` is not `Clone` once a body has
     /// been attached. The closure also re-acquires auth so a token refresh
     /// during retry is picked up automatically.
     ///
-    /// Retry conditions: 503/429/502/504 status, or `is_timeout()` /
-    /// `is_connect()` reqwest errors. Body-decode errors and 4xx (other
-    /// than 429) are NOT retried — those indicate a request-shape problem
-    /// the cluster won't recover from.
-    async fn send_with_retry<F>(&self, path: &str, mut make_req: F) -> Result<Response>
+    /// Retry conditions depend on `idempotency` (`#348`):
+    /// - [`RequestIdempotency::Idempotent`] (`GET`): retries `503`/`429`/`502`/`504`
+    ///   statuses, or `is_timeout()` / `is_connect()` reqwest errors (excluding
+    ///   TLS/cert failures).
+    /// - [`RequestIdempotency::Mutation`] (`POST`/`PUT`/`DELETE`): retries ONLY
+    ///   when the request provably was not processed by PVE:
+    ///   `(a)` a connect error that is not a timeout (`is_connect() && !is_timeout()`
+    ///   and not a TLS/cert failure), `(b)` HTTP `429`, or `(c)` HTTP `503` WITH a
+    ///   `Retry-After` header. Never retries a mutation on a timeout, `502`,
+    ///   `504`, `595`, or `503` without `Retry-After`.
+    /// - Reactive `401` re-auth retry stays for both reads and mutations (PVE
+    ///   rejected the request before executing it).
+    async fn send_with_retry<F>(
+        &self,
+        idempotency: RequestIdempotency,
+        path: &str,
+        mut make_req: F,
+    ) -> Result<Response>
     where
         F: FnMut(&Client) -> RequestBuilder,
     {
@@ -461,7 +487,10 @@ impl PxClient {
             self.limiter.until_ready().await;
 
             let auth = self.auth.read().await;
-            let req = auth.apply(make_req(&self.http));
+            let mut req = auth.apply(make_req(&self.http));
+            if let Some(timeout) = self.request_timeout {
+                req = req.timeout(timeout);
+            }
             let result = req.send().await;
             drop(auth);
 
@@ -490,7 +519,7 @@ impl PxClient {
                         }
                         continue;
                     }
-                    if is_retryable_status(status) && attempt < self.max_attempts {
+                    if should_retry_response(idempotency, &resp) && attempt < self.max_attempts {
                         let delay = backoff_delay(attempt, retry_after_secs(&resp));
                         warn!(
                             "transient {status} from {path}, retry {attempt}/{} after {:?}",
@@ -501,7 +530,10 @@ impl PxClient {
                     }
                     return Ok(resp);
                 }
-                Err(e) if is_retryable_error(&e) && attempt < self.max_attempts => {
+                Err(e)
+                    if should_retry_reqwest_error(idempotency, &e)
+                        && attempt < self.max_attempts =>
+                {
                     let delay = backoff_delay(attempt, None);
                     warn!(
                         "transient connection error on {path}: {}, retry {attempt}/{} after {:?}",
@@ -516,13 +548,18 @@ impl PxClient {
                 }
                 Err(e) => {
                     // Surface transport-level failures (DNS NXDOMAIN, TCP
-                    // close mid-handshake, TLS errors, connect timeouts)
+                    // close mid-handshake, TLS errors, connect/request timeouts)
                     // as the typed `ApiError::Transport` with the full
-                    // std::error::Error::source() chain preserved (#323).
-                    return Err(anyhow::Error::from(super::ApiError::from_transport(
-                        format!("request to {path} failed"),
-                        &e,
-                    )));
+                    // std::error::Error::source() chain preserved (#323), and
+                    // attach the may-have-executed warning on mutation timeouts
+                    // (#348).
+                    return Err(anyhow::Error::from(
+                        super::ApiError::from_transport_with_idempotency(
+                            format!("request to {path} failed"),
+                            &e,
+                            idempotency,
+                        ),
+                    ));
                 }
             }
         }
@@ -558,7 +595,9 @@ impl PxClient {
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("GET {}", url);
 
-        let resp = self.send_with_retry(path, |http| http.get(&url)).await?;
+        let resp = self
+            .send_with_retry(RequestIdempotency::Idempotent, path, |http| http.get(&url))
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -598,7 +637,7 @@ impl PxClient {
         Ok(())
     }
 
-    /// Rate-limited, auth-aware POST request with retry on transient failures.
+    /// Rate-limited, auth-aware POST request with safe-only retry (`#348`).
     async fn post<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
@@ -624,7 +663,9 @@ impl PxClient {
         debug!("POST {}", url);
 
         let resp = match self
-            .send_with_retry(path, |http| http.post(&url).form(params))
+            .send_with_retry(RequestIdempotency::Mutation, path, |http| {
+                http.post(&url).form(params)
+            })
             .await
         {
             Ok(resp) => resp,
@@ -646,7 +687,13 @@ impl PxClient {
             // TUI/CLI couldn't downcast 403s to a "permission denied"
             // banner the way GETs already could (audit closed
             // the GET path; this closes the rest).
-            return Err(super::ApiError::from_status(status, path, body).into());
+            return Err(super::ApiError::from_status_with_idempotency(
+                status,
+                path,
+                body,
+                RequestIdempotency::Mutation,
+            )
+            .into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
@@ -656,10 +703,10 @@ impl PxClient {
         parse_json_maybe_blocking::<T>(bytes, path).await
     }
 
-    /// Rate-limited, auth-aware PUT request with retry on transient
-    /// failures. Used for partial updates of mutable resources — the
-    /// PVE config endpoints (`/qemu/{vmid}/config`,
-    /// `/lxc/{vmid}/config`, `/qemu/{vmid}/cloudinit`) are all PUT.
+    /// Rate-limited, auth-aware PUT request with safe-only retry (`#348`).
+    /// Used for partial updates of mutable resources — the PVE config
+    /// endpoints (`/qemu/{vmid}/config`, `/lxc/{vmid}/config`,
+    /// `/qemu/{vmid}/cloudinit`) are all PUT.
     async fn put<T: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
@@ -678,7 +725,9 @@ impl PxClient {
         debug!("PUT {}", url);
 
         let resp = match self
-            .send_with_retry(path, |http| http.put(&url).form(params))
+            .send_with_retry(RequestIdempotency::Mutation, path, |http| {
+                http.put(&url).form(params)
+            })
             .await
         {
             Ok(resp) => resp,
@@ -696,7 +745,13 @@ impl PxClient {
             audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
-            return Err(super::ApiError::from_status(status, path, body).into());
+            return Err(super::ApiError::from_status_with_idempotency(
+                status,
+                path,
+                body,
+                RequestIdempotency::Mutation,
+            )
+            .into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
@@ -704,7 +759,7 @@ impl PxClient {
         parse_json_maybe_blocking::<T>(bytes, path).await
     }
 
-    /// Rate-limited, auth-aware DELETE request with retry on transient failures.
+    /// Rate-limited, auth-aware DELETE request with safe-only retry (`#348`).
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
         self.guard_read_only(path)?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
@@ -718,7 +773,10 @@ impl PxClient {
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("DELETE {}", url);
 
-        let resp = match self.send_with_retry(path, |http| http.delete(&url)).await {
+        let resp = match self
+            .send_with_retry(RequestIdempotency::Mutation, path, |http| http.delete(&url))
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => {
                 audit_ctx.record_outcome(&format!(
@@ -734,7 +792,13 @@ impl PxClient {
             audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
-            return Err(super::ApiError::from_status(status, path, body).into());
+            return Err(super::ApiError::from_status_with_idempotency(
+                status,
+                path,
+                body,
+                RequestIdempotency::Mutation,
+            )
+            .into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
