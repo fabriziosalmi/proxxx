@@ -269,7 +269,7 @@ impl SshPool {
     /// # Errors
     /// Returns an error if the `known_hosts` file exists and cannot be parsed.
     pub fn new(cfg: SshConfig, passphrase: Option<String>) -> Result<Self> {
-        let known_path = cfg.known_hosts_path();
+        let known_path = cfg.known_hosts_path()?;
         let known = KnownHosts::load(known_path).context("loading known_hosts")?;
         let policy = HostKeyPolicy::from_str(&cfg.strict_host_key_checking);
         let verifier: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier { policy });
