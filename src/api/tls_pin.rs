@@ -572,12 +572,12 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         // No raw `[`, `]`, or `:` from the IPv6 literal should leak.
-        assert!(!filename.contains('['), "filename has '[': {filename}");
-        assert!(!filename.contains(']'), "filename has ']': {filename}");
-        assert!(!filename.contains(':'), "filename has ':': {filename}");
+        assert!(!filename.contains('['), "filename has '['");
+        assert!(!filename.contains(']'), "filename has ']'");
+        assert!(!filename.contains(':'), "filename has ':'");
         assert!(
             filename.ends_with("_8006.der"),
-            "filename should end with the port + .der: {filename}"
+            "filename should end with the port + .der"
         );
     }
 
