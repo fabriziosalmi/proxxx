@@ -112,12 +112,13 @@ If you want destructive ops gated by Telegram approval:
 ```toml
 [telegram]
 bot_token = "123456:ABC..."
-chat_id   = -1001234567890
+chat_id   = "-1001234567890"
 
 [[policies]]
 action  = "delete"
 target  = "tag:prod"
-require_approval = true
+channel = "telegram"
+require = 1                     # approvals needed
 ```
 
 Now `proxxx delete <vmid> --yes` on a guest tagged `prod` will:

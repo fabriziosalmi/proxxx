@@ -10,7 +10,7 @@ SaaS account required.
 [[alerts]]
 name              = "node_down"
 trigger           = "node_offline"
-threshold         = 60                          # seconds
+for_secs          = 60                          # seconds
 severity          = "critical"
 route             = ["telegram", "ntfy:proxxx-prod"]
 dedup_secs        = 600
@@ -36,7 +36,7 @@ The `trigger` field is a closed enum — three predicates today:
 
 | Trigger | Fires when | Tunables |
 | :--- | :--- | :--- |
-| `node_offline` | A cluster node has been offline for `threshold` seconds | `threshold` |
+| `node_offline` | A cluster node has been offline for `for_secs` seconds | `for_secs` |
 | `storage_above` | A storage pool's usage exceeds `threshold_percent` | `threshold_percent`, optional `storage` filter |
 | `replication_failing` | Any replication job has `fail_count > 0` or non-empty `error` | none |
 
@@ -93,7 +93,11 @@ predicate match. Use this in your install runbook.
 ## Dedup
 
 ```toml
-dedup_secs = 600
+[[alerts]]
+name        = "node_down"
+trigger     = "node_offline"
+route       = ["telegram"]
+dedup_secs  = 600
 ```
 
 A `(rule, target)` tuple won't re-fire within `dedup_secs`. So

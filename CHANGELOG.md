@@ -149,6 +149,19 @@ SemVer contract:
 
 ### Changed
 
+- **Configuration typos now fail loudly (#326).** All TOML configuration
+  sections reject unknown keys; configs that contain unknown keys now fail
+  to load; previously the keys were ignored. Stale documentation examples
+  (such as `[ssh].key`, `threshold`, and `password_file`) have been corrected
+  and are now drift-proofed in CI. In `[[alerts]]` rules, `trigger` is now
+  accepted as an alias of `when`: the documented examples used `trigger`
+  and previously failed to load with a missing `when` field. `[[policies]]`
+  entries also reject unknown keys; the HITL policy examples in the docs
+  used fields that do not exist (`require_approval`, `timeout_secs`,
+  `when = {...}`, `require = "telegram"`) and now show the real schema
+  (`action`, `target`, `channel`, `require`), and `telegram.chat_id` is
+  shown as a string, which is what the loader requires.
+
 - **The live tier moved off GitHub Actions and onto a LAN-only box.**
   v0.14.0 added `.github/workflows/live-tier.yml`, a `workflow_dispatch`
   job on a self-hosted runner, to close the audit finding that the

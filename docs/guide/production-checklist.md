@@ -187,14 +187,16 @@ with no matching policy.
 
 ```toml
 [[policies]]
-when = { action = "delete", tag = "prod" }
-require = "telegram-2of3"   # or "telegram"
+action  = "delete"
+target  = "tag:prod"
 channel = "telegram"
+require = 2            # two approvals (quorum)
 
 [[policies]]
-when = { action = "stop", vmid = "100" }
-require = "telegram"
+action  = "stop"
+target  = "100"
 channel = "telegram"
+require = 1
 ```
 
 Policies match by `action`, `tag`, `vmid`, or wildcard. The
@@ -422,9 +424,10 @@ Destructive (policy-gated) tools: `stop_guest`, `restart_guest`,
 # to the MCP client. Confirm your rules cover every destructive action
 # you intend a client to perform.
 [[policies]]
-when = { action = "delete" }
-require = "telegram"
+action  = "delete"
+target  = "*"
 channel = "telegram"
+require = 1
 ```
 
 ## 9. Guard unmanned auto-converge (if you run `reconcile watch --auto-converge`)

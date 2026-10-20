@@ -42,22 +42,23 @@ Note the ID (negative for groups, positive for DMs).
 ```toml
 [telegram]
 bot_token = "123456:ABC..."
-chat_id   = -1001234567890
+chat_id   = "-1001234567890"
 ```
 
 ### 4. Add policies
 
 ```toml
 [[policies]]
-action           = "delete"
-target           = "tag:prod"
-require_approval = true
-timeout_secs     = 120
+action  = "delete"
+target  = "tag:prod"
+channel = "telegram"
+require = 1
 
 [[policies]]
-action           = "stop"
-target           = "tag:critical"
-require_approval = true
+action  = "stop"
+target  = "tag:critical"
+channel = "telegram"
+require = 1
 ```
 
 ### 5. Test

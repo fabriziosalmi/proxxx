@@ -39,7 +39,7 @@ For `auth = "token"`, set `token_id` and one of: `token_secret`,
 `token_secret_file`, `PROXXX_TOKEN_SECRET` env, or store it in the
 keychain.
 
-For `auth = "password"`, set `password`, `password_file`,
+For `auth = "password"`, set `password`,
 `PROXXX_PASSWORD` env, or keychain.
 
 ## Secrets
@@ -262,7 +262,7 @@ header to PBS you'll get a 401 with no useful diagnostic.
 ```toml
 [telegram]
 bot_token = "123456:ABC..."
-chat_id   = -1001234567890
+chat_id   = "-1001234567890"
 ```
 
 Get `bot_token` from [@BotFather](https://t.me/BotFather), `chat_id`
@@ -273,10 +273,10 @@ from any message metadata to your bot (e.g. via
 
 ```toml
 [[policies]]
-action           = "delete"          # delete | stop | restart | migrate | exec | move_disk | resize_disk
-target           = "tag:prod"        # tag:<X> | <vmid> | *
-require_approval = true
-timeout_secs     = 120               # default 120
+action  = "delete"     # delete | stop | restart | migrate | exec | move_disk | resize_disk | *
+target  = "tag:prod"   # tag:<X> | <vmid> | *
+channel = "telegram"   # approval channel
+require = 1            # approvals needed (2 or more = quorum)
 ```
 
 Multiple policies are evaluated in order; the first matching one wins.
@@ -288,7 +288,7 @@ See [HITL via Telegram](/integrations/hitl).
 [[alerts]]
 name        = "node_down"
 trigger     = "node_offline"
-threshold   = 60                     # seconds offline before firing
+for_secs    = 60                     # seconds offline before firing
 route       = ["telegram", "ntfy:proxxx-prod"]
 dedup_secs  = 600                    # don't re-fire within 10 min
 ```

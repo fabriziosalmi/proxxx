@@ -30,7 +30,6 @@ token_id      = "proxxx"
 token_secret  = "..."                 # plain string OR
 token_secret_file = "/etc/proxxx/token"
 password      = "..."                 # only if auth = "password"
-password_file = "..."
 verify_tls    = true                  # validate the cluster cert. DEFAULT true
                                       # since v0.13.4 (was false). Proxmox ships
                                       # a self-signed cert: set false deliberately
@@ -115,11 +114,13 @@ max_unmanned_changes = 5              # hard cap on changes-per-tick for the UNM
 
 ```toml
 [ssh]
-key  = "/home/fab/.ssh/proxxx_homelab"   # ed25519 / rsa private key path
-host = "10.0.0.1"                    # default node for `proxxx perms` and patching
-port = 22                                  # optional, default 22
+key_path = "/home/fab/.ssh/proxxx_homelab" # ed25519 / rsa private key path
 user = "root"                              # optional, default "root"
+strict_host_key_checking = "tofu"           # tofu, strict, or off
 known_hosts = "~/.config/proxxx/known_hosts"  # optional, default to XDG path
+
+[ssh.hosts]
+pve1 = "10.0.0.1:22"                        # optional per-node override
 ```
 
 ## `[ssh.guests.<vmid>]` (optional override)
@@ -159,7 +160,7 @@ Used by HITL and alert routing.
 ```toml
 [telegram]
 bot_token = "123456:ABC..."           # from @BotFather
-chat_id   = -1001234567890            # from getUpdates response
+chat_id   = "-1001234567890"            # from getUpdates response
 allowed_approvers = [123456789]       # REQUIRED. Telegram numeric user ids
                                       # permitted to approve/deny. The callback
                                       # HMAC proves proxxx minted the keyboard,
@@ -174,10 +175,10 @@ allowed_approvers = [123456789]       # REQUIRED. Telegram numeric user ids
 
 ```toml
 [[policies]]
-action           = "delete"           # delete | stop | restart | migrate | exec | move_disk | resize_disk
-target           = "tag:prod"         # tag:<X> | <vmid> | * (numeric or wildcard)
-require_approval = true
-timeout_secs     = 120                # default 120
+action  = "delete"     # delete | stop | restart | migrate | exec | move_disk | resize_disk | *
+target  = "tag:prod"   # tag:<X> | <vmid> | *
+channel = "telegram"   # approval channel
+require = 1            # approvals needed (2 or more = quorum)
 ```
 
 Multiple `[[policies]]` arrays are evaluated in order. The first
@@ -210,7 +211,7 @@ pre-format the secret.
 [[alerts]]
 name              = "node_down"
 trigger           = "node_offline"           # closed enum: see Alerts integration
-threshold         = 60                        # seconds
+for_secs          = 60                        # seconds
 storage           = "ceph-rbd"                # filter for storage_above (optional)
 threshold_percent = 85                        # for storage_above
 severity          = "critical"                # info | warning | critical
@@ -269,9 +270,7 @@ location](#file-location)), these tune runtime behaviour:
 | :--- | :--- |
 | `verify_tls` | `true` |
 | `rate_limit` | `10` |
-| `port` (SSH) | `22` |
 | `user` (SSH) | `"root"` |
-| `timeout_secs` (HITL policy) | `120` |
 | `dedup_secs` (alert) | `600` |
 | `severity` (alert) | `"warning"` |
 | `auth` | `"token"` |
@@ -297,5 +296,5 @@ Common errors:
 - **`token_secret` has trailing whitespace** — copy-paste from the
   web UI sometimes appends a newline; trim it
 - **`auth = "token"` without `token_id`** — both fields are required
-- **`[ssh]` referenced but `key` is missing** — `proxxx ssh <vmid>`,
+- **`[ssh]` referenced but `key_path` is missing** — `proxxx ssh <vmid>`,
   `proxxx perms`, and `proxxx patch apply` all require it

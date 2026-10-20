@@ -22,6 +22,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
     pub action: String,  // "delete" | "stop" | "migrate" | "*"
     pub target: String,  // "*" | "100" | "tag:prod"

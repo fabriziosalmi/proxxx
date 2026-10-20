@@ -71,14 +71,16 @@ bot_token = "<bot-api-token>"
 chat_id = "<your-chat-id>"
 
 [[policies]]
-when = { action = "delete" }
-require = "telegram"
+action  = "delete"
+target  = "*"
 channel = "telegram"
+require = 1
 
 [[policies]]
-when = { action = "stop", tag = "prod" }
-require = "telegram"
+action  = "stop"
+target  = "tag:prod"
 channel = "telegram"
+require = 1
 ```
 
 The 120 s deny-on-timeout is hardcoded — if you don't approve,

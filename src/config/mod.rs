@@ -9,6 +9,7 @@ use crate::util::secret::SecretString;
 
 /// Profile configuration loaded from TOML
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     pub url: String,
     pub user: String,
@@ -86,6 +87,7 @@ pub struct ProfileConfig {
 /// `reconcile run`. Detect-only by default; `auto_converge = true` opts the
 /// daemon into the converge (write) half — see [`ReconcileConfig::auto_converge`].
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReconcileConfig {
     /// Desired-state source: a local file, a local directory, or a git URL
     /// (shallow-cloned each tick).
@@ -185,10 +187,14 @@ impl ReadOnlyRefusal {
 /// dedup_secs = 600
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertRuleConfig {
     pub name: String,
     /// One of `"node_offline" | "storage_above" | "replication_failing"`.
     /// Unknown values cause the engine to skip the rule with a warn log.
+    /// `trigger` is accepted as an alias: it is the name the documentation
+    /// uses, so both spellings parse.
+    #[serde(alias = "trigger")]
     pub when: String,
     /// For `node_offline`: minimum seconds offline before firing.
     /// Default 60.
@@ -234,6 +240,7 @@ const fn default_dedup_secs() -> u64 {
 /// Auth is token-only. PBS supports password but pinning a long-lived
 /// token is the right pattern for headless tools like proxxx.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PbsConfig {
     /// PBS API base URL, e.g. `"https://pbs.lan:8007"`.
     pub url: String,
@@ -451,6 +458,7 @@ impl PbsConfig {
 /// Inline `bot_token = "…"` in the TOML still works for lab setups
 /// but is the lowest-priority source.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelegramConfig {
     /// Inline plaintext token. Kept for lab setups; not recommended for
     /// prod — prefer `bot_token_file` (chmod 600) or the OS keychain.
@@ -550,6 +558,7 @@ impl TelegramConfig {
 /// Auth is key-based only. Password is intentionally unsupported —
 /// a Proxmox node with password-only SSH is a security smell we won't enable.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshConfig {
     /// SSH user on the Proxmox node (default: "root")
     #[serde(default = "default_ssh_user")]
@@ -592,6 +601,7 @@ pub struct SshConfig {
 /// Connection details for `SSHing` into a guest (not the Proxmox node).
 /// All fields fall back to the parent `SshConfig` when omitted.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestSshTarget {
     /// Guest hostname or IP. Required (we don't yet auto-discover via agent).
     pub host: String,
@@ -1417,6 +1427,74 @@ mod read_only_tests {
         let msg = format!("{e}");
         assert!(msg.contains("read-only"), "got: {msg}");
         assert!(msg.contains("prod"), "names the profile: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod unknown_field_tests {
+    use super::ProfileConfig;
+
+    #[test]
+    fn rejects_stale_ssh_key_name() {
+        let err = toml::from_str::<ProfileConfig>(
+            r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+
+[ssh]
+key = "~/.ssh/id_ed25519"
+"#,
+        )
+        .expect_err("the stale key name must not be silently ignored");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `key`") || message.contains("unknown field 'key'"),
+            "expected an actionable unknown-field error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_key_in_policy() {
+        let err = toml::from_str::<ProfileConfig>(
+            r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+
+[[policies]]
+action = "delete"
+target = "*"
+channel = "telegram"
+require = 2
+requires = 3
+"#,
+        )
+        .expect_err("a misspelled policy key must not be silently ignored");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `requires`"),
+            "expected an actionable unknown-field error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn accepts_documented_ssh_key_path() {
+        let config = toml::from_str::<ProfileConfig>(
+            r#"
+url = "https://pve.example:8006"
+user = "root@pam"
+
+[ssh]
+key_path = "~/.ssh/id_ed25519"
+"#,
+        )
+        .expect("the documented key_path field must parse");
+
+        assert_eq!(
+            config.ssh.and_then(|ssh| ssh.key_path),
+            Some("~/.ssh/id_ed25519".to_string())
+        );
     }
 }
 

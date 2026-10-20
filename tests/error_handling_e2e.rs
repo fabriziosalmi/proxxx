@@ -625,6 +625,33 @@ mod cli_contract {
         );
     }
 
+    #[test]
+    fn unknown_config_key_exits_with_code_3() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg_path = dir.path().join("config.toml");
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).expect("create temp audit dir");
+        std::fs::write(
+            &cfg_path,
+            "url = \"https://127.0.0.1:8006\"\nuser = \"root@pam\"\n[ssh]\nkey = \"~/.ssh/id_ed25519\"\n",
+        )
+        .expect("write temp config");
+
+        let output = Command::new(proxxx_binary())
+            .env("PROXXX_CONFIG", &cfg_path)
+            .env("PROXXX_AUDIT_DIR", &audit_dir)
+            .args(["ls", "nodes"])
+            .output()
+            .expect("spawn proxxx with unknown config key");
+
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "unknown config key must exit 3 (ConfigError); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// Issues #361 + #323: `--format json ls nodes` and
     /// `--format json-envelope ls nodes` against an unreachable port
     /// (`https://127.0.0.1:1/`) must exit non-zero and include the
