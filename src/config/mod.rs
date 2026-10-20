@@ -983,8 +983,12 @@ pub struct SshConfig {
     /// Path to private key (e.g. "~/.`ssh/proxxx_homelab`"). Tilde-expanded.
     pub key_path: Option<String>,
 
-    /// Per-node hostname/IP override. Key = node name, value = host:port form.
-    /// If absent, the node name itself is used as host (port 22).
+    /// Per-node hostname/IP override. Key = node name, value = `host:port` or `host` form.
+    /// When omitted for a node, `proxxx` falls back to the host in the profile's `url`
+    /// (port 22) ONLY if that node is the one answering the API (`/cluster/status`
+    /// `local = true`, or the single node of a standalone install) and verifies the
+    /// remote hostname before running any command (`#328`). Every non-API node of a
+    /// cluster requires an explicit entry here.
     #[serde(default)]
     pub hosts: std::collections::HashMap<String, String>,
 
@@ -1052,6 +1056,100 @@ pub struct ResolvedGuestSsh {
     pub port: u16,
     pub user: String,
     pub key_path: std::path::PathBuf,
+}
+
+/// Source of a resolved Proxmox VE node SSH target (`#328`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshHostSource {
+    /// Explicit entry in `[ssh].hosts` (`hosts = { <node> = "<host>:<port>" }`).
+    ExplicitHosts,
+    /// Fallback to the host in the profile's `url` (port 22) because `node`
+    /// is the node answering the API (`/cluster/status` `local = true`, or
+    /// the single node of a standalone install).
+    ApiUrlFallback,
+    /// Pre-`#328` fallback to `(node.to_string(), 22)` (DNS / `/etc/hosts`
+    /// resolution by node name) for non-API cluster nodes or when
+    /// `/cluster/status` is unavailable.
+    NodeNameFallback,
+}
+
+/// Resolved SSH connection target for a Proxmox VE node (`#328`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNodeSsh {
+    pub host: String,
+    pub port: u16,
+    pub source: SshHostSource,
+}
+
+/// Extract the bare host (IPv4, unbracketed IPv6 literal, or DNS name) from an
+/// API `url` (`#328`).
+///
+/// Unbrackets IPv6 literals (e.g. `https://[::1]:8006` -> `"::1"`) so the
+/// returned string can be passed directly to `(host.as_str(), port)` socket
+/// resolution.
+#[must_use]
+pub fn extract_url_host(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let raw = parsed.host_str()?.trim();
+    let stripped = raw
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(raw);
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Parse an `[ssh].hosts` value (`"<host>:<port>"`, `"<host>"`, `"[<ipv6>]:<port>"`,
+/// or `"[<ipv6>]"`) into `(host, port)`, defaulting the port to `22` (`#328`).
+#[must_use]
+pub fn parse_ssh_host_spec(spec: &str) -> (String, u16) {
+    if let Some(rest) = spec.strip_prefix('[') {
+        if let Some((ipv6, port_str)) = rest.split_once("]:") {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return (ipv6.to_string(), port);
+            }
+        }
+        if let Some(ipv6) = rest.strip_suffix(']') {
+            return (ipv6.to_string(), 22);
+        }
+    }
+    if spec.bytes().filter(|&b| b == b':').count() > 1 {
+        return (spec.to_string(), 22);
+    }
+    if let Some((h, p)) = spec.rsplit_once(':') {
+        if let Ok(port) = p.parse::<u16>() {
+            return (h.to_string(), port);
+        }
+    }
+    (spec.to_string(), 22)
+}
+
+/// Determine the node answering the API from `/cluster/status` entries (`#328`):
+/// 1. The node entry with `local = true`, or
+/// 2. The single node entry of a standalone install (no `type == "cluster"` entry
+///    and exactly one node entry).
+#[must_use]
+pub fn api_local_node_from_status(
+    entries: &[crate::api::types::ClusterStatusEntry],
+) -> Option<String> {
+    let node_entries: Vec<&crate::api::types::ClusterStatusEntry> = entries
+        .iter()
+        .filter(|e| e.entry_type != "cluster" && !e.name.is_empty())
+        .collect();
+
+    if let Some(local_entry) = node_entries.iter().find(|e| e.local) {
+        return Some(local_entry.name.clone());
+    }
+
+    let has_cluster_entry = entries.iter().any(|e| e.entry_type == "cluster");
+    if !has_cluster_entry && node_entries.len() == 1 {
+        return Some(node_entries[0].name.clone());
+    }
+
+    None
 }
 
 /// Reject SSH user/host strings that would be parsed by `ssh(1)` as
@@ -1157,18 +1255,67 @@ impl SshConfig {
         })
     }
 
-    /// Resolve host:port for a given node name. Falls back to node:22.
+    /// Look up an explicit `[ssh].hosts` entry for `node` (`#328`).
+    ///
+    /// Returns `Some((host, port))` when `hosts[node]` is configured, or `None`
+    /// when no explicit entry exists for `node`.
     #[must_use]
-    pub fn resolve_host(&self, node: &str) -> (String, u16) {
-        if let Some(spec) = self.hosts.get(node) {
-            if let Some((h, p)) = spec.rsplit_once(':') {
-                if let Ok(port) = p.parse::<u16>() {
-                    return (h.to_string(), port);
-                }
-            }
-            return (spec.clone(), 22);
+    pub fn resolve_explicit_host(&self, node: &str) -> Option<(String, u16)> {
+        self.hosts.get(node).map(|spec| parse_ssh_host_spec(spec))
+    }
+
+    /// Resolve the SSH `(host, port, source)` target for `node` (`#328`).
+    ///
+    /// Resolution order:
+    /// 1. `self.hosts[node]` (always wins, no `/cluster/status` lookup needed).
+    /// 2. The host from `api_url` on port `22`, **only if** `node` is the node
+    ///    answering the API (`api_local_node == Some(node)`).
+    /// 3. `(node.to_string(), 22)` (`SshHostSource::NodeNameFallback`, pre-`#328`
+    ///    behaviour) for every other node or when `/cluster/status` is
+    ///    unavailable.
+    #[must_use]
+    pub fn resolve_host(
+        &self,
+        node: &str,
+        api_url: Option<&str>,
+        api_local_node: Option<&str>,
+    ) -> ResolvedNodeSsh {
+        if let Some((host, port)) = self.resolve_explicit_host(node) {
+            return ResolvedNodeSsh {
+                host,
+                port,
+                source: SshHostSource::ExplicitHosts,
+            };
         }
-        (node.to_string(), 22)
+
+        if api_local_node.is_some_and(|local| local == node) {
+            if let Some(url_host) = api_url.and_then(extract_url_host) {
+                return ResolvedNodeSsh {
+                    host: url_host,
+                    port: 22,
+                    source: SshHostSource::ApiUrlFallback,
+                };
+            }
+        }
+
+        ResolvedNodeSsh {
+            host: node.to_string(),
+            port: 22,
+            source: SshHostSource::NodeNameFallback,
+        }
+    }
+
+    /// Convenience wrapper around [`Self::resolve_host`] that extracts the
+    /// API-local node from `/cluster/status` entries (`#328`).
+    #[must_use]
+    pub fn resolve_host_with_status(
+        &self,
+        node: &str,
+        api_url: &str,
+        cluster_status: &[crate::api::types::ClusterStatusEntry],
+    ) -> ResolvedNodeSsh {
+        let local_node = api_local_node_from_status(cluster_status);
+        self.resolve_host(node, Some(api_url), local_node.as_deref())
     }
 
     /// Resolve `known_hosts` path with default + tilde expansion.

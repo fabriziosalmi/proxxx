@@ -112,7 +112,9 @@ pub async fn execute_logs(
             let ssh_cfg = config.ssh.clone().context(
                 "`proxxx logs tail` requires `[profiles.X.ssh]` configured (key_path, etc.)",
             )?;
-            let pool = Arc::new(SshPool::new(ssh_cfg, None)?);
+            let api: Arc<dyn crate::api::ProxmoxGateway> =
+                Arc::clone(client) as Arc<dyn crate::api::ProxmoxGateway>;
+            let pool = Arc::new(SshPool::new(ssh_cfg, None)?.with_api(&config.url, api));
 
             // Resolve target nodes. Empty `--node` = fanout to every
             // cluster member. We still tag each line with the node

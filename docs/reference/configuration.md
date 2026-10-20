@@ -120,7 +120,7 @@ strict_host_key_checking = "tofu"           # tofu, strict, or off
 known_hosts = "~/.config/proxxx/known_hosts"  # optional, default to XDG path
 
 [ssh.hosts]
-pve1 = "10.0.0.1:22"                        # optional per-node override
+pve1 = "10.0.0.1:22"                        # optional per-node override; the API-answering node falls back to profile url host:22 (with hostname verification), and other cluster nodes fall back to <node>:22 (required when <node> does not resolve via DNS or /etc/hosts)
 ```
 
 ## `[ssh.guests.<vmid>]` (optional override)

@@ -76,6 +76,7 @@ pub struct PciDevice {
 }
 
 pub async fn execute_gpu_inspect(
+    client: &std::sync::Arc<crate::api::PxClient>,
     config: &crate::config::ProfileConfig,
     args: GpuInspectArgs,
 ) -> Result<(Value, i32)> {
@@ -87,7 +88,9 @@ pub async fn execute_gpu_inspect(
              we SSH to the node and probe /sys + dmesg"
         )
     })?;
-    let pool = crate::ssh::SshPool::new(ssh_cfg, None)?;
+    let api: std::sync::Arc<dyn crate::api::ProxmoxGateway> =
+        std::sync::Arc::clone(client) as std::sync::Arc<dyn crate::api::ProxmoxGateway>;
+    let pool = crate::ssh::SshPool::new(ssh_cfg, None)?.with_api(&config.url, api);
 
     // Single multi-command probe — one round-trip instead of N.
     // The output is parsed line-by-line below.

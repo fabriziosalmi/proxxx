@@ -1475,7 +1475,9 @@ pub async fn execute(
         Command::Anomaly(args) => anomaly::execute_anomaly(&client, args).await,
         Command::BackupVerify(args) => backup_verify::execute_verify(&client, args).await,
         Command::Import(args) => import_vm::execute_import(&args),
-        Command::GpuInspect(args) => gpu_passthrough::execute_gpu_inspect(&config, args).await,
+        Command::GpuInspect(args) => {
+            gpu_passthrough::execute_gpu_inspect(&client, &config, args).await
+        }
         Command::Tasks { limit, node } => {
             let tasks = if let Some(n) = node {
                 client
