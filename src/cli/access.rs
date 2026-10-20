@@ -555,7 +555,9 @@ pub async fn execute_perms(
     let ssh_cfg = config.ssh.clone().ok_or_else(|| {
         anyhow::anyhow!("[profiles.X.ssh] not configured — `proxxx perms` shells out via SSH")
     })?;
-    let pool = SshPool::new(ssh_cfg, None)?;
+    let api: Arc<dyn crate::api::ProxmoxGateway> =
+        Arc::clone(client) as Arc<dyn crate::api::ProxmoxGateway>;
+    let pool = SshPool::new(ssh_cfg, None)?.with_api(&config.url, api);
     // Build the command. We pass userid through unchanged — pveum quotes
     // it server-side. We DO defend against shell-injection by refusing
     // any userid that contains shell metachars.

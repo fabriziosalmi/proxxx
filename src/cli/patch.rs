@@ -123,7 +123,7 @@ pub async fn execute(
                     "patch apply requires `[profiles.X.ssh]` configured (key_path, etc.)"
                 )
             })?;
-            let pool = SshPool::new(ssh_cfg, None)?;
+            let pool = SshPool::new(ssh_cfg, None)?.with_api(&config.url, Arc::clone(&api));
             let ssh: Arc<dyn SshGateway> = Arc::new(pool);
 
             let strategy = PatchStrategy {

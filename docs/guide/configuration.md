@@ -217,7 +217,7 @@ see the [TUI reference](../reference/tui.md). `proxxx fleet` ignores
 
 ## SSH
 
-For `proxxx ssh <vmid>`, `proxxx perms`, `proxxx doctor`, and the patching orchestrator:
+For `proxxx ssh <vmid>`, `proxxx perms`, `proxxx gpu inspect`, `proxxx logs tail`, `proxxx doctor`, and the patching orchestrator (`proxxx patch apply`):
 
 ```toml
 [ssh]
@@ -226,6 +226,7 @@ user     = "root"                            # optional, defaults to "root"
 
 [ssh.hosts]
 pve1 = "10.0.0.1:22"
+pve2 = "10.0.0.2:22"
 
 [ssh.guests."100"]
 host = "10.10.10.100"
@@ -235,6 +236,12 @@ user = "fab"
 host     = "10.10.10.200"
 key_path = "~/.ssh/k8s_master"               # optional, falls back to [ssh].key_path (~ expanded)
 ```
+
+For node-level SSH (`proxxx perms`, `proxxx gpu inspect`, `proxxx logs tail`, `proxxx patch apply`), `SshPool` resolves a target `<node>` in strict order:
+
+1. **`[ssh.hosts]` override (`hosts.<node>`)** — always wins when present (no `/cluster/status` call is needed). Accepts `<host>` (defaults to port `22`) or `<host>:<port>` (including bracketed IPv6 `[::1]:2222`).
+2. **Profile `url` host fallback (port `22`)** — used **only** when `<node>` is the node answering the PVE API (`/cluster/status` entry with `local = true`, or the single node of a standalone install). On a session opened through this fallback, `SshPool` runs `hostname` before the first command and refuses the connection if the remote short hostname does not match `<node>` (protecting against a profile `url` that points at a VIP or load balancer).
+3. **Explicit error for other cluster members** — if `<node>` is any other member of a multi-node cluster and has no `[ssh.hosts]` entry, `SshPool` refuses with `no SSH host configured for node '<node>': add 'hosts = { <node> = "<ip>:22" }' under [profiles.<profile>.ssh]` (it never falls back to the profile `url` host for non-local cluster nodes and never falls back to raw `<node>:22` DNS lookup). Every non-API node of a cluster therefore requires an explicit `[ssh.hosts]` entry.
 
 Both `key_path` (at `[ssh]` and `[ssh.guests."<vmid>"]`) and `known_hosts`
 accept a leading `~` or `~/...` (expanded via `util::path::expand_tilde`,
