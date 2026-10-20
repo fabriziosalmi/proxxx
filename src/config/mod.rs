@@ -1760,37 +1760,186 @@ pub fn token_secret_path(profile: &str) -> std::path::PathBuf {
 }
 
 /// Write a profile's token secret to [`token_secret_path`] with `0600`
-/// perms on Unix, atomically (temp file + rename; perms set BEFORE the
-/// rename so the secret is never briefly group/world-readable). Returns
-/// the path so the caller can record it as `token_secret_file`. The
-/// companion reader is [`Config::resolve_token_secret`], which refuses
-/// anything looser than 0600.
+/// perms on Unix, atomically (temp file opened with `0600` from the first
+/// byte + durable rename). Returns the path so the caller can record it as
+/// `token_secret_file`. The companion reader is [`Config::resolve_token_secret`],
+/// which refuses anything looser than 0600.
 pub fn write_token_secret(profile: &str, secret: &str) -> Result<std::path::PathBuf> {
     write_secret_file(&token_secret_path(profile), secret)
+}
+
+/// Write a secret to `path` with `0600` permissions on Unix from the first
+/// byte (`OpenOptions::mode(0o600)` — no `chmod` after write), parent dir
+/// `0700`, and atomic durable rename (`#268`, `#330`).
+///
+/// When `allow_overwrite` is `false` and `path` already exists, refuses
+/// before touching the filesystem (`#330` — pass `--rotate` to overwrite).
+pub fn write_secret_file_checked(
+    path: &std::path::Path,
+    secret: &str,
+    allow_overwrite: bool,
+) -> Result<std::path::PathBuf> {
+    if !allow_overwrite && path.exists() {
+        anyhow::bail!(
+            "secret file {} already exists; pass `--rotate` to overwrite it",
+            path.display()
+        );
+    }
+    let dir = path
+        .parent()
+        .context("token-secret path has no parent directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("creating secrets dir {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating secrets dir {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("token.tmp");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)
+            .with_context(|| format!("removing stale temp secret file {}", tmp.display()))?;
+    }
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts
+            .open(&tmp)
+            .with_context(|| format!("creating temp secret file {}", tmp.display()))?;
+        file.write_all(secret.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", tmp.display()))?;
+    }
+    // #268 — see util::durable.
+    crate::util::durable::rename_durable(&tmp, path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    Ok(path.to_path_buf())
 }
 
 /// Inner writer, split out so tests can exercise the atomic-write + 0600
 /// mechanics against an explicit path without touching the global
 /// `PROXXX_CONFIG`-derived location.
 fn write_secret_file(path: &std::path::Path, secret: &str) -> Result<std::path::PathBuf> {
-    let dir = path
-        .parent()
-        .context("token-secret path has no parent directory")?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("creating secrets dir {}", dir.display()))?;
-    let tmp = path.with_extension("token.tmp");
-    std::fs::write(&tmp, secret.as_bytes())
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    #[cfg(unix)]
+    write_secret_file_checked(path, secret, true)
+}
+
+/// Store a secret in the OS keychain under service `"proxxx"`, account
+/// `<profile>/<item>` (`#330`).
+///
+/// Refuses to overwrite an existing non-empty entry when `allow_overwrite` is
+/// `false` (require `--rotate`). Never includes the secret value in error
+/// messages.
+#[cfg_attr(
+    not(all(feature = "keychain", target_os = "macos")),
+    allow(clippy::unused_async, unused_variables)
+)]
+pub async fn store_keychain_secret_checked(
+    profile: &str,
+    item: &str,
+    secret: &SecretString,
+    allow_overwrite: bool,
+) -> Result<(String, String)> {
+    #[cfg(any(test, all(feature = "keychain", target_os = "macos")))]
+    const SERVICE: &str = "proxxx";
+    #[cfg(any(test, all(feature = "keychain", target_os = "macos")))]
+    let account = if profile.is_empty() {
+        item.to_string()
+    } else {
+        format!("{profile}/{item}")
+    };
+
+    #[cfg(test)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting 0600 on {}", tmp.display()))?;
+        let mut guard = TEST_KEYCHAIN_STATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(guard.mode, Some(TestKeychainMode::Entries(_))) {
+            guard.consult_count += 1;
+        }
+        if let Some(ref mut mode) = guard.mode {
+            return match mode {
+                TestKeychainMode::NoStoreCompiled => Err(anyhow::anyhow!(
+                    "no persistent OS keychain store is compiled into this binary"
+                )),
+                TestKeychainMode::Entries(map) => {
+                    let key = (SERVICE.to_string(), account.clone());
+                    if !allow_overwrite {
+                        if let Some(KeychainEntryOutcome::Found(existing)) = map.get(&key) {
+                            if !existing.is_empty() {
+                                anyhow::bail!(
+                                    "keychain entry `{SERVICE}` / `{account}` already exists; \
+                                     pass `--rotate` to overwrite it"
+                                );
+                            }
+                        }
+                    }
+                    map.insert(key, KeychainEntryOutcome::Found(secret.clone()));
+                    Ok((SERVICE.to_string(), account))
+                }
+            };
+        }
     }
-    // #268 — see util::durable.
-    crate::util::durable::rename_durable(&tmp, path)
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
-    Ok(path.to_path_buf())
+
+    if !keychain_store_info().compiled {
+        anyhow::bail!("no persistent OS keychain store is compiled into this binary");
+    }
+
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
+    {
+        let account_for_task = account.clone();
+        let secret_clone = secret.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let entry = keyring::Entry::new(SERVICE, &account_for_task).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to open keychain entry `{SERVICE}` / `{account_for_task}`: {e}"
+                )
+            })?;
+            if !allow_overwrite {
+                match entry.get_password() {
+                    Ok(pw) if !pw.is_empty() => {
+                        anyhow::bail!(
+                            "keychain entry `{SERVICE}` / `{account_for_task}` already exists; \
+                             pass `--rotate` to overwrite it"
+                        );
+                    }
+                    Ok(_) | Err(keyring::Error::NoEntry) => {}
+                    Err(e) => {
+                        anyhow::bail!(
+                            "failed to check existing keychain entry `{SERVICE}` / `{account_for_task}`: {e}"
+                        );
+                    }
+                }
+            }
+            entry.set_password(secret_clone.expose()).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to store secret in keychain `{SERVICE}` / `{account_for_task}`: {e}"
+                )
+            })?;
+            Ok(())
+        })
+        .await
+        .context("joining keychain write task")??;
+        Ok((SERVICE.to_string(), account))
+    }
+
+    #[cfg(not(all(feature = "keychain", target_os = "macos")))]
+    {
+        anyhow::bail!("no persistent OS keychain store is compiled into this binary")
+    }
 }
 
 /// Load configuration from TOML file. Errors carry a typed

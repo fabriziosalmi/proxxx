@@ -42,6 +42,61 @@ keychain.
 For `auth = "password"`, set `password`,
 `PROXXX_PASSWORD` env, or keychain.
 
+### Bootstrap a token (`proxxx token bootstrap`)
+
+Minting a token manually with `pveum user token add` prints the secret to the
+terminal (scrollback, shell history, clipboard, or agent context), and
+`proxxx token create` requires an already-working API token. To onboard a node
+over SSH without the secret ever reaching the terminal (`#330`):
+
+```bash
+proxxx --profile pve1 token bootstrap \
+  [--userid root@pam] \
+  [--tokenid proxxx] \
+  [--role PVEAuditor] \
+  [--acl-path /] \
+  [--ssh-host 10.0.0.10:22] \
+  [--secret-file ~/.config/proxxx/secrets/pve1.token] \
+  [--rotate] \
+  --yes
+```
+
+How `token bootstrap` works:
+
+1. **Profile & guardrails**: loads `[profiles.<X>]` (with `[defaults]` merged)
+   before constructing an API client. `user` and `token_id` come from the
+   profile unless overridden by `--userid` / `--tokenid`. Refuses `read_only = true`
+   profiles (exit code `8`) and requires `--yes` before opening an SSH session.
+2. **SSH target**: connects to `--ssh-host <host[:port]>` if given, otherwise to
+   the host parsed from the profile's `url` on port `22`. Because no working API
+   token exists yet, `token bootstrap` does **not** call `/cluster/status` and
+   does **not** run the remote `hostname` node-name check. Host key verification
+   always goes through the profile's `known_hosts` policy (`tofu` or `strict`;
+   `strict_host_key_checking = "off"` is refused).
+3. **Pre-check & rotation**: runs `pveum user token list <user> --output-format json`.
+   If `<tokenid>` already exists, refuses unless `--rotate` is passed (which
+   removes the old token via `pveum user token remove <user> <tokenid>` and
+   recreates it, invalidating the previous secret immediately).
+4. **Create & ACL**: runs `pveum user token add <user> <tokenid> --privsep 1 --output-format json`,
+   parses `value` directly into a `SecretString`, immediately zeroizes the raw
+   `stdout` buffer, and grants `--role` (default `PVEAuditor`) on `--acl-path`
+   (default `/`) via `pveum acl modify <acl-path> --tokens '<user>!<tokenid>' --roles <role>`.
+5. **Store & rollback**: stores the secret before reporting success, choosing the
+   target in order: explicit `--secret-file <path>` -> `token_secret_file` on the
+   profile -> macOS Keychain (`proxxx` / `<profile>/token_secret`, when compiled
+   in) -> `<config_dir>/secrets/<profile>.token`. Secret files are opened with
+   mode `0600` from the first byte inside a `0700` parent directory and renamed
+   atomically; existing files or keychain entries are refused unless `--rotate` is
+   set. If ACL assignment or local secret storage fails after token creation,
+   `proxxx` removes the newly created token over SSH (rollback) and never prints
+   the secret as a fallback.
+6. **Verify & TOML snippet**: builds a `PxClient` with the stored secret, runs
+   `GET /version` and `GET /nodes` (a verification failure keeps the stored
+   secret and exits `1`), records write-ahead `"sent"` and outcome entries in the
+   HMAC-chained audit log (with `user`, `tokenid`, `role`, `path`, and `node` —
+   never the secret), and prints the `token_id` (plus `token_secret_file` when a
+   file was used) TOML lines without editing `config.toml`.
+
 ## Secrets
 
 The resolution order for PVE (`token_secret`, `password`), PBS (`pbs.token_secret`), and Telegram (`telegram.bot_token`) is:

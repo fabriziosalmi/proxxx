@@ -199,9 +199,14 @@ const SECRET_KEY_SUBSTRINGS: &[&str] = &["password", "secret", "token", "ticket"
 
 /// Return `true` if `key` (matched case-insensitively) names a credential or
 /// secret field (`password`, `secret`, `token`, `ticket`, `key`, `cookie`).
+///
+/// Public token identifiers (`tokenid`, `token_id`) are not secrets (`#330`).
 #[must_use]
 pub fn is_secret_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    if matches!(lower.as_str(), "tokenid" | "token_id") {
+        return false;
+    }
     SECRET_KEY_SUBSTRINGS
         .iter()
         .any(|needle| lower.contains(needle))
