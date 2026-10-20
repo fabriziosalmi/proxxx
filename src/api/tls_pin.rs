@@ -406,14 +406,10 @@ pub fn save_pinned_cert_in(
     known_certs_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let path = pinned_cert_path_in(cluster_url, known_certs_dir)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("der.proxxx-tofu-tmp");
-    std::fs::write(&tmp, cert_der).with_context(|| format!("writing tmp {}", tmp.display()))?;
-    crate::util::durable::rename_durable(&tmp, &path)
-        .with_context(|| format!("renaming tmp to {}", path.display()))?;
+    // fsync + durable rename (#268, #376): a pin lost to a power loss means
+    // the next connect trusts whatever certificate it sees first.
+    crate::util::durable::write_private_atomic(&path, cert_der)
+        .with_context(|| format!("writing pinned cert {}", path.display()))?;
     Ok(path)
 }
 

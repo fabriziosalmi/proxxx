@@ -148,51 +148,17 @@ fn config_paths() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
 /// Atomic write: temp file in the same dir + fsync + rename. A partial
 /// write can never leave a half-config the next `load_config` would
 /// parse-error on. Sets 0600 on Unix (the file may hold inline secrets).
-fn atomic_write(
-    config_dir: &std::path::Path,
-    config_path: &std::path::Path,
-    body: &str,
-) -> Result<()> {
+fn atomic_write(config_path: &std::path::Path, body: &str) -> Result<()> {
     use anyhow::Context as _;
-    use std::io::Write as _;
 
-    std::fs::create_dir_all(config_dir).with_context(|| {
-        format!(
-            "creating config directory {} (check filesystem perms)",
-            config_dir.display()
-        )
-    })?;
-    let tmp_path = config_dir.join("config.toml.proxxx-init-tmp");
-    {
-        let mut f = std::fs::File::create(&tmp_path).with_context(|| {
-            format!(
-                "creating temp config at {} (check perms)",
-                tmp_path.display()
-            )
-        })?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting 0600 on {}", tmp_path.display()))?;
-    }
-    // #268 — fsync the directory too, so the rename itself survives a
-    // power loss rather than leaving the pre-rename state on disk after
-    // we already told the operator the config was written.
-    crate::util::durable::rename_durable(&tmp_path, config_path).with_context(|| {
-        format!(
-            "renaming temp config into place at {}",
-            config_path.display()
-        )
-    })?;
-    Ok(())
+    // 0600 from the first byte, fsync, durable rename (#268, #376): the
+    // config can hold a token or a password.
+    crate::util::durable::write_private_atomic(config_path, body.as_bytes())
+        .with_context(|| format!("writing config {}", config_path.display()))
 }
 
 fn write_flat_template(force: bool) -> Result<(serde_json::Value, i32)> {
-    let (config_dir, config_path) = config_paths()?;
+    let (_config_dir, config_path) = config_paths()?;
     if config_path.exists() && !force {
         anyhow::bail!(
             "Config already exists at {}. Re-run with --force to overwrite, or add a \
@@ -200,7 +166,7 @@ fn write_flat_template(force: bool) -> Result<(serde_json::Value, i32)> {
             config_path.display()
         );
     }
-    atomic_write(&config_dir, &config_path, INIT_CONFIG_TEMPLATE)?;
+    atomic_write(&config_path, INIT_CONFIG_TEMPLATE)?;
     Ok((
         serde_json::json!({
             "wrote": config_path.display().to_string(),
@@ -221,7 +187,7 @@ fn add_profile(name: &str, force: bool) -> Result<(serde_json::Value, i32)> {
         anyhow::bail!("profile name must not be empty");
     }
 
-    let (config_dir, config_path) = config_paths()?;
+    let (_config_dir, config_path) = config_paths()?;
 
     let mut doc = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)
@@ -285,7 +251,7 @@ fn add_profile(name: &str, force: bool) -> Result<(serde_json::Value, i32)> {
     }
     profiles.insert(name, Item::Table(t));
 
-    atomic_write(&config_dir, &config_path, &doc.to_string())?;
+    atomic_write(&config_path, &doc.to_string())?;
 
     Ok((
         serde_json::json!({

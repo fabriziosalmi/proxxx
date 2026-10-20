@@ -147,7 +147,7 @@ pub async fn run(profile_name: Option<&str>) -> Result<(serde_json::Value, i32)>
         ssh_block.as_ref(),
         telegram_block.as_ref(),
     );
-    write_config(&config_dir, &config_path, &toml)?;
+    write_config(&config_path, &toml)?;
     ok(&format!("wrote {}", config_path.display()));
 
     print_next_steps();
@@ -1012,26 +1012,10 @@ fn toml_escape(s: &str) -> String {
 
 // ── Atomic write + perms ─────────────────────────────────────
 
-fn write_config(config_dir: &Path, config_path: &Path, body: &str) -> Result<()> {
-    std::fs::create_dir_all(config_dir)
-        .with_context(|| format!("creating {}", config_dir.display()))?;
-    let tmp = config_dir.join("config.toml.proxxx-init-tmp");
-    {
-        let mut f =
-            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    // 0600 — the file holds a token / password.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    // #268 — see util::durable.
-    crate::util::durable::rename_durable(&tmp, config_path)
-        .with_context(|| format!("renaming into {}", config_path.display()))?;
-    Ok(())
+fn write_config(config_path: &Path, body: &str) -> Result<()> {
+    // 0600 from the first byte — the file holds a token / password (#376).
+    crate::util::durable::write_private_atomic(config_path, body.as_bytes())
+        .with_context(|| format!("writing {}", config_path.display()))
 }
 
 fn resolve_config_dir() -> Result<PathBuf> {

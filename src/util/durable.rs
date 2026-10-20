@@ -135,9 +135,172 @@ mod call_site_tests {
                  so the rename itself survives a power loss (#268)"
             );
             assert!(
-                src.contains("rename_durable("),
-                "{name} should reach its final filename through rename_durable"
+                src.contains("rename_durable(") || src.contains("write_private_atomic("),
+                "{name} should reach its final filename through rename_durable \
+                 (directly or via write_private_atomic)"
             );
         }
+    }
+}
+
+/// Write `bytes` to `path` without ever exposing them with wider permissions
+/// or half written (`#376`).
+///
+/// - The parent directory is created with mode 0700 if it is missing (an
+///   existing directory is left as it is).
+/// - The bytes go to a temp file in the same directory, created with mode
+///   0600 from the first byte (`create_new`, so no other file is reused):
+///   there is no window in which the content sits in a 0644 file waiting for
+///   a `chmod`.
+/// - The temp file is fsync-ed, then renamed over `path` with
+///   [`rename_durable`], which also fsyncs the directory.
+///
+/// # Errors
+/// When the directory, the temp file, the write, the fsync or the rename
+/// fails. The temp file is removed on failure.
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .with_context(|| format!("create directory {}", dir.display()))?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create directory {}", dir.display()))?;
+    }
+    let name = path
+        .file_name()
+        .map_or_else(|| "proxxx".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = (|| -> Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("create temp file {}", tmp.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("write temp file {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        rename_durable(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+#[cfg(test)]
+mod private_write_tests {
+    use super::write_private_atomic;
+
+    #[test]
+    fn creates_a_0600_file_in_a_new_0700_directory_and_replaces_atomically() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("nested").join("secret");
+        write_private_atomic(&path, b"first").expect("write");
+        write_private_atomic(&path, b"second").expect("overwrite");
+        assert_eq!(std::fs::read(&path).expect("read"), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let file_mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            let dir_mode = std::fs::metadata(path.parent().expect("dir"))
+                .expect("stat dir")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o600);
+            assert_eq!(dir_mode, 0o700);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("dir"))
+            .expect("ls")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "secret")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file may remain: {leftovers:?}"
+        );
+    }
+
+    /// `#376` regression guard: no production code writes a file and then
+    /// tightens it to 0600 afterwards; private files go through
+    /// `write_private_atomic` (or open with `mode(0o600)` from the start).
+    #[test]
+    fn no_production_code_chmods_a_file_to_0600_after_writing_it() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir)
+                .expect("read src")
+                .filter_map(Result::ok)
+            {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        // Sites that set 0600 at open(2) time or only tighten files they did
+        // not just write (SQLite databases and their sidecars, legacy files):
+        // not the write-then-chmod pattern.
+        const ALLOWED: &[(&str, &str)] = &[
+            (
+                "src/handoff/spice.rs",
+                "tempfile::Builder::permissions sets the mode in open(2)",
+            ),
+            (
+                "src/hitl/pending.rs",
+                "file created with mode(0o600); chmod only tightens a legacy file",
+            ),
+            (
+                "src/app/cache.rs",
+                "tightens the SQLite db and -wal/-shm sidecars SQLite created",
+            ),
+        ];
+        let mut hits = Vec::new();
+        for f in files {
+            let rel = f
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(&f)
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .to_string();
+            if ALLOWED.iter().any(|(p, _)| *p == rel) {
+                continue;
+            }
+            let src = std::fs::read_to_string(&f).expect("read");
+            let prod = src.split("#[cfg(test)]").next().unwrap_or(&src);
+            for (i, line) in prod.lines().enumerate() {
+                let l = line.trim_start();
+                if l.starts_with("//") {
+                    continue;
+                }
+                if l.contains("from_mode(0o600)") || l.contains("set_mode(0o600)") {
+                    hits.push(format!("{}:{}", f.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "write-then-chmod found; use util::durable::write_private_atomic: {hits:?}"
+        );
     }
 }

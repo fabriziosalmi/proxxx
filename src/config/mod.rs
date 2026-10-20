@@ -1818,48 +1818,10 @@ pub fn write_secret_file_checked(
             path.display()
         );
     }
-    let dir = path
-        .parent()
+    path.parent()
         .context("token-secret path has no parent directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .with_context(|| format!("creating secrets dir {}", dir.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating secrets dir {}", dir.display()))?;
-    }
-    let tmp = path.with_extension("token.tmp");
-    if tmp.exists() {
-        std::fs::remove_file(&tmp)
-            .with_context(|| format!("removing stale temp secret file {}", tmp.display()))?;
-    }
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts
-            .open(&tmp)
-            .with_context(|| format!("creating temp secret file {}", tmp.display()))?;
-        file.write_all(secret.as_bytes())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("syncing {}", tmp.display()))?;
-    }
-    // #268 — see util::durable.
-    crate::util::durable::rename_durable(&tmp, path)
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    crate::util::durable::write_private_atomic(path, secret.as_bytes())
+        .with_context(|| format!("writing secret file {}", path.display()))?;
     Ok(path.to_path_buf())
 }
 

@@ -105,34 +105,12 @@ pub fn load_or_generate_hmac_key() -> Result<Vec<u8>> {
     }
     let mut key = [0u8; KEY_BYTES];
     getrandom::fill(&mut key).context("getrandom failed seeding HMAC key")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    // Atomic write via temp + rename so a crash mid-write can't leave
-    // a half-key the next start would silently accept as the wrong
-    // length. 0600 perms on Unix; Windows inherits the directory ACL
-    // which under ProjectDirs is per-user.
-    let tmp = path.with_extension("key.proxxx-hmac-tmp");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating tmp {}", tmp.display()))?;
-        f.write_all(&key)
-            .with_context(|| format!("writing tmp {}", tmp.display()))?;
-        f.sync_all().ok();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = f.metadata()?.permissions();
-            perms.set_mode(0o600);
-            f.set_permissions(perms)?;
-        }
-    }
-    // #268 — durable: losing a newly generated key to a power loss makes
-    // every callback signed with it unverifiable.
-    crate::util::durable::rename_durable(&tmp, &path)
-        .with_context(|| format!("renaming tmp to {}", path.display()))?;
+    // 0600 from the first byte, fsync, durable rename (#268, #376): a
+    // half-written or briefly world-readable key would let callbacks be
+    // forged, and losing it to a power loss makes every callback signed
+    // with it unverifiable.
+    crate::util::durable::write_private_atomic(&path, &key)
+        .with_context(|| format!("writing HMAC key {}", path.display()))?;
     Ok(key.to_vec())
 }
 
