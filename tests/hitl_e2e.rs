@@ -3001,70 +3001,364 @@ fn build_tui_destructive_effect(action: &str) -> proxxx::app::SideEffect {
     }
 }
 
-fn build_cli_destructive_command(action: &str) -> proxxx::cli::Command {
-    use proxxx::cli::vm::DiskCommand;
-    use proxxx::cli::Command;
-
-    match action {
-        "stop" => Command::Stop {
-            vmids: vec![100],
-            force: false,
-            strict: false,
-            allow_risk: false,
-            stop_timeout: 60,
-            policy: "continue".into(),
-        },
-        "delete" => Command::Delete {
-            vmids: vec![100],
-            yes: true,
-            strict: false,
-            allow_risk: false,
-        },
-        "restart" => Command::Restart {
-            vmids: vec![100],
-            strict: false,
-            allow_risk: false,
-            policy: "continue".into(),
-        },
-        "migrate" => Command::Migrate {
-            vmid: 100,
-            target: "pve2".into(),
-            yes: true,
-            with_local_disks: false,
-            allow_risk: false,
-            wait: false,
-            stream: false,
-        },
-        "exec" => Command::Exec {
-            vmid: 100,
-            command: vec!["id".into()],
-        },
-        "move_disk" => Command::Disk {
-            action: DiskCommand::Move {
-                vmid: 100,
-                disk: "scsi0".into(),
-                storage: "ceph".into(),
-                delete_source: true,
-                yes: true,
-                allow_risk: false,
-                wait: false,
-            },
-        },
-        "resize_disk" => Command::Disk {
-            action: DiskCommand::Resize {
-                vmid: 100,
-                disk: "scsi0".into(),
-                size: "+10G".into(),
-                yes: true,
-                allow_risk: false,
-            },
-        },
-        other => panic!("unmapped destructive action in CLI test helper: {other}"),
-    }
+#[derive(clap::Parser)]
+#[command(name = "proxxx")]
+struct TestCliWrapper {
+    #[command(subcommand)]
+    cmd: proxxx::cli::Command,
 }
 
-/// #338 Test 3 — The single shared `proxxx::hitl::DESTRUCTIVE_ACTIONS` set and
-/// `proxxx::hitl::is_destructive_action` helper are consulted by both the TUI
+fn parse_cli_command(args: &[&str]) -> proxxx::cli::Command {
+    use clap::Parser;
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("proxxx");
+    full.extend_from_slice(args);
+    TestCliWrapper::try_parse_from(full)
+        .unwrap_or_else(|e| panic!("failed to parse CLI args {args:?}: {e}"))
+        .cmd
+}
+
+const TUI_DESTRUCTIVE_ACTIONS: &[&str] = &[
+    "stop",
+    "delete",
+    "restart",
+    "migrate",
+    "exec",
+    "move_disk",
+    "resize_disk",
+];
+
+const ALL_DESTRUCTIVE_CLI_CASES: &[(&[&str], &str)] = &[
+    // Shared with TUI SideEffect:
+    (&["stop", "100"], "stop"),
+    (&["delete", "100", "--yes"], "delete"),
+    (&["restart", "100"], "restart"),
+    (&["migrate", "100", "pve2", "--yes"], "migrate"),
+    (&["exec", "100", "--", "id"], "exec"),
+    (
+        &[
+            "disk",
+            "move",
+            "100",
+            "--disk",
+            "scsi0",
+            "--storage",
+            "ceph",
+            "--yes",
+        ],
+        "move_disk",
+    ),
+    (
+        &[
+            "disk", "resize", "100", "--disk", "scsi0", "--size", "+10G", "--yes",
+        ],
+        "resize_disk",
+    ),
+    // Newly classified destructive CLI commands (#399):
+    (&["suspend", "100"], "suspend"),
+    (
+        &[
+            "task-stop",
+            "--node",
+            "pve1",
+            "--upid",
+            "UPID:pve1:1",
+            "--yes",
+        ],
+        "task_stop",
+    ),
+    (
+        &["backup", "100", "--storage", "local", "--mode", "stop"],
+        "backup_stop",
+    ),
+    (&["template", "100", "--yes"], "template"),
+    (
+        &["snapshot", "delete", "100", "--name", "snap1"],
+        "snapshot_delete",
+    ),
+    (&["patch", "apply"], "patch_apply"),
+    (&["node", "stopall", "pve1", "--yes"], "node_stopall"),
+    (&["node", "suspendall", "pve1", "--yes"], "node_suspendall"),
+    (&["vm", "raw-set", "100", "protection=0"], "vm_raw_set"),
+    (
+        &["vm", "sendkey", "100", "--key", "ctrl-alt-delete"],
+        "vm_sendkey",
+    ),
+    (&["vm", "unlink", "100", "--idlist", "scsi1"], "vm_unlink"),
+    (&["ct", "raw-set", "100", "protection=0"], "ct_raw_set"),
+    (
+        &["qga", "100", "write", "--file", "/tmp/x", "--content", "hi"],
+        "qga_write",
+    ),
+    (&["ssh", "100", "--cmd", "uptime"], "ssh_cmd"),
+    (&["ha", "group-delete", "grp1", "--yes"], "ha_group_delete"),
+    (
+        &["backup-jobs", "delete", "job1", "--yes"],
+        "backup_job_delete",
+    ),
+    (
+        &[
+            "firewall-cluster",
+            "alias",
+            "update",
+            "al1",
+            "--cidr",
+            "10.0.0.0/8",
+        ],
+        "firewall_alias_update",
+    ),
+    (
+        &["firewall-cluster", "alias", "delete", "al1", "--yes"],
+        "firewall_alias_delete",
+    ),
+    (
+        &["firewall-cluster", "group", "delete", "sg1", "--yes"],
+        "firewall_group_delete",
+    ),
+    (
+        &[
+            "firewall-cluster",
+            "ipset",
+            "add-cidr",
+            "ips1",
+            "--cidr",
+            "10.0.0.0/8",
+        ],
+        "firewall_ipset_add_cidr",
+    ),
+    (
+        &["firewall-cluster", "ipset", "delete", "ips1", "--yes"],
+        "firewall_ipset_delete",
+    ),
+    (
+        &[
+            "firewall-cluster",
+            "ipset",
+            "remove-cidr",
+            "ips1",
+            "10.0.0.0/24",
+            "--yes",
+        ],
+        "firewall_ipset_remove_cidr",
+    ),
+    (
+        &["firewall-cluster", "options", "set", "--enable", "true"],
+        "firewall_options_set",
+    ),
+    (
+        &[
+            "firewall-guest",
+            "100",
+            "alias",
+            "update",
+            "al1",
+            "--cidr",
+            "10.0.0.0/8",
+        ],
+        "guest_firewall_alias_update",
+    ),
+    (
+        &["firewall-guest", "100", "alias", "delete", "al1", "--yes"],
+        "guest_firewall_alias_delete",
+    ),
+    (
+        &[
+            "firewall-guest",
+            "100",
+            "options",
+            "set",
+            "--enable",
+            "true",
+        ],
+        "guest_firewall_options_set",
+    ),
+    (
+        &["cluster-mapping", "pci", "delete", "gpu0", "--yes"],
+        "cluster_mapping_pci_delete",
+    ),
+    (
+        &["cluster-mapping", "usb", "delete", "ups0", "--yes"],
+        "cluster_mapping_usb_delete",
+    ),
+    (
+        &["node-system", "pve1", "subscription", "delete", "--yes"],
+        "node_subscription_delete",
+    ),
+    (
+        &["node-system", "pve1", "cert", "delete", "--yes"],
+        "node_cert_delete",
+    ),
+    (
+        &["pool", "remove-members", "dev", "--vms", "100"],
+        "pool_remove_members",
+    ),
+    (&["pool", "delete", "dev", "--yes"], "pool_delete"),
+    (
+        &["metric-servers", "delete", "influx1", "--yes"],
+        "metric_server_delete",
+    ),
+    (
+        &[
+            "notifications",
+            "endpoint",
+            "delete",
+            "--endpoint-type",
+            "smtp",
+            "ep1",
+            "--yes",
+        ],
+        "notification_endpoint_delete",
+    ),
+    (
+        &["notifications", "matcher", "delete", "m1", "--yes"],
+        "notification_matcher_delete",
+    ),
+    (
+        &["storage-defs", "update", "nfs1", "--disable", "true"],
+        "storage_def_update",
+    ),
+    (
+        &["storage-defs", "delete", "nfs1", "--yes"],
+        "storage_def_delete",
+    ),
+    (
+        &["storage", "delete", "pve1", "local:iso/test.iso", "--yes"],
+        "storage_delete",
+    ),
+    (
+        &[
+            "pbs",
+            "restore",
+            "--store",
+            "main",
+            "--snapshot",
+            "vm/100/2026-01-01T00:00:00Z",
+            "--archive",
+            "root.pxar.didx",
+            "--target",
+            "/tmp/out",
+            "--yes",
+        ],
+        "pbs_restore",
+    ),
+    (
+        &["acme", "account", "delete", "default", "--yes"],
+        "acme_account_delete",
+    ),
+    (
+        &["acme", "plugin", "delete", "cf", "--yes"],
+        "acme_plugin_delete",
+    ),
+    (
+        &["cluster-bootstrap", "nodes", "add", "pve4"],
+        "corosync_node_add",
+    ),
+    (
+        &["cluster-bootstrap", "nodes", "remove", "pve3", "--yes"],
+        "corosync_node_remove",
+    ),
+    (
+        &[
+            "cluster-bootstrap",
+            "join",
+            "join",
+            "--hostname",
+            "10.0.0.1",
+            "--password",
+            "pw",
+            "--fingerprint",
+            "AA:BB",
+        ],
+        "cluster_join",
+    ),
+    (
+        &[
+            "cluster-bootstrap",
+            "qdevice",
+            "setup",
+            "--addr",
+            "10.0.0.9",
+        ],
+        "qdevice_setup",
+    ),
+    (
+        &[
+            "cluster-bootstrap",
+            "qdevice",
+            "update",
+            "--algorithm",
+            "ffsplit",
+        ],
+        "qdevice_update",
+    ),
+    (
+        &["cluster-bootstrap", "qdevice", "delete", "--yes"],
+        "qdevice_delete",
+    ),
+    (
+        &["access", "user-update", "alice@pve", "--disable"],
+        "user_update",
+    ),
+    (
+        &["access", "user-delete", "alice@pve", "--yes"],
+        "user_delete",
+    ),
+    (&["access", "group-delete", "devs", "--yes"], "group_delete"),
+    (
+        &[
+            "access",
+            "acl-unset",
+            "/vms/100",
+            "--role",
+            "PVEAdmin",
+            "--user",
+            "alice@pve",
+            "--yes",
+        ],
+        "acl_unset",
+    ),
+    (
+        &["access", "password", "alice@pve", "--password", "secret"],
+        "access_password",
+    ),
+    (
+        &["token", "revoke", "alice@pve", "ci", "--yes"],
+        "token_revoke",
+    ),
+    (
+        &[
+            "token",
+            "bootstrap",
+            "--tokenid",
+            "ci",
+            "--secret-file",
+            "/tmp/tok",
+            "--rotate",
+            "--yes",
+        ],
+        "token_bootstrap_rotate",
+    ),
+    (
+        &["schedule", "remove", "--name", "nightly"],
+        "schedule_remove",
+    ),
+    (&["state", "apply", "state.toml"], "state_apply"),
+    (
+        &["reconcile", "converge", "--source", "state.toml"],
+        "reconcile_converge",
+    ),
+];
+
+fn build_cli_destructive_command(action: &str) -> proxxx::cli::Command {
+    let (args, _) = ALL_DESTRUCTIVE_CLI_CASES
+        .iter()
+        .find(|(_, a)| *a == action)
+        .unwrap_or_else(|| panic!("unmapped destructive action in CLI test helper: {action}"));
+    parse_cli_command(args)
+}
+
+/// #338 Test 3 / #399 Unit Test — The single shared `proxxx::hitl::DESTRUCTIVE_ACTIONS`
+/// set and `proxxx::hitl::is_destructive_action` helper are consulted by both the TUI
 /// classifier (`proxxx::tui::hitl_action`) and the CLI `--secure` gate
 /// (`proxxx::cli::cli_hitl_action` + `proxxx::cli::enforce_cli_secure_mode`).
 #[test]
@@ -3072,29 +3366,28 @@ fn shared_destructive_actions_gate_both_tui_and_cli() {
     use proxxx::cli::Command;
     use proxxx::hitl::{is_destructive_action, SecureModeRefusal, DESTRUCTIVE_ACTIONS};
 
-    assert_eq!(
-        DESTRUCTIVE_ACTIONS,
-        &[
-            "stop",
-            "delete",
-            "restart",
-            "migrate",
-            "exec",
-            "move_disk",
-            "resize_disk"
-        ]
-    );
+    let expected_names: Vec<&str> = ALL_DESTRUCTIVE_CLI_CASES.iter().map(|(_, a)| *a).collect();
+    assert_eq!(DESTRUCTIVE_ACTIONS, expected_names.as_slice());
     assert_eq!(SecureModeRefusal::EXIT_CODE, 8);
 
-    for &expected in DESTRUCTIVE_ACTIONS {
+    // Every TUI destructive side effect maps into DESTRUCTIVE_ACTIONS.
+    for &expected in TUI_DESTRUCTIVE_ACTIONS {
         assert!(is_destructive_action(expected));
         let effect = build_tui_destructive_effect(expected);
         let tui_target = proxxx::tui::hitl_action(&effect).expect("TUI classifies destructive op");
         assert_eq!(tui_target.action, expected);
         assert!(is_destructive_action(tui_target.action));
+    }
 
+    // Every destructive action in DESTRUCTIVE_ACTIONS is returned by cli_hitl_action
+    // and refused by enforce_cli_secure_mode under --secure.
+    for &expected in DESTRUCTIVE_ACTIONS {
+        assert!(is_destructive_action(expected));
         let cmd = build_cli_destructive_command(expected);
-        assert_eq!(proxxx::cli::cli_hitl_action(&cmd), Some(expected));
+        let mapped = proxxx::cli::cli_hitl_action(&cmd)
+            .expect("destructive CLI command must return Some(action)");
+        assert_eq!(mapped, expected);
+        assert!(is_destructive_action(mapped));
         assert!(
             proxxx::cli::enforce_cli_secure_mode(&cmd, false).is_ok(),
             "without --secure, `{expected}` is not refused by enforce_cli_secure_mode"
@@ -3107,6 +3400,35 @@ fn shared_destructive_actions_gate_both_tui_and_cli() {
         assert_eq!(refusal.action, expected);
     }
 
+    // Also verify `backup --mode suspend` maps to `backup_stop`, while default
+    // `backup --mode snapshot` and `token bootstrap` (without `--rotate`) and
+    // interactive `ssh 100` (without `--cmd`) are non-destructive (`None`).
+    let backup_suspend =
+        parse_cli_command(&["backup", "100", "--storage", "local", "--mode", "suspend"]);
+    assert_eq!(
+        proxxx::cli::cli_hitl_action(&backup_suspend),
+        Some("backup_stop")
+    );
+    let backup_snapshot = parse_cli_command(&["backup", "100", "--storage", "local"]);
+    assert_eq!(proxxx::cli::cli_hitl_action(&backup_snapshot), None);
+    assert!(proxxx::cli::enforce_cli_secure_mode(&backup_snapshot, true).is_ok());
+
+    let token_bootstrap_new = parse_cli_command(&[
+        "token",
+        "bootstrap",
+        "--tokenid",
+        "ci",
+        "--secret-file",
+        "/tmp/tok",
+        "--yes",
+    ]);
+    assert_eq!(proxxx::cli::cli_hitl_action(&token_bootstrap_new), None);
+    assert!(proxxx::cli::enforce_cli_secure_mode(&token_bootstrap_new, true).is_ok());
+
+    let ssh_interactive = parse_cli_command(&["ssh", "100"]);
+    assert_eq!(proxxx::cli::cli_hitl_action(&ssh_interactive), None);
+    assert!(proxxx::cli::enforce_cli_secure_mode(&ssh_interactive, true).is_ok());
+
     for non_destructive in ["start", "snapshot", "download_iso", "ls"] {
         assert!(!is_destructive_action(non_destructive));
     }
@@ -3116,6 +3438,239 @@ fn shared_destructive_actions_gate_both_tui_and_cli() {
         policy: "continue".into(),
     };
     assert!(proxxx::cli::enforce_cli_secure_mode(&start_cmd, true).is_ok());
+}
+
+/// #399 Test 1 — Dead-cluster harness with `--secure`: every newly gated
+/// destructive CLI command (including `node stopall`, `node suspendall`,
+/// `snapshot delete`, `template`, `state apply`, `reconcile converge`, and
+/// every other newly classified destructive command) exits 8 and attempts no
+/// network request.
+#[test]
+fn cli_secure_refuses_all_newly_classified_destructive_commands_with_exit_8() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let cfg_path = write_dead_cluster_config(dir.path());
+
+    for &(cmd_args, expected_action) in ALL_DESTRUCTIVE_CLI_CASES {
+        let mut args = Vec::with_capacity(cmd_args.len() + 1);
+        args.push("--secure");
+        args.extend_from_slice(cmd_args);
+
+        let out = run_proxxx_with_dead_config(&cfg_path, audit_dir.path(), &args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(8),
+            "expected exit 8 for `{args:?}`, got {:?}\nstderr: {stderr}",
+            out.status.code()
+        );
+        assert!(
+            stderr.contains(&format!("--secure: {expected_action} requires human approval")),
+            "stderr for `{args:?}` must contain the --secure refusal for `{expected_action}`, got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("127.0.0.1:1") && !stderr.contains("Connection refused"),
+            "`{args:?}` must refuse BEFORE any connection attempt, got:\n{stderr}"
+        );
+    }
+}
+
+/// #399 Test 2 — Non-destructive mutations (`start`, `resume`, `snapshot create`,
+/// `node startall`, `pool create`) under `--secure` are NOT blocked by the
+/// `--secure` gate and reach the HTTP transport layer (`exit != 8`).
+#[test]
+fn cli_secure_allows_non_destructive_mutations_past_the_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let cfg_path = write_dead_cluster_config(dir.path());
+
+    let cases: &[&[&str]] = &[
+        &["--secure", "start", "100"],
+        &["--secure", "resume", "100"],
+        &["--secure", "snapshot", "create", "100", "--name", "snap1"],
+        &["--secure", "node", "startall", "pve1"],
+        &["--secure", "pool", "create", "--poolid", "dev"],
+    ];
+
+    for args in cases {
+        let out = run_proxxx_with_dead_config(&cfg_path, audit_dir.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`{args:?}` against 127.0.0.1:1 must fail at transport layer"
+        );
+        assert_ne!(
+            out.status.code(),
+            Some(8),
+            "`{args:?}` must NOT be refused with exit 8, stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("requires human approval"),
+            "non-destructive mutation `{args:?}` must not trigger the --secure refusal:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("error sending request") || stderr.contains("Connection refused"),
+            "`{args:?}` must reach the HTTP transport layer, got:\n{stderr}"
+        );
+    }
+}
+
+/// #399 Test 3 — `node stopall` and `node suspendall` without `--yes` refuse
+/// before any network request.
+#[test]
+fn node_stopall_and_suspendall_refuse_without_yes_before_connecting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let cfg_path = write_dead_cluster_config(dir.path());
+
+    for subcmd in ["stopall", "suspendall"] {
+        let args = ["node", subcmd, "pve1"];
+        let out = run_proxxx_with_dead_config(&cfg_path, audit_dir.path(), &args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`node {subcmd} pve1` without `--yes` must fail"
+        );
+        assert!(
+            stderr.contains(&format!(
+                "node {subcmd} is destructive — re-run with --yes to confirm"
+            )),
+            "`node {subcmd} pve1` without `--yes` must mention `--yes`, got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("error sending request") && !stderr.contains("Connection refused"),
+            "`node {subcmd} pve1` without `--yes` must refuse BEFORE any HTTP request, got:\n{stderr}"
+        );
+    }
+}
+
+fn add_and_run_due_under_secure(
+    cfg_path: &std::path::Path,
+    schedules_path: &std::path::Path,
+    audit_dir: &std::path::Path,
+    name: &str,
+    cmd: &str,
+) -> Vec<serde_json::Value> {
+    let add_out = std::process::Command::new(env!("CARGO_BIN_EXE_proxxx"))
+        .args([
+            "schedule", "add", "--name", name, "--every", "0s", "--cmd", cmd,
+        ])
+        .env("PROXXX_CONFIG", cfg_path)
+        .env("PROXXX_SCHEDULES_PATH", schedules_path)
+        .env("PROXXX_AUDIT_DIR", audit_dir)
+        .output()
+        .expect("spawn schedule add");
+    assert!(
+        add_out.status.success(),
+        "schedule add failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+
+    let run_out = std::process::Command::new(env!("CARGO_BIN_EXE_proxxx"))
+        .args(["--format", "json", "--secure", "schedule", "run-due"])
+        .env("PROXXX_CONFIG", cfg_path)
+        .env("PROXXX_SCHEDULES_PATH", schedules_path)
+        .env("PROXXX_AUDIT_DIR", audit_dir)
+        .output()
+        .expect("spawn --secure schedule run-due");
+    assert!(
+        run_out.status.success(),
+        "schedule run-due failed: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&run_out.stdout).expect("parse run-due JSON output");
+    payload[0]["runs"]
+        .as_array()
+        .or_else(|| payload["runs"].as_array())
+        .expect("runs array")
+        .clone()
+}
+
+/// #399 Rev. 49 F1 — `proxxx --secure schedule run-due` forwards `--secure` to
+/// every spawned child process so a destructive scheduled command (`delete 100 --yes`)
+/// fails closed with exit 8 in the child and zero HTTP requests reach the
+/// `wiremock` server, while a non-destructive scheduled command (`ls nodes`)
+/// still runs and reaches the server.
+#[tokio::test]
+async fn schedule_run_due_forwards_secure_flag_to_child_and_blocks_destructive_command() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tempfile::tempdir().expect("audit tempdir");
+    let schedules_path = dir.path().join("schedules.toml");
+    let cfg_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "url = \"{}/\"\n\
+             user = \"root@pam\"\n\
+             token_id = \"test\"\n\
+             token_secret = \"00000000-0000-0000-0000-000000000000\"\n\
+             verify_tls = false\n",
+            server.uri()
+        ),
+    )
+    .expect("write config.toml");
+
+    // 1. Schedule a destructive command (`delete 100 --yes`): child must exit 8
+    // and zero HTTP requests may reach `server`.
+    let runs = add_and_run_due_under_secure(
+        &cfg_path,
+        &schedules_path,
+        audit_dir.path(),
+        "del-100",
+        "delete 100 --yes",
+    );
+    assert_eq!(runs.len(), 1, "expected 1 scheduled run, got {runs:?}");
+    assert_eq!(runs[0]["name"], "del-100");
+    assert_eq!(
+        runs[0]["exit_code"], 8,
+        "destructive scheduled command under --secure must exit 8 in child, got: {runs:?}"
+    );
+    let received = server
+        .received_requests()
+        .await
+        .expect("wiremock received_requests");
+    assert!(
+        received.is_empty(),
+        "destructive scheduled command under --secure must make zero HTTP requests, got: {received:?}"
+    );
+
+    // 2. Non-destructive schedule (`ls nodes`) still runs under `--secure` and reaches the server.
+    Mock::given(method("GET"))
+        .and(path("/api2/json/nodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "node": "pve1",
+                "status": "online",
+                "cpu": 0.1,
+                "maxcpu": 4,
+                "mem": 1024,
+                "maxmem": 4096,
+                "disk": 1024,
+                "maxdisk": 10240,
+                "uptime": 100
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let schedules_ro = dir.path().join("schedules_ro.toml");
+    let ro_runs = add_and_run_due_under_secure(
+        &cfg_path,
+        &schedules_ro,
+        audit_dir.path(),
+        "ls-nodes",
+        "ls nodes",
+    );
+    assert_eq!(ro_runs.len(), 1);
+    assert_eq!(ro_runs[0]["name"], "ls-nodes");
+    assert_eq!(
+        ro_runs[0]["exit_code"], 0,
+        "non-destructive scheduled command under --secure must succeed, got: {ro_runs:?}"
+    );
 }
 
 // ── Issue #341: Persisted pending-approval store, random IDs & TTL ──────

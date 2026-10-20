@@ -27,10 +27,22 @@ pub enum NodeCommand {
         node: String,
     },
     /// Graceful shutdown of every running guest on the node.
-    Stopall { node: String },
+    /// Destructive — requires `--yes` (#399).
+    Stopall {
+        node: String,
+        /// Required: confirms bulk shutdown of all running guests on the node
+        #[arg(long)]
+        yes: bool,
+    },
     /// Suspend every running guest (PVE 8+). On older PVE versions the
     /// endpoint 404s and the call surfaces `ApiError::NotFound`.
-    Suspendall { node: String },
+    /// Destructive — requires `--yes` (#399).
+    Suspendall {
+        node: String,
+        /// Required: confirms bulk suspend of all running guests on the node
+        #[arg(long)]
+        yes: bool,
+    },
     /// Mint a one-shot ticket for shell access to the NODE itself
     /// (not a guest). Three flavours: term (xterm.js), vnc, spice.
     /// proxxx prints the ticket as JSON for handoff to a viewer; it
@@ -234,14 +246,16 @@ pub async fn execute_node(
                 0,
             ))
         }
-        NodeCommand::Stopall { node } => {
+        NodeCommand::Stopall { node, yes } => {
+            crate::cli::common::require_yes(yes, "node stopall")?;
             let upid = client.stopall_node(&node).await?;
             Ok((
                 serde_json::json!({"action": "stopall", "status": "submitted", "upid": upid}),
                 0,
             ))
         }
-        NodeCommand::Suspendall { node } => {
+        NodeCommand::Suspendall { node, yes } => {
+            crate::cli::common::require_yes(yes, "node suspendall")?;
             let upid = client.suspendall_node(&node).await?;
             Ok((
                 serde_json::json!({"action": "suspendall", "status": "submitted", "upid": upid}),
