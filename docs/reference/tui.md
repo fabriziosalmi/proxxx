@@ -156,15 +156,43 @@ dismiss. While the help is up, the status footer collapses to
 
 ## Theming
 
-The colour palette adapts to terminal background (light / dark
-detected at launch). Brand colour is `#2563eb` blue. Status pills:
+`Theme` (`src/tui/theme.rs`) uses a single dark-background RGB palette
+(`Theme::BG = Rgb(15, 15, 20)`, brand accent `Theme::ACCENT = Rgb(99, 102, 241)`).
+Every usage-level foreground colour meets at least a 4.5:1 WCAG AA contrast
+ratio against `Theme::BG`.
+
+Status pills:
 
 | Pill | Status |
 | :--- | :--- |
 | `running`   | green |
 | `stopped`   | dim |
-| `paused`    | yellow |
-| `unknown`   | red |
+| `paused`    | blue |
+| `unknown`   | yellow |
+
+### Per-metric usage colour thresholds and `!` marker
+
+Dashboard gauges (`CPU`, `RAM`, `DISK`) and the usage cells in the Nodes view
+(`cpu`, `cpu usage`, `ram`, `ram usage`, `disk`), Guests view (`cpu`, `ram`,
+`disk`, and the guest detail `Resources` panel), and Fleet view (`mem`,
+`storage`, and per-guest `cpu` / `mem`) share one pure classifier,
+`usage_level(metric, percent) -> UsageLevel`, backed by `USAGE_THRESHOLDS`
+(inclusive lower bounds):
+
+| Metric | `Ok` — green `Rgb(34, 197, 94)` | `Elevated` — yellow `Rgb(234, 179, 8)` | `High` — orange `Rgb(249, 115, 22)` | `Critical` — red `Rgb(239, 68, 68)` + `!` |
+| :--- | :--- | :--- | :--- | :--- |
+| CPU | `< 60 %` | `>= 60 %` | `>= 80 %` | `>= 95 %` |
+| Memory | `< 70 %` | `>= 70 %` | `>= 80 %` | `>= 90 %` |
+| Disk / storage | `< 70 %` | `>= 70 %` | `>= 80 %` | `>= 90 %` |
+
+- **Non-colour marker (`!`):** any cell at `Critical` appends a trailing `!`
+  (for example `96%!` or `1.8T/1.9T!`) so severity remains visible without
+  relying on colour alone.
+- **Missing / zero capacity (`max == 0`):** cells render with the default style
+  and without a `!` marker (`-`, `0%`, or `0M/0M`).
+- **Fleet cluster CPU column:** the per-cluster `cpu` cell in `proxxx fleet`
+  shows total core count (for example `8c`), not a percentage, and is left
+  uncoloured.
 
 ## Terminal restore
 

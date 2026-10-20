@@ -11,7 +11,7 @@ use ratatui::{
 
 use super::{FleetCluster, FleetFocus, FleetState};
 use crate::api::types::{GuestStatus, GuestType};
-use crate::tui::theme::Theme;
+use crate::tui::theme::{Theme, UsageMetric};
 use crate::util::sanitize::{sanitize_display, truncate_ellipsis};
 
 pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
@@ -142,15 +142,37 @@ fn summary_row(_idx: usize, c: &FleetCluster, selected: bool) -> Row<'static> {
 
     let guests = format!("{}/{}", c.running_guests(), c.stopped_guests());
     let cpu = format!("{}c", c.total_cpu_cores());
-    let mem = format!(
-        "{}/{}",
-        format_bytes(c.mem_used()),
-        format_bytes(c.mem_total())
+
+    let mem_used = c.mem_used();
+    let mem_total = c.mem_total();
+    let mem_pct = if mem_total > 0 {
+        (mem_used as f64 / mem_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let mem = Theme::usage_span(
+        format!("{}/{}", format_bytes(mem_used), format_bytes(mem_total)),
+        UsageMetric::Memory,
+        mem_pct,
+        mem_total > 0,
     );
-    let storage = format!(
-        "{}/{}",
-        format_bytes(c.storage_used()),
-        format_bytes(c.storage_total())
+
+    let storage_used = c.storage_used();
+    let storage_total = c.storage_total();
+    let storage_pct = if storage_total > 0 {
+        (storage_used as f64 / storage_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let storage = Theme::usage_span(
+        format!(
+            "{}/{}",
+            format_bytes(storage_used),
+            format_bytes(storage_total)
+        ),
+        UsageMetric::Disk,
+        storage_pct,
+        storage_total > 0,
     );
 
     let row = Row::new(vec![
@@ -160,8 +182,8 @@ fn summary_row(_idx: usize, c: &FleetCluster, selected: bool) -> Row<'static> {
         Span::raw(c.nodes.len().to_string()),
         Span::raw(guests),
         Span::raw(cpu),
-        Span::raw(mem),
-        Span::raw(storage),
+        mem,
+        storage,
     ]);
 
     if selected {
@@ -216,15 +238,33 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
                 GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::INFO),
                 GuestStatus::Unknown => Style::default().fg(Theme::WARNING),
             };
-            Row::new(vec![
-                truncate_ellipsis(&sanitize_display(profile), 12),
-                g.vmid.to_string(),
-                truncate_ellipsis(&sanitize_display(&g.name), 22),
-                type_str.to_string(),
-                status,
-                truncate_ellipsis(&sanitize_display(&g.node), 12),
-                format!("{:.0}%", g.cpu * 100.0),
+            let cpu_pct = g.cpu * 100.0;
+            let cpu_span = Theme::usage_span(
+                format!("{cpu_pct:.0}%"),
+                UsageMetric::Cpu,
+                cpu_pct,
+                g.cpus > 0,
+            );
+            let mem_pct = if g.maxmem > 0 {
+                (g.mem as f64 / g.maxmem as f64) * 100.0
+            } else {
+                0.0
+            };
+            let mem_span = Theme::usage_span(
                 format_bytes(g.mem),
+                UsageMetric::Memory,
+                mem_pct,
+                g.maxmem > 0,
+            );
+            Row::new(vec![
+                Span::raw(truncate_ellipsis(&sanitize_display(profile), 12)),
+                Span::raw(g.vmid.to_string()),
+                Span::raw(truncate_ellipsis(&sanitize_display(&g.name), 22)),
+                Span::raw(type_str.to_string()),
+                Span::raw(status),
+                Span::raw(truncate_ellipsis(&sanitize_display(&g.node), 12)),
+                cpu_span,
+                mem_span,
             ])
             .style(style)
         })
@@ -286,5 +326,139 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1}G", bytes as f64 / GB as f64)
     } else {
         format!("{:.0}M", bytes as f64 / 1_048_576.0)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::api::types::{Node, NodeStatus, StoragePool};
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
+
+    fn render_buffer(state: &FleetState) -> Buffer {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .expect("draw succeeds");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    fn find_col_of(buf: &Buffer, y: u16, needle: &str) -> u16 {
+        let line = row_string(buf, y);
+        let byte_idx = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("expected {needle:?} in row {y}: {line:?}"));
+        u16::try_from(line[..byte_idx].chars().count()).expect("col fits u16")
+    }
+
+    fn make_cluster(profile: &str, used_gb: u64, total_gb: u64) -> FleetCluster {
+        const GB: u64 = 1_073_741_824;
+        FleetCluster {
+            profile: profile.to_string(),
+            reachable: true,
+            error: None,
+            nodes: vec![Node {
+                node: "n1".into(),
+                status: NodeStatus::Online,
+                maxcpu: 8,
+                mem: used_gb * GB,
+                maxmem: total_gb * GB,
+                ..Node::default()
+            }],
+            guests: vec![],
+            storage: vec![StoragePool {
+                storage: "local".into(),
+                used: used_gb * GB,
+                total: total_gb * GB,
+                ..StoragePool::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn fleet_table_storage_and_memory_colours_and_critical_marker() {
+        let state = FleetState {
+            clusters: vec![
+                make_cluster("c-low", 10, 100),
+                make_cluster("c-high", 85, 100),
+                make_cluster("c-crit", 96, 100),
+            ],
+            selected_index: 0,
+            ..FleetState::default()
+        };
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("storage"))
+            .expect("header row present");
+        let cpu_col = find_col_of(&buf, header_y, "cpu");
+        let mem_col = find_col_of(&buf, header_y, "mem");
+        let storage_col = find_col_of(&buf, header_y, "storage");
+
+        let r0 = header_y + 1;
+        let r1 = header_y + 2;
+        let r2 = header_y + 3;
+
+        let stor_0: String = (storage_col..storage_col + 15)
+            .map(|x| buf[(x, r0)].symbol())
+            .collect();
+        let stor_1: String = (storage_col..storage_col + 15)
+            .map(|x| buf[(x, r1)].symbol())
+            .collect();
+        let stor_2: String = (storage_col..storage_col + 15)
+            .map(|x| buf[(x, r2)].symbol())
+            .collect();
+
+        assert_eq!(stor_0.trim(), "10.0G/100.0G");
+        assert!(!stor_0.contains('!'));
+        assert_eq!(buf[(storage_col, r0)].fg, Theme::SUCCESS);
+        assert_eq!(buf[(mem_col, r0)].fg, Theme::SUCCESS);
+
+        assert_eq!(stor_1.trim(), "85.0G/100.0G");
+        assert!(!stor_1.contains('!'));
+        assert_eq!(buf[(storage_col, r1)].fg, Theme::ORANGE);
+        assert_eq!(buf[(mem_col, r1)].fg, Theme::ORANGE);
+
+        assert_eq!(stor_2.trim(), "96.0G/100.0G!");
+        assert!(stor_2.contains('!'));
+        assert_eq!(buf[(storage_col, r2)].fg, Theme::DANGER);
+        assert_eq!(buf[(mem_col, r2)].fg, Theme::DANGER);
+
+        // Fleet cpu cell is a core count ("8c"), not a percentage: never coloured on unselected rows.
+        assert_eq!(buf[(cpu_col, r1)].fg, Color::Reset);
+        assert_eq!(buf[(cpu_col, r2)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn fleet_table_max_zero_has_no_marker_and_default_style() {
+        let state = FleetState {
+            clusters: vec![make_cluster("c-zero", 0, 0)],
+            selected_index: 1, // keep row 0 unselected to verify default cell style
+            ..FleetState::default()
+        };
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("storage"))
+            .expect("header row present");
+        let mem_col = find_col_of(&buf, header_y, "mem");
+        let storage_col = find_col_of(&buf, header_y, "storage");
+        let row_y = header_y + 1;
+
+        let line = row_string(&buf, row_y);
+        assert!(
+            !line.contains('!'),
+            "max==0 row must not contain '!': {line}"
+        );
+        assert_eq!(buf[(mem_col, row_y)].fg, Color::Reset);
+        assert_eq!(buf[(storage_col, row_y)].fg, Color::Reset);
     }
 }
