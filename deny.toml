@@ -53,6 +53,19 @@ ignore = [
     # constant-time decryption path. Track:
     # https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+    # webpki-roots 0.26.11 — RUSTSEC-2026-0381 (distrusted emSign roots).
+    # Path: tokio-tungstenite 0.29 (feature `rustls-tls-webpki-roots`,
+    # used by the serial console websocket) -> webpki-roots 0.26.11.
+    # Why accepted: 0.26.11 is a 33-line compatibility shim whose only
+    # item is `pub use parent::TLS_SERVER_ROOTS`, with `parent` =
+    # webpki-roots 1.x; Cargo.lock pins that parent to 1.0.10, the
+    # patched release, so the roots actually used are the fixed ones.
+    # RustSec matches on crate name and version only, so the shim is
+    # still reported. Verified 2026-10-20 against the crate source.
+    # Remediation: drop this ignore when tokio-tungstenite depends on
+    # webpki-roots 1.x directly, or when the console builds its own
+    # rustls ClientConfig and the feature is removed.
+    "RUSTSEC-2026-0381",
 ]
 
 # ─── Licenses ──────────────────────────────────────────────────────
