@@ -42,6 +42,20 @@ mod upgrade_check;
 pub mod vm;
 mod watch;
 #[cfg(test)]
+mod cli_secret_scope_tests {
+    #[test]
+    fn the_cli_secret_is_refused_for_fanout_with_a_config_error() {
+        let err = super::refuse_cli_secret_for_fanout(Some("s"), "fleet")
+            .expect_err("a CLI secret must not be fanned out");
+        assert!(err
+            .chain()
+            .any(|c| c.downcast_ref::<crate::config::ConfigError>().is_some()));
+        assert!(format!("{err:#}").contains("`fleet`"));
+        super::refuse_cli_secret_for_fanout(None, "fleet").expect("no flag, no refusal");
+    }
+}
+
+#[cfg(test)]
 mod yes_gate_net;
 
 pub use audit_cmd::AuditAction;
@@ -1432,6 +1446,22 @@ pub const fn cli_hitl_action(cmd: &Command) -> Option<&'static str> {
     }
 }
 
+/// `--token-secret` / `--token-secret-file` hold ONE profile's secret
+/// (#374). Fan-out commands talk to every configured profile, so passing
+/// that secret on would send one cluster's credential to all of them.
+/// Refuse instead of guessing which profile it was meant for.
+pub fn refuse_cli_secret_for_fanout(cli_secret: Option<&str>, command: &str) -> Result<()> {
+    if cli_secret.is_some() {
+        return Err(crate::config::ConfigError::InvalidValue(format!(
+            "--token-secret / --token-secret-file apply to a single profile, but `{command}` \
+             contacts every configured profile; drop the flag so each profile resolves its \
+             own secret (env var, token_secret_file or keychain)"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Fail-closed `--secure` gate for the CLI (#338).
 ///
 /// When `secure` is `true`, every destructive CLI command (as classified by
@@ -1538,12 +1568,14 @@ pub async fn execute(
                 "--all-profiles is supported on `ls nodes|guests|storage` (got `{resource}`)"
             )
         })?;
-        let rows = fanout::fanout_ls(kind, cli_secret).await?;
+        refuse_cli_secret_for_fanout(cli_secret, "ls --all-profiles")?;
+        let rows = fanout::fanout_ls(kind, None).await?;
         let exit = i32::from(rows.iter().any(fanout::ProfileRow::is_error));
         return Ok((serde_json::to_value(rows)?, exit));
     }
     if let Command::Find { vmid } = &cmd {
-        let rows = fanout::fanout_find_vmid(*vmid, cli_secret).await?;
+        refuse_cli_secret_for_fanout(cli_secret, "find")?;
+        let rows = fanout::fanout_find_vmid(*vmid, None).await?;
         // #322: exit 5 (NotFound) ONLY when every profile answered without
         // error and none owns the VMID. If any profile errored, exit 1 and
         // still return `rows` so the operator sees which profile failed.
@@ -1697,18 +1729,30 @@ pub async fn execute(
                 // Delete is the only op where backup-recency matters —
                 // build a PBS client opportunistically (when configured)
                 // so the preflight covers PBS-tracked snapshots too.
-                let pbs_for_preflight = match config.pbs.as_ref() {
-                    Some(cfg) => crate::pbs::PbsClient::new(cfg.clone(), cli_secret)
-                        .await
-                        .ok(),
-                    None => None,
+                // #374: the CLI secret belongs to the PVE profile, so the PBS
+                // client resolves its own (PROXXX_PBS_TOKEN_SECRET, file,
+                // keychain). If PBS is configured but its client cannot be
+                // built, the backup-recency check is reported as skipped
+                // instead of silently dropping PBS from it.
+                let (pbs_for_preflight, pbs_unavailable) = match config.pbs.as_ref() {
+                    Some(cfg) => match crate::pbs::PbsClient::new(cfg.clone(), None).await {
+                        Ok(c) => (Some(c), None),
+                        Err(e) => (None, Some(format!("{e:#}"))),
+                    },
+                    None => (None, None),
                 };
-                enforce_preflight(
+                crate::cli::common::enforce_preflight_with_notes(
                     &client,
                     pbs_for_preflight.as_ref(),
                     crate::app::preflight::Op::Delete,
                     &g,
                     allow_risk,
+                    pbs_unavailable.map(|e| {
+                        format!(
+                            "PBS is configured but its client could not be built, so PBS \
+                             backups were not checked: {e}"
+                        )
+                    }),
                 )
                 .await?;
             }

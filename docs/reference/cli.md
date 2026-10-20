@@ -24,7 +24,9 @@ within a major version.
                            keychain, especially for `daemon serve`.
 --token-secret-file <PATH> Read the token secret from a file. Leaves
                            nothing in argv. Wins over --token-secret
-                           when both are given.
+                           when both are given. Both flags apply to the
+                           selected profile only: ls --all-profiles,
+                           find and fleet refuse them (exit 3).
 --secure                   Require Telegram approval for destructive operations
                            in the TUI; refuse destructive CLI commands
                            (stop, delete, restart, migrate, exec, disk move,

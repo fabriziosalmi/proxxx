@@ -199,8 +199,13 @@ fn main() -> Result<()> {
             // profile name; we open that profile's full single-profile
             // TUI, then re-enter the fleet view when the user quits it.
             if matches!(cmd, cli::Command::Fleet) {
+                if let Err(e) = cli::refuse_cli_secret_for_fanout(cli_secret.as_deref(), "fleet") {
+                    // Same exit code as the CLI path maps a ConfigError to.
+                    eprintln!("Fatal Error: {e:#}");
+                    std::process::exit(3);
+                }
                 rt.block_on(async {
-                    while let Some(profile) = tui::fleet::run_fleet(cli_secret.as_deref()).await? {
+                    while let Some(profile) = tui::fleet::run_fleet(None).await? {
                         // Hold the terminal gate across the drill-in handoff so
                         // `tui::run`'s pre-`TerminalGuard` `PxClient::new` log
                         // cannot write to stderr between leaving the fleet
@@ -209,7 +214,7 @@ fn main() -> Result<()> {
                         // Open the selected cluster's full TUI. Its own
                         // profile-switch return value is ignored — on exit
                         // we always come back to the fleet overview.
-                        let _ = tui::run(Some(&profile), cli_secret.as_deref(), cli.secure).await?;
+                        let _ = tui::run(Some(&profile), None, cli.secure).await?;
                     }
                     Ok::<(), anyhow::Error>(())
                 })?;
@@ -357,14 +362,22 @@ fn main() -> Result<()> {
         // switch (tui::run returns Some(name)); exits on normal quit.
         None => {
             let mut active_profile: Option<String> = cli.profile.clone();
+            // #374: the CLI secret belongs to the profile the TUI started
+            // on. After an in-app profile switch the next profile resolves
+            // its own secret, so one cluster's credential is never sent to
+            // another.
+            let mut secret_for_profile = cli_secret;
             loop {
                 let next = rt.block_on(tui::run(
                     active_profile.as_deref(),
-                    cli_secret.as_deref(),
+                    secret_for_profile.as_deref(),
                     cli.secure,
                 ))?;
                 match next {
-                    Some(name) => active_profile = Some(name),
+                    Some(name) => {
+                        active_profile = Some(name);
+                        secret_for_profile = None;
+                    }
                     None => break,
                 }
             }
