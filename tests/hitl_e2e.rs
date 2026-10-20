@@ -2396,9 +2396,6 @@ async fn env_var_beats_inline_bot_token() {
 async fn bot_token_file_with_lax_permissions_is_refused() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _kc = proxxx::config::TestKeychainGuard::install(
-        proxxx::config::TestKeychainMode::Entries(std::collections::HashMap::new()),
-    );
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("bot_token");
     std::fs::write(&path, "secret-token-here").expect("write");
