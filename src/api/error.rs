@@ -119,6 +119,25 @@ impl ApiError {
         }
     }
 
+    /// Map an HTTP status + body into [`ApiError`], enriching ambiguous
+    /// gateway/overload failures (`502`, `503` without `Retry-After`, `504`)
+    /// on mutating requests (`POST`, `PUT`, `DELETE`) with an explicit warning
+    /// that PVE may still have executed the mutation (`#348`).
+    #[must_use]
+    pub fn from_status_with_idempotency(
+        status: reqwest::StatusCode,
+        path: &str,
+        body: String,
+        idempotency: super::transport::RequestIdempotency,
+    ) -> Self {
+        if idempotency.is_mutation() && matches!(status.as_u16(), 502..=504) {
+            return Self::RateLimited(format!(
+                "{path} {status}: {body} (mutation was not retried; PVE may still have executed it — check `proxxx tasks` or the PVE task log before retrying)"
+            ));
+        }
+        Self::from_status(status, path, body)
+    }
+
     /// Format an error together with its entire [`std::error::Error::source`]
     /// chain (`outer: cause 1: cause 2`).
     ///
@@ -149,6 +168,25 @@ impl ApiError {
         err: &(dyn std::error::Error + 'static),
     ) -> Self {
         Self::Transport(format!("{context}: {}", Self::format_error_chain(err)))
+    }
+
+    /// Construct [`Self::Transport`] for a `reqwest::Error`, enriching
+    /// mutation timeouts (`POST`, `PUT`, `DELETE` where `err.is_timeout()` is
+    /// `true`) with an explicit warning that PVE may still have executed the
+    /// mutation (`#348`).
+    #[must_use]
+    pub fn from_transport_with_idempotency(
+        context: impl std::fmt::Display,
+        err: &reqwest::Error,
+        idempotency: super::transport::RequestIdempotency,
+    ) -> Self {
+        if idempotency.is_mutation() && err.is_timeout() {
+            return Self::Transport(format!(
+                "{context}: {} (mutation was not retried after timeout; PVE may still have executed it — check `proxxx tasks` or the PVE task log before retrying)",
+                Self::format_error_chain(err)
+            ));
+        }
+        Self::from_transport(context, err)
     }
 
     /// — true if the failure is a pveproxy upstream hang
@@ -214,7 +252,7 @@ impl ApiError {
     /// CLI error path appends it under the `Fatal Error:` line; JSON
     /// output exposes it as a `hint` field on the error object.
     #[must_use]
-    pub const fn actionable_hint(&self) -> &'static str {
+    pub fn actionable_hint(&self) -> &'static str {
         match self {
             Self::Unauthorized(_) => {
                 "credentials rejected — re-run `proxxx init --interactive` to rotate the token, \
@@ -231,20 +269,32 @@ impl ApiError {
                  renamed, or the vmid/storage/node name is wrong (try `proxxx ls guests` / \
                  `proxxx ls nodes` to enumerate)"
             }
-            Self::RateLimited(_) => {
-                "PVE returned 429/502/503/504 after proxxx's retry budget was exhausted — \
-                 the cluster is overloaded; back off 30 s and retry, or check pveproxy \
-                 load on the affected node"
+            Self::RateLimited(msg) => {
+                if msg.contains("may still have executed") {
+                    "mutating request failed with 502/503/504 — proxxx did not retry to avoid \
+                     duplicate execution; PVE may still have executed the mutation, so check \
+                     `proxxx tasks` or the PVE task log before retrying"
+                } else {
+                    "PVE returned 429/502/503/504 after proxxx's retry budget was exhausted — \
+                     the cluster is overloaded; back off 30 s and retry, or check pveproxy \
+                     load on the affected node"
+                }
             }
             Self::StorageHang(_) => {
                 "PVE emitted a 59x status — a node's upstream service is hung, typically \
                  pvestatd or an NFS-backed storage; `proxxx ls nodes` shows which one is \
                  stale (uptime / last-seen vs the others)"
             }
-            Self::Transport(_) => {
-                "network or TLS failure reaching the PVE URL — verify connectivity \
-                 (`curl --cacert ... <url>/api2/json/version`), check that `verify_tls` \
-                 in your profile matches the cluster's cert posture, and confirm DNS"
+            Self::Transport(msg) => {
+                if msg.contains("may still have executed") {
+                    "mutating request timed out after being sent — proxxx did not retry to avoid \
+                     duplicate execution; PVE may still have executed the mutation, so check \
+                     `proxxx tasks` or the PVE task log before retrying"
+                } else {
+                    "network or TLS failure reaching the PVE URL — verify connectivity \
+                     (`curl --cacert ... <url>/api2/json/version`), check that `verify_tls` \
+                     in your profile matches the cluster's cert posture, and confirm DNS"
+                }
             }
             Self::Parse { .. } => {
                 "proxxx couldn't parse a PVE response as the expected JSON shape — likely \
@@ -538,5 +588,45 @@ mod tests {
                 "variant {variant:?} should map to exit {expected}"
             );
         }
+    }
+
+    #[test]
+    fn issue_348_mutation_status_502_503_504_warns_may_have_executed_and_keeps_exit_code_7() {
+        use crate::api::transport::RequestIdempotency;
+
+        for code in [
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let err = ApiError::from_status_with_idempotency(
+                code,
+                "/nodes/pve1/vzdump",
+                "gateway timeout".into(),
+                RequestIdempotency::Mutation,
+            );
+            assert_eq!(err.exit_code(), 7);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("may still have executed") && msg.contains("proxxx tasks"),
+                "mutation {code} Display must warn that PVE may still have executed it, got: {msg}"
+            );
+            let hint = err.actionable_hint();
+            assert!(
+                hint.contains("may still have executed") && hint.contains("proxxx tasks"),
+                "mutation {code} hint must warn that PVE may still have executed it, got: {hint}"
+            );
+        }
+
+        // 429 on a mutation was rejected before execution, so after retry
+        // budget exhaustion it uses the normal overload hint.
+        let err_429 = ApiError::from_status_with_idempotency(
+            StatusCode::TOO_MANY_REQUESTS,
+            "/nodes/pve1/vzdump",
+            "rate limit".into(),
+            RequestIdempotency::Mutation,
+        );
+        assert_eq!(err_429.exit_code(), 7);
+        assert!(!err_429.to_string().contains("may still have executed"));
     }
 }

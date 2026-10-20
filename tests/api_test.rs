@@ -6404,3 +6404,433 @@ mod fast_guest_lookup {
         assert_eq!(node, "pve1");
     }
 }
+
+mod issue_348_no_retry_mutations {
+    use std::time::Duration;
+
+    use proxxx::api::types::GuestType;
+    use proxxx::api::{
+        should_retry_for_method, ApiError, ProxmoxGateway, PxClient, RequestIdempotency,
+        RetryOutcome,
+    };
+    use proxxx::config::ProfileConfig;
+    use reqwest::{Method, StatusCode};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for(
+        url: &str,
+        audit_dir: &std::path::Path,
+        timeout: Option<Duration>,
+    ) -> PxClient {
+        let cfg = ProfileConfig {
+            url: url.to_string(),
+            user: "root@pam".to_string(),
+            auth: "token".to_string(),
+            token_id: Some("t".to_string()),
+            token_secret: None,
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            tls_pin_mode: None,
+            read_only: false,
+            rate_limit: Some(1000),
+            policies: None,
+            telegram: None,
+            ssh: None,
+            pbs: None,
+            alerts: None,
+            mcp_token: None,
+            reconcile: None,
+            profile_name: Some("test-348".to_string()),
+        };
+        let mut c = PxClient::new(cfg, Some("s"))
+            .await
+            .expect("client init")
+            .with_audit_dir(audit_dir);
+        if let Some(t) = timeout {
+            c = c.with_request_timeout(t);
+        }
+        c
+    }
+
+    fn upid_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": "UPID:pve1:00000001:00000001:00000000:qmstart:100:root@pam:"
+        }))
+    }
+
+    /// Requirement 1: A POST whose mock delays longer than the injected
+    /// request timeout sends exactly ONE request (`server.received_requests()`)
+    /// and returns a typed `ApiError::Transport` (exit code 1) whose error
+    /// message and actionable hint warn that PVE may still have executed the
+    /// mutation and advise checking `proxxx tasks`.
+    #[tokio::test]
+    async fn post_timeout_sends_exactly_one_request_and_surfaces_may_have_executed_hint() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+            .respond_with(upid_ok().set_delay(Duration::from_millis(250)))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri(), tmp.path(), Some(Duration::from_millis(40))).await;
+        let err = c
+            .start_guest("pve1", 100, GuestType::Qemu)
+            .await
+            .expect_err("POST delayed past timeout must fail");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "POST timeout must NOT be retried; expected 1 request, got {}",
+            received.len()
+        );
+
+        let typed = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<ApiError>())
+            .expect("must downcast to ApiError");
+        assert!(matches!(typed, ApiError::Transport(_)));
+        assert_eq!(typed.exit_code(), 1);
+        assert!(
+            typed.actionable_hint().contains("may still have executed")
+                && typed.actionable_hint().contains("proxxx tasks"),
+            "hint must warn that PVE may still have executed the mutation, got: {}",
+            typed.actionable_hint()
+        );
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("may still have executed") && full.contains("proxxx tasks"),
+            "error message must warn that PVE may still have executed the mutation, got: {full}"
+        );
+    }
+
+    /// Requirement 2: POST 504 -> 1 request; POST 502 -> 1 request;
+    /// DELETE 504 -> 1 request; PUT timeout -> 1 request.
+    #[tokio::test]
+    async fn post_504_post_502_delete_504_and_put_timeout_each_send_only_one_request() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 2a. POST 504 -> 1 request
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(ResponseTemplate::new(504).set_body_string("gateway timeout"))
+                .mount(&server)
+                .await;
+            let c = client_for(&server.uri(), tmp.path(), None).await;
+            let err = c
+                .start_guest("pve1", 100, GuestType::Qemu)
+                .await
+                .expect_err("POST 504 must fail");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let typed = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<ApiError>())
+                .expect("ApiError");
+            assert!(matches!(typed, ApiError::RateLimited(_)));
+            assert_eq!(typed.exit_code(), 7);
+            assert!(typed.actionable_hint().contains("may still have executed"));
+            assert!(typed.actionable_hint().contains("proxxx tasks"));
+        }
+
+        // 2b. POST 502 -> 1 request
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+                .mount(&server)
+                .await;
+            let c = client_for(&server.uri(), tmp.path(), None).await;
+            let err = c
+                .start_guest("pve1", 100, GuestType::Qemu)
+                .await
+                .expect_err("POST 502 must fail");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let typed = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<ApiError>())
+                .expect("ApiError");
+            assert!(matches!(typed, ApiError::RateLimited(_)));
+            assert_eq!(typed.exit_code(), 7);
+            assert!(typed.actionable_hint().contains("may still have executed"));
+        }
+
+        // 2c. DELETE 504 -> 1 request
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/snapshot/snap1"))
+                .respond_with(ResponseTemplate::new(504).set_body_string("gateway timeout"))
+                .mount(&server)
+                .await;
+            let c = client_for(&server.uri(), tmp.path(), None).await;
+            let err = c
+                .delete_snapshot("pve1", 100, GuestType::Qemu, "snap1")
+                .await
+                .expect_err("DELETE 504 must fail");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let typed = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<ApiError>())
+                .expect("ApiError");
+            assert!(matches!(typed, ApiError::RateLimited(_)));
+            assert_eq!(typed.exit_code(), 7);
+            assert!(typed.actionable_hint().contains("may still have executed"));
+        }
+
+        // 2d. PUT timeout -> 1 request
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/resize"))
+                .respond_with(upid_ok().set_delay(Duration::from_millis(250)))
+                .mount(&server)
+                .await;
+            let c = client_for(&server.uri(), tmp.path(), Some(Duration::from_millis(40))).await;
+            let err = c
+                .resize_disk("pve1", 100, GuestType::Qemu, "scsi0", "+1G")
+                .await
+                .expect_err("PUT timeout must fail");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let typed = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<ApiError>())
+                .expect("ApiError");
+            assert!(matches!(typed, ApiError::Transport(_)));
+            assert_eq!(typed.exit_code(), 1);
+            assert!(typed.actionable_hint().contains("may still have executed"));
+        }
+    }
+
+    /// Requirement 3:
+    /// - POST answered 429 then 200 -> 2 requests, success, and only ONE
+    ///   write-ahead `"sent"` entry is written to the audit log.
+    /// - POST answered 503 with `Retry-After: 0` then 200 -> 2 requests, success.
+    /// - POST answered 503 WITHOUT `Retry-After` -> 1 request, error.
+    #[tokio::test]
+    async fn post_retries_429_and_503_with_retry_after_but_not_503_without_retry_after() {
+        // 3a. POST 429 -> 200 (2 requests, 1 write-ahead "sent" audit entry)
+        {
+            let server = MockServer::start().await;
+            let audit_tmp = tempfile::tempdir().unwrap();
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(
+                    ResponseTemplate::new(429)
+                        .insert_header("Retry-After", "0")
+                        .set_body_string("rate limited"),
+                )
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(upid_ok())
+                .mount(&server)
+                .await;
+
+            let c = client_for(&server.uri(), audit_tmp.path(), None).await;
+            let upid = c
+                .start_guest("pve1", 100, GuestType::Qemu)
+                .await
+                .expect("POST 429 then 200 must succeed");
+            assert!(upid.starts_with("UPID:"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+            let logger =
+                proxxx::audit::AuditLogger::open_in(audit_tmp.path()).expect("open audit logger");
+            let mut entries = logger.query(10, None).expect("query entries");
+            entries.reverse();
+            assert_eq!(
+                entries.len(),
+                2,
+                "retried 429 must write exactly 1 write-ahead 'sent' entry + 1 outcome entry, got: {entries:?}"
+            );
+            assert_eq!(entries[0].result, "sent");
+            assert_eq!(entries[1].result, "ok 200");
+        }
+
+        // 3b. POST 503 with Retry-After: 0 -> 200 (2 requests, success)
+        {
+            let server = MockServer::start().await;
+            let audit_tmp = tempfile::tempdir().unwrap();
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(
+                    ResponseTemplate::new(503)
+                        .insert_header("Retry-After", "0")
+                        .set_body_string("overloaded before processing"),
+                )
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(upid_ok())
+                .mount(&server)
+                .await;
+
+            let c = client_for(&server.uri(), audit_tmp.path(), None).await;
+            let upid = c
+                .start_guest("pve1", 100, GuestType::Qemu)
+                .await
+                .expect("POST 503 with Retry-After then 200 must succeed");
+            assert!(upid.starts_with("UPID:"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+
+        // 3c. POST 503 WITHOUT Retry-After -> 1 request, error
+        {
+            let server = MockServer::start().await;
+            let audit_tmp = tempfile::tempdir().unwrap();
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+                .mount(&server)
+                .await;
+
+            let c = client_for(&server.uri(), audit_tmp.path(), None).await;
+            let err = c
+                .start_guest("pve1", 100, GuestType::Qemu)
+                .await
+                .expect_err("POST 503 without Retry-After must not retry");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let typed = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<ApiError>())
+                .expect("ApiError");
+            assert_eq!(typed.exit_code(), 7);
+            assert!(typed.actionable_hint().contains("may still have executed"));
+        }
+    }
+
+    /// Requirement 4: GET answered 504, 504, 200 -> 3 requests, success
+    /// (GET retry behaviour unchanged).
+    #[tokio::test]
+    async fn get_retries_504_twice_and_succeeds_on_third_attempt() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(
+                ResponseTemplate::new(504)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string("gateway timeout"),
+            )
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"node": "pve1", "status": "online"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri(), tmp.path(), None).await;
+        let nodes = c.get_nodes().await.expect("GET 504, 504, 200 must succeed");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node, "pve1");
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    /// Requirement 5 & 6: POST to a closed port retries connect errors (when
+    /// the server comes up on the same port before attempt 2, the mutation
+    /// succeeds after attempt 1's ECONNREFUSED), and the pure classifier covers
+    /// every method x outcome row.
+    #[tokio::test]
+    async fn post_to_closed_port_retries_connect_error_and_succeeds_when_listener_comes_up() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Reserve an ephemeral loopback port and drop the listener so the port
+        // is closed (ECONNREFUSED) when attempt 1 fires at t=0.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let url = format!("http://{addr}");
+        let c = client_for(&url, tmp.path(), None).await;
+
+        // While attempt 1 is in its ~100 ms backoff sleep after ECONNREFUSED,
+        // start a MockServer bound to the same address so attempt 2 succeeds.
+        let server_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let std_listener = std::net::TcpListener::bind(addr)
+                .expect("rebind loopback port during retry backoff");
+            let server = MockServer::builder().listener(std_listener).start().await;
+            Mock::given(method("POST"))
+                .and(path("/api2/json/nodes/pve1/qemu/100/status/start"))
+                .respond_with(upid_ok())
+                .expect(1)
+                .mount(&server)
+                .await;
+            // Keep server alive until the client call completes.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            server
+        });
+
+        let upid = c
+            .start_guest("pve1", 100, GuestType::Qemu)
+            .await
+            .expect("POST must retry ECONNREFUSED on attempt 1 and succeed on attempt 2");
+        assert!(upid.starts_with("UPID:"));
+        let server = server_task.await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        // Also assert the pure classifier across GET vs POST/PUT/DELETE.
+        assert!(should_retry_for_method(
+            &Method::POST,
+            RetryOutcome::TransportError {
+                is_connect: true,
+                is_timeout: false,
+                is_tls_or_cert: false,
+            }
+        ));
+        assert!(!should_retry_for_method(
+            &Method::POST,
+            RetryOutcome::TransportError {
+                is_connect: false,
+                is_timeout: true,
+                is_tls_or_cert: false,
+            }
+        ));
+        assert!(!should_retry_for_method(
+            &Method::PUT,
+            RetryOutcome::HttpStatus {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                has_retry_after: false,
+            }
+        ));
+        assert!(!should_retry_for_method(
+            &Method::DELETE,
+            RetryOutcome::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                has_retry_after: false,
+            }
+        ));
+        assert!(should_retry_for_method(
+            &Method::DELETE,
+            RetryOutcome::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                has_retry_after: true,
+            }
+        ));
+        assert_eq!(
+            RequestIdempotency::for_method(&Method::GET),
+            RequestIdempotency::Idempotent
+        );
+        assert_eq!(
+            RequestIdempotency::for_method(&Method::POST),
+            RequestIdempotency::Mutation
+        );
+    }
+}

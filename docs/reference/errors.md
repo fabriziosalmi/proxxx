@@ -31,8 +31,11 @@ pub enum ApiError {
     NotFound(String),
 
     /// 429 / 502 / 503 / 504 — transient cluster overload.
-    /// Fires only when retry budget is exhausted; the client absorbs
-    /// transient errors automatically below this threshold.
+    /// Read-only GET requests retry all four automatically; mutating
+    /// requests (POST, PUT, DELETE) retry ONLY 429 and 503 with a
+    /// `Retry-After` header (#348). On 502, 504, or 503 without
+    /// `Retry-After`, a mutation fails immediately and the hint warns
+    /// that PVE may still have executed it (`check proxxx tasks`).
     RateLimited(String),
 
     /// Body exceeded our 32 MiB cap. Misbehaving node or hostile
@@ -46,7 +49,10 @@ pub enum ApiError {
     StorageHang(String),
 
     /// Network / TLS / connection failure. Includes timeouts, DNS
-    /// failures, certificate errors. Caller MAY retry at a higher level.
+    /// failures, certificate errors. Read-only GET requests retry
+    /// timeouts and connect errors; mutations retry ONLY connect
+    /// errors (`is_connect() && !is_timeout()`, excluding TLS/cert
+    /// failures) and never retry a timeout (#348).
     Transport(String),
 
     /// JSON deserialization failed. PVE returned non-JSON, schema drift,
