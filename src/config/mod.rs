@@ -266,6 +266,11 @@ pub struct PbsConfig {
     pub fingerprint: Option<String>,
     /// Optional API rate limit (req/s). Default 10.
     pub rate_limit: Option<u32>,
+    /// Resolved profile name stamped by [`load_config_from_path`] (`None` for
+    /// flat top-level config). Used to scope keychain lookups to
+    /// `<profile>/pbs_token_secret` before falling back to `pbs_token_secret`.
+    #[serde(skip)]
+    pub profile_name: Option<String>,
 }
 
 const fn default_verify_tls_pbs() -> bool {
@@ -278,27 +283,150 @@ const fn default_verify_tls() -> bool {
     true
 }
 
-/// (Gemini wave-3 audit) — keychain access wrapper.
+/// Compiled-in OS keychain store descriptor (`#319`, `#332`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeychainStoreInfo {
+    /// `true` iff a persistent OS keychain store (`UntilDelete`) is compiled in.
+    pub compiled: bool,
+    /// Store identifier (`"macos-keychain"` or `"none"`).
+    pub store: &'static str,
+}
+
+/// Report whether a real persistent OS keychain store is compiled into this
+/// binary (`#319`, `#332`).
 ///
-/// `keyring::Entry::get_password()` is **synchronous** and can block
-/// for tens of seconds on Linux (Secret Service / GNOME Keyring may
-/// pop a GUI unlock dialog and wait for the user to type a password).
-/// Calling it directly inside a tokio async context blocks the runtime
-/// thread it's scheduled on, starving every other future.
+/// Queries `keyring::default::default_credential_builder().persistence()` on
+/// macOS rather than relying on `cfg!` alone: `UntilDelete` indicates the
+/// real macOS Security.framework keychain (`apple-native`), whereas
+/// `EntryOnly` indicates `keyring`'s in-memory mock fallback.
+// Non-macOS builds omit the runtime `keyring::default` query, making the body const-eligible on Linux only.
+#[cfg_attr(
+    not(all(feature = "keychain", target_os = "macos")),
+    allow(clippy::missing_const_for_fn)
+)]
+#[must_use]
+pub fn keychain_store_info() -> KeychainStoreInfo {
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
+    {
+        if matches!(
+            keyring::default::default_credential_builder().persistence(),
+            keyring::credential::CredentialPersistence::UntilDelete
+        ) {
+            return KeychainStoreInfo {
+                compiled: true,
+                store: "macos-keychain",
+            };
+        }
+    }
+    KeychainStoreInfo {
+        compiled: false,
+        store: "none",
+    }
+}
+
+/// Outcome of querying a single `(service, account)` entry in the keychain (`#329`).
+#[cfg(any(test, all(feature = "keychain", target_os = "macos")))]
+#[cfg_attr(not(all(feature = "keychain", target_os = "macos")), allow(dead_code))]
+#[derive(Debug, Clone)]
+enum KeychainEntryOutcome {
+    /// Entry found with a non-empty secret.
+    Found(SecretString),
+    /// Entry does not exist in the keychain.
+    NotFound,
+    /// Entry exists in the keychain but its value is empty.
+    Empty,
+    /// Access to the keychain item was denied (locked keychain or ACL refusal).
+    AccessDenied(String),
+    /// Other platform / store failure (never contains a secret value).
+    Error(String),
+}
+
+#[cfg(any(test, all(feature = "keychain", target_os = "macos")))]
+impl KeychainEntryOutcome {
+    fn diagnostic_reason(&self) -> String {
+        match self {
+            Self::Found(_) => "found".to_string(),
+            Self::NotFound => "not found".to_string(),
+            Self::Empty => "empty".to_string(),
+            Self::AccessDenied(msg) => {
+                if msg.is_empty() {
+                    "access denied".to_string()
+                } else {
+                    format!("access denied: {msg}")
+                }
+            }
+            Self::Error(msg) => format!("error: {msg}"),
+        }
+    }
+}
+
+/// Test-only in-memory keychain override (`#319`, `#329`).
 ///
-/// `tokio::task::spawn_blocking` runs the closure on the dedicated
-/// blocking thread pool (default 512 threads) — the async runtime
-/// stays responsive. The `.await` here yields just like any other
-/// async call, returning the result when the blocking thread
-/// completes.
-#[cfg(feature = "keychain")]
-async fn keyring_get(service: &'static str, item: &'static str) -> anyhow::Result<SecretString> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<SecretString> {
-        let entry = keyring::Entry::new(service, item)?;
-        Ok(SecretString::new(entry.get_password()?))
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("keychain spawn_blocking join error: {e}"))?
+/// Compiled only under `#[cfg(test)]` so the release library API never exposes
+/// an override hook and production lookups never acquire a global lock.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+enum TestKeychainMode {
+    /// Simulate a compiled-in store backed by an in-memory map of
+    /// `(service, account) -> KeychainEntryOutcome`.
+    Entries(std::collections::HashMap<(String, String), KeychainEntryOutcome>),
+    /// Simulate a build with no keychain store compiled in (Linux /
+    /// `--no-default-features`).
+    NoStoreCompiled,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestKeychainState {
+    mode: Option<TestKeychainMode>,
+    consult_count: usize,
+}
+
+#[cfg(test)]
+static TEST_KEYCHAIN_STATE: std::sync::LazyLock<std::sync::RwLock<TestKeychainState>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(TestKeychainState::default()));
+
+/// RAII guard that installs a [`TestKeychainMode`] for the duration of a unit
+/// test and restores the default state on drop. Serialise tests that construct
+/// this guard with `#[serial_test::serial]`.
+#[cfg(test)]
+#[derive(Debug)]
+struct TestKeychainGuard;
+
+#[cfg(test)]
+impl TestKeychainGuard {
+    /// Install a [`TestKeychainMode`] and reset the consultation counter to `0`.
+    #[must_use]
+    fn install(mode: TestKeychainMode) -> Self {
+        let mut guard = TEST_KEYCHAIN_STATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.mode = Some(mode);
+        guard.consult_count = 0;
+        Self
+    }
+
+    /// Number of times the underlying store was consulted while this guard was active.
+    // Takes `&self` so callers must still hold the active `TestKeychainGuard` when reading the counter.
+    #[allow(clippy::unused_self)]
+    #[must_use]
+    fn consult_count(&self) -> usize {
+        let guard = TEST_KEYCHAIN_STATE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.consult_count
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestKeychainGuard {
+    fn drop(&mut self) {
+        let mut guard = TEST_KEYCHAIN_STATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.mode = None;
+        guard.consult_count = 0;
+    }
 }
 
 /// Ordered keychain item names to try for a secret: the per-profile item
@@ -310,36 +438,183 @@ async fn keyring_get(service: &'static str, item: &'static str) -> anyhow::Resul
 /// it; the flat fallback keeps keys stored before this change working. Pure so
 /// the ordering is unit-tested without touching the OS keychain.
 #[must_use]
-fn keyring_candidates(item: &str, profile: Option<&str>) -> Vec<String> {
+pub fn keyring_candidates(item: &str, profile: Option<&str>) -> Vec<String> {
     let mut names = Vec::with_capacity(2);
     if let Some(p) = profile {
-        names.push(format!("{p}/{item}"));
+        if !p.is_empty() {
+            names.push(format!("{p}/{item}"));
+        }
     }
     names.push(item.to_string());
     names
 }
 
-/// Resolve a keychain secret, per-profile-first with a flat fallback (see
-/// [`keyring_candidates`]). The primary cluster credentials (`token_secret`,
-/// `password`) route through here; the shared/secondary bot-token + PBS-token
-/// keychain entries stay flat by design (see ACCEPTED-RISKS AR-8).
-#[cfg(feature = "keychain")]
-async fn keyring_get_scoped(item: &str, profile: Option<&str>) -> anyhow::Result<SecretString> {
-    let candidates = keyring_candidates(item, profile);
-    tokio::task::spawn_blocking(move || -> anyhow::Result<SecretString> {
-        let mut last: Option<keyring::Error> = None;
-        for name in &candidates {
-            match keyring::Entry::new("proxxx", name).and_then(|e| e.get_password()) {
-                Ok(v) => return Ok(SecretString::new(v)),
-                Err(e) => last = Some(e),
+// Non-macOS non-test builds have no keychain store and never construct `Found`.
+#[cfg_attr(
+    not(any(test, all(feature = "keychain", target_os = "macos"))),
+    allow(dead_code)
+)]
+enum KeychainLookupOutcome {
+    Found(SecretString),
+    Unavailable { summary: String },
+}
+
+#[cfg(all(feature = "keychain", target_os = "macos"))]
+fn classify_keyring_error(err: &keyring::Error) -> KeychainEntryOutcome {
+    match err {
+        keyring::Error::NoEntry => KeychainEntryOutcome::NotFound,
+        keyring::Error::NoStorageAccess(inner) => {
+            KeychainEntryOutcome::AccessDenied(inner.to_string())
+        }
+        keyring::Error::PlatformFailure(inner) => {
+            let msg = inner.to_string();
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("auth")
+                || lower.contains("denied")
+                || lower.contains("interaction is not allowed")
+                || lower.contains("-25308")
+                || lower.contains("-128")
+            {
+                KeychainEntryOutcome::AccessDenied(msg)
+            } else {
+                KeychainEntryOutcome::Error(msg)
             }
         }
-        Err(anyhow::anyhow!(
-            "keychain: no entry among {candidates:?}: {last:?}"
-        ))
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("keychain spawn_blocking join error: {e}"))?
+        other => KeychainEntryOutcome::Error(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+fn keyring_query_test_mode(
+    service: &str,
+    candidates: &[String],
+    mode: TestKeychainMode,
+) -> KeychainLookupOutcome {
+    match mode {
+        TestKeychainMode::NoStoreCompiled => KeychainLookupOutcome::Unavailable {
+            summary: format!(
+                "keychain (service `{service}`, accounts [{}]: no keychain store in this build)",
+                candidates.join(", ")
+            ),
+        },
+        TestKeychainMode::Entries(map) => {
+            let mut per_account = Vec::with_capacity(candidates.len());
+            for name in candidates {
+                {
+                    let mut guard = TEST_KEYCHAIN_STATE
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.consult_count += 1;
+                }
+                let outcome = map
+                    .get(&(service.to_string(), name.clone()))
+                    .cloned()
+                    .unwrap_or(KeychainEntryOutcome::NotFound);
+                if let KeychainEntryOutcome::Found(secret) = outcome {
+                    if !secret.is_empty() {
+                        return KeychainLookupOutcome::Found(secret);
+                    }
+                    per_account.push(format!("`{name}` (empty)"));
+                } else {
+                    per_account.push(format!("`{name}` ({})", outcome.diagnostic_reason()));
+                }
+            }
+            KeychainLookupOutcome::Unavailable {
+                summary: format!(
+                    "keychain (service `{service}`, accounts [{}])",
+                    per_account.join(", ")
+                ),
+            }
+        }
+    }
+}
+
+/// Resolve a keychain secret under service `"proxxx"`, trying
+/// `<profile>/<item>` first and then flat `<item>` (`#319`, `#329`).
+///
+/// On failure, returns a formatted diagnostic naming service `"proxxx"`, every
+/// account queried in order, and why each account did not yield a secret
+/// (`not found`, `access denied`, or `no keychain store in this build`).
+// Non-macOS builds omit the `spawn_blocking(...).await` keychain lookup.
+#[cfg_attr(
+    not(all(feature = "keychain", target_os = "macos")),
+    allow(clippy::unused_async)
+)]
+async fn keyring_query_scoped(item: &str, profile: Option<&str>) -> KeychainLookupOutcome {
+    const SERVICE: &str = "proxxx";
+    let candidates = keyring_candidates(item, profile);
+
+    #[cfg(test)]
+    {
+        let test_mode = {
+            let guard = TEST_KEYCHAIN_STATE
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.mode.clone()
+        };
+
+        if let Some(mode) = test_mode {
+            return keyring_query_test_mode(SERVICE, &candidates, mode);
+        }
+    }
+
+    if !keychain_store_info().compiled {
+        let accounts_list = candidates.join(", ");
+        return KeychainLookupOutcome::Unavailable {
+            summary: format!(
+                "keychain (service `{SERVICE}`, accounts [{accounts_list}]: no keychain store in this build)"
+            ),
+        };
+    }
+
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
+    {
+        let candidates_for_task = candidates.clone();
+        let res = tokio::task::spawn_blocking(move || -> KeychainLookupOutcome {
+            let mut per_account = Vec::with_capacity(candidates_for_task.len());
+            for name in &candidates_for_task {
+                let outcome = match keyring::Entry::new(SERVICE, name) {
+                    Ok(entry) => match entry.get_password() {
+                        Ok(pw) if pw.is_empty() => KeychainEntryOutcome::Empty,
+                        Ok(pw) => KeychainEntryOutcome::Found(SecretString::new(pw)),
+                        Err(ref e) => classify_keyring_error(e),
+                    },
+                    Err(ref e) => classify_keyring_error(e),
+                };
+                if let KeychainEntryOutcome::Found(secret) = outcome {
+                    return KeychainLookupOutcome::Found(secret);
+                }
+                per_account.push(format!("`{name}` ({})", outcome.diagnostic_reason()));
+            }
+            KeychainLookupOutcome::Unavailable {
+                summary: format!(
+                    "keychain (service `{SERVICE}`, accounts [{}])",
+                    per_account.join(", ")
+                ),
+            }
+        })
+        .await;
+
+        match res {
+            Ok(outcome) => outcome,
+            Err(join_err) => KeychainLookupOutcome::Unavailable {
+                summary: format!(
+                    "keychain (service `{SERVICE}`, accounts [{}]: join error: {join_err})",
+                    candidates.join(", ")
+                ),
+            },
+        }
+    }
+
+    #[cfg(not(all(feature = "keychain", target_os = "macos")))]
+    {
+        let accounts_list = candidates.join(", ");
+        KeychainLookupOutcome::Unavailable {
+            summary: format!(
+                "keychain (service `{SERVICE}`, accounts [{accounts_list}]: no keychain store in this build)"
+            ),
+        }
+    }
 }
 
 /// .10 (audit) — bounded env var read for secrets.
@@ -353,80 +628,198 @@ async fn keyring_get_scoped(item: &str, profile: Option<&str>) -> anyhow::Result
 /// corrupted.
 const ENV_SECRET_MAX_BYTES: usize = 64 * 1024;
 
+fn env_var_secret_checked(name: &str) -> std::result::Result<SecretString, &'static str> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Err("unset"),
+        Err(std::env::VarError::NotUnicode(_)) => Err("invalid UTF-8"),
+        Ok(raw) => {
+            if raw.len() > ENV_SECRET_MAX_BYTES {
+                tracing::warn!(
+                    "env var {name} is {} bytes — exceeds {ENV_SECRET_MAX_BYTES} cap, refusing",
+                    raw.len()
+                );
+                return Err("exceeds 64 KiB cap");
+            }
+            if raw.is_empty() {
+                return Err("empty");
+            }
+            Ok(SecretString::new(raw))
+        }
+    }
+}
+
+#[cfg(test)]
 fn env_var_secret(name: &str) -> Option<SecretString> {
-    let raw = std::env::var(name).ok()?;
-    if raw.len() > ENV_SECRET_MAX_BYTES {
-        tracing::warn!(
-            "env var {name} is {} bytes — exceeds {ENV_SECRET_MAX_BYTES} cap, refusing",
-            raw.len()
-        );
-        return None;
+    env_var_secret_checked(name).ok()
+}
+
+enum SecretFileCheck {
+    Loaded(SecretString),
+    NotConfigured {
+        diagnostic: String,
+    },
+    Failed {
+        diagnostic: String,
+        security_header: Option<String>,
+        blocks_fallback: bool,
+    },
+}
+
+fn check_secret_file(field_name: &str, raw_path: Option<&str>) -> SecretFileCheck {
+    let Some(file_path) = raw_path else {
+        return SecretFileCheck::NotConfigured {
+            diagnostic: format!("{field_name} (not configured)"),
+        };
+    };
+    let expanded = expand_tilde(file_path);
+    let path = expanded.as_path();
+    let expanded_str = path.display().to_string();
+    if !path.exists() {
+        return SecretFileCheck::Failed {
+            diagnostic: format!("{field_name} '{file_path}' (expanded: '{expanded_str}': missing)"),
+            security_header: None,
+            blocks_fallback: true,
+        };
     }
-    if raw.is_empty() {
-        return None;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let header = format!(
+                    "Security Error: {field_name} '{file_path}' ({expanded_str}) has unsafe permissions {mode:04o}. Must be 0600 or stricter."
+                );
+                return SecretFileCheck::Failed {
+                    diagnostic: format!(
+                        "{field_name} '{file_path}' (expanded: '{expanded_str}': bad permissions {mode:04o} — unsafe permissions, must be 0600 or stricter)"
+                    ),
+                    security_header: Some(header),
+                    blocks_fallback: true,
+                };
+            }
+        }
     }
-    Some(SecretString::new(raw))
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                SecretFileCheck::Failed {
+                    diagnostic: format!(
+                        "{field_name} '{file_path}' (expanded: '{expanded_str}': empty)"
+                    ),
+                    security_header: None,
+                    blocks_fallback: false,
+                }
+            } else {
+                SecretFileCheck::Loaded(SecretString::new(trimmed.to_string()))
+            }
+        }
+        Err(e) => SecretFileCheck::Failed {
+            diagnostic: format!(
+                "{field_name} '{file_path}' (expanded: '{expanded_str}': read error: {e})"
+            ),
+            security_header: None,
+            blocks_fallback: true,
+        },
+    }
+}
+
+fn format_sources_tried_error(
+    headline: &str,
+    security_header: Option<&str>,
+    tried: &[String],
+) -> anyhow::Error {
+    let mut numbered = String::new();
+    for (idx, item) in tried.iter().enumerate() {
+        if idx > 0 {
+            numbered.push_str("; ");
+        }
+        let _ = std::fmt::Write::write_fmt(&mut numbered, format_args!("{}. {item}", idx + 1));
+    }
+    if let Some(sec) = security_header {
+        anyhow::anyhow!("{sec} {headline}. Sources tried in order: {numbered}")
+    } else {
+        anyhow::anyhow!("{headline}. Sources tried in order: {numbered}")
+    }
 }
 
 impl PbsConfig {
     /// Resolve the token secret using the same hierarchy as the main
-    /// Proxmox API: CLI override → env → file → keychain.
+    /// Proxmox API: CLI override → env → inline → file → keychain (`#319`, `#329`).
     ///
-    /// Async because the keychain branch must run via
-    /// `spawn_blocking` (audit) — see `keyring_get`.
+    /// Async because the keychain branch runs via `spawn_blocking`.
     pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
-        if let Some(s) = cli_secret {
-            if !s.is_empty() {
-                return Ok(SecretString::from(s));
+        let mut tried: Vec<String> = Vec::with_capacity(5);
+
+        // 1. CLI flag
+        match cli_secret {
+            Some(s) if !s.is_empty() => return Ok(SecretString::from(s)),
+            Some(_) => tried.push("CLI flag --pbs-token-secret (empty)".to_string()),
+            None => tried.push("CLI flag --pbs-token-secret (not given)".to_string()),
+        }
+
+        // 2. Env var
+        match env_var_secret_checked("PROXXX_PBS_TOKEN_SECRET") {
+            Ok(val) => return Ok(val),
+            Err(reason) => tried.push(format!("env var PROXXX_PBS_TOKEN_SECRET ({reason})")),
+        }
+
+        // 3. Inline key
+        match self.token_secret {
+            Some(ref s) if !s.is_empty() => return Ok(s.clone()),
+            Some(_) => tried.push("inline pbs.token_secret (empty)".to_string()),
+            None => tried.push("inline pbs.token_secret (absent)".to_string()),
+        }
+
+        // 4. Secret file
+        let mut blocks_fallback = false;
+        match check_secret_file("pbs.token_secret_file", self.token_secret_file.as_deref()) {
+            SecretFileCheck::Loaded(secret) => return Ok(secret),
+            SecretFileCheck::NotConfigured { diagnostic } => tried.push(diagnostic),
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: Some(sec),
+                blocks_fallback: _,
+            } => {
+                tried.push(diagnostic);
+                return Err(format_sources_tried_error(
+                    "PBS token secret not found",
+                    Some(&sec),
+                    &tried,
+                ));
+            }
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: None,
+                blocks_fallback: blocks,
+            } => {
+                tried.push(diagnostic);
+                blocks_fallback = blocks;
             }
         }
-        if let Some(val) = env_var_secret("PROXXX_PBS_TOKEN_SECRET") {
-            return Ok(val);
-        }
-        if let Some(ref s) = self.token_secret {
-            if !s.is_empty() {
-                return Ok(s.clone());
+
+        // 5. Keychain (`<profile>/pbs_token_secret`, then `pbs_token_secret`)
+        match keyring_query_scoped("pbs_token_secret", self.profile_name.as_deref()).await {
+            KeychainLookupOutcome::Found(val) if !blocks_fallback => return Ok(val),
+            KeychainLookupOutcome::Found(_) => {
+                let candidates =
+                    keyring_candidates("pbs_token_secret", self.profile_name.as_deref());
+                tried.push(format!(
+                    "keychain (service `proxxx`, accounts [{}]: ignored because pbs.token_secret_file failed)",
+                    candidates.join(", ")
+                ));
             }
+            KeychainLookupOutcome::Unavailable { summary } => tried.push(summary),
         }
-        if let Some(ref file_path) = self.token_secret_file {
-            let expanded = expand_tilde(file_path);
-            let path = expanded.as_path();
-            if path.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        let mode = meta.permissions().mode();
-                        if mode & 0o077 != 0 {
-                            anyhow::bail!(
-                                "Security Error: pbs.token_secret_file '{}' ({}) has unsafe permissions {:o}. Must be 0600.",
-                                file_path,
-                                path.display(),
-                                mode & 0o777,
-                            );
-                        }
-                    }
-                }
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    let s = content.trim().to_string();
-                    if !s.is_empty() {
-                        return Ok(SecretString::new(s));
-                    }
-                }
-            } else {
-                anyhow::bail!(
-                    "pbs.token_secret_file '{file_path}' (expanded: '{}') not found",
-                    path.display()
-                );
-            }
-        }
-        #[cfg(feature = "keychain")]
-        {
-            if let Ok(val) = keyring_get("proxxx", "pbs_token_secret").await {
-                return Ok(val);
-            }
-        }
-        anyhow::bail!("PBS token secret not found. Check CLI flag, PROXXX_PBS_TOKEN_SECRET, token_secret_file, or keychain.")
+
+        Err(format_sources_tried_error(
+            "PBS token secret not found",
+            None,
+            &tried,
+        ))
     }
 
     /// Build a [`crate::api::tls_pin::PinnedLeafVerifier`] when
@@ -489,67 +882,90 @@ pub struct TelegramConfig {
     /// operator to configure it. This is fail-closed by design.
     #[serde(default)]
     pub allowed_approvers: Option<Vec<i64>>,
+    /// Resolved profile name stamped by [`load_config_from_path`] (`None` for
+    /// flat top-level config). Used to scope keychain lookups to
+    /// `<profile>/telegram_bot_token` before falling back to `telegram_bot_token`.
+    #[serde(skip)]
+    pub profile_name: Option<String>,
 }
 
 impl TelegramConfig {
-    /// Resolve the bot token using the standard hierarchy:
+    /// Resolve the bot token using the standard hierarchy (`#319`, `#329`):
     /// 1. `PROXXX_TELEGRAM_BOT_TOKEN` env var (capped at 64 KiB)
     /// 2. `bot_token_file` (with 0600 permission check on Unix)
     /// 3. Inline `bot_token` field
-    /// 4. OS keychain entry `proxxx / telegram_bot_token`
-    ///
-    /// Async so the keychain branch can run via `spawn_blocking`
-    /// (audit) — keyring calls block on Linux.
+    /// 4. OS keychain entry (`<profile>/telegram_bot_token`, then `telegram_bot_token`)
     ///
     /// Returns [`SecretString`] so the heap bytes are wiped on drop and
     /// any `{:?}` prints `[REDACTED]`, matching the PVE/PBS pattern.
     pub async fn resolve_bot_token(&self) -> Result<SecretString> {
-        if let Some(val) = env_var_secret("PROXXX_TELEGRAM_BOT_TOKEN") {
-            return Ok(val);
+        let mut tried: Vec<String> = Vec::with_capacity(4);
+
+        // 1. Env var
+        match env_var_secret_checked("PROXXX_TELEGRAM_BOT_TOKEN") {
+            Ok(val) => return Ok(val),
+            Err(reason) => tried.push(format!("env var PROXXX_TELEGRAM_BOT_TOKEN ({reason})")),
         }
-        if let Some(ref file_path) = self.bot_token_file {
-            let expanded = expand_tilde(file_path);
-            let path = expanded.as_path();
-            if path.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        let mode = meta.permissions().mode();
-                        if mode & 0o077 != 0 {
-                            anyhow::bail!(
-                                "Security Error: telegram.bot_token_file '{}' ({}) has unsafe permissions {:o}. Must be 0600.",
-                                file_path,
-                                path.display(),
-                                mode & 0o777,
-                            );
-                        }
-                    }
-                }
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    let s = content.trim().to_string();
-                    if !s.is_empty() {
-                        return Ok(SecretString::new(s));
-                    }
-                }
+
+        // 2. Secret file
+        let mut blocks_fallback = false;
+        match check_secret_file("telegram.bot_token_file", self.bot_token_file.as_deref()) {
+            SecretFileCheck::Loaded(secret) => return Ok(secret),
+            SecretFileCheck::NotConfigured { diagnostic } => tried.push(diagnostic),
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: Some(sec),
+                blocks_fallback: _,
+            } => {
+                tried.push(diagnostic);
+                return Err(format_sources_tried_error(
+                    "Telegram bot token not found",
+                    Some(&sec),
+                    &tried,
+                ));
+            }
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: None,
+                blocks_fallback: blocks,
+            } => {
+                tried.push(diagnostic);
+                blocks_fallback = blocks;
             }
         }
-        if let Some(ref s) = self.bot_token {
-            if !s.is_empty() {
-                return Ok(s.clone());
+
+        // 3. Inline key
+        match self.bot_token {
+            Some(ref s) if !s.is_empty() && !blocks_fallback => return Ok(s.clone()),
+            Some(ref s) if !s.is_empty() => {
+                tried.push(
+                    "inline telegram.bot_token (ignored because telegram.bot_token_file failed)"
+                        .to_string(),
+                );
             }
+            Some(_) => tried.push("inline telegram.bot_token (empty)".to_string()),
+            None => tried.push("inline telegram.bot_token (absent)".to_string()),
         }
-        #[cfg(feature = "keychain")]
-        {
-            if let Ok(val) = keyring_get("proxxx", "telegram_bot_token").await {
-                return Ok(val);
+
+        // 4. Keychain (`<profile>/telegram_bot_token`, then `telegram_bot_token`)
+        match keyring_query_scoped("telegram_bot_token", self.profile_name.as_deref()).await {
+            KeychainLookupOutcome::Found(val) if !blocks_fallback => return Ok(val),
+            KeychainLookupOutcome::Found(_) => {
+                let candidates =
+                    keyring_candidates("telegram_bot_token", self.profile_name.as_deref());
+                tried.push(format!(
+                    "keychain (service `proxxx`, accounts [{}]: ignored because telegram.bot_token_file failed)",
+                    candidates.join(", ")
+                ));
             }
+            KeychainLookupOutcome::Unavailable { summary } => tried.push(summary),
         }
-        anyhow::bail!(
-            "Telegram bot token not found. Check PROXXX_TELEGRAM_BOT_TOKEN env, \
-             telegram.bot_token_file, inline telegram.bot_token, or keychain entry \
-             proxxx/telegram_bot_token."
-        )
+
+        Err(format_sources_tried_error(
+            "Telegram bot token not found",
+            None,
+            &tried,
+        ))
     }
 }
 
@@ -914,114 +1330,107 @@ impl ProfileConfig {
     }
 
     pub async fn resolve_token_secret(&self, cli_secret: Option<&str>) -> Result<SecretString> {
+        let mut tried: Vec<String> = Vec::with_capacity(5);
+
         // 1. CLI Flag
-        if let Some(secret) = cli_secret {
-            if !secret.is_empty() {
-                return Ok(SecretString::from(secret));
-            }
+        match cli_secret {
+            Some(secret) if !secret.is_empty() => return Ok(SecretString::from(secret)),
+            Some(_) => tried.push("CLI flag --token-secret (empty)".to_string()),
+            None => tried.push("CLI flag --token-secret (not given)".to_string()),
         }
 
         // 2. Environment variable (— 64 KiB cap)
-        if let Some(val) = env_var_secret("PROXXX_TOKEN_SECRET") {
-            return Ok(val);
+        match env_var_secret_checked("PROXXX_TOKEN_SECRET") {
+            Ok(val) => return Ok(val),
+            Err(reason) => tried.push(format!("env var PROXXX_TOKEN_SECRET ({reason})")),
         }
 
         // 3. Inline `token_secret = "..."` in the config file.
-        //
-        // Bug fix from live cluster test: this branch was missing
-        // entirely — the field was advertised in `docs/config.example.toml`
-        // and accepted by serde, but the resolver only consulted CLI /
-        // env / file / keychain, so users who put the secret directly
-        // in config.toml got "Token secret not found" with no hint.
-        // PbsConfig already had the equivalent branch; this aligns
-        // the two resolvers.
-        if let Some(ref s) = self.token_secret {
-            if !s.is_empty() {
-                return Ok(s.clone());
-            }
+        match self.token_secret {
+            Some(ref s) if !s.is_empty() => return Ok(s.clone()),
+            Some(_) => tried.push("inline token_secret (empty)".to_string()),
+            None => tried.push("inline token_secret (absent)".to_string()),
         }
 
         // 4. Secure File
-        if let Some(ref file_path) = self.token_secret_file {
-            let expanded = expand_tilde(file_path);
-            let path = expanded.as_path();
-            if path.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(path) {
-                        let mode = meta.permissions().mode();
-                        if mode & 0o077 != 0 {
-                            anyhow::bail!(
-                                "Security Error: token_secret_file '{}' ({}) has unsafe permissions {:o}. Must be 0600 or stricter.",
-                                file_path,
-                                path.display(),
-                                mode & 0o777
-                            );
-                        }
-                    }
-                }
-
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    let secret = content.trim().to_string();
-                    if !secret.is_empty() {
-                        return Ok(SecretString::new(secret));
-                    }
-                }
-            } else {
-                anyhow::bail!(
-                    "token_secret_file '{file_path}' (expanded: '{}') not found",
-                    path.display()
-                );
+        let mut blocks_fallback = false;
+        match check_secret_file("token_secret_file", self.token_secret_file.as_deref()) {
+            SecretFileCheck::Loaded(secret) => return Ok(secret),
+            SecretFileCheck::NotConfigured { diagnostic } => tried.push(diagnostic),
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: Some(sec),
+                blocks_fallback: _,
+            } => {
+                tried.push(diagnostic);
+                return Err(format_sources_tried_error(
+                    "Token secret not found",
+                    Some(&sec),
+                    &tried,
+                ));
+            }
+            SecretFileCheck::Failed {
+                diagnostic,
+                security_header: None,
+                blocks_fallback: blocks,
+            } => {
+                tried.push(diagnostic);
+                blocks_fallback = blocks;
             }
         }
 
-        // 5. OS Keychain (if feature enabled) — blocking
-        // call wrapped in spawn_blocking via `keyring_get`.
-        #[cfg(feature = "keychain")]
-        {
-            if let Ok(val) = keyring_get_scoped("token_secret", self.profile_name.as_deref()).await
-            {
-                return Ok(val);
+        // 5. OS Keychain (`<profile>/token_secret`, then `token_secret`)
+        match keyring_query_scoped("token_secret", self.profile_name.as_deref()).await {
+            KeychainLookupOutcome::Found(val) if !blocks_fallback => return Ok(val),
+            KeychainLookupOutcome::Found(_) => {
+                let candidates = keyring_candidates("token_secret", self.profile_name.as_deref());
+                tried.push(format!(
+                    "keychain (service `proxxx`, accounts [{}]: ignored because token_secret_file failed)",
+                    candidates.join(", ")
+                ));
             }
+            KeychainLookupOutcome::Unavailable { summary } => tried.push(summary),
         }
 
-        anyhow::bail!("Token secret not found. Check CLI args, PROXXX_TOKEN_SECRET, inline `token_secret =` in config.toml, token_secret_file, or keychain.")
+        Err(format_sources_tried_error(
+            "Token secret not found",
+            None,
+            &tried,
+        ))
     }
 
-    /// Resolve password from env, config, or keychain. Async because
-    /// the keychain branch goes through `spawn_blocking` (audit).
+    /// Resolve password from env, config, or keychain (`#319`, `#329`).
     ///
     /// Resolution order — env > inline config > keychain — matches
     /// `resolve_token_secret` so operators get the SAME precedence
-    /// rules regardless of which auth method their profile uses. The
-    /// pre-Phase 18 order put inline-config first, which made
-    /// `PROXXX_PASSWORD` silently unreachable on any profile that
-    /// also had `password =` in `config.toml`. That broke
-    /// credential rotation at runtime (the documented escape hatch)
-    /// AND broke the `beta_bad_token_surfaces_401_cleanly` E2E test
-    /// on password-auth configs.
+    /// rules regardless of which auth method their profile uses.
     pub async fn resolve_password(&self) -> Result<SecretString> {
-        // Env beats inline — matches the token-secret hierarchy and
-        // the long-standing "env always wins" promise in the docs.
-        if let Some(val) = env_var_secret("PROXXX_PASSWORD") {
-            return Ok(val);
+        let mut tried: Vec<String> = Vec::with_capacity(3);
+
+        // 1. Environment variable
+        match env_var_secret_checked("PROXXX_PASSWORD") {
+            Ok(val) => return Ok(val),
+            Err(reason) => tried.push(format!("env var PROXXX_PASSWORD ({reason})")),
         }
 
-        if let Some(ref pw) = self.password {
-            if !pw.is_empty() {
-                return Ok(pw.clone());
-            }
+        // 2. Inline `password = "..."`
+        match self.password {
+            Some(ref pw) if !pw.is_empty() => return Ok(pw.clone()),
+            Some(_) => tried.push("inline password (empty)".to_string()),
+            None => tried.push("inline password (absent)".to_string()),
         }
 
-        #[cfg(feature = "keychain")]
-        {
-            if let Ok(val) = keyring_get_scoped("password", self.profile_name.as_deref()).await {
-                return Ok(val);
-            }
+        // 3. OS Keychain (`<profile>/password`, then `password`)
+        match keyring_query_scoped("password", self.profile_name.as_deref()).await {
+            KeychainLookupOutcome::Found(val) => return Ok(val),
+            KeychainLookupOutcome::Unavailable { summary } => tried.push(summary),
         }
 
-        anyhow::bail!("Password not found. Set it via PROXXX_PASSWORD env var, inline `password =` in config.toml, or `proxxx auth login`")
+        Err(format_sources_tried_error(
+            "Password not found",
+            None,
+            &tried,
+        ))
     }
 
     /// Resolved profile label (`#346`, Decision 1): returns the effective
@@ -1344,6 +1753,12 @@ pub fn load_config_from_path(
     // only the global lock. Note this is `effective`, not the raw CLI arg,
     // so a `default = "x"` key or single-profile auto-default is attributed.
     cfg.profile_name = effective;
+    if let Some(ref mut pbs) = cfg.pbs {
+        pbs.profile_name.clone_from(&cfg.profile_name);
+    }
+    if let Some(ref mut tg) = cfg.telegram {
+        tg.profile_name.clone_from(&cfg.profile_name);
+    }
     cfg.validate_enum_like_fields()?;
     cfg.warn_on_shadowed_secret_sources();
     Ok(cfg)
@@ -1936,5 +2351,506 @@ user = "root@pam"
         parse(BASE)
             .validate_enum_like_fields()
             .expect("omitting tls_pin_mode means no pinning, which is valid");
+    }
+}
+
+#[cfg(test)]
+mod keychain_and_secret_resolution_tests {
+    use super::*;
+    use crate::cli::doctor::check_keychain_for_store;
+    use std::collections::HashMap;
+
+    fn clear_secret_env_vars() {
+        std::env::remove_var("PROXXX_TOKEN_SECRET");
+        std::env::remove_var("PROXXX_PASSWORD");
+        std::env::remove_var("PROXXX_PBS_TOKEN_SECRET");
+        std::env::remove_var("PROXXX_TELEGRAM_BOT_TOKEN");
+    }
+
+    /// Test 1 (`#319`, macOS-only): the compiled default credential builder
+    /// reports `CredentialPersistence::UntilDelete` (real macOS Security.framework
+    /// store via `apple-native`), not `EntryOnly` (keyring's in-memory mock).
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
+    #[test]
+    fn macos_default_credential_builder_reports_persistent_store() {
+        assert!(
+            matches!(
+                keyring::default::default_credential_builder().persistence(),
+                keyring::credential::CredentialPersistence::UntilDelete
+            ),
+            "macOS build must wire keyring with apple-native (UntilDelete persistence), not the EntryOnly mock store"
+        );
+        let info = keychain_store_info();
+        assert!(info.compiled, "keychain_store_info().compiled must be true");
+        assert_eq!(info.store, "macos-keychain");
+    }
+
+    /// Test 5 (Linux / non-macOS native check): when not built on macOS with
+    /// `keychain`, `keychain_store_info()` reports `compiled: false, store: "none"`.
+    #[cfg(not(all(feature = "keychain", target_os = "macos")))]
+    #[test]
+    fn non_macos_keychain_store_info_reports_none() {
+        let info = keychain_store_info();
+        assert!(!info.compiled);
+        assert_eq!(info.store, "none");
+    }
+
+    /// Test 2 (`#319` + consistent keychain account names):
+    /// With an injected keychain (`TestKeychainGuard`), `load_config_from_path`
+    /// stamps `profile_name` on `ProfileConfig`, `PbsConfig`, and `TelegramConfig`,
+    /// and all four resolvers (`token_secret`, `password`, `pbs_token_secret`,
+    /// `telegram_bot_token`) resolve `<profile>/<item>` first, then fall back to
+    /// the flat `<item>` name.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_2_injected_keychain_resolves_profile_scoped_then_flat_names() {
+        clear_secret_env_vars();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+default = "pve-test"
+
+[profiles.pve-test]
+url = "https://127.0.0.1:8006"
+user = "root@pam"
+token_id = "proxxx"
+
+[profiles.pve-test.pbs]
+url = "https://127.0.0.1:8007"
+user = "backup@pbs"
+token_id = "reader"
+
+[profiles.pve-test.telegram]
+chat_id = "12345"
+"#,
+        )
+        .expect("write config.toml");
+
+        let cfg = load_config_from_path(&cfg_path, None).expect("load config");
+        assert_eq!(cfg.profile_name.as_deref(), Some("pve-test"));
+        assert_eq!(
+            cfg.pbs.as_ref().unwrap().profile_name.as_deref(),
+            Some("pve-test")
+        );
+        assert_eq!(
+            cfg.telegram.as_ref().unwrap().profile_name.as_deref(),
+            Some("pve-test")
+        );
+
+        // 2a. Both `<profile>/<item>` and flat `<item>` present -> `<profile>/<item>` wins.
+        let mut scoped_and_flat = HashMap::new();
+        for (item, scoped_val, flat_val) in [
+            ("token_secret", "pve-scoped-val", "pve-flat-val"),
+            ("password", "pw-scoped-val", "pw-flat-val"),
+            ("pbs_token_secret", "pbs-scoped-val", "pbs-flat-val"),
+            ("telegram_bot_token", "tg-scoped-val", "tg-flat-val"),
+        ] {
+            scoped_and_flat.insert(
+                ("proxxx".to_string(), format!("pve-test/{item}")),
+                KeychainEntryOutcome::Found(SecretString::from(scoped_val)),
+            );
+            scoped_and_flat.insert(
+                ("proxxx".to_string(), item.to_string()),
+                KeychainEntryOutcome::Found(SecretString::from(flat_val)),
+            );
+        }
+        {
+            let guard = TestKeychainGuard::install(TestKeychainMode::Entries(scoped_and_flat));
+            assert_eq!(
+                cfg.resolve_token_secret(None).await.unwrap().expose(),
+                "pve-scoped-val"
+            );
+            assert_eq!(
+                cfg.resolve_password().await.unwrap().expose(),
+                "pw-scoped-val"
+            );
+            assert_eq!(
+                cfg.pbs
+                    .as_ref()
+                    .unwrap()
+                    .resolve_token_secret(None)
+                    .await
+                    .unwrap()
+                    .expose(),
+                "pbs-scoped-val"
+            );
+            assert_eq!(
+                cfg.telegram
+                    .as_ref()
+                    .unwrap()
+                    .resolve_bot_token()
+                    .await
+                    .unwrap()
+                    .expose(),
+                "tg-scoped-val"
+            );
+            assert_eq!(
+                guard.consult_count(),
+                4,
+                "each resolver must stop after the first hit on <profile>/<item>"
+            );
+        }
+
+        // 2b. Only flat `<item>` present -> falls back to flat `<item>`.
+        let mut flat_only = HashMap::new();
+        for (item, flat_val) in [
+            ("token_secret", "pve-flat-only"),
+            ("password", "pw-flat-only"),
+            ("pbs_token_secret", "pbs-flat-only"),
+            ("telegram_bot_token", "tg-flat-only"),
+        ] {
+            flat_only.insert(
+                ("proxxx".to_string(), item.to_string()),
+                KeychainEntryOutcome::Found(SecretString::from(flat_val)),
+            );
+        }
+        {
+            let guard = TestKeychainGuard::install(TestKeychainMode::Entries(flat_only));
+            assert_eq!(
+                cfg.resolve_token_secret(None).await.unwrap().expose(),
+                "pve-flat-only"
+            );
+            assert_eq!(
+                cfg.resolve_password().await.unwrap().expose(),
+                "pw-flat-only"
+            );
+            assert_eq!(
+                cfg.pbs
+                    .as_ref()
+                    .unwrap()
+                    .resolve_token_secret(None)
+                    .await
+                    .unwrap()
+                    .expose(),
+                "pbs-flat-only"
+            );
+            assert_eq!(
+                cfg.telegram
+                    .as_ref()
+                    .unwrap()
+                    .resolve_bot_token()
+                    .await
+                    .unwrap()
+                    .expose(),
+                "tg-flat-only"
+            );
+            assert_eq!(
+                guard.consult_count(),
+                8,
+                "each resolver queries <profile>/<item> (miss) then <item> (hit)"
+            );
+        }
+    }
+
+    /// Test 3a (`#329`):
+    /// With no source available, `ProfileConfig::resolve_token_secret`,
+    /// `ProfileConfig::resolve_password`, `PbsConfig::resolve_token_secret`, and
+    /// `TelegramConfig::resolve_bot_token` list every source tried in order,
+    /// name every keychain account queried, and never print any secret value
+    /// (verified with canary secrets in a decoy profile's keychain accounts).
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_3a_secret_not_found_lists_all_sources_in_order_and_leaks_no_canary() {
+        clear_secret_env_vars();
+
+        let canary_pve = "CANARY-PVE-SECRET-329-DO-NOT-PRINT";
+        let canary_pw = "CANARY-PW-SECRET-329-DO-NOT-PRINT";
+        let canary_pbs = "CANARY-PBS-SECRET-329-DO-NOT-PRINT";
+        let canary_tg = "CANARY-TG-SECRET-329-DO-NOT-PRINT";
+
+        let mut decoy_entries = HashMap::new();
+        decoy_entries.insert(
+            (
+                "proxxx".to_string(),
+                "other-profile/token_secret".to_string(),
+            ),
+            KeychainEntryOutcome::Found(SecretString::from(canary_pve)),
+        );
+        decoy_entries.insert(
+            ("proxxx".to_string(), "other-profile/password".to_string()),
+            KeychainEntryOutcome::Found(SecretString::from(canary_pw)),
+        );
+        decoy_entries.insert(
+            (
+                "proxxx".to_string(),
+                "other-profile/pbs_token_secret".to_string(),
+            ),
+            KeychainEntryOutcome::Found(SecretString::from(canary_pbs)),
+        );
+        decoy_entries.insert(
+            (
+                "proxxx".to_string(),
+                "other-profile/telegram_bot_token".to_string(),
+            ),
+            KeychainEntryOutcome::Found(SecretString::from(canary_tg)),
+        );
+        let _guard = TestKeychainGuard::install(TestKeychainMode::Entries(decoy_entries));
+
+        let mut cfg: ProfileConfig = toml::from_str(
+            r#"
+url = "https://127.0.0.1:8006"
+user = "root@pam"
+token_id = "proxxx"
+
+[pbs]
+url = "https://127.0.0.1:8007"
+user = "backup@pbs"
+token_id = "reader"
+
+[telegram]
+chat_id = "12345"
+"#,
+        )
+        .expect("parse profile");
+        cfg.profile_name = Some("pve-test".to_string());
+        cfg.pbs.as_mut().unwrap().profile_name = Some("pve-test".to_string());
+        cfg.telegram.as_mut().unwrap().profile_name = Some("pve-test".to_string());
+
+        // 1. PVE token_secret
+        let pve_msg = format!("{:#}", cfg.resolve_token_secret(None).await.unwrap_err());
+        let i_cli = pve_msg
+            .find("1. CLI flag --token-secret (not given)")
+            .expect(&pve_msg);
+        let i_env = pve_msg
+            .find("2. env var PROXXX_TOKEN_SECRET (unset)")
+            .expect(&pve_msg);
+        let i_inl = pve_msg
+            .find("3. inline token_secret (absent)")
+            .expect(&pve_msg);
+        let i_fil = pve_msg
+            .find("4. token_secret_file (not configured)")
+            .expect(&pve_msg);
+        let i_kc = pve_msg
+            .find("5. keychain (service `proxxx`, accounts [`pve-test/token_secret` (not found), `token_secret` (not found)])")
+            .expect(&pve_msg);
+        assert!(i_cli < i_env && i_env < i_inl && i_inl < i_fil && i_fil < i_kc);
+        assert!(!pve_msg.contains(canary_pve) && !pve_msg.contains("CANARY-"));
+
+        // 2. PVE password
+        let pw_msg = format!("{:#}", cfg.resolve_password().await.unwrap_err());
+        assert!(
+            pw_msg.contains("1. env var PROXXX_PASSWORD (unset)"),
+            "{pw_msg}"
+        );
+        assert!(pw_msg.contains("2. inline password (absent)"), "{pw_msg}");
+        assert!(
+            pw_msg.contains("3. keychain (service `proxxx`, accounts [`pve-test/password` (not found), `password` (not found)])"),
+            "{pw_msg}"
+        );
+        assert!(!pw_msg.contains(canary_pw) && !pw_msg.contains("CANARY-"));
+
+        // 3. PBS token_secret
+        let pbs_msg = format!(
+            "{:#}",
+            cfg.pbs
+                .as_ref()
+                .unwrap()
+                .resolve_token_secret(None)
+                .await
+                .unwrap_err()
+        );
+        assert!(
+            pbs_msg.contains("1. CLI flag --pbs-token-secret (not given)"),
+            "{pbs_msg}"
+        );
+        assert!(
+            pbs_msg.contains("2. env var PROXXX_PBS_TOKEN_SECRET (unset)"),
+            "{pbs_msg}"
+        );
+        assert!(
+            pbs_msg.contains("3. inline pbs.token_secret (absent)"),
+            "{pbs_msg}"
+        );
+        assert!(
+            pbs_msg.contains("4. pbs.token_secret_file (not configured)"),
+            "{pbs_msg}"
+        );
+        assert!(
+            pbs_msg.contains("5. keychain (service `proxxx`, accounts [`pve-test/pbs_token_secret` (not found), `pbs_token_secret` (not found)])"),
+            "{pbs_msg}"
+        );
+        assert!(!pbs_msg.contains(canary_pbs) && !pbs_msg.contains("CANARY-"));
+
+        // 4. Telegram bot_token
+        let tg_msg = format!(
+            "{:#}",
+            cfg.telegram
+                .as_ref()
+                .unwrap()
+                .resolve_bot_token()
+                .await
+                .unwrap_err()
+        );
+        assert!(
+            tg_msg.contains("1. env var PROXXX_TELEGRAM_BOT_TOKEN (unset)"),
+            "{tg_msg}"
+        );
+        assert!(
+            tg_msg.contains("2. telegram.bot_token_file (not configured)"),
+            "{tg_msg}"
+        );
+        assert!(
+            tg_msg.contains("3. inline telegram.bot_token (absent)"),
+            "{tg_msg}"
+        );
+        assert!(
+            tg_msg.contains("4. keychain (service `proxxx`, accounts [`pve-test/telegram_bot_token` (not found), `telegram_bot_token` (not found)])"),
+            "{tg_msg}"
+        );
+        assert!(!tg_msg.contains(canary_tg) && !tg_msg.contains("CANARY-"));
+    }
+
+    /// Test 3b (`#329`):
+    /// Exercises `token_secret_file` diagnostics (`missing`, `bad permissions`,
+    /// `empty`) and keychain `access denied` without leaking any file content.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_3b_secret_file_states_and_keychain_access_denied_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+
+        clear_secret_env_vars();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            ("proxxx".to_string(), "pve-test/token_secret".to_string()),
+            KeychainEntryOutcome::AccessDenied("User interaction is not allowed".to_string()),
+        );
+        let _guard = TestKeychainGuard::install(TestKeychainMode::Entries(entries));
+
+        // 1. Missing file
+        let missing_path = tmp.path().join("missing.token");
+        let mut cfg: ProfileConfig = toml::from_str(&format!(
+            "url = \"https://127.0.0.1:8006\"\nuser = \"root@pam\"\ntoken_secret_file = \"{}\"\n",
+            missing_path.display()
+        ))
+        .unwrap();
+        cfg.profile_name = Some("pve-test".to_string());
+        let msg_missing = format!("{:#}", cfg.resolve_token_secret(None).await.unwrap_err());
+        assert!(
+            msg_missing.contains(": missing)")
+                && msg_missing.contains(
+                    "`pve-test/token_secret` (access denied: User interaction is not allowed)"
+                )
+                && msg_missing.contains("`token_secret` (not found)"),
+            "unexpected missing-file diagnostic: {msg_missing}"
+        );
+
+        // 2. Bad permissions (0644) with a canary secret inside the file
+        let lax_path = tmp.path().join("lax.token");
+        let file_canary = "CANARY-LAX-FILE-SECRET-329";
+        std::fs::write(&lax_path, file_canary).unwrap();
+        std::fs::set_permissions(&lax_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        cfg.token_secret_file = Some(lax_path.display().to_string());
+        let msg_lax = format!("{:#}", cfg.resolve_token_secret(None).await.unwrap_err());
+        assert!(
+            msg_lax.contains("bad permissions 0644") && msg_lax.contains("Must be 0600"),
+            "unexpected bad-permissions diagnostic: {msg_lax}"
+        );
+        assert!(
+            !msg_lax.contains(file_canary),
+            "bad-permissions error must never print file contents: {msg_lax}"
+        );
+
+        // 3. Empty file (0600)
+        let empty_path = tmp.path().join("empty.token");
+        std::fs::write(&empty_path, "   \n").unwrap();
+        std::fs::set_permissions(&empty_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        cfg.token_secret_file = Some(empty_path.display().to_string());
+        let msg_empty = format!("{:#}", cfg.resolve_token_secret(None).await.unwrap_err());
+        assert!(
+            msg_empty.contains(": empty)")
+                && msg_empty.contains(
+                    "`pve-test/token_secret` (access denied: User interaction is not allowed)"
+                )
+                && msg_empty.contains("`token_secret` (not found)"),
+            "unexpected empty-file diagnostic: {msg_empty}"
+        );
+    }
+
+    /// Test 5 (`#319`, `#329`, `#332` Linux / no-store behaviour):
+    /// - `check_keychain_for_store` with `compiled: false, store: "none"` reports
+    ///   `warn` with `"no keychain store in this build (Linux): use token_secret_file or env"`.
+    /// - When no store is compiled in (`TestKeychainMode::NoStoreCompiled`), none
+    ///   of the four secret resolvers ever consults a store (`consult_count() == 0`)
+    ///   and each reports `"no keychain store in this build"`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_5_linux_no_store_doctor_warn_and_resolvers_never_consult_store() {
+        clear_secret_env_vars();
+
+        let linux_check = check_keychain_for_store(
+            KeychainStoreInfo {
+                compiled: false,
+                store: "none",
+            },
+            "Linux",
+        );
+        assert_eq!(linux_check["check"], "keychain");
+        assert_eq!(linux_check["status"], "warn");
+        assert_eq!(
+            linux_check["message"],
+            "no keychain store in this build (Linux): use token_secret_file or env"
+        );
+
+        let guard = TestKeychainGuard::install(TestKeychainMode::NoStoreCompiled);
+        let mut cfg: ProfileConfig = toml::from_str(
+            r#"
+url = "https://127.0.0.1:8006"
+user = "root@pam"
+token_id = "proxxx"
+
+[pbs]
+url = "https://127.0.0.1:8007"
+user = "backup@pbs"
+token_id = "reader"
+
+[telegram]
+chat_id = "12345"
+"#,
+        )
+        .expect("parse profile");
+        cfg.profile_name = Some("pve-test".to_string());
+        cfg.pbs.as_mut().unwrap().profile_name = Some("pve-test".to_string());
+        cfg.telegram.as_mut().unwrap().profile_name = Some("pve-test".to_string());
+
+        let pve_err = format!("{:#}", cfg.resolve_token_secret(None).await.unwrap_err());
+        let pw_err = format!("{:#}", cfg.resolve_password().await.unwrap_err());
+        let pbs_err = format!(
+            "{:#}",
+            cfg.pbs
+                .as_ref()
+                .unwrap()
+                .resolve_token_secret(None)
+                .await
+                .unwrap_err()
+        );
+        let tg_err = format!(
+            "{:#}",
+            cfg.telegram
+                .as_ref()
+                .unwrap()
+                .resolve_bot_token()
+                .await
+                .unwrap_err()
+        );
+
+        assert_eq!(
+            guard.consult_count(),
+            0,
+            "resolver must never consult a keychain store when no store is compiled in"
+        );
+        for msg in [&pve_err, &pw_err, &pbs_err, &tg_err] {
+            assert!(
+                msg.contains("no keychain store in this build"),
+                "expected 'no keychain store in this build', got: {msg}"
+            );
+        }
     }
 }

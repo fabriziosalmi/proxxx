@@ -44,20 +44,34 @@ For `auth = "password"`, set `password`,
 
 ## Secrets
 
-The resolution order for token / password / PBS secret is:
+The resolution order for PVE (`token_secret`, `password`), PBS (`pbs.token_secret`), and Telegram (`telegram.bot_token`) is:
 
-1. **CLI flag** (`--token-secret VALUE`) — highest priority, takes
+1. **CLI flag** (`--token-secret VALUE`, `--pbs-token-secret VALUE`) — highest priority, takes
    precedence over everything else.
-2. **Environment variable** — `PROXXX_TOKEN_SECRET`,
-   `PROXXX_PASSWORD`, or `PROXXX_PBS_TOKEN_SECRET`.
-3. **File reference** — `token_secret_file = "~/.config/proxxx/secrets/pve.token"`
-   (or `/etc/proxxx/token`). Leading `~` and `~/...` are expanded against
-   `$HOME` (`pbs.token_secret_file` and `telegram.bot_token_file` use the
-   same expansion). On Unix the file must have mode `0600` or stricter;
+2. **Environment variable** (`PROXXX_TOKEN_SECRET`, `PROXXX_PASSWORD`,
+   `PROXXX_PBS_TOKEN_SECRET`, or `PROXXX_TELEGRAM_BOT_TOKEN`; capped at 64 KiB).
+3. **Inline TOML key** (`token_secret`, `password`, `pbs.token_secret`; note that for Telegram, `telegram.bot_token_file` is checked before inline `telegram.bot_token`).
+4. **File reference** — `token_secret_file = "~/.config/proxxx/secrets/pve.token"`
+   (or `pbs.token_secret_file`, `telegram.bot_token_file`). Leading `~` and `~/...`
+   are expanded against `$HOME`. On Unix the file must have mode `0600` or stricter;
    proxxx refuses to read files with group or world permissions.
-4. **OS keychain** — last resort. Service `proxxx`, key
-   `token_secret` / `password` / `pbs_token_secret`. Disabled if you
-   build with `--no-default-features`.
+5. **macOS Keychain (macOS only)** — last resort. Service is always `proxxx`.
+   For a named profile `<profile>`, proxxx queries the profile-scoped account first
+   and falls back to the flat account name:
+   - PVE API token secret: `<profile>/token_secret`, then `token_secret`
+   - PVE password: `<profile>/password`, then `password`
+   - PBS API token secret: `<profile>/pbs_token_secret`, then `pbs_token_secret`
+   - Telegram bot token: `<profile>/telegram_bot_token`, then `telegram_bot_token`
+
+   The keychain backend (`keyring` with `apple-native` / Security.framework) is
+   compiled on macOS only (`--no-default-features` disables it on macOS; on Linux
+   and other targets the `keychain` Cargo feature is a no-op and no keychain store
+   is compiled in — use `token_secret_file` or environment variables there).
+   Verify whether a keychain store is compiled into your binary with
+   `proxxx version --json` (`keychain.compiled` / `keychain.store`) or `proxxx doctor`.
+
+When no secret can be resolved, the error lists every source consulted in order
+and why each did not yield a secret (without ever printing a secret value).
 
 Once loaded, secrets live in `Zeroizing<String>` — they are wiped from
 the heap on `Drop` . They are never written to logs.

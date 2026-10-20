@@ -316,6 +316,7 @@ mod tests {
             verify_tls: true,
             fingerprint: None,
             rate_limit: None,
+            profile_name: None,
         }
     }
 

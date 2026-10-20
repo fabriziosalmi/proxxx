@@ -227,12 +227,12 @@ intentional, see [Alerts](/integrations/alerts).
 
 For each of `token_secret`, `password`, `pbs.token_secret`:
 
-1. CLI flag (`--token-secret VALUE`)
+1. CLI flag (`--token-secret VALUE`, `--pbs-token-secret VALUE`)
 2. Env var (`PROXXX_TOKEN_SECRET`, `PROXXX_PASSWORD`,
-   `PROXXX_PBS_TOKEN_SECRET`)
+   `PROXXX_PBS_TOKEN_SECRET`, `PROXXX_TELEGRAM_BOT_TOKEN`)
 3. **Inline TOML value** (`<...>_secret = "..."`)
 4. **File reference** (`<...>_secret_file = "..."`)
-5. OS keychain (service `proxxx`, key matches the field name)
+5. **macOS Keychain** (macOS only; service `proxxx`, account `<profile>/<item>` then `<item>` for `token_secret`, `password`, `pbs_token_secret`, and `telegram_bot_token`)
 
 The first one that resolves wins.
 

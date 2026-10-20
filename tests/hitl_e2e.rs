@@ -2372,6 +2372,7 @@ async fn env_var_beats_inline_bot_token() {
         bot_token: Some(proxxx::util::secret::SecretString::from("inline-loser")),
         bot_token_file: None,
         chat_id: "12345".to_string(),
+        profile_name: None,
     };
 
     // Sanity: with no env, inline wins.
@@ -2406,6 +2407,7 @@ async fn bot_token_file_with_lax_permissions_is_refused() {
         bot_token: None,
         bot_token_file: Some(path.to_string_lossy().to_string()),
         chat_id: "12345".to_string(),
+        profile_name: None,
     };
     // Make sure no env override leaks in from a previous serial test.
     std::env::remove_var("PROXXX_TELEGRAM_BOT_TOKEN");

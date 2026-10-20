@@ -99,23 +99,18 @@ Disabling TLS verification exposes the **entire API + WebSocket
 traffic** (including serial-console tickets) to any MITM on the
 path.
 
-### `[ ]` Store the token secret in the OS keychain or a 0600 file, not inline
+### `[ ]` Store the token secret in a 0600 file or the macOS Keychain, not inline
 
 ```bash
-# Option A: macOS keychain
+# Option A: macOS Keychain (macOS only; service `proxxx`, account `<profile>/token_secret` or `token_secret`)
 security add-generic-password \
-  -a "$USER" -s proxxx -w "<token-uuid>"
+  -s proxxx -a "<profile>/token_secret" -w "<token-uuid>"
 
-# Option B: Linux secret-service (gnome-keyring / kwallet)
-secret-tool store --label proxxx service proxxx account token_secret
-# (proxxx reads via the `keyring` crate, falling back to
-# secret-service on Linux, libsecret on macOS keychain)
-
-# Option C: 0600 file referenced from config.toml
-mkdir -p ~/.config/proxxx
-printf '%s' '<uuid>' > ~/.config/proxxx/token.secret
-chmod 600 ~/.config/proxxx/token.secret
-# token_secret_file = "~/.config/proxxx/token.secret" in config.toml
+# Option B: 0600 file referenced from config.toml (Linux and macOS)
+mkdir -p ~/.config/proxxx/secrets
+printf '%s' '<uuid>' > ~/.config/proxxx/secrets/pve.token
+chmod 600 ~/.config/proxxx/secrets/pve.token
+# token_secret_file = "~/.config/proxxx/secrets/pve.token" in config.toml
 ```
 
 ::: warning

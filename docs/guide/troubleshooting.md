@@ -47,16 +47,17 @@ proxxx — `proxxx --version` should report `0.1.3` or newer.
 
 ## Auth / secrets
 
-### `Fatal Error: Token secret not found. Check CLI args, PROXXX_TOKEN_SECRET, inline `token_secret =` in config.toml, token_secret_file, or keychain.`
+### `Fatal Error: Token secret not found. Sources tried in order: ...`
 
 The literal resolution order is:
 
 1. `--token-secret <X>` on the command line (overrides everything).
 2. `PROXXX_TOKEN_SECRET` env var.
-3. `token_secret_file = "/path"` in config.toml (the file must be
+3. `token_secret = "..."` inline in config.toml.
+4. `token_secret_file = "/path"` in config.toml (the file must be
    mode 0600 on Unix or proxxx refuses).
-4. `token_secret = "..."` inline in config.toml.
-5. OS keychain entry under service `"proxxx"`, account `"token_secret"`.
+5. macOS Keychain entry (macOS only) under service `"proxxx"`, account
+   `"<profile>/token_secret"` (falling back to `"token_secret"`).
 
 **Fix the cleanest way for your context:**
 

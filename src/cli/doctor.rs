@@ -72,6 +72,37 @@ pub async fn check_telegram_with_gateway(gw: &crate::hitl::telegram::TelegramGat
     })
 }
 
+/// Build the `keychain` doctor check from a [`crate::config::KeychainStoreInfo`]
+/// without reading any secret (`#332`).
+fn keychain_check_for(info: crate::config::KeychainStoreInfo, os_label: &str) -> Check {
+    if info.compiled {
+        Check {
+            name: "keychain",
+            status: CheckStatus::Ok,
+            message: format!("OS keychain store compiled in ({})", info.store),
+        }
+    } else {
+        Check {
+            name: "keychain",
+            status: CheckStatus::Warn,
+            message: format!(
+                "no keychain store in this build ({os_label}): use token_secret_file or env"
+            ),
+        }
+    }
+}
+
+/// Evaluate the `keychain` doctor check as JSON for tests (`#332`).
+#[must_use]
+pub fn check_keychain_for_store(info: crate::config::KeychainStoreInfo, os_label: &str) -> Value {
+    let check = keychain_check_for(info, os_label);
+    json!({
+        "check": check.name,
+        "status": check.status.symbol(),
+        "message": check.message,
+    })
+}
+
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn run() -> Result<(Value, i32)> {
     let mut checks: Vec<Check> = Vec::new();
@@ -374,6 +405,19 @@ pub async fn run() -> Result<(Value, i32)> {
             });
         }
     }
+
+    // #332: report whether a real persistent OS keychain store is compiled
+    // into this binary (macOS Security.framework vs. Linux / none). Never
+    // reads any secret.
+    let os_label = if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        std::env::consts::OS
+    };
+    checks.push(keychain_check_for(
+        crate::config::keychain_store_info(),
+        os_label,
+    ));
 
     // Audit 2026-09-09 (#281) — actually verify the chain.
     //

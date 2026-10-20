@@ -33,6 +33,7 @@ mod tests {
             verify_tls: false,
             fingerprint: None,
             rate_limit: Some(100),
+            profile_name: None,
         };
         PbsClient::new(cfg, None).await.expect("client builds")
     }

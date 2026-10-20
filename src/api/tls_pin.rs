@@ -1147,6 +1147,7 @@ mod tests {
             verify_tls: true,
             fingerprint: Some(format_colon_fingerprint(&leaf1_sha)),
             rate_limit: Some(100),
+            profile_name: None,
         };
         let pbs_ok = crate::pbs::PbsClient::new(ok_cfg, None)
             .await
@@ -1167,6 +1168,7 @@ mod tests {
             verify_tls: true,
             fingerprint: Some(format_colon_fingerprint(&leaf2_sha)),
             rate_limit: Some(100),
+            profile_name: None,
         };
         let pbs_wrong = crate::pbs::PbsClient::new(wrong_cfg, None)
             .await

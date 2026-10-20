@@ -1896,6 +1896,11 @@ fn build_version_payload() -> serde_json::Value {
             }
         })
         .collect();
+    let kc = crate::config::keychain_store_info();
+    let mut features: Vec<&'static str> = Vec::new();
+    if cfg!(feature = "keychain") {
+        features.push("keychain");
+    }
     serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
@@ -1914,6 +1919,12 @@ fn build_version_payload() -> serde_json::Value {
         // describe "rich preflight intelligence" without lying about
         // the depth.
         "preflight_risk_variants": 11_usize,
+        // #332: active Cargo features and compiled OS keychain store.
+        "features": features,
+        "keychain": {
+            "compiled": kc.compiled,
+            "store": kc.store,
+        },
     })
 }
 

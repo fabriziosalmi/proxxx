@@ -7,7 +7,7 @@ response to a specific audit finding and is tracked in
 | Surface | Mechanism | Vector |
 | :--- | :--- | :---: |
 | Secret heap residue | `Zeroizing<String>` everywhere |  |
-| Keychain access | `spawn_blocking` (no runtime stall) | V12 |
+| Keychain access (macOS only) | Security.framework (`apple-native`) via `spawn_blocking` (no runtime stall) | V12 |
 | Shell injection | `shell_quote` + 3-layer defence in `pveum` shell-out | V3 |
 | TOCTOU on temp files | `tempfile` 0600 + O_EXCL + 128-bit random suffix | V2 |
 | API body OOM | 32 MiB body cap on every response |  |
