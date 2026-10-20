@@ -203,7 +203,7 @@ pub fn verify_remote_hostname_output(
     Ok(())
 }
 
-async fn verify_session_identity_if_fallback<F, Fut>(
+async fn check_fallback_hostname<F, Fut>(
     node: &str,
     target: &ResolvedNodeSsh,
     run_hostname: F,
@@ -406,7 +406,7 @@ impl SshPool {
             Err(err) => return Err(enrich_node_connect_error(node, &target, err)),
         };
 
-        verify_session_identity_if_fallback(node, &target, |opts| {
+        check_fallback_hostname(node, &target, |opts| {
             let s = Arc::clone(&session);
             async move { s.exec("hostname", opts).await }
         })
