@@ -241,6 +241,7 @@ async fn run_unified(
                 name: "reconcile",
                 handle: tokio::spawn(reconcile_loop(
                     client,
+                    Arc::clone(&config_handle),
                     profile_label,
                     rec,
                     telegram,
@@ -417,15 +418,20 @@ fn unix_secs() -> u64 {
 /// continues; a transient failure must not kill the watch. Prometheus
 /// metrics + MCP event fan-out land in a follow-up (both are cross-process
 /// and need a shared drift-state store).
+///
+/// `[reconcile]` is re-read from the live config on every tick (`#373`), so a
+/// SIGHUP that sets `auto_converge = false`, changes the source, or removes
+/// the section takes effect on the next tick. `interval_secs` is the one
+/// restart-only setting (the timer is armed once).
 async fn reconcile_loop(
     client: Arc<PxClient>,
+    config_handle: ConfigHandle,
     profile_label: String,
-    rec: crate::config::ReconcileConfig,
+    startup_rec: crate::config::ReconcileConfig,
     telegram: Option<Arc<crate::hitl::telegram::TelegramGateway>>,
     enable_converge: bool,
 ) -> Result<()> {
-    let interval = rec.interval_secs.max(30);
-    let path = std::path::PathBuf::from(&rec.path);
+    let interval = startup_rec.interval_secs.max(30);
     loop {
         tokio::select! {
             biased;
@@ -436,6 +442,14 @@ async fn reconcile_loop(
                 // adds the same for the component itself so all four
                 // pillars answer the same question the same way.
                 crate::metrics::daemon_health::tick("reconcile");
+                let Some(rec) = config_handle.read().await.reconcile.clone() else {
+                    tracing::info!(
+                        profile = %profile_label,
+                        "reconcile: [reconcile] removed by a config reload; skipping this tick"
+                    );
+                    continue;
+                };
+                let path = std::path::PathBuf::from(&rec.path);
                 match super::reconcile::compute_drift(&client, &profile_label, &rec.source, &path).await {
                     Ok(changes) => {
                         let in_sync = changes.is_empty();
@@ -476,16 +490,12 @@ async fn reconcile_loop(
                             // deliberate write-lock (read_only / freeze) skips
                             // quietly (no alert storm). Always force=false, so a
                             // Severe drift is never auto-applied.
-                            let decision = {
-                                let cfg = client.profile_config();
-                                converge_decision(
-                                    enable_converge,
-                                    rec.auto_converge,
-                                    std::env::var("PROXXX_NO_CONVERGE").is_ok(),
-                                    cfg.read_only,
-                                    is_frozen(cfg.profile_name.as_deref()),
-                                )
-                            };
+                            let decision = live_converge_decision(
+                                &client,
+                                &rec,
+                                enable_converge,
+                            )
+                            .await;
                             match decision {
                                 ConvergeDecision::Disabled => {}
                                 ConvergeDecision::SkipLocked => {
@@ -515,6 +525,24 @@ async fn reconcile_loop(
         }
     }
     Ok(())
+}
+
+/// Converge gate evaluated against the LIVE config (`#373`): `auto_converge`
+/// from the `[reconcile]` read on this tick, `read_only` from the client's
+/// live config, plus the env kill-switch and the incident freeze.
+async fn live_converge_decision(
+    client: &PxClient,
+    rec: &crate::config::ReconcileConfig,
+    enable_converge: bool,
+) -> ConvergeDecision {
+    let read_only = client.effective_read_only().await;
+    converge_decision(
+        enable_converge,
+        rec.auto_converge,
+        std::env::var("PROXXX_NO_CONVERGE").is_ok(),
+        read_only,
+        is_frozen(client.profile_config().profile_name.as_deref()),
+    )
 }
 
 /// What the reconcile loop should do with detected drift on a tick. Factored
@@ -777,6 +805,51 @@ async fn repersist_drift(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #373: the converge gate follows a SIGHUP reload: `read_only = true`
+    /// skips, `auto_converge = false` disables, without restarting the loop.
+    #[tokio::test]
+    async fn live_converge_decision_follows_a_reload() {
+        let mk = |read_only: bool, auto: bool| -> crate::config::ProfileConfig {
+            toml::from_str(&format!(
+                "url = \"https://127.0.0.1:1\"\nuser = \"root@pam\"\ntoken_id = \"t\"\n\
+                 verify_tls = false\nread_only = {read_only}\n\n[reconcile]\n\
+                 source = \"file\"\npath = \"/tmp/x.toml\"\nauto_converge = {auto}\n"
+            ))
+            .expect("config")
+        };
+        let client = PxClient::new(
+            mk(false, true),
+            Some("00000000-0000-0000-0000-000000000001"),
+        )
+        .await
+        .expect("client");
+        let handle = crate::config::watcher::new_handle(mk(false, true));
+        client.attach_live_config(Arc::clone(&handle));
+        let rec = |h: &crate::config::ProfileConfig| h.reconcile.clone().expect("reconcile");
+
+        let r = rec(&*handle.read().await);
+        assert_eq!(
+            live_converge_decision(&client, &r, true).await,
+            ConvergeDecision::Proceed
+        );
+
+        crate::config::watcher::reload_once(&handle, || Ok(mk(true, true))).await;
+        let r = rec(&*handle.read().await);
+        assert_eq!(
+            live_converge_decision(&client, &r, true).await,
+            ConvergeDecision::SkipLocked,
+            "read_only = true from the reload must stop unmanned converge"
+        );
+
+        crate::config::watcher::reload_once(&handle, || Ok(mk(false, false))).await;
+        let r = rec(&*handle.read().await);
+        assert_eq!(
+            live_converge_decision(&client, &r, true).await,
+            ConvergeDecision::Disabled,
+            "auto_converge = false from the reload must disable converge"
+        );
+    }
 
     #[test]
     fn converge_decision_gates() {
