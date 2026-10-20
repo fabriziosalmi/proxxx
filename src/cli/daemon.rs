@@ -134,6 +134,7 @@ pub async fn execute_daemon(
     config_handle: ConfigHandle,
     config: ProfileConfig,
     action: DaemonCommand,
+    secure: bool,
 ) -> Result<(Value, i32)> {
     match action {
         DaemonCommand::Serve {
@@ -156,6 +157,7 @@ pub async fn execute_daemon(
                 !no_hitl,
                 !no_reconcile,
                 !no_converge,
+                secure,
             )
             .await
         }
@@ -182,6 +184,7 @@ async fn run_unified(
     enable_hitl: bool,
     enable_reconcile: bool,
     enable_converge: bool,
+    secure: bool,
 ) -> Result<(Value, i32)> {
     let mut components: Vec<Component> = Vec::new();
     let profile_label = config.profile_label().to_owned();
@@ -189,7 +192,7 @@ async fn run_unified(
     if enable_schedule {
         components.push(Component {
             name: "schedule",
-            handle: tokio::spawn(schedule_loop(schedule_secs)),
+            handle: tokio::spawn(schedule_loop(schedule_secs, secure)),
         });
     }
 
@@ -350,7 +353,7 @@ async fn run_unified(
 /// Schedule tick loop. Every `interval_secs`, fires
 /// `schedule::run_due` on a `spawn_blocking` thread (it shells
 /// out subprocesses internally so it's not async-friendly).
-async fn schedule_loop(interval_secs: u64) -> Result<()> {
+async fn schedule_loop(interval_secs: u64, secure: bool) -> Result<()> {
     let interval_secs = interval_secs.max(5);
     loop {
         tokio::select! {
@@ -362,8 +365,8 @@ async fn schedule_loop(interval_secs: u64) -> Result<()> {
                 // spawn_blocking so the daemon's tokio runtime stays
                 // responsive to the SIGTERM signal and to the other
                 // daemon tasks.
-                let result = tokio::task::spawn_blocking(|| {
-                    crate::cli::schedule::run_due(None)
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::cli::schedule::run_due(None, secure)
                 }).await;
                 // #271 — a completed tick, so "wedged" is distinguishable
                 // from "idle" in the metrics.

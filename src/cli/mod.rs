@@ -1003,26 +1003,432 @@ pub enum McpCommand {
     },
 }
 
-/// Map a CLI [`Command`] to its canonical HITL action name (#338).
+/// Map a CLI [`Command`] to its canonical HITL action name (#338, #399).
+///
+/// Exhaustive over [`Command`] and every nested subcommand enum that contains a
+/// mutation (no `_ =>` wildcard), so adding a new CLI subcommand fails to
+/// compile until its destructive/non-destructive classification is explicitly
+/// decided (#399). Read-only and non-destructive variants map to `None` (except
+/// `start` and `snapshot` create, which retain their non-destructive HITL
+/// names from #338).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub const fn cli_hitl_action(cmd: &Command) -> Option<&'static str> {
     match cmd {
+        // Guest lifecycle — non-destructive:
         Command::Start { .. } => Some("start"),
+        Command::Snapshot {
+            action: vm::SnapshotCommand::Create { .. },
+        } => Some("snapshot"),
+        Command::Resume { .. } | Command::Clone { .. } => None,
+
+        // Guest lifecycle & in-guest execution — destructive:
         Command::Stop { .. } => Some("stop"),
         Command::Restart { .. } => Some("restart"),
         Command::Delete { .. } => Some("delete"),
+        Command::Suspend { .. } => Some("suspend"),
         Command::Migrate { .. } => Some("migrate"),
         Command::Exec { .. } => Some("exec"),
+        Command::Template { .. } => Some("template"),
+        Command::TaskStop { .. } => Some("task_stop"),
+        Command::Backup { mode, .. } => {
+            if matches!(mode.as_bytes(), b"stop" | b"suspend") {
+                Some("backup_stop")
+            } else {
+                None
+            }
+        }
+        Command::Snapshot {
+            action: vm::SnapshotCommand::Delete { .. },
+        } => Some("snapshot_delete"),
         Command::Disk {
             action: vm::DiskCommand::Move { .. },
         } => Some("move_disk"),
         Command::Disk {
             action: vm::DiskCommand::Resize { .. },
         } => Some("resize_disk"),
-        Command::Snapshot {
-            action: vm::SnapshotCommand::Create { .. },
-        } => Some("snapshot"),
-        _ => None,
+        Command::Qga { action, .. } => match action {
+            vm::QgaCommand::Read { .. } | vm::QgaCommand::Net => None,
+            vm::QgaCommand::Write { .. } => Some("qga_write"),
+        },
+        Command::Ssh { cmd, .. } => {
+            if cmd.is_some() {
+                Some("ssh_cmd")
+            } else {
+                None
+            }
+        }
+
+        // VM / CT config & lifecycle subtrees:
+        Command::Vm { action } => match action {
+            vm::VmCommand::Set { .. }
+            | vm::VmCommand::Cloudinit {
+                action: vm::CloudinitCommand::Set { .. } | vm::CloudinitCommand::Regen { .. },
+            }
+            | vm::VmCommand::CloudinitDump { .. }
+            | vm::VmCommand::Create { .. } => None,
+            vm::VmCommand::RawSet { .. } => Some("vm_raw_set"),
+            vm::VmCommand::Sendkey { .. } => Some("vm_sendkey"),
+            vm::VmCommand::Unlink { .. } => Some("vm_unlink"),
+        },
+        Command::Ct { action } => match action {
+            ct::CtCommand::Set { .. }
+            | ct::CtCommand::Interfaces { .. }
+            | ct::CtCommand::Create { .. } => None,
+            ct::CtCommand::RawSet { .. } => Some("ct_raw_set"),
+        },
+
+        // Node operations & system configuration:
+        Command::Node { action } => match action {
+            node::NodeCommand::Startall { .. } | node::NodeCommand::Shell { .. } => None,
+            node::NodeCommand::Stopall { .. } => Some("node_stopall"),
+            node::NodeCommand::Suspendall { .. } => Some("node_suspendall"),
+        },
+        Command::NodeSystem { action, .. } => match action {
+            node::NodeSystemCommand::Dns(
+                node::NodeDnsCommand::Get | node::NodeDnsCommand::Set { .. },
+            )
+            | node::NodeSystemCommand::Hosts(
+                node::NodeHostsCommand::Get | node::NodeHostsCommand::Set { .. },
+            )
+            | node::NodeSystemCommand::Journal { .. }
+            | node::NodeSystemCommand::Syslog { .. }
+            | node::NodeSystemCommand::Time(
+                node::NodeTimeCommand::Get | node::NodeTimeCommand::Set { .. },
+            )
+            | node::NodeSystemCommand::Wol
+            | node::NodeSystemCommand::Report => None,
+            node::NodeSystemCommand::Subscription(sub) => match sub {
+                node::NodeSubscriptionCommand::Get
+                | node::NodeSubscriptionCommand::Set { .. }
+                | node::NodeSubscriptionCommand::Refresh => None,
+                node::NodeSubscriptionCommand::Delete { .. } => Some("node_subscription_delete"),
+            },
+            node::NodeSystemCommand::Cert(sub) => match sub {
+                node::NodeCertCommand::Info
+                | node::NodeCertCommand::Upload { .. }
+                | node::NodeCertCommand::AcmeOrder { .. } => None,
+                node::NodeCertCommand::Delete { .. } => Some("node_cert_delete"),
+            },
+        },
+        Command::Patch { action } => match action {
+            patch::PatchCommand::Plan { .. }
+            | patch::PatchCommand::Repositories { .. }
+            | patch::PatchCommand::Changelog { .. }
+            | patch::PatchCommand::Versions { .. } => None,
+            patch::PatchCommand::Apply { .. } => Some("patch_apply"),
+        },
+        Command::Hw { action } => match action {
+            node::HwCommand::Pci { .. }
+            | node::HwCommand::Usb { .. }
+            | node::HwCommand::Conflicts { .. } => None,
+        },
+
+        // Cluster, HA, mappings, corosync bootstrap:
+        Command::Ha { action } => match action {
+            monitoring::HaCommand::Groups
+            | monitoring::HaCommand::GroupsLegacy
+            | monitoring::HaCommand::GroupCreate { .. }
+            | monitoring::HaCommand::GroupUpdate { .. }
+            | monitoring::HaCommand::Resources
+            | monitoring::HaCommand::Status
+            | monitoring::HaCommand::StatusCurrent
+            | monitoring::HaCommand::Preview { .. } => None,
+            monitoring::HaCommand::GroupDelete { .. } => Some("ha_group_delete"),
+        },
+        Command::ClusterMapping { action } => match action {
+            firewall::ClusterMappingCommand::Pci(sub) => match sub {
+                firewall::ClusterMappingPciCommand::List
+                | firewall::ClusterMappingPciCommand::Create { .. }
+                | firewall::ClusterMappingPciCommand::Update { .. } => None,
+                firewall::ClusterMappingPciCommand::Delete { .. } => {
+                    Some("cluster_mapping_pci_delete")
+                }
+            },
+            firewall::ClusterMappingCommand::Usb(sub) => match sub {
+                firewall::ClusterMappingUsbCommand::List
+                | firewall::ClusterMappingUsbCommand::Create { .. }
+                | firewall::ClusterMappingUsbCommand::Update { .. } => None,
+                firewall::ClusterMappingUsbCommand::Delete { .. } => {
+                    Some("cluster_mapping_usb_delete")
+                }
+            },
+        },
+        Command::ClusterConfig { action } => match action {
+            cluster::ClusterConfigCommand::Get | cluster::ClusterConfigCommand::Set { .. } => None,
+        },
+        Command::ClusterBootstrap { action } => match action {
+            cluster::ClusterBootstrapCommand::Totem => None,
+            cluster::ClusterBootstrapCommand::Nodes(sub) => match sub {
+                cluster::CorosyncNodesCommand::List => None,
+                cluster::CorosyncNodesCommand::Add { .. } => Some("corosync_node_add"),
+                cluster::CorosyncNodesCommand::Remove { .. } => Some("corosync_node_remove"),
+            },
+            cluster::ClusterBootstrapCommand::Join(sub) => match sub {
+                cluster::ClusterJoinCommand::Info { .. } => None,
+                cluster::ClusterJoinCommand::Join { .. } => Some("cluster_join"),
+            },
+            cluster::ClusterBootstrapCommand::Qdevice(sub) => match sub {
+                cluster::ClusterQdeviceCommand::Get => None,
+                cluster::ClusterQdeviceCommand::Setup { .. } => Some("qdevice_setup"),
+                cluster::ClusterQdeviceCommand::Update { .. } => Some("qdevice_update"),
+                cluster::ClusterQdeviceCommand::Delete { .. } => Some("qdevice_delete"),
+            },
+        },
+
+        // Firewall:
+        Command::FirewallCluster { action } => match action {
+            firewall::FirewallClusterCommand::Alias(sub) => match sub {
+                firewall::FirewallAliasCommand::List
+                | firewall::FirewallAliasCommand::Create { .. } => None,
+                firewall::FirewallAliasCommand::Update { .. } => Some("firewall_alias_update"),
+                firewall::FirewallAliasCommand::Delete { .. } => Some("firewall_alias_delete"),
+            },
+            firewall::FirewallClusterCommand::Group(sub) => match sub {
+                firewall::FirewallGroupCommand::List
+                | firewall::FirewallGroupCommand::Create { .. }
+                | firewall::FirewallGroupCommand::Rules { .. } => None,
+                firewall::FirewallGroupCommand::Delete { .. } => Some("firewall_group_delete"),
+            },
+            firewall::FirewallClusterCommand::Ipset(sub) => match sub {
+                firewall::FirewallIpsetCommand::List
+                | firewall::FirewallIpsetCommand::Create { .. }
+                | firewall::FirewallIpsetCommand::Cidrs { .. } => None,
+                firewall::FirewallIpsetCommand::AddCidr { .. } => Some("firewall_ipset_add_cidr"),
+                firewall::FirewallIpsetCommand::Delete { .. } => Some("firewall_ipset_delete"),
+                firewall::FirewallIpsetCommand::RemoveCidr { .. } => {
+                    Some("firewall_ipset_remove_cidr")
+                }
+            },
+            firewall::FirewallClusterCommand::Options(sub) => match sub {
+                firewall::FirewallOptionsCommand::Get => None,
+                firewall::FirewallOptionsCommand::Set { .. } => Some("firewall_options_set"),
+            },
+        },
+        Command::FirewallGuest { action, .. } => match action {
+            firewall::FirewallGuestCommand::Alias(sub) => match sub {
+                firewall::GuestFirewallAliasCommand::List
+                | firewall::GuestFirewallAliasCommand::Create { .. } => None,
+                firewall::GuestFirewallAliasCommand::Update { .. } => {
+                    Some("guest_firewall_alias_update")
+                }
+                firewall::GuestFirewallAliasCommand::Delete { .. } => {
+                    Some("guest_firewall_alias_delete")
+                }
+            },
+            firewall::FirewallGuestCommand::Options(sub) => match sub {
+                firewall::GuestFirewallOptionsCommand::Get => None,
+                firewall::GuestFirewallOptionsCommand::Set { .. } => {
+                    Some("guest_firewall_options_set")
+                }
+            },
+        },
+        Command::Firewall { .. } => None,
+
+        // Access control, pools, API tokens:
+        Command::Pool { action } => match action {
+            cluster::PoolCommand::List
+            | cluster::PoolCommand::Show { .. }
+            | cluster::PoolCommand::Create { .. }
+            | cluster::PoolCommand::AddMembers { .. }
+            | cluster::PoolCommand::SetComment { .. } => None,
+            cluster::PoolCommand::RemoveMembers { .. } => Some("pool_remove_members"),
+            cluster::PoolCommand::Delete { .. } => Some("pool_delete"),
+        },
+        Command::Access { action } => match action {
+            access::AccessCommand::Acl { .. }
+            | access::AccessCommand::Users
+            | access::AccessCommand::Groups
+            | access::AccessCommand::Roles
+            | access::AccessCommand::Realms
+            | access::AccessCommand::Tfa { .. }
+            | access::AccessCommand::UserCreate { .. }
+            | access::AccessCommand::GroupCreate { .. }
+            | access::AccessCommand::AclSet { .. }
+            | access::AccessCommand::Permissions { .. } => None,
+            access::AccessCommand::UserUpdate { .. } => Some("user_update"),
+            access::AccessCommand::UserDelete { .. } => Some("user_delete"),
+            access::AccessCommand::GroupDelete { .. } => Some("group_delete"),
+            access::AccessCommand::AclUnset { .. } => Some("acl_unset"),
+            access::AccessCommand::Password { .. } => Some("access_password"),
+        },
+        Command::Token { action } => match action {
+            access::TokenCommand::List { .. } | access::TokenCommand::Create { .. } => None,
+            access::TokenCommand::Revoke { .. } => Some("token_revoke"),
+            access::TokenCommand::Bootstrap(args) => {
+                if args.rotate {
+                    Some("token_bootstrap_rotate")
+                } else {
+                    None
+                }
+            }
+        },
+
+        // Storage, backup jobs, ISO, templates, ACME, PBS, cloud-img:
+        Command::Storage { action } => match action {
+            storage::StorageCommand::Upload { .. } => None,
+            storage::StorageCommand::Delete { .. } => Some("storage_delete"),
+        },
+        Command::StorageDefs { action } => match action {
+            storage::StorageDefsCommand::List
+            | storage::StorageDefsCommand::Show { .. }
+            | storage::StorageDefsCommand::Create { .. } => None,
+            storage::StorageDefsCommand::Update { .. } => Some("storage_def_update"),
+            storage::StorageDefsCommand::Delete { .. } => Some("storage_def_delete"),
+        },
+        Command::BackupJobs { action } => match action {
+            storage::BackupJobsCommand::List
+            | storage::BackupJobsCommand::Show { .. }
+            | storage::BackupJobsCommand::Create { .. }
+            | storage::BackupJobsCommand::Update { .. }
+            | storage::BackupJobsCommand::Info
+            | storage::BackupJobsCommand::ExtractConfig { .. } => None,
+            storage::BackupJobsCommand::Delete { .. } => Some("backup_job_delete"),
+        },
+        Command::Iso { action } => match action {
+            storage::IsoCommand::List | storage::IsoCommand::Download { .. } => None,
+        },
+        Command::Aplinfo { action } => match action {
+            storage::AplinfoCommand::List { .. } | storage::AplinfoCommand::Download { .. } => None,
+        },
+        Command::Acme { action } => match action {
+            storage::AcmeCommand::Account(sub) => match sub {
+                storage::AcmeAccountCommand::List
+                | storage::AcmeAccountCommand::Show { .. }
+                | storage::AcmeAccountCommand::Create { .. }
+                | storage::AcmeAccountCommand::Update { .. } => None,
+                storage::AcmeAccountCommand::Delete { .. } => Some("acme_account_delete"),
+            },
+            storage::AcmeCommand::Plugin(sub) => match sub {
+                storage::AcmePluginCommand::List
+                | storage::AcmePluginCommand::Show { .. }
+                | storage::AcmePluginCommand::Create { .. }
+                | storage::AcmePluginCommand::Update { .. } => None,
+                storage::AcmePluginCommand::Delete { .. } => Some("acme_plugin_delete"),
+            },
+            storage::AcmeCommand::Directories
+            | storage::AcmeCommand::Tos { .. }
+            | storage::AcmeCommand::ChallengeSchema => None,
+        },
+        Command::Pbs { action } => match action {
+            storage::PbsCommand::Ping
+            | storage::PbsCommand::Datastores
+            | storage::PbsCommand::Snapshots { .. }
+            | storage::PbsCommand::Files { .. } => None,
+            storage::PbsCommand::Restore { .. } => Some("pbs_restore"),
+        },
+        Command::CloudImg { action } => match action {
+            cloudimg::CloudImgCommand::List { .. }
+            | cloudimg::CloudImgCommand::Download { .. }
+            | cloudimg::CloudImgCommand::Provision { .. } => None,
+        },
+
+        // Monitoring, alerts, notifications:
+        Command::Alerts { action } => match action {
+            monitoring::AlertsCommand::Eval
+            | monitoring::AlertsCommand::Watch { .. }
+            | monitoring::AlertsCommand::Test { .. } => None,
+        },
+        Command::MetricServers { action } => match action {
+            monitoring::MetricServersCommand::List
+            | monitoring::MetricServersCommand::Show { .. }
+            | monitoring::MetricServersCommand::Create { .. }
+            | monitoring::MetricServersCommand::Update { .. } => None,
+            monitoring::MetricServersCommand::Delete { .. } => Some("metric_server_delete"),
+        },
+        Command::Notifications { action } => match action {
+            monitoring::NotificationsCommand::Endpoint(sub) => match sub {
+                monitoring::NotificationEndpointCommand::List
+                | monitoring::NotificationEndpointCommand::Create { .. }
+                | monitoring::NotificationEndpointCommand::Update { .. } => None,
+                monitoring::NotificationEndpointCommand::Delete { .. } => {
+                    Some("notification_endpoint_delete")
+                }
+            },
+            monitoring::NotificationsCommand::Matcher(sub) => match sub {
+                monitoring::NotificationMatcherCommand::List
+                | monitoring::NotificationMatcherCommand::Create { .. }
+                | monitoring::NotificationMatcherCommand::Update { .. } => None,
+                monitoring::NotificationMatcherCommand::Delete { .. } => {
+                    Some("notification_matcher_delete")
+                }
+            },
+            monitoring::NotificationsCommand::Targets => None,
+        },
+
+        // Local schedules, incidents, audit, state, reconcile:
+        Command::Schedule { action } => match action {
+            schedule::ScheduleCommand::Add { .. }
+            | schedule::ScheduleCommand::List { .. }
+            | schedule::ScheduleCommand::Pause { .. }
+            | schedule::ScheduleCommand::Resume { .. }
+            | schedule::ScheduleCommand::RunDue { .. } => None,
+            schedule::ScheduleCommand::Remove { .. } => Some("schedule_remove"),
+        },
+        Command::Incident { action } => match action {
+            incident::IncidentCommand::Freeze { .. }
+            | incident::IncidentCommand::Thaw { .. }
+            | incident::IncidentCommand::Status => None,
+        },
+        Command::Audit { action } => match action {
+            audit_cmd::AuditAction::Log { .. }
+            | audit_cmd::AuditAction::Export { .. }
+            | audit_cmd::AuditAction::Verify
+            | audit_cmd::AuditAction::RotateKey => None,
+        },
+        Command::State { action } => match action {
+            state::StateCommand::Export { .. } | state::StateCommand::Diff { .. } => None,
+            state::StateCommand::Apply { .. } => Some("state_apply"),
+        },
+        Command::Reconcile { action } => match action {
+            reconcile::ReconcileCommand::Run { .. } => None,
+            reconcile::ReconcileCommand::Converge { .. } => Some("reconcile_converge"),
+        },
+
+        // Purely read-only, interactive console, or local daemon/utility commands:
+        Command::Ls { .. }
+        | Command::Find { .. }
+        | Command::Config { .. }
+        | Command::Tasks { .. }
+        | Command::Events { .. }
+        | Command::Logs { .. }
+        | Command::Explain(..)
+        | Command::Describe(..)
+        | Command::Daemon { .. }
+        | Command::UpgradeCheck(..)
+        | Command::Accounting(..)
+        | Command::Heatmap(..)
+        | Command::Anomaly(..)
+        | Command::BackupVerify(..)
+        | Command::Import(..)
+        | Command::GpuInspect(..)
+        | Command::Feature { .. }
+        | Command::UrlInfo { .. }
+        | Command::Watch { .. }
+        | Command::Replay { .. }
+        | Command::Search { .. }
+        | Command::Hitl { .. }
+        | Command::Mcp { .. }
+        | Command::Replication { .. }
+        | Command::Disks { .. }
+        | Command::Metrics { .. }
+        | Command::Vnc { .. }
+        | Command::ClusterResources { .. }
+        | Command::PveVersion
+        | Command::ClusterLog { .. }
+        | Command::Spice { .. }
+        | Command::Novnc { .. }
+        | Command::Serial { .. }
+        | Command::PlayCast { .. }
+        | Command::Perms { .. }
+        | Command::DevPanic { .. }
+        | Command::Version { .. }
+        | Command::Profiles
+        | Command::Init { .. }
+        | Command::Completions { .. }
+        | Command::Fleet
+        | Command::Doctor
+        | Command::Network { .. } => None,
     }
 }
 
@@ -1465,14 +1871,14 @@ pub async fn execute(
         Command::Incident { action } => incident::execute_incident(action),
         Command::Describe(args) => describe::execute_describe(&client, args).await,
         Command::CloudImg { action } => cloudimg::execute_cloudimg(&client, action).await,
-        Command::Schedule { action } => schedule::execute_schedule(action),
+        Command::Schedule { action } => schedule::execute_schedule(action, secure),
         Command::Daemon { action } => {
             let handle = crate::config::watcher::new_handle(config.clone());
             crate::config::watcher::spawn_reload_on_sighup(
                 std::sync::Arc::clone(&handle),
                 profile.map(str::to_owned),
             );
-            daemon::execute_daemon(&client, handle, config.clone(), action).await
+            daemon::execute_daemon(&client, handle, config.clone(), action, secure).await
         }
         Command::UpgradeCheck(args) => {
             upgrade_check::execute_upgrade_check(&client, &config, args).await

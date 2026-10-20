@@ -270,25 +270,86 @@ exhaustive `hitl_action` matcher (which has no wildcard arm, so new
 ## Self-HITL (`--secure`)
 
 Both the TUI and the CLI consult the shared destructive-action set defined in
-`src/hitl/mod.rs` (`DESTRUCTIVE_ACTIONS`: `stop`, `delete`, `restart`,
-`migrate`, `exec`, `move_disk`, `resize_disk`):
+`src/hitl/mod.rs` (`DESTRUCTIVE_ACTIONS`). By the classification rule in
+`src/hitl/mod.rs` (`#399`), an action is **destructive** if it is irreversible,
+removes data or a resource, or interrupts availability:
+
+- **Shared TUI + CLI actions**: `stop`, `delete`, `restart`, `migrate`, `exec`,
+  `move_disk` (`disk move`), `resize_disk` (`disk resize`).
+- **Additional CLI destructive actions (`#399`)**:
+  - Guest & task availability / irreversible lifecycle: `suspend`, `task_stop`
+    (`task-stop`), `backup_stop` (`backup --mode stop|suspend`), `template`,
+    `snapshot_delete` (`snapshot delete`), `vm_raw_set` (`vm raw-set`),
+    `vm_sendkey` (`vm sendkey`), `vm_unlink` (`vm unlink`), `ct_raw_set`
+    (`ct raw-set`), `qga_write` (`qga write`), `ssh_cmd`
+    (`ssh <vmid> --cmd ...`).
+  - Node-level bulk power & rolling upgrades: `node_stopall` (`node stopall`,
+    requires `--yes`), `node_suspendall` (`node suspendall`, requires `--yes`),
+    `patch_apply` (`patch apply`), `node_subscription_delete`
+    (`node-system <node> subscription delete`), `node_cert_delete`
+    (`node-system <node> cert delete`).
+  - Cluster, HA, corosync & hardware mapping removal / quorum changes:
+    `ha_group_delete` (`ha group-delete`), `cluster_mapping_pci_delete`
+    (`cluster-mapping pci delete`), `cluster_mapping_usb_delete`
+    (`cluster-mapping usb delete`), `corosync_node_add`
+    (`cluster-bootstrap nodes add`), `corosync_node_remove`
+    (`cluster-bootstrap nodes remove`), `cluster_join`
+    (`cluster-bootstrap join join`), `qdevice_setup`
+    (`cluster-bootstrap qdevice setup`), `qdevice_update`
+    (`cluster-bootstrap qdevice update`), `qdevice_delete`
+    (`cluster-bootstrap qdevice delete`).
+  - Firewall removal & match/policy updates: `firewall_alias_update`
+    (`firewall-cluster alias update`), `firewall_alias_delete`
+    (`firewall-cluster alias delete`), `firewall_group_delete`
+    (`firewall-cluster group delete`), `firewall_ipset_add_cidr`
+    (`firewall-cluster ipset add-cidr`), `firewall_ipset_delete`
+    (`firewall-cluster ipset delete`), `firewall_ipset_remove_cidr`
+    (`firewall-cluster ipset remove-cidr`), `firewall_options_set`
+    (`firewall-cluster options set`), `guest_firewall_alias_update`
+    (`firewall-guest <vmid> alias update`), `guest_firewall_alias_delete`
+    (`firewall-guest <vmid> alias delete`), `guest_firewall_options_set`
+    (`firewall-guest <vmid> options set`).
+  - Access control, pools & tokens: `pool_remove_members`
+    (`pool remove-members`), `pool_delete` (`pool delete`), `user_update`
+    (`access user-update`), `user_delete` (`access user-delete`), `group_delete`
+    (`access group-delete`), `acl_unset` (`access acl-unset`), `access_password`
+    (`access password`), `token_revoke` (`token revoke`),
+    `token_bootstrap_rotate` (`token bootstrap --rotate`).
+  - Storage, backups, notifications & schedules: `storage_delete`
+    (`storage delete`), `storage_def_update` (`storage-defs update`),
+    `storage_def_delete` (`storage-defs delete`), `backup_job_delete`
+    (`backup-jobs delete`), `pbs_restore` (`pbs restore`),
+    `acme_account_delete` (`acme account delete`), `acme_plugin_delete`
+    (`acme plugin delete`), `metric_server_delete` (`metric-servers delete`),
+    `notification_endpoint_delete` (`notifications endpoint delete`),
+    `notification_matcher_delete` (`notifications matcher delete`),
+    `schedule_remove` (`schedule remove`).
+  - Declarative convergence (can delete resources under `--prune`):
+    `state_apply` (`state apply`), `reconcile_converge` (`reconcile converge`).
+
+`cli::cli_hitl_action` (`src/cli/mod.rs`) matches exhaustively over `Command`
+and every mutating subcommand enum (with no `_ =>` wildcard), so adding a new
+CLI subcommand fails to compile until it is explicitly classified. When
+`proxxx --secure schedule run-due` (or `proxxx --secure daemon serve`) runs,
+`--secure` is forwarded to every spawned child process so destructive scheduled
+entries also fail closed with exit code `8`.
 
 - **In the TUI (`proxxx --secure`)**: every destructive operation is forced
   through the Telegram HITL approval flow regardless of whether a
   `[[policies]]` rule matches.
 - **In the CLI (`proxxx --secure <command>`)**: the CLI does not implement
-  interactive HITL approval yet, so every destructive CLI command (`stop`,
-  `delete`, `restart`, `migrate`, `exec`, `disk move`, `disk resize`) fails
-  closed before any API call with `hitl::SecureModeRefusal` and exit code `8`
-  (the same "mutation refused by a local lock" family as `read_only` and
-  `incident freeze`):
+  interactive HITL approval yet, so every destructive CLI command in
+  `DESTRUCTIVE_ACTIONS` fails closed before any API call with
+  `hitl::SecureModeRefusal` and exit code `8` (the same "mutation refused by a
+  local lock" family as `read_only` and `incident freeze`):
 
   ```text
   Fatal Error: --secure: delete requires human approval, which the CLI does not implement yet; run it from the TUI with --secure, or drop --secure
   ```
 
-  Non-destructive CLI commands (for example `proxxx --secure ls nodes` or
-  `proxxx --secure start 100`) run normally.
+  Non-destructive CLI commands (for example `proxxx --secure ls nodes`,
+  `proxxx --secure start 100`, or `proxxx --secure snapshot create 100 --name s1`)
+  run normally.
 
 ## Limits
 

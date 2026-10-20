@@ -255,7 +255,7 @@ pub enum ScheduleOutput {
     Json,
 }
 
-pub fn execute_schedule(action: ScheduleCommand) -> Result<(Value, i32)> {
+pub fn execute_schedule(action: ScheduleCommand, secure: bool) -> Result<(Value, i32)> {
     match action {
         ScheduleCommand::Add { name, every, cmd } => {
             if name.is_empty() {
@@ -334,7 +334,7 @@ pub fn execute_schedule(action: ScheduleCommand) -> Result<(Value, i32)> {
         }
         ScheduleCommand::Pause { name } => set_enabled(&name, false),
         ScheduleCommand::Resume { name } => set_enabled(&name, true),
-        ScheduleCommand::RunDue { proxxx_binary } => run_due(proxxx_binary.as_deref()),
+        ScheduleCommand::RunDue { proxxx_binary } => run_due(proxxx_binary.as_deref(), secure),
     }
 }
 
@@ -371,9 +371,30 @@ fn fmt_interval(secs: u64) -> String {
     }
 }
 
+/// Split a schedule entry's `cmd` into subprocess arguments, forwarding
+/// `--secure` before the subcommand when the parent `schedule run-due` was
+/// invoked under `--secure` (#399).
+fn build_child_argv(cmd: &str, secure: bool) -> Vec<String> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let already_has_secure = tokens
+        .iter()
+        .take_while(|&&tok| tok != "--")
+        .any(|&tok| tok == "--secure");
+    let mut argv = Vec::with_capacity(tokens.len() + usize::from(secure));
+    if secure && !already_has_secure {
+        argv.push("--secure".to_owned());
+    }
+    argv.extend(tokens.into_iter().map(str::to_owned));
+    argv
+}
+
 /// Run every enabled schedule whose `next_run <= now`. For each:
 /// spawn proxxx as a subprocess, wait, capture exit code, update
 /// `last_run` + `next_run`, persist.
+///
+/// When `secure` is `true`, `--secure` is forwarded to every spawned child
+/// process so destructive scheduled commands fail closed with exit code 8
+/// (#399).
 ///
 /// Failures don't halt the loop — each schedule independent.
 ///
@@ -381,7 +402,7 @@ fn fmt_interval(secs: u64) -> String {
 /// can tick it directly without going through the CLI dispatch.
 /// The `schedule` module itself is private; this is reachable
 /// only from sibling modules in `cli/`.
-pub fn run_due(proxxx_binary: Option<&std::path::Path>) -> Result<(Value, i32)> {
+pub fn run_due(proxxx_binary: Option<&std::path::Path>, secure: bool) -> Result<(Value, i32)> {
     use std::process::Command;
 
     let mut store = load_store()?;
@@ -402,7 +423,7 @@ pub fn run_due(proxxx_binary: Option<&std::path::Path>) -> Result<(Value, i32)> 
         // embedded whitespace anyway. Document as a limitation:
         // operators with whitespace inside arg values can pass them
         // via a wrapper script.
-        let argv: Vec<String> = s.cmd.split_whitespace().map(str::to_owned).collect();
+        let argv = build_child_argv(&s.cmd, secure);
         let started = now_secs();
         let result = Command::new(&binary).args(&argv).output();
         let finished = now_secs();
@@ -510,5 +531,25 @@ mod tests {
         let (_d, p) = temp_path();
         let s = load_store_at(&p).unwrap();
         assert!(s.schedules.is_empty());
+    }
+
+    #[test]
+    fn build_child_argv_forwards_secure_without_duplicating() {
+        assert_eq!(
+            build_child_argv("delete 100 --yes", false),
+            vec!["delete", "100", "--yes"]
+        );
+        assert_eq!(
+            build_child_argv("delete 100 --yes", true),
+            vec!["--secure", "delete", "100", "--yes"]
+        );
+        assert_eq!(
+            build_child_argv("--secure delete 100 --yes", true),
+            vec!["--secure", "delete", "100", "--yes"]
+        );
+        assert_eq!(
+            build_child_argv("exec 100 -- --secure", true),
+            vec!["--secure", "exec", "100", "--", "--secure"]
+        );
     }
 }

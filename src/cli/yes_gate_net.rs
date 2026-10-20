@@ -52,12 +52,14 @@ async fn offline_client() -> Arc<PxClient> {
     )
 }
 
-/// A representative destructive command from each of two families refuses with
-/// the `--yes` guidance and never reaches its gateway call.
+/// A representative destructive command from each of two families — plus
+/// `node stopall` and `node suspendall` (#399) — refuses with the `--yes`
+/// guidance and never reaches its gateway call.
 #[tokio::test]
 async fn destructive_commands_refuse_without_yes() {
     use super::access::{execute_access, AccessCommand};
     use super::cluster::{execute_pool, PoolCommand};
+    use super::node::{execute_node, NodeCommand};
 
     let client = offline_client().await;
 
@@ -87,5 +89,33 @@ async fn destructive_commands_refuse_without_yes() {
     assert!(
         err.to_string().contains("--yes"),
         "user delete should refuse with --yes guidance, got: {err}"
+    );
+
+    let err = execute_node(
+        &client,
+        NodeCommand::Stopall {
+            node: "pve1".into(),
+            yes: false,
+        },
+    )
+    .await
+    .expect_err("node stopall must refuse without --yes (#399)");
+    assert!(
+        err.to_string().contains("--yes"),
+        "node stopall should refuse with --yes guidance, got: {err}"
+    );
+
+    let err = execute_node(
+        &client,
+        NodeCommand::Suspendall {
+            node: "pve1".into(),
+            yes: false,
+        },
+    )
+    .await
+    .expect_err("node suspendall must refuse without --yes (#399)");
+    assert!(
+        err.to_string().contains("--yes"),
+        "node suspendall should refuse with --yes guidance, got: {err}"
     );
 }
