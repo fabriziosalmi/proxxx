@@ -1655,6 +1655,15 @@ pub enum ConfigError {
     )]
     NoDefaultProfile { available: String, example: String },
 
+    /// Deserializing the `[defaults]` table into [`DefaultsConfigSchema`]
+    /// failed — e.g. an unknown field or a type mismatch inside `[defaults]`.
+    #[error("Failed to parse [defaults] from {path}: {source}")]
+    DefaultsParse {
+        path: std::path::PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+
     /// Deserializing the selected profile table (or flat config) into
     /// [`ProfileConfig`] failed — e.g. a required field (`url`, `user`)
     /// is missing or has the wrong type.
@@ -1798,6 +1807,239 @@ pub fn load_config(profile_name: Option<&str>) -> Result<ProfileConfig> {
     load_config_from_path(&config_path, profile_name)
 }
 
+/// Schema used strictly to validate the top-level `[defaults]` table (`#331`).
+///
+/// Every non-secret, non-`url` field from [`ProfileConfig`] is optional here so
+/// `[defaults]` can provide any subset of shared keys. `#[serde(deny_unknown_fields)]`
+/// guarantees that an unknown key in `[defaults]` or in one of its sub-tables
+/// (`[defaults.ssh]`, `[defaults.pbs]`, `[defaults.telegram]`, `[defaults.reconcile]`,
+/// `[[defaults.policies]]`, `[[defaults.alerts]]`) is caught before merging and
+/// reported via [`ConfigError::DefaultsParse`] naming `[defaults]` directly.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultsConfigSchema {
+    #[allow(dead_code)]
+    user: Option<String>,
+    auth: Option<String>,
+    #[allow(dead_code)]
+    token_id: Option<String>,
+    #[allow(dead_code)]
+    verify_tls: Option<bool>,
+    tls_pin_mode: Option<String>,
+    #[allow(dead_code)]
+    read_only: Option<bool>,
+    #[allow(dead_code)]
+    rate_limit: Option<u32>,
+    #[allow(dead_code)]
+    policies: Option<Vec<crate::hitl::policy::Policy>>,
+    #[allow(dead_code)]
+    telegram: Option<DefaultsTelegramSchema>,
+    #[allow(dead_code)]
+    ssh: Option<SshConfig>,
+    pbs: Option<DefaultsPbsSchema>,
+    #[allow(dead_code)]
+    alerts: Option<Vec<AlertRuleConfig>>,
+    #[allow(dead_code)]
+    reconcile: Option<DefaultsReconcileSchema>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultsTelegramSchema {
+    #[allow(dead_code)]
+    chat_id: Option<String>,
+    #[allow(dead_code)]
+    allowed_approvers: Option<Vec<i64>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultsPbsSchema {
+    #[allow(dead_code)]
+    url: Option<String>,
+    #[allow(dead_code)]
+    user: Option<String>,
+    #[allow(dead_code)]
+    token_id: Option<String>,
+    #[allow(dead_code)]
+    verify_tls: Option<bool>,
+    fingerprint: Option<String>,
+    #[allow(dead_code)]
+    rate_limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultsReconcileSchema {
+    #[allow(dead_code)]
+    source: Option<String>,
+    #[allow(dead_code)]
+    path: Option<String>,
+    #[allow(dead_code)]
+    interval_secs: Option<u64>,
+    #[allow(dead_code)]
+    auto_converge: Option<bool>,
+    #[allow(dead_code)]
+    converge_prune: Option<bool>,
+    #[allow(dead_code)]
+    allowed_families: Option<Vec<String>>,
+    #[allow(dead_code)]
+    max_unmanned_changes: Option<u32>,
+}
+
+/// Validate the top-level `[defaults]` table (`#331`):
+/// 1. `defaults` must be a TOML table.
+/// 2. `url` is forbidden in `[defaults]` (each profile has its own endpoint).
+/// 3. Secret keys (`token_secret`, `token_secret_file`, `password`, `mcp_token`,
+///    plus `pbs.token_secret`, `pbs.token_secret_file`, `telegram.bot_token`,
+///    `telegram.bot_token_file`) are forbidden in `[defaults]` so a single
+///    credential is not silently shared across every node.
+/// 4. Unknown keys and type mismatches are rejected via [`DefaultsConfigSchema`]
+///    and wrapped in [`ConfigError::DefaultsParse`] naming `[defaults]`.
+fn validate_defaults_value<'a>(
+    defaults_val: &'a toml::Value,
+    config_path: &std::path::Path,
+) -> Result<&'a toml::map::Map<String, toml::Value>> {
+    let Some(table) = defaults_val.as_table() else {
+        return Err(ConfigError::InvalidValue(format!(
+            "config key `defaults` in {} must be a `[defaults]` table, not a scalar or array",
+            config_path.display()
+        ))
+        .into());
+    };
+
+    if table.contains_key("url") {
+        return Err(ConfigError::InvalidValue(format!(
+            "`url` is not allowed in `[defaults]` ({}): each profile under `[profiles.<name>]` \
+             must declare its own cluster `url`",
+            config_path.display()
+        ))
+        .into());
+    }
+
+    const TOP_LEVEL_SECRET_KEYS: &[&str] =
+        &["token_secret", "token_secret_file", "password", "mcp_token"];
+    for &secret_key in TOP_LEVEL_SECRET_KEYS {
+        if table.contains_key(secret_key) {
+            return Err(ConfigError::InvalidValue(format!(
+                "secret key `{secret_key}` is not allowed in `[defaults]` ({}): credentials must \
+                 be configured per-profile under `[profiles.<name>]`, via `PROXXX_*` environment \
+                 variables, or in the OS keychain so one secret is not silently shared across every node",
+                config_path.display()
+            ))
+            .into());
+        }
+    }
+
+    if let Some(pbs_table) = table.get("pbs").and_then(toml::Value::as_table) {
+        for &secret_key in &["token_secret", "token_secret_file"] {
+            if pbs_table.contains_key(secret_key) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "secret key `pbs.{secret_key}` is not allowed in `[defaults]` ({}): credentials \
+                     must be configured per-profile under `[profiles.<name>.pbs]`, via \
+                     `PROXXX_PBS_TOKEN_SECRET`, or in the OS keychain",
+                    config_path.display()
+                ))
+                .into());
+            }
+        }
+    }
+
+    if let Some(tg_table) = table.get("telegram").and_then(toml::Value::as_table) {
+        for &secret_key in &["bot_token", "bot_token_file"] {
+            if tg_table.contains_key(secret_key) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "secret key `telegram.{secret_key}` is not allowed in `[defaults]` ({}): \
+                     credentials must be configured per-profile under `[profiles.<name>.telegram]`, \
+                     via `PROXXX_TELEGRAM_BOT_TOKEN`, or in the OS keychain",
+                    config_path.display()
+                ))
+                .into());
+            }
+        }
+    }
+
+    let parsed: DefaultsConfigSchema =
+        defaults_val
+            .clone()
+            .try_into()
+            .map_err(|source| ConfigError::DefaultsParse {
+                path: config_path.to_path_buf(),
+                source,
+            })?;
+
+    if let Some(ref auth) = parsed.auth {
+        const AUTH_VALUES: &[&str] = &["token", "password"];
+        if !AUTH_VALUES.contains(&auth.as_str()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "`[defaults]` key `auth` is {auth:?}, which is not a recognised value. \
+                 Accepted: {}. Note the comparison is case-sensitive.",
+                AUTH_VALUES.join(" | ")
+            ))
+            .into());
+        }
+    }
+
+    if let Some(ref mode) = parsed.tls_pin_mode {
+        if !mode.trim().is_empty() && !mode.eq_ignore_ascii_case("tofu") {
+            return Err(ConfigError::InvalidValue(format!(
+                "`[defaults]` key `tls_pin_mode` is {mode:?}, which is not a recognised value. \
+                 Accepted: \"tofu\" (case-insensitive), or omit the key entirely for no pinning."
+            ))
+            .into());
+        }
+    }
+
+    if let Some(ref pbs) = parsed.pbs {
+        if let Some(ref fp) = pbs.fingerprint {
+            if !fp.trim().is_empty() {
+                crate::api::tls_pin::parse_sha256_fingerprint(fp).map_err(|e| {
+                    ConfigError::InvalidValue(format!(
+                        "invalid `[defaults.pbs]` fingerprint {fp:?}: {e}"
+                    ))
+                })?;
+            }
+        }
+    }
+
+    Ok(table)
+}
+
+/// Merge `[defaults]` into a single `[profiles.<name>]` table (`#331`, Decision A1):
+/// - A key set in the profile always wins.
+/// - Sub-tables (`[ssh]`, `[pbs]`, `[telegram]`, `[reconcile]`) merge **one level
+///   deep**: missing keys in `[profiles.<name>.<sub>]` are filled from
+///   `[defaults.<sub>]`, while any nested table inside `<sub>` (such as
+///   `ssh.hosts` or `ssh.guests`) is taken whole from the profile if present,
+///   else from defaults (no recursive map merge).
+/// - Arrays (`policies`, `alerts`) are NOT merged: a profile's array replaces
+///   the default array wholesale.
+fn merge_defaults_into_profile(
+    defaults: &toml::map::Map<String, toml::Value>,
+    profile: &mut toml::map::Map<String, toml::Value>,
+) {
+    for (key, default_val) in defaults {
+        match profile.get_mut(key) {
+            None => {
+                profile.insert(key.clone(), default_val.clone());
+            }
+            Some(toml::Value::Table(profile_subtable)) => {
+                if let toml::Value::Table(default_subtable) = default_val {
+                    for (subkey, default_subval) in default_subtable {
+                        if !profile_subtable.contains_key(subkey) {
+                            profile_subtable.insert(subkey.clone(), default_subval.clone());
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                // Scalar, array (`policies`, `alerts`), or non-table value in
+                // the profile always wins over `[defaults]`.
+            }
+        }
+    }
+}
+
 pub fn load_config_from_path(
     config_path: &std::path::Path,
     profile_name: Option<&str>,
@@ -1818,6 +2060,16 @@ pub fn load_config_from_path(
         path: config_path.to_path_buf(),
         source,
     })?;
+
+    // Validate `[defaults]` up front (before profile resolution) so forbidden
+    // keys (`url`, secrets) or unknown keys inside `[defaults]` fail with a
+    // `ConfigError` naming `[defaults]` regardless of which profile is active.
+    let defaults_table: Option<toml::map::Map<String, toml::Value>> =
+        if let Some(defaults_val) = raw.get("defaults") {
+            Some(validate_defaults_value(defaults_val, config_path)?.clone())
+        } else {
+            None
+        };
 
     // Resolve which profile to load when none was passed on the CLI:
     //   1. an explicit `--profile` always wins (the `Some` arm below);
@@ -1844,7 +2096,8 @@ pub fn load_config_from_path(
     });
 
     let profile_value: toml::Value = if let Some(name) = effective.as_deref() {
-        raw.get("profiles")
+        let mut pval = raw
+            .get("profiles")
             .and_then(|p| p.get(name))
             .cloned()
             .ok_or_else(|| {
@@ -1858,7 +2111,11 @@ pub fn load_config_from_path(
                     profile: name.to_string(),
                     known: known_str,
                 }
-            })?
+            })?;
+        if let (Some(ref defaults), Some(profile_map)) = (&defaults_table, pval.as_table_mut()) {
+            merge_defaults_into_profile(defaults, profile_map);
+        }
+        pval
     } else {
         // No profile resolved. If the config is profile-only (no flat
         // `url`/`user`) emit an actionable error listing the profiles —
@@ -1877,11 +2134,21 @@ pub fn load_config_from_path(
             }
         }
         // Flat top-level config (backwards compat). Strip the [profiles]
-        // table before deserializing so unknown-field errors don't fire
-        // on parsers that use deny_unknown_fields in the future.
+        // and [defaults] tables before deserializing so unknown-field errors
+        // don't fire on ProfileConfig (`#[serde(deny_unknown_fields)]`).
+        // `[defaults]` was already schema-validated above; emit a warning so
+        // an operator with a flat config knows `[defaults]` only applies to
+        // `[profiles.<name>]` entries.
         let mut v = raw;
         if let Some(t) = v.as_table_mut() {
             t.remove("profiles");
+            if t.remove("defaults").is_some() {
+                tracing::warn!(
+                    "config: `[defaults]` table in {} is ignored because no `[profiles.<name>]` \
+                     profile is active (flat top-level config mode)",
+                    config_path.display()
+                );
+            }
         }
         v
     };
@@ -1930,18 +2197,18 @@ pub fn list_profiles() -> Result<Vec<String>> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    let content = std::fs::read_to_string(&path)?;
-    let raw: toml::Value = toml::from_str(&content)?;
-    let names = raw
-        .get("profiles")
-        .and_then(|p| p.as_table())
-        .map(|t| {
-            let mut v: Vec<String> = t.keys().cloned().collect();
-            v.sort();
-            v
-        })
-        .unwrap_or_default();
-    Ok(names)
+    let content = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let raw: toml::Value = toml::from_str(&content).map_err(|source| ConfigError::Toml {
+        path: path.clone(),
+        source,
+    })?;
+    if let Some(defaults_val) = raw.get("defaults") {
+        validate_defaults_value(defaults_val, &path)?;
+    }
+    Ok(profile_names(&raw))
 }
 
 fn dirs_fallback() -> std::path::PathBuf {
@@ -2999,5 +3266,357 @@ chat_id = "12345"
                 "expected 'no keychain store in this build', got: {msg}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod defaults_merge_tests {
+    use super::*;
+
+    fn write_cfg(dir: &tempfile::TempDir, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).expect("write test config");
+        p
+    }
+
+    /// Test 1 (`#331`): Two profiles sharing `user`, `token_id`, `verify_tls`
+    /// and `[ssh] key_path`/`user` from `[defaults]`; each resolves its own
+    /// `url`, the shared values, and its own `profile_label()`.
+    #[test]
+    fn test_1_two_profiles_share_defaults_scalars_and_ssh() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_cfg(
+            &tmp,
+            "config.toml",
+            r#"
+default = "pve1"
+
+[defaults]
+user = "root@pam"
+token_id = "proxxx"
+verify_tls = false
+
+[defaults.ssh]
+user = "ops"
+key_path = "~/.ssh/proxxx_ed25519"
+
+[profiles.pve1]
+url = "https://pve1.lan:8006"
+
+[profiles.pve2]
+url = "https://pve2.lan:8006"
+"#,
+        );
+
+        let p1 = load_config_from_path(&cfg_path, Some("pve1")).expect("load pve1");
+        assert_eq!(p1.url, "https://pve1.lan:8006");
+        assert_eq!(p1.user, "root@pam");
+        assert_eq!(p1.token_id.as_deref(), Some("proxxx"));
+        assert!(!p1.verify_tls);
+        assert_eq!(p1.profile_label(), "pve1");
+        let p1_ssh = p1.ssh.as_ref().expect("pve1 ssh from defaults");
+        assert_eq!(p1_ssh.user, "ops");
+        assert_eq!(p1_ssh.key_path.as_deref(), Some("~/.ssh/proxxx_ed25519"));
+
+        let p2 = load_config_from_path(&cfg_path, Some("pve2")).expect("load pve2");
+        assert_eq!(p2.url, "https://pve2.lan:8006");
+        assert_eq!(p2.user, "root@pam");
+        assert_eq!(p2.token_id.as_deref(), Some("proxxx"));
+        assert!(!p2.verify_tls);
+        assert_eq!(p2.profile_label(), "pve2");
+        let p2_ssh = p2.ssh.as_ref().expect("pve2 ssh from defaults");
+        assert_eq!(p2_ssh.user, "ops");
+        assert_eq!(p2_ssh.key_path.as_deref(), Some("~/.ssh/proxxx_ed25519"));
+
+        // Default resolution (`profile_name = None`) selects `default = "pve1"`
+        // and merges `[defaults]` identically.
+        let p_default = load_config_from_path(&cfg_path, None).expect("load default profile");
+        assert_eq!(p_default.url, "https://pve1.lan:8006");
+        assert_eq!(p_default.profile_label(), "pve1");
+    }
+
+    /// Test 2 (`#331`): Precedence: a profile value beats the default, both for
+    /// a top-level scalar (`user`, `verify_tls`, `rate_limit`) and for a key
+    /// inside `[ssh]` (`user`, `key_path`).
+    #[test]
+    fn test_2_profile_values_beat_defaults_for_scalars_and_ssh_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_cfg(
+            &tmp,
+            "config.toml",
+            r#"
+[defaults]
+user = "root@pam"
+token_id = "shared-token"
+verify_tls = false
+rate_limit = 10
+
+[defaults.ssh]
+user = "root"
+key_path = "~/.ssh/default_ed25519"
+exec_timeout_secs = 60
+
+[profiles.pve1]
+url = "https://pve1.lan:8006"
+user = "audit@pve"
+verify_tls = true
+
+[profiles.pve1.ssh]
+user = "admin"
+"#,
+        );
+
+        let p1 = load_config_from_path(&cfg_path, Some("pve1")).expect("load pve1");
+        assert_eq!(p1.url, "https://pve1.lan:8006");
+        assert_eq!(p1.user, "audit@pve", "profile scalar must beat [defaults]");
+        assert!(p1.verify_tls, "profile verify_tls must beat [defaults]");
+        assert_eq!(
+            p1.token_id.as_deref(),
+            Some("shared-token"),
+            "unset scalar falls back to [defaults]"
+        );
+        assert_eq!(p1.rate_limit, Some(10));
+
+        let ssh = p1.ssh.expect("merged ssh");
+        assert_eq!(
+            ssh.user, "admin",
+            "profile [ssh].user must beat [defaults.ssh].user"
+        );
+        assert_eq!(
+            ssh.key_path.as_deref(),
+            Some("~/.ssh/default_ed25519"),
+            "unset [ssh].key_path falls back to [defaults.ssh].key_path"
+        );
+        assert_eq!(ssh.exec_timeout_secs, 60);
+    }
+
+    /// Test 3 (`#331`): One-level table merge:
+    /// - `[defaults.ssh] key_path` + `[profiles.X.ssh] hosts = {...}` -> both present.
+    /// - `hosts` in both `[defaults.ssh]` and `[profiles.Y.ssh]` -> the profile's
+    ///   `hosts` map wins whole (no recursive merge of nested maps).
+    #[test]
+    fn test_3_one_level_table_merge_and_nested_map_replacement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_cfg(
+            &tmp,
+            "config.toml",
+            r#"
+[defaults]
+user = "root@pam"
+token_id = "proxxx"
+
+[defaults.ssh]
+key_path = "~/.ssh/proxxx_ed25519"
+hosts = { defaultnode = "10.0.0.99" }
+
+[profiles.pve1]
+url = "https://pve1.lan:8006"
+[profiles.pve1.ssh]
+user = "ops"
+
+[profiles.pve2]
+url = "https://pve2.lan:8006"
+[profiles.pve2.ssh]
+hosts = { pve2 = "10.0.0.2:2222" }
+"#,
+        );
+
+        // pve1 omits `hosts` in `[profiles.pve1.ssh]`: inherits both `key_path`
+        // and the `hosts` table whole from `[defaults.ssh]`.
+        let p1 = load_config_from_path(&cfg_path, Some("pve1")).expect("load pve1");
+        let ssh1 = p1.ssh.expect("pve1 ssh");
+        assert_eq!(ssh1.user, "ops");
+        assert_eq!(ssh1.key_path.as_deref(), Some("~/.ssh/proxxx_ed25519"));
+        assert_eq!(ssh1.hosts.len(), 1);
+        assert_eq!(
+            ssh1.hosts.get("defaultnode").map(String::as_str),
+            Some("10.0.0.99")
+        );
+
+        // pve2 sets `hosts` in `[profiles.pve2.ssh]`: keeps `key_path` from
+        // `[defaults.ssh]`, and its `hosts` map replaces the default `hosts`
+        // map wholesale (`defaultnode` is NOT merged in).
+        let p2 = load_config_from_path(&cfg_path, Some("pve2")).expect("load pve2");
+        let ssh2 = p2.ssh.expect("pve2 ssh");
+        assert_eq!(ssh2.key_path.as_deref(), Some("~/.ssh/proxxx_ed25519"));
+        assert_eq!(ssh2.hosts.len(), 1, "profile hosts map must win whole");
+        assert_eq!(
+            ssh2.hosts.get("pve2").map(String::as_str),
+            Some("10.0.0.2:2222")
+        );
+        assert!(!ssh2.hosts.contains_key("defaultnode"));
+    }
+
+    /// Test 4 (`#331`): Arrays replace: `[[defaults.policies]]` +
+    /// `[[profiles.X.policies]]` -> only the profile's array is kept (not concatenated).
+    /// When a profile omits `policies` (or `alerts`), it inherits `[defaults]`'s array.
+    #[test]
+    fn test_4_arrays_replace_rather_than_append() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_cfg(
+            &tmp,
+            "config.toml",
+            r#"
+[defaults]
+user = "root@pam"
+token_id = "proxxx"
+
+[[defaults.policies]]
+action = "delete"
+target = "*"
+channel = "telegram"
+require = 1
+
+[[defaults.alerts]]
+name = "default_node_down"
+when = "node_offline"
+route = ["telegram"]
+
+[profiles.inherits]
+url = "https://pve1.lan:8006"
+
+[profiles.overrides]
+url = "https://pve2.lan:8006"
+
+[[profiles.overrides.policies]]
+action = "*"
+target = "tag:prod"
+channel = "telegram"
+require = 2
+
+[[profiles.overrides.alerts]]
+name = "prod_storage_full"
+when = "storage_above"
+threshold_percent = 85
+route = ["telegram"]
+"#,
+        );
+
+        let inherited = load_config_from_path(&cfg_path, Some("inherits")).expect("inherits");
+        let inh_pol = inherited.policies.expect("inherited policies");
+        assert_eq!(inh_pol.len(), 1);
+        assert_eq!(inh_pol[0].action, "delete");
+        assert_eq!(inh_pol[0].require, 1);
+        let inh_alerts = inherited.alerts.expect("inherited alerts");
+        assert_eq!(inh_alerts.len(), 1);
+        assert_eq!(inh_alerts[0].name, "default_node_down");
+
+        let overridden = load_config_from_path(&cfg_path, Some("overrides")).expect("overrides");
+        let ov_pol = overridden.policies.expect("overridden policies");
+        assert_eq!(
+            ov_pol.len(),
+            1,
+            "profile policies must replace default array"
+        );
+        assert_eq!(ov_pol[0].action, "*");
+        assert_eq!(ov_pol[0].target, "tag:prod");
+        assert_eq!(ov_pol[0].require, 2);
+
+        let ov_alerts = overridden.alerts.expect("overridden alerts");
+        assert_eq!(
+            ov_alerts.len(),
+            1,
+            "profile alerts must replace default array"
+        );
+        assert_eq!(ov_alerts[0].name, "prod_storage_full");
+    }
+
+    /// Test 5 (`#331` unit level): Refusals for `url`, secrets, and unknown keys
+    /// in `[defaults]`, all downcasting to `ConfigError` (`EXIT_CODE == 3`) and
+    /// naming `defaults`.
+    #[test]
+    fn test_5_refusals_for_url_secrets_and_unknown_keys_in_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "url-in-defaults.toml",
+                "[defaults]\nurl = \"https://pve1.lan:8006\"\nuser = \"root@pam\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "url",
+            ),
+            (
+                "token-secret-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\ntoken_secret = \"super-secret\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "token_secret",
+            ),
+            (
+                "token-secret-file-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\ntoken_secret_file = \"/etc/proxxx/tok\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "token_secret_file",
+            ),
+            (
+                "password-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\npassword = \"hunter2\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "password",
+            ),
+            (
+                "mcp-token-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\nmcp_token = \"bearer-xyz\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "mcp_token",
+            ),
+            (
+                "pbs-secret-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\n[defaults.pbs]\ntoken_secret = \"pbs-sec\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "pbs.token_secret",
+            ),
+            (
+                "telegram-secret-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\n[defaults.telegram]\nbot_token = \"tg-sec\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "telegram.bot_token",
+            ),
+            (
+                "unknown-key-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\nverfiy_tls = false\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "verfiy_tls",
+            ),
+            (
+                "unknown-ssh-key-in-defaults.toml",
+                "[defaults]\nuser = \"root@pam\"\n[defaults.ssh]\nkey = \"~/.ssh/id_ed25519\"\n\n[profiles.pve1]\nurl = \"https://pve1.lan:8006\"\n",
+                "unknown field `key`",
+            ),
+        ];
+
+        for &(filename, body, expected_needle) in cases {
+            let path = write_cfg(&tmp, filename, body);
+            let err = load_config_from_path(&path, Some("pve1"))
+                .expect_err(&format!("{filename} must be rejected"));
+            let cfg_err = err
+                .chain()
+                .find_map(|c| c.downcast_ref::<ConfigError>())
+                .unwrap_or_else(|| panic!("{filename} must downcast to ConfigError: {err:#}"));
+            assert_eq!(ConfigError::EXIT_CODE, 3);
+            let msg = format!("{cfg_err}");
+            assert!(
+                msg.contains("defaults"),
+                "{filename}: error message must name `defaults`, got: {msg}"
+            );
+            assert!(
+                msg.contains(expected_needle),
+                "{filename}: error message must contain `{expected_needle}`, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_config_strips_valid_defaults_and_preserves_default_profile_label() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_cfg(
+            &tmp,
+            "flat.toml",
+            r#"
+url = "https://pve-flat.lan:8006"
+user = "root@pam"
+
+[defaults]
+verify_tls = false
+"#,
+        );
+
+        let cfg = load_config_from_path(&cfg_path, None).expect("flat config loads");
+        assert_eq!(cfg.url, "https://pve-flat.lan:8006");
+        // Flat config ignores `[defaults]` (with a warning) rather than failing
+        // on `deny_unknown_fields`, so `verify_tls` keeps its struct default (`true`).
+        assert!(cfg.verify_tls);
+        assert_eq!(cfg.profile_label(), "default");
     }
 }

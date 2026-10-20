@@ -19,6 +19,47 @@ If both `default` and `[profiles.X]` are present, `default` selects
 which profile to load. If only top-level fields are present, those
 fields are the implicit profile.
 
+## `[defaults]` (shared profile base)
+
+Optional top-level table merged under every `[profiles.<name>]` entry before
+deserialization (`#331`). Accepts any non-secret, non-`url` field or sub-table
+supported by `[profiles.<name>]`:
+
+```toml
+default = "pve1"
+
+[defaults]
+user          = "root@pam"
+auth          = "token"
+token_id      = "proxxx"
+verify_tls    = true
+tls_pin_mode  = "tofu"
+rate_limit    = 10
+read_only     = false
+
+[defaults.ssh]
+user     = "root"
+key_path = "~/.ssh/proxxx_homelab"
+
+[profiles.pve1]
+url = "https://pve1.lan:8006/"
+
+[profiles.pve2]
+url = "https://pve2.lan:8006/"
+read_only = true
+```
+
+Merge and validation rules:
+
+| Rule | Behaviour |
+| :--- | :--- |
+| **Precedence** | A key set in `[profiles.<name>]` always wins over `[defaults]`. |
+| **Sub-tables (`[ssh]`, `[pbs]`, `[telegram]`, `[reconcile]`)** | Merged **one level deep**: missing keys in `[profiles.<name>.<sub>]` are filled from `[defaults.<sub>]`. Nested maps inside a sub-table (`ssh.hosts`, `ssh.guests`) are taken whole from the profile if present, else whole from `[defaults]` (no recursive map merge). |
+| **Arrays (`[[policies]]`, `[[alerts]]`)** | Not concatenated: if a profile defines `policies` or `alerts`, its array replaces the `[defaults]` array wholesale; if omitted, the profile inherits the `[defaults]` array. |
+| **Forbidden keys (exit `3`)** | `url` and all secret keys (`token_secret`, `token_secret_file`, `password`, `mcp_token`, `pbs.token_secret`, `pbs.token_secret_file`, `telegram.bot_token`, `telegram.bot_token_file`) are refused in `[defaults]` with `ConfigError` (exit code `3`). |
+| **Unknown keys (exit `3`)** | Validated with `deny_unknown_fields` before merge; any unknown key in `[defaults]` or its sub-tables fails with a `ConfigError` naming `[defaults]`. |
+| **Flat config (no `[profiles]`)** | `[defaults]` is schema-validated, then stripped with a `WARN` log because no `[profiles.<name>]` entry is active. |
+
 ## `[profiles.<name>]`
 
 ```toml
