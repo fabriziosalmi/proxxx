@@ -68,9 +68,6 @@ governor = "0.8"
 # Fuzzy search
 nucleo = "0.5"
 
-# OS keychain
-keyring = { version = "3", optional = true }
-
 # Async trait
 async-trait = "0.1"
 nucleo-matcher = "0.3.1"
@@ -151,7 +148,17 @@ zeroize = { version = "1", features = ["zeroize_derive", "serde"] }
 
 [features]
 default = ["keychain"]
+# Enables the OS keychain credential store on macOS (`keyring` with
+# `apple-native` / Security.framework). On Linux and other targets `keyring`
+# is not a dependency, so this feature is a no-op there (`--no-default-features`
+# remains accepted everywhere).
 keychain = ["dep:keyring"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# OS keychain (macOS only — #319). Declared under target-specific dependencies
+# with `apple-native` so macOS links Security.framework (`UntilDelete`
+# persistence) while Linux musl/gnu builds do not pull `keyring` or D-Bus.
+keyring = { version = "3", features = ["apple-native"], optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"

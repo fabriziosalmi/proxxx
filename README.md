@@ -168,7 +168,7 @@ proxxx --help                           # full subcommand list.
 proxxx version --json                   # build + capability metadata.
 ```
 
-The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → 0600 file → OS keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
+The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → inline TOML → 0600 file → macOS Keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
 
 <p align="center">
   <img src="assets/demo.svg" alt="proxxx animated demo — a destructive command is typed, refused by the pre-flight risk gate, then approved via Telegram HITL and executed" width="820">
@@ -309,7 +309,7 @@ Default location follows the `directories` project-dirs convention:
 | Linux | `~/.config/proxxx/config.toml` |
 | macOS | `~/Library/Application Support/dev.proxxx.proxxx/config.toml` |
 
-Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → inline TOML → `token_secret_file` (0600 enforced) → OS keychain. **Inline beats the file reference** — when moving a secret into a file, delete the inline value or it keeps winning (proxxx warns when both are set). Loaded values live in `SecretString`: redacting `Debug`, no `Display`, no `Serialize`, zeroized on drop.
+Secrets resolve in order: CLI flag → `PROXXX_TOKEN_SECRET` env → inline TOML → `token_secret_file` (0600 enforced) → macOS Keychain (macOS only; service `proxxx`, account `<profile>/token_secret` then `token_secret`). **Inline beats the file reference** — when moving a secret into a file, delete the inline value or it keeps winning (proxxx warns when both are set). Loaded values live in `SecretString`: redacting `Debug`, no `Display`, no `Serialize`, zeroized on drop.
 
 | Optional section | Unlocks |
 | :--- | :--- |

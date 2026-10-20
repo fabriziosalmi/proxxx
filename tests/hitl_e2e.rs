@@ -2372,6 +2372,7 @@ async fn env_var_beats_inline_bot_token() {
         bot_token: Some(proxxx::util::secret::SecretString::from("inline-loser")),
         bot_token_file: None,
         chat_id: "12345".to_string(),
+        profile_name: None,
     };
 
     // Sanity: with no env, inline wins.
@@ -2395,6 +2396,9 @@ async fn env_var_beats_inline_bot_token() {
 async fn bot_token_file_with_lax_permissions_is_refused() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _kc = proxxx::config::TestKeychainGuard::install(
+        proxxx::config::TestKeychainMode::Entries(std::collections::HashMap::new()),
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("bot_token");
     std::fs::write(&path, "secret-token-here").expect("write");
@@ -2406,6 +2410,7 @@ async fn bot_token_file_with_lax_permissions_is_refused() {
         bot_token: None,
         bot_token_file: Some(path.to_string_lossy().to_string()),
         chat_id: "12345".to_string(),
+        profile_name: None,
     };
     // Make sure no env override leaks in from a previous serial test.
     std::env::remove_var("PROXXX_TELEGRAM_BOT_TOKEN");

@@ -453,7 +453,7 @@ fn init_queue_table(conn: &Connection) -> anyhow::Result<()> {
 /// the writer can block for up to the configured `busy_timeout` (5000 ms).
 /// Called synchronously from an async task, that pin the runtime worker
 /// thread for the full window — `q` keypresses lag, alerts skip ticks.
-/// Same pattern as [`config::keyring_get`](crate::config) which already
+/// Same pattern as the keychain lookup in [`crate::config`] which already
 /// uses `spawn_blocking` for the same reason on the keychain side.
 ///
 /// Takes owned arguments because `spawn_blocking` requires `'static`;
