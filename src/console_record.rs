@@ -69,14 +69,19 @@ impl CastWriter {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create dir {}", parent.display()))?;
         }
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("open cast file {} for write", path.display()))?;
+        // 0600 from the first byte (#376): a recording can contain anything
+        // typed or shown on the console, so it must never sit in a 0644 file
+        // waiting for a chmod.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("chmod 0600 {}", path.display()))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        let file = opts
+            .open(path)
+            .with_context(|| format!("open cast file {} for write", path.display()))?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

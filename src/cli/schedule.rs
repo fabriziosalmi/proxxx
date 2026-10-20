@@ -131,24 +131,11 @@ pub fn save_store(store: &ScheduleStore) -> Result<()> {
 
 /// `save_store` with an explicit path. Tests use this form.
 pub fn save_store_at(path: &std::path::Path, store: &ScheduleStore) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create dir {}", parent.display()))?;
-    }
     let content = toml::to_string_pretty(store)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, content)
-        .with_context(|| format!("write temp schedules at {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    // #268 — durable rename, so a scheduled job written before a crash
-    // is still there afterwards.
-    crate::util::durable::rename_durable(&tmp, path)
-        .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
-    Ok(())
+    // 0600 from the first byte, fsync, durable rename (#268, #376), so a
+    // scheduled job written before a crash is still there afterwards.
+    crate::util::durable::write_private_atomic(path, content.as_bytes())
+        .with_context(|| format!("write schedules at {}", path.display()))
 }
 
 /// Parse a duration suffix: `30s`, `5m`, `2h`, `1d`, `1w`.

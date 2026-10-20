@@ -535,32 +535,14 @@ pub fn thaw_at(path: &std::path::Path) -> Result<Option<FreezeState>> {
 /// half-written file. On Unix the file mode is forced to 0600 because
 /// the reason text may name a compromised user / system.
 fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
+    path.parent()
         .context("freeze lock path has no parent — refusing to write to root")?;
-    let tmp = parent.join(format!(
-        "freeze.lock.tmp.{}.{}",
-        std::process::id(),
-        now_secs()
-    ));
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating temp lock {}", tmp.display()))?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
-    }
-    // #268 — the freeze lock above all: a rename that does not survive a
-    // power loss means the kill-switch is off after the reboot, while the
-    // operator was told the fleet was frozen.
-    crate::util::durable::rename_durable(&tmp, path)
-        .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
+    // 0600 from the first byte, fsync, durable rename (#268, #376). The
+    // freeze lock above all: a rename that does not survive a power loss
+    // means the kill-switch is off after the reboot, while the operator was
+    // told the fleet was frozen.
+    crate::util::durable::write_private_atomic(path, content.as_bytes())
+        .with_context(|| format!("writing freeze lock {}", path.display()))?;
     Ok(())
 }
 
