@@ -1319,16 +1319,23 @@ impl SshConfig {
     }
 
     /// Resolve `known_hosts` path with default + tilde expansion.
-    #[must_use]
-    pub fn known_hosts_path(&self) -> std::path::PathBuf {
+    ///
+    /// # Errors
+    /// When no `known_hosts` is configured and the per-user config directory
+    /// cannot be resolved. There is deliberately no shared fallback such as
+    /// `/tmp/proxxx`: another local user could pre-seed host keys there and
+    /// have proxxx trust them (`#375`).
+    pub fn known_hosts_path(&self) -> Result<std::path::PathBuf> {
         if let Some(ref p) = self.known_hosts {
-            return expand_tilde(p);
+            return Ok(expand_tilde(p));
         }
-        let dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx").map_or_else(
-            || std::path::PathBuf::from("/tmp/proxxx"),
-            |d| d.config_dir().to_path_buf(),
-        );
-        dir.join("known_hosts")
+        let dirs = directories::ProjectDirs::from("dev", "proxxx", "proxxx").ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resolve the per-user proxxx config directory for known_hosts; \
+                 set `known_hosts = \"<path>\"` under [ssh] to a file only you can write"
+            )
+        })?;
+        Ok(dirs.config_dir().join("known_hosts"))
     }
 
     /// Resolve private key path with tilde expansion.
@@ -1346,21 +1353,35 @@ pub enum HostKeyPolicy {
 }
 
 impl HostKeyPolicy {
-    /// Parse a string policy tolerantly. Default fallback: Tofu.
+    /// Accepted spellings of `ssh.strict_host_key_checking` (`#375`):
+    /// `tofu`, `strict` and `off`, plus the OpenSSH spellings `accept-new`
+    /// (= tofu), `yes` (= strict) and `no` (= off). Case-insensitive.
+    pub const ACCEPTED: &'static [&'static str] =
+        &["tofu", "strict", "off", "accept-new", "yes", "no"];
+
+    /// Parse a policy, or `None` for an unrecognised value. Config loading
+    /// refuses `None` (exit 3), so a typo never changes the trust model.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tofu" | "accept-new" => Some(Self::Tofu),
+            "strict" | "yes" => Some(Self::Strict),
+            "off" | "no" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Infallible variant for call sites that hold an already-validated
+    /// config. An unrecognised value maps to `Strict`, the policy that trusts
+    /// nothing new: it used to map to `Tofu`, so the OpenSSH spelling `"yes"`
+    /// trusted the first key presented (`#375`).
     ///
-    /// Intentionally NOT `impl FromStr` — the std trait returns
-    /// `Result<Self, Err>` which doesn't fit our infallible
-    /// "tolerate unknown → Tofu" semantics. The tolerance is the
-    /// load-bearing behaviour (a typo'd config shouldn't crash
-    /// proxxx, just default to the safer policy).
+    /// Intentionally NOT `impl FromStr` (that trait is fallible); see
+    /// [`Self::parse`] for the fallible form.
     #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "strict" => Self::Strict,
-            "off" => Self::Off,
-            _ => Self::Tofu,
-        }
+        Self::parse(s).unwrap_or(Self::Strict)
     }
 }
 
@@ -1472,6 +1493,18 @@ impl ProfileConfig {
         if let Some(ref pbs) = self.pbs {
             pbs.pinned_verifier()
                 .map_err(|e| ConfigError::InvalidValue(e.to_string()))?;
+        }
+        if let Some(ref ssh) = self.ssh {
+            if HostKeyPolicy::parse(&ssh.strict_host_key_checking).is_none() {
+                return Err(ConfigError::InvalidValue(format!(
+                    "config key `ssh.strict_host_key_checking` is {:?}, which is not a \
+                     recognised value. Accepted: {} (case-insensitive). Refusing rather \
+                     than guessing a host-key trust policy (#375).",
+                    ssh.strict_host_key_checking,
+                    HostKeyPolicy::ACCEPTED.join(" | ")
+                ))
+                .into());
+            }
         }
         Ok(())
     }
@@ -3852,5 +3885,90 @@ verify_tls = false
         // on `deny_unknown_fields`, so `verify_tls` keeps its struct default (`true`).
         assert!(cfg.verify_tls);
         assert_eq!(cfg.profile_label(), "default");
+    }
+}
+
+/// `#375`: host-key trust policy parsing and validation.
+#[cfg(test)]
+mod host_key_policy_tests {
+    use super::{load_config_from_path, ConfigError, HostKeyPolicy};
+
+    #[test]
+    fn accepted_spellings_map_to_the_intended_policy() {
+        for (s, want) in [
+            ("tofu", HostKeyPolicy::Tofu),
+            ("accept-new", HostKeyPolicy::Tofu),
+            ("strict", HostKeyPolicy::Strict),
+            ("yes", HostKeyPolicy::Strict),
+            ("YES", HostKeyPolicy::Strict),
+            ("off", HostKeyPolicy::Off),
+            ("no", HostKeyPolicy::Off),
+            (" Strict ", HostKeyPolicy::Strict),
+        ] {
+            assert_eq!(HostKeyPolicy::parse(s), Some(want), "{s:?}");
+            assert_eq!(HostKeyPolicy::from_str(s), want, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_values_are_rejected_and_never_degrade_to_tofu() {
+        for s in ["maybe", "", "true", "ask"] {
+            assert_eq!(HostKeyPolicy::parse(s), None, "{s:?}");
+            assert_eq!(
+                HostKeyPolicy::from_str(s),
+                HostKeyPolicy::Strict,
+                "an unrecognised value must fail safe to strict, not tofu: {s:?}"
+            );
+        }
+    }
+
+    fn load(value: &str) -> anyhow::Result<super::ProfileConfig> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "url = \"https://pve.example:8006\"\nuser = \"root@pam\"\n\n[ssh]\nkey_path = \"~/.ssh/id_ed25519\"\nstrict_host_key_checking = \"{value}\"\n"
+            ),
+        )
+        .expect("write config");
+        load_config_from_path(&path, None)
+    }
+
+    #[test]
+    fn config_load_refuses_an_unrecognised_policy_with_a_config_error() {
+        let err = load("maybe").expect_err("an unknown policy must not load");
+        assert!(
+            err.chain()
+                .any(|c| c.downcast_ref::<ConfigError>().is_some()),
+            "must be a ConfigError (exit 3): {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("strict_host_key_checking"), "{msg}");
+        assert!(
+            msg.contains("accept-new"),
+            "the error must list the accepted values: {msg}"
+        );
+    }
+
+    #[test]
+    fn config_load_accepts_the_openssh_spelling_yes_as_strict() {
+        let cfg = load("yes").expect("`yes` is the OpenSSH spelling of strict");
+        let ssh = cfg.ssh.expect("ssh block");
+        assert_eq!(
+            HostKeyPolicy::from_str(&ssh.strict_host_key_checking),
+            HostKeyPolicy::Strict
+        );
+    }
+
+    #[test]
+    fn an_explicit_known_hosts_path_is_used_as_written() {
+        let cfg = load("tofu").expect("load");
+        let mut ssh = cfg.ssh.expect("ssh block");
+        ssh.known_hosts = Some("/srv/proxxx/known_hosts".to_string());
+        assert_eq!(
+            ssh.known_hosts_path().expect("explicit path"),
+            std::path::PathBuf::from("/srv/proxxx/known_hosts")
+        );
     }
 }

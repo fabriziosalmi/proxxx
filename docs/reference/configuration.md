@@ -157,7 +157,7 @@ max_unmanned_changes = 5              # hard cap on changes-per-tick for the UNM
 [ssh]
 key_path = "/home/fab/.ssh/proxxx_homelab" # ed25519 / rsa private key path
 user = "root"                              # optional, default "root"
-strict_host_key_checking = "tofu"           # tofu, strict, or off
+strict_host_key_checking = "tofu"           # tofu, strict, off (OpenSSH: accept-new, yes, no); anything else is refused
 known_hosts = "~/.config/proxxx/known_hosts"  # optional, default to XDG path
 
 [ssh.hosts]

@@ -91,7 +91,7 @@ token_id = "proxxx"
 # [ssh]
 # user = "root"
 # key_path = "~/.ssh/id_ed25519"
-# # known_hosts_path = "~/.ssh/known_hosts"  # default
+# # known_hosts = "~/.ssh/known_hosts"       # default: <config_dir>/known_hosts
 
 # ── Optional: PBS (Proxmox Backup Server) connection ─────────
 # Read-only browse via REST; restore shells out to proxmox-backup-client

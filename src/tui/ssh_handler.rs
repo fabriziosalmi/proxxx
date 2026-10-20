@@ -44,14 +44,22 @@ impl SshSessionHandler {
     /// crash the entire TUI on first run.
     pub fn new(profile: ProfileConfig) -> Self {
         let (known, verifier) = if let Some(ref ssh) = profile.ssh {
-            let known_path = ssh.known_hosts_path();
-            let kh = KnownHosts::load(known_path.clone())
-                .with_context(|| format!("loading known_hosts {}", known_path.display()))
-                .unwrap_or_else(|e| {
-                    warn!("known_hosts load failed: {e:#} — starting with empty store");
+            let mut policy = HostKeyPolicy::from_str(&ssh.strict_host_key_checking);
+            let kh = match ssh.known_hosts_path() {
+                Ok(known_path) => KnownHosts::load(known_path.clone())
+                    .with_context(|| format!("loading known_hosts {}", known_path.display()))
+                    .unwrap_or_else(|e| {
+                        warn!("known_hosts load failed: {e:#} — starting with empty store");
+                        KnownHosts::default()
+                    }),
+                Err(e) => {
+                    // No private known_hosts location: trust nothing new
+                    // rather than accept keys that cannot be persisted (#375).
+                    warn!("{e:#} — SSH host keys will be checked strictly");
+                    policy = HostKeyPolicy::Strict;
                     KnownHosts::default()
-                });
-            let policy = HostKeyPolicy::from_str(&ssh.strict_host_key_checking);
+                }
+            };
             let v: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier { policy });
             (Arc::new(TokioRwLock::new(kh)), v)
         } else {
