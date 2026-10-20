@@ -159,6 +159,59 @@ written by `proxxx state export`, the `"profile"` field in `audit.db`
 `params_json`, the `profile` label on Prometheus reconcile metrics, and
 MCP reconciliation notifications.
 
+### Shared profile defaults (`[defaults]`)
+
+When several standalone Proxmox nodes or clusters share the same `user`,
+`token_id`, `verify_tls`, `[ssh]`, `[pbs]`, `[telegram]`, `[reconcile]`,
+`[[policies]]`, or `[[alerts]]` settings, declare them once in a top-level
+`[defaults]` table (`#331`). Every `[profiles.<name>]` entry inherits
+from `[defaults]` before deserialization:
+
+```toml
+default = "pve1"
+
+[defaults]
+user = "root@pam"
+token_id = "proxxx"
+verify_tls = false
+
+[defaults.ssh]
+user = "root"
+key_path = "~/.ssh/proxxx_ed25519"
+
+[profiles.pve1]
+url = "https://pve1.lan:8006"
+token_secret_file = "~/.config/proxxx/secrets/pve1.token"
+
+[profiles.pve2]
+url = "https://pve2.lan:8006"
+token_secret_file = "~/.config/proxxx/secrets/pve2.token"
+```
+
+Merge rules:
+
+- **Profile always wins**: any key set in `[profiles.<name>]` overrides `[defaults]`.
+- **One-level sub-table merge**: `[defaults.ssh]`, `[defaults.pbs]`,
+  `[defaults.telegram]`, and `[defaults.reconcile]` fill missing keys in the
+  corresponding `[profiles.<name>.<sub>]` table. Nested maps inside a sub-table
+  (such as `[ssh.hosts]` or `[ssh.guests]`) are **not** merged recursively — if
+  the profile sets `hosts` or `guests`, the profile's map replaces the default map
+  whole; otherwise the default map is inherited whole.
+- **Arrays replace**: `[[defaults.policies]]` and `[[defaults.alerts]]` are
+  replaced wholesale when a profile defines its own `[[profiles.<name>.policies]]`
+  or `[[profiles.<name>.alerts]]`.
+- **Refusals (exit code `3`)**:
+  - `url` is forbidden in `[defaults]` (each profile must declare its own endpoint).
+  - Secrets (`token_secret`, `token_secret_file`, `password`, `mcp_token`,
+    `pbs.token_secret`, `pbs.token_secret_file`, `telegram.bot_token`,
+    `telegram.bot_token_file`) are forbidden in `[defaults]` so a single credential
+    is never silently shared across every node; store secrets per profile, via
+    environment variables, or in the OS keychain.
+  - Unknown keys in `[defaults]` or its sub-tables fail immediately with a
+    `ConfigError` (exit code `3`) naming `[defaults]`.
+- **Flat top-level configs (no `[profiles]`)**: `[defaults]` is still schema-validated,
+  then stripped with a warning because no named profile is active.
+
 ### Read-only profiles (`read_only`)
 
 Set `read_only = true` on a profile to make proxxx refuse **every**

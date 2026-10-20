@@ -84,6 +84,7 @@ fn documented_toml_blocks_have_no_unknown_fields() {
     md_files.push(root.join("README.md"));
 
     let dir = tempfile::tempdir().expect("temp dir for config checks");
+    let mut defaults_blocks_parsed = 0usize;
 
     for file_path in md_files {
         let content = fs::read_to_string(&file_path)
@@ -129,9 +130,34 @@ fn documented_toml_blocks_have_no_unknown_fields() {
                         start_line
                     );
                 }
+
+                if block.contains("[defaults]") && block.contains("[profiles.") {
+                    let raw: toml::Value =
+                        toml::from_str(&test_content).expect("valid TOML in [defaults] doc block");
+                    let profiles = raw
+                        .get("profiles")
+                        .and_then(toml::Value::as_table)
+                        .expect("[profiles] table in [defaults] doc block");
+                    for prof_name in profiles.keys() {
+                        proxxx::config::load_config_from_path(&tmp_cfg, Some(prof_name))
+                            .unwrap_or_else(|err| {
+                                panic!(
+                                    "Documentation error in {}:{}: [defaults] + [profiles.{prof_name}] failed to load: {err:#}\nBlock:\n{block}",
+                                    rel.display(),
+                                    start_line
+                                )
+                            });
+                    }
+                    defaults_blocks_parsed += 1;
+                }
                 let _ = fs::remove_file(&tmp_cfg);
             }
             idx += 1;
         }
     }
+
+    assert!(
+        defaults_blocks_parsed >= 2,
+        "expected at least 2 `[defaults]` TOML blocks in docs (guide + reference), found {defaults_blocks_parsed}"
+    );
 }

@@ -1149,7 +1149,7 @@ pub async fn execute(
     }
 
     if matches!(cmd, Command::Doctor) {
-        return doctor::run().await;
+        return doctor::run_for_profile(profile).await;
     }
 
     if let Command::Audit { ref action } = cmd {
