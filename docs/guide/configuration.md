@@ -290,6 +290,16 @@ PVE API token (`PVEAuditor` role on `/`) for defence in depth:
 Either alone blocks writes; together they're belt-and-suspenders for the
 production clusters you only ever observe.
 
+### Reloading a running daemon (`SIGHUP`)
+
+`daemon serve`, `mcp serve`, `mcp serve-http` and `alerts watch` reload `config.toml` on
+`SIGHUP` (a reload that fails to parse keeps the previous config). Applied without a
+restart: `read_only` (checked before every write, so setting `read_only = true` and sending
+`SIGHUP` stops writes immediately), `[reconcile]` (re-read on every reconcile tick, including
+`auto_converge`), `[[alerts]]`, `[[policies]]`, the `[telegram]` structure and `mcp_token`.
+Restart required: `url`, `user`, `token_id`, the token secret, `rate_limit`,
+`reconcile.interval_secs` and Telegram bot credentials. The reload log line lists both.
+
 ### Multi-Proxmox pattern (prod read-only + writable test)
 
 The intended fleet layout: production hosts get a `PVEAuditor` token

@@ -1918,6 +1918,7 @@ pub async fn execute(
         Command::Schedule { action } => schedule::execute_schedule(action, secure),
         Command::Daemon { action } => {
             let handle = crate::config::watcher::new_handle(config.clone());
+            client.attach_live_config(std::sync::Arc::clone(&handle));
             crate::config::watcher::spawn_reload_on_sighup(
                 std::sync::Arc::clone(&handle),
                 profile.map(str::to_owned),
@@ -2130,6 +2131,7 @@ pub async fn execute(
         Command::Mcp { action } => match action {
             McpCommand::Serve => {
                 let handle = crate::config::watcher::new_handle(config);
+                client.attach_live_config(std::sync::Arc::clone(&handle));
                 crate::config::watcher::spawn_reload_on_sighup(
                     std::sync::Arc::clone(&handle),
                     profile.map(str::to_owned),
@@ -2148,6 +2150,7 @@ pub async fn execute(
                 // SIGHUP reload can never drop a token given on the command line.
                 let cli_token = token.map(crate::util::secret::SecretString::new);
                 let handle = crate::config::watcher::new_handle(config);
+                client.attach_live_config(std::sync::Arc::clone(&handle));
                 crate::config::watcher::spawn_reload_on_sighup(
                     std::sync::Arc::clone(&handle),
                     profile.map(str::to_owned),
@@ -2222,6 +2225,7 @@ pub async fn execute(
         Command::ClusterBootstrap { action } => cluster::execute_bootstrap(&client, action).await,
         Command::Alerts { action } => {
             let handle = crate::config::watcher::new_handle(config.clone());
+            client.attach_live_config(std::sync::Arc::clone(&handle));
             crate::config::watcher::spawn_reload_on_sighup(
                 std::sync::Arc::clone(&handle),
                 profile.map(str::to_owned),

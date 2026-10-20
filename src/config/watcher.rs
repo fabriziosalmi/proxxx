@@ -1,19 +1,25 @@
 // Config hot-reload — SIGHUP-triggered atomic swap.
 //
-// Long-running daemons (alerts watch, mcp serve, mcp serve-http) hold a
-// `ConfigHandle` instead of a plain `ProfileConfig`.  On SIGHUP they
-// transparently pick up new `[[alerts]]` rules, `[[policies]]`, `[telegram]`
-// structure, `mcp_token`, and `rate_limit` without restarting.
+// Long-running daemons (daemon serve, alerts watch, mcp serve, mcp serve-http)
+// hold a `ConfigHandle` instead of a plain `ProfileConfig`.  On SIGHUP they
+// pick up, without restarting: `read_only` (the client checks it before every
+// write, #373), `[reconcile]` (re-read on every reconcile tick), `[[alerts]]`
+// rules, `[[policies]]`, `[telegram]` structure and `mcp_token`.
 //
-// Fields baked into `PxClient` at startup (`url`, `user`, `token_id`,
-// `token_secret`) are NOT re-applied on reload — those require a full
-// restart.  The same applies to Telegram bot credentials used by the HITL
-// and alert daemons (credentials are resolved once at init time).
+// Restart-only (see `RESTART_ONLY_FIELDS`): the connection fields baked into
+// `PxClient` at startup (`url`, `user`, `token_id`, the token secret),
+// `rate_limit` (the limiter is built once), `reconcile.interval_secs` (the
+// timer is armed once) and Telegram bot credentials (resolved once at init).
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::ProfileConfig;
+
+/// Settings a SIGHUP reload does NOT apply; named in the reload log line so
+/// an operator does not assume they changed (`#373`).
+pub const RESTART_ONLY_FIELDS: &str =
+    "url, user, token_id, token secret, rate_limit, reconcile.interval_secs, telegram credentials";
 
 /// Shared live-config handle.  Clone-cheap (`Arc` inside).
 pub type ConfigHandle = Arc<RwLock<ProfileConfig>>;
@@ -43,7 +49,10 @@ where
     match load() {
         Ok(new_cfg) => {
             *handle.write().await = new_cfg;
-            tracing::info!("config watcher: reload OK");
+            tracing::info!(
+                "config watcher: reload OK (applied live: read_only, reconcile, alerts, \
+                 policies, mcp_token; restart required for: {RESTART_ONLY_FIELDS})"
+            );
             true
         }
         Err(e) => {

@@ -270,6 +270,11 @@ pub struct PxClient {
     audit_dir: Option<std::path::PathBuf>,
     max_attempts: u32,
     request_timeout: Option<std::time::Duration>,
+    /// Live, SIGHUP-reloaded config for long-running processes (`#373`).
+    /// When attached, `read_only` is read from it before every write, so
+    /// flipping `read_only = true` and sending SIGHUP stops writes without a
+    /// restart.
+    live_config: std::sync::OnceLock<crate::config::ConfigHandle>,
 }
 
 impl PxClient {
@@ -362,6 +367,7 @@ impl PxClient {
             audit_dir: None,
             max_attempts: RETRY_MAX_ATTEMPTS,
             request_timeout: None,
+            live_config: std::sync::OnceLock::new(),
         })
     }
 
@@ -618,12 +624,28 @@ impl PxClient {
         parse_json_maybe_blocking::<T>(bytes, path).await
     }
 
+    /// Attach the SIGHUP-reloaded config handle of a long-running process
+    /// (`daemon serve`, `mcp serve[-http]`, `alerts watch`), so the
+    /// write lock follows reloads (`#373`). Only the first call takes effect.
+    pub fn attach_live_config(&self, handle: crate::config::ConfigHandle) {
+        let _ = self.live_config.set(handle);
+    }
+
+    /// `read_only` as it is NOW: from the live config when one is attached
+    /// (`#373`), otherwise from the config the client was built with.
+    pub async fn effective_read_only(&self) -> bool {
+        match self.live_config.get() {
+            Some(handle) => handle.read().await.read_only,
+            None => self.profile_config.read_only,
+        }
+    }
+
     /// Client-side write lock. Refuses the mutation before the request
     /// leaves the process when the profile is `read_only = true`. Sits
     /// alongside the per-incident freeze check in every write verb; the
     /// two are independent (config-declared vs runtime-operational).
-    fn guard_read_only(&self, path: &str) -> Result<()> {
-        if self.profile_config.read_only {
+    async fn guard_read_only(&self, path: &str) -> Result<()> {
+        if self.effective_read_only().await {
             return Err(crate::config::ReadOnlyRefusal {
                 profile: self
                     .profile_config
@@ -645,7 +667,7 @@ impl PxClient {
     ) -> Result<T> {
         // Declarative read-only lock — refuses the write before it leaves
         // the process when the profile is `read_only = true`.
-        self.guard_read_only(path)?;
+        self.guard_read_only(path).await?;
         // Incident lockdown gate — refuses every mutation when the
         // freeze lock is active. Reads (GET) intentionally skip this
         // check; investigators need observation during an incident.
@@ -712,7 +734,7 @@ impl PxClient {
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<T> {
-        self.guard_read_only(path)?;
+        self.guard_read_only(path).await?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "PUT",
@@ -761,7 +783,7 @@ impl PxClient {
 
     /// Rate-limited, auth-aware DELETE request with safe-only retry (`#348`).
     async fn delete<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
-        self.guard_read_only(path)?;
+        self.guard_read_only(path).await?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "DELETE",
@@ -2808,7 +2830,7 @@ impl ProxmoxGateway for PxClient {
             node = urlenc_segment(node),
             storage = urlenc_segment(storage)
         );
-        self.guard_read_only(&path)?;
+        self.guard_read_only(&path).await?;
         crate::incident::check_not_frozen_for(self.profile_config.profile_name.as_deref())?;
         let audit_ctx = crate::audit::MutationAuditCtx::write_ahead_at(
             "POST",
