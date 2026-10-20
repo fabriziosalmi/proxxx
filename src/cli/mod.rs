@@ -37,6 +37,7 @@ pub(crate) mod reconcile;
 mod schedule;
 mod state;
 mod storage;
+pub mod token_bootstrap;
 mod upgrade_check;
 pub mod vm;
 mod watch;
@@ -1168,6 +1169,12 @@ pub async fn execute(
     let config = crate::config::load_config(profile)?;
     if let Command::Pbs { action } = cmd {
         return storage::execute_pbs(&config, action, cli_secret).await;
+    }
+    if let Command::Token {
+        action: access::TokenCommand::Bootstrap(ref args),
+    } = cmd
+    {
+        return token_bootstrap::execute_token_bootstrap(&config, args).await;
     }
     let client = std::sync::Arc::new(crate::api::PxClient::new(config.clone(), cli_secret).await?);
 

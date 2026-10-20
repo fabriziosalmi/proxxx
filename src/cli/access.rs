@@ -181,6 +181,9 @@ pub enum TokenCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Bootstrap a new API token over SSH (`pveum`), grant an ACL role, and store
+    /// the secret directly in a `0600` file or OS keychain without ever printing it (`#330`).
+    Bootstrap(crate::cli::token_bootstrap::TokenBootstrapArgs),
 }
 
 /// Feature #10 — read-only access browse.
@@ -462,6 +465,9 @@ pub async fn execute_token(
                 }),
                 0,
             ))
+        }
+        TokenCommand::Bootstrap(_) => {
+            anyhow::bail!("internal error: `token bootstrap` is handled before PxClient::new")
         }
     }
 }
