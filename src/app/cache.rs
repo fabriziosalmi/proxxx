@@ -236,7 +236,14 @@ pub struct ClusterStateCache {
     pub timestamp: u64,
 }
 
+/// Directory of the per-profile state databases: `PROXXX_CACHE_DIR` when set
+/// and non-empty (relocating the cache, and keeping test runs out of the
+/// developer's real cache: `.cargo/config.toml` sets it for every process
+/// cargo runs, #386), otherwise `<platform cache dir>/proxxx`.
 fn get_db_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("PROXXX_CACHE_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
     let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("proxxx");
     path

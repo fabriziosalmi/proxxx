@@ -96,15 +96,26 @@ fn main() -> Result<()> {
     // hardening for any XDG-aware tool. proxxx documents this in
     // README; no in-app canonicalisation gate (it would break
     // legitimate $HOME=/var/lib/proxxx setups in containers).
-    let log_dir = directories::ProjectDirs::from("dev", "proxxx", "proxxx").map_or_else(
-        || std::path::PathBuf::from("/tmp/proxxx"),
-        |d| d.data_local_dir().to_path_buf(),
-    );
+    //
+    // `PROXXX_LOG_DIR` (when set and non-empty) relocates the log files;
+    // `.cargo/config.toml` points it into the build tree so the binaries
+    // the e2e tests spawn do not log into the developer's data dir (#386).
+    let log_dir = match std::env::var_os("PROXXX_LOG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => directories::ProjectDirs::from("dev", "proxxx", "proxxx").map_or_else(
+            || std::path::PathBuf::from("/tmp/proxxx"),
+            |d| d.data_local_dir().to_path_buf(),
+        ),
+    };
     std::fs::create_dir_all(&log_dir)?;
+    // The appender writes `<prefix>.<date>.<suffix>`; the startup line below
+    // names the file from the same constants (#420).
+    const LOG_FILE_PREFIX: &str = "proxxx";
+    const LOG_FILE_SUFFIX: &str = "log";
     let file_appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("proxxx")
-        .filename_suffix("log")
+        .filename_prefix(LOG_FILE_PREFIX)
+        .filename_suffix(LOG_FILE_SUFFIX)
         .max_log_files(14)
         .build(&log_dir)
         .map_err(|e| anyhow::anyhow!("log appender init failed: {e}"))?;
@@ -164,7 +175,9 @@ fn main() -> Result<()> {
     info!(
         "proxxx v{} starting (log file: {})",
         env!("CARGO_PKG_VERSION"),
-        log_dir.join("proxxx.log.<date>").display()
+        log_dir
+            .join(format!("{LOG_FILE_PREFIX}.<date>.{LOG_FILE_SUFFIX}"))
+            .display()
     );
 
     // flight recorder: install the flight-recorder panic hook BEFORE the

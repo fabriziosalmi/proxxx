@@ -64,6 +64,7 @@ fn test_5_binary_refuses_url_secrets_and_unknown_keys_in_defaults_with_exit_3() 
 
         let out = Command::new(proxxx_bin())
             .env("PROXXX_CONFIG", &cfg_path)
+            .env("PROXXX_AUDIT_DIR", tmp.path().join("audit"))
             .args(["--profile", "pve1", "ls", "nodes"])
             .output()?;
 
@@ -121,8 +122,10 @@ url = "https://127.0.0.2:1"
         ("pve1", "https://127.0.0.1:1"),
         ("pve2", "https://127.0.0.2:1"),
     ] {
+        // `doctor` opens the audit DB: keep it off the real data dir (#386).
         let out = Command::new(proxxx_bin())
             .env("PROXXX_CONFIG", &cfg_path)
+            .env("PROXXX_AUDIT_DIR", tmp.path().join("audit"))
             .args(["--format", "json", "--profile", prof, "doctor"])
             .output()?;
 

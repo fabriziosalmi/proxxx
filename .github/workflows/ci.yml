@@ -82,6 +82,22 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      - name: Tests left the user directories alone
+        # #386: a test that resolves the real cache, data or config directory
+        # writes into the home of whoever runs `cargo test` (rows signed with
+        # the real audit key, state DBs in the real cache). The runner starts
+        # without any of these, so their presence means a test leaked.
+        run: |
+          leaked=0
+          for d in "$HOME/.cache/proxxx" "$HOME/.local/share/proxxx" "$HOME/.config/proxxx"; do
+            if [ -e "$d" ]; then
+              echo "::error::the test run wrote into $d"
+              ls -la "$d"
+              leaked=1
+            fi
+          done
+          exit "$leaked"
+
       - name: Build (release, stripped)
         run: cargo build --release
 
