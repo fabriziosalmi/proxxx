@@ -14,9 +14,13 @@
 # We don't ship a Windows binary — proxxx claims macOS + Linux only
 # (per README's "Honest non-goals"). PowerShell users can use WSL2.
 #
-# This workflow does NOT replace `ci.yml`. ci.yml runs on every push
-# and PR (build/test/clippy/fmt + audit + musl); release.yml runs on
-# tag push only and assumes the tagged commit already passed ci.
+# The first job calls `ci.yml` (build/test/clippy/fmt, cargo audit,
+# cargo deny, secret scan, musl) on the tagged commit, and the build
+# matrix needs it (#381): a tag on a red commit, or on one with a new
+# advisory, publishes nothing. Every cargo build uses `--locked`, so the
+# shipped binary is built from exactly the Cargo.lock that audit, deny
+# and the SBOM read; a stale lock fails the build instead of being
+# re-resolved on the runner.
 
 name: Release
 
@@ -41,10 +45,20 @@ permissions:
 
 jobs:
   # ──────────────────────────────────────────────────────────
+  # Gate — the full CI workflow on the tagged commit (#381).
+  # ──────────────────────────────────────────────────────────
+  gate:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # ──────────────────────────────────────────────────────────
   # Build matrix — one job per target triple, parallel.
   # ──────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
+    needs: gate
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -108,9 +122,9 @@ jobs:
       - name: Build release binary
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --locked --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
 
       - name: Verify Linux binary is statically linked

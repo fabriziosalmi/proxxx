@@ -22,6 +22,10 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # release.yml calls this whole workflow as the gate in front of the
+  # build matrix (#381): a tag is built, signed and published only after
+  # the tagged commit passes every job below.
+  workflow_call:
   schedule:
     # Daily 04:17 UTC sweep — catches CVEs disclosed AFTER the last
     # commit. The commit-triggered runs above only see CVEs known at
@@ -74,13 +78,13 @@ jobs:
         # The tree is clean at this level, so there is no backlog to work
         # through: a new warning means a new regression.
         # `--all-targets` covers tests + examples + benches.
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build (debug)
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
 
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
 
       - name: Tests left the user directories alone
         # #386: a test that resolves the real cache, data or config directory
@@ -99,7 +103,7 @@ jobs:
           exit "$leaked"
 
       - name: Build (release, stripped)
-        run: cargo build --release
+        run: cargo build --locked --release
 
   lint-scripts:
     name: Lint shell + Python
@@ -172,7 +176,7 @@ jobs:
         run: cargo install --locked --version 0.9.1 cargo-llvm-cov
 
       - name: Measure
-        run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-targets --lcov --output-path lcov.info
 
       - name: Summary
         run: cargo llvm-cov report --summary-only | tee -a "$GITHUB_STEP_SUMMARY"
@@ -276,7 +280,7 @@ jobs:
           shared-key: musl
 
       - name: Build static release
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
 
       - name: Verify the binary is statically linked
         # `ldd` on a static binary prints "not a dynamic executable"
