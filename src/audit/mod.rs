@@ -15,9 +15,9 @@ use anyhow::{Context, Result};
 // hmac 0.13: `new_from_slice` lives on the `KeyInit` trait which is no
 // longer re-exported by `Mac` like it was in 0.12. Explicit import.
 use hmac::{Hmac, KeyInit, Mac};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::Sha256;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -57,6 +57,10 @@ impl AuditWriteRefusal {
 pub struct AuditLogger {
     conn: Connection,
     key: Vec<u8>,
+    /// Path of the primary key this logger signs with. Retired keys are
+    /// resolved beside it, so a logger opened on an explicit directory
+    /// verifies rotated rows against that directory's keys (`#367`).
+    key_path: PathBuf,
 }
 
 impl AuditLogger {
@@ -79,8 +83,6 @@ impl AuditLogger {
     }
 
     fn open_at(path: &std::path::Path, key_path: &std::path::Path) -> Result<Self> {
-        let key_existed = key_path.exists();
-        let key = load_or_create_key(&key_path.to_path_buf())?;
         let conn = Connection::open(path)
             .with_context(|| format!("open audit db at {}", path.display()))?;
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
@@ -101,27 +103,53 @@ impl AuditLogger {
         )?;
         migrate_chain_version(&conn)?;
         migrate_key_id(&conn)?;
-        if !key_existed {
+        // First use: decide whether a missing key is legitimate BEFORE any key
+        // exists on disk, then create it atomically. The order matters with
+        // several processes starting at once on a fresh directory: a process
+        // must never publish a key and then delete it again, because another
+        // process may already have signed rows with it. Losing the creation
+        // race just means using the winner's key.
+        let key = if key_path.exists() {
+            read_existing_key(key_path)?
+        } else {
             let existing_primary_rows: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM audit_log WHERE key_id = ?1",
                     params![PRIMARY_KEY_ID],
                     |r| r.get(0),
                 )
-                .unwrap_or(0);
-            if existing_primary_rows > 0 {
-                let _ = std::fs::remove_file(key_path);
-                anyhow::bail!(
-                    "audit key at {} was missing while {} already contains {existing_primary_rows} \
-                     row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
-                    key_path.display(),
-                    path.display()
-                );
-            }
-        }
-        Ok(Self { conn, key })
+                .context("count rows signed with the primary key")?;
+            anyhow::ensure!(
+                existing_primary_rows == 0,
+                "audit key at {} was missing while {} already contains {existing_primary_rows} \
+                 row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
+                key_path.display(),
+                path.display()
+            );
+            create_key_once(key_path)?
+        };
+        Ok(Self {
+            conn,
+            key,
+            key_path: key_path.to_path_buf(),
+        })
     }
 
+    /// Append one entry to the chain.
+    ///
+    /// Reading the previous MAC and inserting the new row happen inside one
+    /// `BEGIN IMMEDIATE` transaction (`#368`): `SQLite` admits a single
+    /// writer, so two loggers on the same database (the daemon and a CLI
+    /// process, or two CLI processes) can no longer chain onto the same
+    /// predecessor. A writer that cannot get the lock within the 5 s busy
+    /// timeout, or that cannot read the previous MAC, fails instead of
+    /// starting a fresh segment. Because the write-ahead record is
+    /// fail-closed (`#344`), that failure refuses the mutation it was
+    /// guarding, which is the intended outcome.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started, the previous
+    /// MAC cannot be read, or the insert or commit fails.
     pub fn log(
         &mut self,
         action: &str,
@@ -131,7 +159,11 @@ impl AuditLogger {
         params_json: Option<&str>,
         result: &str,
     ) -> Result<()> {
-        let prev_hmac = self.last_chain_hmac()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("begin audit append transaction")?;
+        let prev_hmac = last_chain_hmac_on(&tx)?;
         let ts = chrono_now();
         let vmid_str = vmid.map(|v| v.to_string()).unwrap_or_default();
         // v2: the actor (`user`) and the parameters (`node`, `params_json`)
@@ -147,7 +179,7 @@ impl AuditLogger {
             params_json.unwrap_or(""),
             result,
         );
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO audit_log
                 (ts, action, user, vmid, node, params_json, result, chain_hmac,
                  chain_version, key_id)
@@ -165,6 +197,7 @@ impl AuditLogger {
                 PRIMARY_KEY_ID,
             ],
         )?;
+        tx.commit().context("commit audit append transaction")?;
         info!(action, vmid, result, "audit");
         Ok(())
     }
@@ -213,7 +246,7 @@ impl AuditLogger {
             } else {
                 let entry = retired
                     .entry(key_id.clone())
-                    .or_insert_with(|| load_retired_key(key_id).ok());
+                    .or_insert_with(|| load_retired_key_for(&self.key_path, key_id).ok());
                 let Some(k) = entry else {
                     // The key this row was signed with is gone, so its
                     // MAC cannot be recomputed. Count it as a failure
@@ -259,7 +292,7 @@ impl AuditLogger {
         let key: &[u8] = if last.9 == PRIMARY_KEY_ID {
             &self.key
         } else {
-            let Ok(k) = load_retired_key(&last.9) else {
+            let Ok(k) = load_retired_key_for(&self.key_path, &last.9) else {
                 anyhow::bail!(
                     "audit chain integrity check failed (1 tampered or unverifiable row(s))"
                 );
@@ -272,19 +305,20 @@ impl AuditLogger {
         }
         Ok(())
     }
+}
 
-    fn last_chain_hmac(&self) -> Result<String> {
-        match self.conn.query_row(
-            "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        ) {
-            Ok(h) => Ok(h),
-            // Empty log — this is the first entry; an empty prev-hmac is correct.
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
-            // A real read error must not silently start a fresh chain segment.
-            Err(e) => Err(anyhow::Error::from(e).context("read last chain hmac")),
-        }
+/// MAC of the newest row, read on `conn` (inside the append transaction).
+fn last_chain_hmac_on(conn: &Connection) -> Result<String> {
+    match conn.query_row(
+        "SELECT chain_hmac FROM audit_log ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(h) => Ok(h),
+        // Empty log — this is the first entry; an empty prev-hmac is correct.
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        // A real read error must not silently start a fresh chain segment.
+        Err(e) => Err(anyhow::Error::from(e).context("read last chain hmac")),
     }
 }
 
@@ -486,89 +520,109 @@ fn migrate_key_id(conn: &Connection) -> Result<()> {
 /// the life of the log.
 pub const PRIMARY_KEY_ID: &str = "primary";
 
-fn load_or_create_key(path: &PathBuf) -> Result<Vec<u8>> {
+fn load_or_create_key(path: &Path) -> Result<Vec<u8>> {
     if path.exists() {
-        // Custody check: the HMAC key is the ONLY thing standing between a
-        // local tamperer and a forged audit chain. A group/world-readable key
-        // lets any other user on the host read it and recompute every MAC —
-        // silently defeating tamper-evidence. Refuse it, mirroring the
-        // `telegram.bot_token_file` 0600 enforcement. (The key we *create*
-        // below is already 0600; this catches one restored from a backup, an
-        // over-permissive umask, or a hand-placed key on a separate volume.)
-        let bytes;
-        #[cfg(unix)]
-        {
-            use std::io::Read as _;
-            use std::os::unix::fs::PermissionsExt;
-            // Open ONCE, then fstat the open fd — not a fresh path stat — so the
-            // mode we check and the bytes we read come from the SAME inode. This
-            // closes the TOCTOU / symlink-swap window between a path-based check
-            // and a path-based read.
-            let mut file = std::fs::File::open(path)
-                .with_context(|| format!("open audit key {}", path.display()))?;
-            // FAIL CLOSED: a stat error must REFUSE the key, not skip the check
-            // and read it anyway. Custody we cannot verify is custody we do not
-            // trust. (Was previously `if let Ok(meta)` — silently fail-open.)
-            let mode = file
-                .metadata()
-                .with_context(|| format!("stat audit key {}", path.display()))?
-                .permissions()
-                .mode();
-            if mode & 0o077 != 0 {
-                anyhow::bail!(
-                    "audit key {} has unsafe permissions {:o} — must be 0600 (owner-only). A \
-                     group/world-readable HMAC key lets another local user forge the audit \
-                     chain. Run: chmod 600 {}",
-                    path.display(),
-                    mode & 0o777,
-                    path.display(),
-                );
-            }
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)
-                .with_context(|| format!("read audit key {}", path.display()))?;
-            bytes = buf;
-        }
-        #[cfg(not(unix))]
-        {
-            // No POSIX mode to enforce custody here. AR-5 scopes the tamper-
-            // evidence guarantee to unix; release targets are darwin + linux-musl.
-            bytes = std::fs::read(path)
-                .with_context(|| format!("read audit key {}", path.display()))?;
-        }
-        // The HMAC chain is only as trustworthy as its key. A truncated or empty
-        // key (e.g. an interrupted first write, or a `touch`'d file) MUST fail
-        // loudly — an empty key would otherwise degrade to a forgeable all-zeros
-        // MAC, and a wrong-length key produces a chain that won't re-derive.
-        anyhow::ensure!(
-            bytes.len() == 32,
-            "audit key {} is {} bytes, expected 32 — refusing to use a malformed key. \
-             Delete the file to regenerate (this starts a new chain; prior entries \
-             will no longer verify under the new key).",
-            path.display(),
-            bytes.len()
-        );
-        return Ok(bytes);
+        return read_existing_key(path);
     }
+    create_key_once(path)
+}
+
+/// Create the key at `path` unless another process does it first.
+///
+/// The new key is written to a private temp file (0600, fsync) and published
+/// with `hard_link`, which fails if `path` already exists: readers therefore
+/// never see a partially written key, and if another process wins the race
+/// its key is read and returned instead.
+fn create_key_once(path: &Path) -> Result<Vec<u8>> {
     let mut key = vec![0u8; 32];
     getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let tmp = path.with_file_name(format!(
+        "{}.{}-{nanos}.tmp",
+        path.file_name().map_or_else(
+            || "audit.key".to_string(),
+            |n| n.to_string_lossy().into_owned()
+        ),
+        std::process::id()
+    ));
+    write_new_key_file(&tmp, &key)?;
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => {
+            crate::util::durable::sync_parent_dir(path)?;
+            Ok(key)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_existing_key(path),
+        Err(e) => Err(e).with_context(|| format!("publish audit key {}", path.display())),
+    }
+}
+
+/// Read an existing key with the 0600 custody and 32-byte length checks.
+fn read_existing_key(path: &Path) -> Result<Vec<u8>> {
+    // Custody check: the HMAC key is the ONLY thing standing between a
+    // local tamperer and a forged audit chain. A group/world-readable key
+    // lets any other user on the host read it and recompute every MAC —
+    // silently defeating tamper-evidence. Refuse it, mirroring the
+    // `telegram.bot_token_file` 0600 enforcement. (The key we *create*
+    // below is already 0600; this catches one restored from a backup, an
+    // over-permissive umask, or a hand-placed key on a separate volume.)
+    let bytes;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, &key))
-            .with_context(|| format!("write audit key {}", path.display()))?;
+        use std::io::Read as _;
+        use std::os::unix::fs::PermissionsExt;
+        // Open ONCE, then fstat the open fd — not a fresh path stat — so the
+        // mode we check and the bytes we read come from the SAME inode. This
+        // closes the TOCTOU / symlink-swap window between a path-based check
+        // and a path-based read.
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("open audit key {}", path.display()))?;
+        // FAIL CLOSED: a stat error must REFUSE the key, not skip the check
+        // and read it anyway. Custody we cannot verify is custody we do not
+        // trust. (Was previously `if let Ok(meta)` — silently fail-open.)
+        let mode = file
+            .metadata()
+            .with_context(|| format!("stat audit key {}", path.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            anyhow::bail!(
+                "audit key {} has unsafe permissions {:o} — must be 0600 (owner-only). A \
+                 group/world-readable HMAC key lets another local user forge the audit \
+                 chain. Run: chmod 600 {}",
+                path.display(),
+                mode & 0o777,
+                path.display(),
+            );
+        }
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)
+            .with_context(|| format!("read audit key {}", path.display()))?;
+        bytes = buf;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, &key)
-            .with_context(|| format!("write audit key {}", path.display()))?;
+        // No POSIX mode to enforce custody here. AR-5 scopes the tamper-
+        // evidence guarantee to unix; release targets are darwin + linux-musl.
+        bytes =
+            std::fs::read(path).with_context(|| format!("read audit key {}", path.display()))?;
     }
-    Ok(key)
+    // The HMAC chain is only as trustworthy as its key. A truncated or empty
+    // key (e.g. an interrupted first write, or a `touch`'d file) MUST fail
+    // loudly — an empty key would otherwise degrade to a forgeable all-zeros
+    // MAC, and a wrong-length key produces a chain that won't re-derive.
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "audit key {} is {} bytes, expected 32 — refusing to use a malformed key. \
+         Delete the file to regenerate (this starts a new chain; prior entries \
+         will no longer verify under the new key).",
+        path.display(),
+        bytes.len()
+    );
+    Ok(bytes)
 }
 
 fn ensure_audit_dir_exists(dir: &std::path::Path) -> Result<()> {
@@ -654,18 +708,23 @@ fn audit_key_path() -> Result<PathBuf> {
 /// key id appended. Keeping them beside the primary means a backup of
 /// the audit directory captures the whole verifiable history, which is
 /// the property #281 is about.
+#[cfg(test)]
 fn retired_key_path(key_id: &str) -> Result<PathBuf> {
-    let primary = audit_key_path()?;
+    Ok(retired_key_path_for(&audit_key_path()?, key_id))
+}
+
+/// Retired-key path beside an explicit primary key path.
+fn retired_key_path_for(primary: &Path, key_id: &str) -> PathBuf {
     let name = primary
         .file_name()
         .map(|n| format!("{}.{key_id}", n.to_string_lossy()))
         .unwrap_or_else(|| format!("audit.key.{key_id}"));
-    Ok(primary.with_file_name(name))
+    primary.with_file_name(name)
 }
 
 /// Read an existing key (primary or retired) with the 0600 custody check,
 /// failing if the file does not exist instead of auto-generating a replacement.
-fn load_existing_key(path: &PathBuf, label: &str) -> Result<Vec<u8>> {
+fn load_existing_key(path: &Path, label: &str) -> Result<Vec<u8>> {
     anyhow::ensure!(
         path.exists(),
         "audit key `{label}` is not present at {} — rows signed with it cannot \
@@ -675,60 +734,158 @@ fn load_existing_key(path: &PathBuf, label: &str) -> Result<Vec<u8>> {
     load_or_create_key(path)
 }
 
-/// Read a retired key. Same 0600 custody check as the primary — a
-/// retired key still proves every row it signed.
-fn load_retired_key(key_id: &str) -> Result<Vec<u8>> {
-    let path = retired_key_path(key_id)?;
+/// Read a retired key archived beside `primary`. Same 0600 custody check as
+/// the primary — a retired key still proves every row it signed.
+fn load_retired_key_for(primary: &Path, key_id: &str) -> Result<Vec<u8>> {
+    let path = retired_key_path_for(primary, key_id);
     load_existing_key(&path, key_id)
 }
 
-/// Rotate the audit HMAC key (audit 2026-09-09, #281).
+/// Write `key` to a NEW file at `path`: created with mode 0600 from the first
+/// byte (`create_new`, so an existing file is never overwritten), fsync-ed.
+fn write_new_key_file(path: &Path, key: &[u8]) -> Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("create key file {}", path.display()))?;
+    std::io::Write::write_all(&mut f, key)
+        .with_context(|| format!("write key file {}", path.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync key file {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically replace the key at `primary` with `key` (temp file + durable
+/// rename), so the primary is never missing or half-written.
+fn replace_primary_key(primary: &Path, key: &[u8]) -> Result<()> {
+    let tmp = primary.with_file_name(format!(
+        "{}.rotate-tmp",
+        primary.file_name().map_or_else(
+            || "audit.key".to_string(),
+            |n| n.to_string_lossy().into_owned()
+        )
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    write_new_key_file(&tmp, key)?;
+    if let Err(e) = crate::util::durable::rename_durable(&tmp, primary) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replace primary key {}", primary.display()));
+    }
+    Ok(())
+}
+
+/// Rotate the audit HMAC key (audit 2026-09-09, #281) at the default paths.
+///
+/// See [`rotate_key_at`] for the all-or-nothing order.
+///
+/// # Errors
+/// When the key directory cannot be read or written, or the database is
+/// locked for longer than the busy timeout.
+pub fn rotate_key() -> Result<String> {
+    rotate_key_at(&audit_db_path()?, &audit_key_path()?)
+}
+
+/// Rotate the HMAC key of the audit log at `db_path` / `primary` (`#281`,
+/// `#367`).
 ///
 /// The current key is archived under a fresh id and a new primary is
-/// generated. Rows already written keep their `key_id`, so `verify`
-/// continues to check them against the key that signed them: rotation no
-/// longer destroys the verifiability of the history it is supposed to
-/// protect.
+/// generated; rows already written are relabelled with that id, so `verify`
+/// keeps checking them against the key that signed them.
+///
+/// All-or-nothing, in this order:
+/// 1. `BEGIN IMMEDIATE` on the audit database. This also holds off
+///    concurrent appends for the duration of the rotation. If the database
+///    is locked, the call fails here and nothing has been touched.
+/// 2. Write the retired copy of the current key (new file, 0600, fsync).
+///    The primary is not touched yet.
+/// 3. Relabel the rows (`UPDATE ... SET key_id`) inside the transaction.
+/// 4. Replace the primary with a fresh key (temp file + durable rename).
+/// 5. `COMMIT`.
+///
+/// Any failure before the commit rolls the transaction back and deletes the
+/// retired copy; the primary is left as it was, and if the commit itself
+/// fails after step 4 the previous primary is written back. The primary is
+/// never renamed away.
 ///
 /// Returns the id the retired key was archived under.
 ///
 /// # Errors
-/// When the key directory cannot be read or written.
-pub fn rotate_key() -> Result<String> {
-    let primary = audit_key_path()?;
+/// When the database is locked, the key files cannot be written, or the
+/// relabel or commit fails; the key files and rows are then unchanged.
+pub fn rotate_key_at(db_path: &Path, primary: &Path) -> Result<String> {
     anyhow::ensure!(
         primary.exists(),
         "no audit key at {} — nothing to rotate (one is created on first use)",
         primary.display()
     );
+    let old_key = load_existing_key(primary, PRIMARY_KEY_ID)?;
     // The id is a timestamp: sortable, and it says when the key stopped
     // being used, which is what an investigator wants to know.
     let key_id = format!("retired-{}", now_unix_secs());
-    let dest = retired_key_path(&key_id)?;
+    let dest = retired_key_path_for(primary, &key_id);
     anyhow::ensure!(
         !dest.exists(),
         "a retired key already exists at {} — refusing to overwrite it, since \
          that would strand every row it signed",
         dest.display()
     );
-    std::fs::rename(&primary, &dest)
-        .with_context(|| format!("archiving {} to {}", primary.display(), dest.display()))?;
-    crate::util::durable::sync_parent_dir(&dest)?;
 
-    // Re-point every existing row at the key that actually signed it,
-    // BEFORE creating the new primary — if this fails, the old key is
-    // still the primary and nothing is stranded.
-    let conn = Connection::open(audit_db_path()?)?;
+    let mut conn = Connection::open(db_path)
+        .with_context(|| format!("open audit db at {}", db_path.display()))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     migrate_key_id(&conn)?;
-    conn.execute(
+
+    // 1. Exclusive writer for the whole rotation.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin key-rotation transaction (is another proxxx writing the audit log?)")?;
+
+    // 2. Retired copy first; the primary stays in place.
+    write_new_key_file(&dest, &old_key)?;
+    let undo_retired = |err: anyhow::Error| -> anyhow::Error {
+        let _ = std::fs::remove_file(&dest);
+        err
+    };
+
+    // 3. Relabel inside the transaction.
+    if let Err(e) = tx.execute(
         "UPDATE audit_log SET key_id = ?1 WHERE key_id = ?2",
         params![key_id, PRIMARY_KEY_ID],
-    )?;
+    ) {
+        return Err(undo_retired(
+            anyhow::Error::from(e).context("relabel audit rows with the retired key id"),
+        ));
+    }
 
-    // Generating the new primary is the last step.
-    let _new = load_or_create_key(&primary)?;
-    // Evict cached loggers so subsequent writes pick up the newly generated
-    // primary key.
+    // 4. New primary, atomically.
+    let mut new_key = vec![0u8; 32];
+    if let Err(e) = getrandom::fill(&mut new_key) {
+        return Err(undo_retired(anyhow::anyhow!("getrandom: {e}")));
+    }
+    if let Err(e) = replace_primary_key(primary, &new_key) {
+        return Err(undo_retired(e));
+    }
+
+    // 5. Commit; on failure put the previous primary back.
+    if let Err(e) = tx.commit() {
+        let restore = replace_primary_key(primary, &old_key);
+        let err = anyhow::Error::from(e).context("commit key-rotation transaction");
+        return Err(undo_retired(match restore {
+            Ok(()) => err,
+            Err(re) => err.context(format!(
+                "and restoring the previous primary key failed: {re:#}"
+            )),
+        }));
+    }
+    crate::util::durable::sync_parent_dir(&dest)?;
+
+    // Evict cached loggers so subsequent writes pick up the new primary key.
     if let Some(mutex) = PROCESS_AUDIT_LOGGERS.get() {
         if let Ok(mut guard) = mutex.lock() {
             guard.clear();
@@ -1120,7 +1277,11 @@ impl AuditLogger {
         .expect("create audit_log");
         // Fixed 32-byte test key — deterministic regression repro.
         let key = (0..32u8).collect::<Vec<u8>>();
-        Self { conn, key }
+        Self {
+            conn,
+            key,
+            key_path: PathBuf::from("audit.key"),
+        }
     }
 }
 
@@ -1387,14 +1548,14 @@ mod key_tests {
         // otherwise degrade the HMAC chain to a forgeable all-zeros MAC.
         let bad = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(bad.path(), b"short").unwrap(); // 5 bytes, not 32
-        let err = load_or_create_key(&bad.path().to_path_buf()).unwrap_err();
+        let err = load_or_create_key(bad.path()).unwrap_err();
         assert!(err.to_string().contains("expected 32"), "got: {err}");
 
         // A correct 32-byte key loads fine.
         let good = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(good.path(), [7u8; 32]).unwrap();
         // NamedTempFile is 0600 by default, so this exercises the happy path.
-        let key = load_or_create_key(&good.path().to_path_buf()).unwrap();
+        let key = load_or_create_key(good.path()).unwrap();
         assert_eq!(key.len(), 32);
     }
 
@@ -1408,7 +1569,7 @@ mod key_tests {
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), [3u8; 32]).unwrap(); // valid length…
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = load_or_create_key(&f.path().to_path_buf()).unwrap_err();
+        let err = load_or_create_key(f.path()).unwrap_err();
         assert!(
             err.to_string().contains("unsafe permissions") && err.to_string().contains("0600"),
             "lax-perms key must be refused with an actionable message, got: {err}"
@@ -1416,10 +1577,7 @@ mod key_tests {
 
         // Tightening to 0600 makes the same key load.
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(
-            load_or_create_key(&f.path().to_path_buf()).unwrap().len(),
-            32
-        );
+        assert_eq!(load_or_create_key(f.path()).unwrap().len(), 32);
     }
 
     #[test]
@@ -1653,5 +1811,207 @@ mod key_rotation_tests {
             "process-global PROXXX_AUDIT_DIR / PROXXX_AUDIT_KEY mutation found:\n{}",
             violations.join("\n")
         );
+    }
+}
+
+/// `#368` / `#367`: the chain stays valid under concurrent writers, and key
+/// rotation is all-or-nothing. Every test uses its own temp directory.
+#[cfg(test)]
+mod chain_transaction_tests {
+    use super::{AuditLogger, PRIMARY_KEY_ID};
+    use rusqlite::Connection;
+
+    fn spawn_writers(dir: &std::path::Path, threads: usize, per_thread: usize) {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let p = dir.to_path_buf();
+                std::thread::spawn(move || {
+                    let mut lg = AuditLogger::open_in(&p).expect("open");
+                    for i in 0..per_thread {
+                        lg.log(&format!("t{t}-{i}"), "u", None, None, None, "ok")
+                            .expect("log");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join");
+        }
+    }
+
+    /// `#368`: 8 writers, each with its own connection, 50 appends each.
+    /// Before the transaction the chain broke in 5 of 5 runs.
+    #[test]
+    fn concurrent_appends_from_separate_connections_keep_the_chain_valid() {
+        for run in 0..5 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            drop(AuditLogger::open_in(dir.path()).expect("create key and db"));
+            spawn_writers(dir.path(), 8, 50);
+            let (ok, broken) = AuditLogger::open_in(dir.path())
+                .expect("reopen")
+                .verify()
+                .expect("verify");
+            assert_eq!(
+                (ok, broken),
+                (400, 0),
+                "run {run}: concurrent appends must chain one after the other"
+            );
+        }
+    }
+
+    /// First use with several processes at once on a FRESH directory: every
+    /// opener ends up with the same key, no key is ever deleted, and the chain
+    /// verifies. Before the fix a loser of the creation race deleted the
+    /// winner's key ("refusing to start a forged chain") and the rows signed
+    /// with it became unverifiable.
+    #[test]
+    fn concurrent_first_use_on_a_fresh_directory_shares_one_key() {
+        for run in 0..5 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            spawn_writers(dir.path(), 8, 20);
+            let (ok, broken) = AuditLogger::open_in(dir.path())
+                .expect("reopen")
+                .verify()
+                .expect("verify");
+            assert_eq!((ok, broken), (160, 0), "run {run}");
+            let stray: Vec<_> = std::fs::read_dir(dir.path())
+                .expect("ls")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| {
+                    std::path::Path::new(n)
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("tmp"))
+                })
+                .collect();
+            assert!(
+                stray.is_empty(),
+                "run {run}: temp key files left: {stray:?}"
+            );
+        }
+    }
+
+    /// `#368`: a previous MAC that cannot be read fails the write instead of
+    /// starting a fresh chain segment, and nothing is inserted.
+    #[test]
+    fn unreadable_previous_mac_fails_the_append_and_inserts_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+        lg.log("first", "u", None, None, None, "ok").expect("first");
+        // A BLOB where the chain MAC is expected cannot be read as text.
+        let raw = Connection::open(dir.path().join("audit.db")).expect("raw");
+        raw.execute(
+            "INSERT INTO audit_log (ts, action, user, result, chain_hmac, chain_version, key_id)
+             VALUES ('t', 'blob', 'u', 'ok', X'00FF', 2, 'primary')",
+            [],
+        )
+        .expect("insert blob mac");
+        let before: i64 = raw
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .expect("count");
+        let err = lg
+            .log("second", "u", None, None, None, "ok")
+            .expect_err("an unreadable previous MAC must fail the append");
+        assert!(
+            format!("{err:#}").contains("read last chain hmac"),
+            "{err:#}"
+        );
+        let after: i64 = raw
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(before, after, "no row may be inserted after the failure");
+    }
+
+    /// `#367`: with the database locked, rotation fails and changes nothing:
+    /// the primary key is byte-identical, no retired copy is left, the chain
+    /// still verifies and the next append chains on.
+    #[test]
+    fn rotation_with_a_locked_database_changes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.db");
+        let key = dir.path().join("audit.key");
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+        for i in 0..3 {
+            lg.log(&format!("before-{i}"), "u", None, None, None, "ok")
+                .expect("log");
+        }
+        let key_before = std::fs::read(&key).expect("read key");
+
+        let locker = Connection::open(&db).expect("locker");
+        // A RESERVED lock: readers (the key-id migration check) still pass, so the
+        // rotation reaches its own `BEGIN IMMEDIATE` and must fail there.
+        locker.execute_batch("BEGIN IMMEDIATE;").expect("lock db");
+        let err = super::rotate_key_at(&db, &key).expect_err("rotation must fail while locked");
+        locker.execute_batch("ROLLBACK;").expect("unlock");
+        drop(locker);
+
+        assert!(format!("{err:#}").contains("locked"), "{err:#}");
+        assert_eq!(
+            std::fs::read(&key).expect("read key"),
+            key_before,
+            "the primary key must be byte-identical after a failed rotation"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("ls")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("audit.key."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no retired copy may be left: {leftovers:?}"
+        );
+        lg.log("after", "u", None, None, None, "ok")
+            .expect("append after failed rotation");
+        let (ok, broken) = AuditLogger::open_in(dir.path())
+            .expect("reopen")
+            .verify()
+            .expect("verify");
+        assert_eq!((ok, broken), (4, 0));
+    }
+
+    /// `#281` / `#367`: rows written before and after a successful rotation
+    /// all verify, the old ones with the retired key beside the primary.
+    #[test]
+    fn rows_before_and_after_a_rotation_all_verify() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.db");
+        let key = dir.path().join("audit.key");
+        {
+            let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+            for i in 0..3 {
+                lg.log(&format!("before-{i}"), "u", None, None, None, "ok")
+                    .expect("log");
+            }
+        }
+        let key_before = std::fs::read(&key).expect("read key");
+        let key_id = super::rotate_key_at(&db, &key).expect("rotate");
+        let retired = super::retired_key_path_for(&key, &key_id);
+        assert_eq!(std::fs::read(&retired).expect("retired"), key_before);
+        assert_ne!(std::fs::read(&key).expect("new primary"), key_before);
+        {
+            let mut lg = AuditLogger::open_in(dir.path()).expect("reopen");
+            for i in 0..2 {
+                lg.log(&format!("after-{i}"), "u", None, None, None, "ok")
+                    .expect("log");
+            }
+        }
+        let raw = Connection::open(&db).expect("raw");
+        let primary_rows: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE key_id = ?1",
+                [PRIMARY_KEY_ID],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            primary_rows, 2,
+            "only the rows written after rotation use the primary"
+        );
+        let (ok, broken) = AuditLogger::open_in(dir.path())
+            .expect("reopen")
+            .verify()
+            .expect("verify");
+        assert_eq!((ok, broken), (5, 0));
     }
 }
