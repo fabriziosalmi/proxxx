@@ -1067,6 +1067,10 @@ pub enum SshHostSource {
     /// is the node answering the API (`/cluster/status` `local = true`, or
     /// the single node of a standalone install).
     ApiUrlFallback,
+    /// Pre-`#328` fallback to `(node.to_string(), 22)` (DNS / `/etc/hosts`
+    /// resolution by node name) for non-API cluster nodes or when
+    /// `/cluster/status` is unavailable.
+    NodeNameFallback,
 }
 
 /// Resolved SSH connection target for a Proxmox VE node (`#328`).
@@ -1260,76 +1264,56 @@ impl SshConfig {
         self.hosts.get(node).map(|spec| parse_ssh_host_spec(spec))
     }
 
-    /// Resolve the SSH `(host, port)` target for `node` (`#328`).
+    /// Resolve the SSH `(host, port, source)` target for `node` (`#328`).
     ///
     /// Resolution order:
     /// 1. `self.hosts[node]` (always wins, no `/cluster/status` lookup needed).
     /// 2. The host from `api_url` on port `22`, **only if** `node` is the node
     ///    answering the API (`api_local_node == Some(node)`).
-    /// 3. Otherwise an error naming `node` and showing the exact `hosts` line
-    ///    to add (`hosts = { <node> = "<ip>:22" }`). Never falls back to the
-    ///    URL host for another member of a cluster, and never falls back to
-    ///    the bare node name.
-    ///
-    /// # Errors
-    /// Returns an error if `node` has no `hosts` entry and is not the
-    /// API-local node (or if `api_url` has no valid host).
+    /// 3. `(node.to_string(), 22)` (`SshHostSource::NodeNameFallback`, pre-`#328`
+    ///    behaviour) for every other node or when `/cluster/status` is
+    ///    unavailable.
+    #[must_use]
     pub fn resolve_host(
         &self,
         node: &str,
         api_url: Option<&str>,
         api_local_node: Option<&str>,
-    ) -> Result<ResolvedNodeSsh> {
+    ) -> ResolvedNodeSsh {
         if let Some((host, port)) = self.resolve_explicit_host(node) {
-            return Ok(ResolvedNodeSsh {
+            return ResolvedNodeSsh {
                 host,
                 port,
                 source: SshHostSource::ExplicitHosts,
-            });
+            };
         }
 
         if api_local_node.is_some_and(|local| local == node) {
             if let Some(url_host) = api_url.and_then(extract_url_host) {
-                return Ok(ResolvedNodeSsh {
+                return ResolvedNodeSsh {
                     host: url_host,
                     port: 22,
                     source: SshHostSource::ApiUrlFallback,
-                });
+                };
             }
-            anyhow::bail!(
-                "cannot resolve SSH address for node '{node}': profile `url` has no valid host \
-                 and no [ssh].hosts entry is configured. Add under [ssh]:\n\
-                 hosts = {{ {node} = \"<ip>:22\" }}"
-            );
         }
 
-        if let Some(local) = api_local_node {
-            anyhow::bail!(
-                "cannot resolve SSH address for node '{node}': profile `url` points to API node '{local}', \
-                 so automatic URL host fallback only applies to '{local}' (never to other cluster members). \
-                 Add an explicit entry under [ssh]:\n\
-                 hosts = {{ {node} = \"<ip>:22\" }}"
-            );
+        ResolvedNodeSsh {
+            host: node.to_string(),
+            port: 22,
+            source: SshHostSource::NodeNameFallback,
         }
-
-        anyhow::bail!(
-            "cannot resolve SSH address for node '{node}': no [ssh].hosts entry is configured for '{node}'. \
-             Add an explicit entry under [ssh]:\n\
-             hosts = {{ {node} = \"<ip>:22\" }}"
-        )
     }
 
     /// Convenience wrapper around [`Self::resolve_host`] that extracts the
     /// API-local node from `/cluster/status` entries (`#328`).
-    ///
-    /// # Errors
-    /// Returns an error under the same conditions as [`Self::resolve_host`].
+    #[must_use]
     pub fn resolve_host_with_status(
         &self,
         node: &str,
         api_url: &str,
         cluster_status: &[crate::api::types::ClusterStatusEntry],
-    ) -> Result<ResolvedNodeSsh> {
+    ) -> ResolvedNodeSsh {
         let local_node = api_local_node_from_status(cluster_status);
         self.resolve_host(node, Some(api_url), local_node.as_deref())
     }

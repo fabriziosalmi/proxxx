@@ -36,9 +36,61 @@ use crate::config::{
     api_local_node_from_status, HostKeyPolicy, ResolvedNodeSsh, SshConfig, SshHostSource,
 };
 
+#[async_trait::async_trait]
+trait SessionOps: Send + Sync {
+    async fn idle_for(&self) -> Duration;
+    async fn exec(&self, command: &str, opts: ExecOptions) -> Result<ExecResult>;
+}
+
+#[async_trait::async_trait]
+impl SessionOps for SshSession {
+    async fn idle_for(&self) -> Duration {
+        Self::idle_for(self).await
+    }
+
+    async fn exec(&self, command: &str, opts: ExecOptions) -> Result<ExecResult> {
+        exec::exec(self, command, opts).await
+    }
+}
+
+#[async_trait::async_trait]
+trait SessionConnector: Send + Sync {
+    type Session: SessionOps + 'static;
+
+    async fn connect(&self, host: &str, port: u16) -> Result<Arc<Self::Session>>;
+}
+
+struct RealSessionConnector<'a> {
+    pool: &'a SshPool,
+}
+
+#[async_trait::async_trait]
+impl SessionConnector for RealSessionConnector<'_> {
+    type Session = SshSession;
+
+    async fn connect(&self, host: &str, port: u16) -> Result<Arc<Self::Session>> {
+        let key_path = self
+            .pool
+            .cfg
+            .key_path_resolved()
+            .context("ssh.key_path not configured for this profile")?;
+        let session = SshSession::connect(
+            host.to_string(),
+            port,
+            self.pool.cfg.user.clone(),
+            &key_path,
+            self.pool.passphrase.as_deref(),
+            Arc::clone(&self.pool.known),
+            Arc::clone(&self.pool.verifier),
+        )
+        .await?;
+        Ok(Arc::new(session))
+    }
+}
+
 #[cfg(test)]
 #[async_trait::async_trait]
-trait FakeSshSession: Send + Sync {
+trait FakeSshSession: Send + Sync + 'static {
     async fn idle_for(&self) -> Duration {
         Duration::ZERO
     }
@@ -46,9 +98,63 @@ trait FakeSshSession: Send + Sync {
 }
 
 #[cfg(test)]
+struct FakeSessionWrapper(Arc<dyn FakeSshSession>);
+
+#[cfg(test)]
 #[async_trait::async_trait]
-trait FakeSshConnector: Send + Sync {
+impl SessionOps for FakeSessionWrapper {
+    async fn idle_for(&self) -> Duration {
+        self.0.idle_for().await
+    }
+
+    async fn exec(&self, command: &str, opts: ExecOptions) -> Result<ExecResult> {
+        self.0.exec(command, opts).await
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+trait FakeSshConnector: Send + Sync + 'static {
     async fn connect(&self, host: &str, port: u16) -> Result<Arc<dyn FakeSshSession>>;
+}
+
+#[cfg(test)]
+struct FakeConnectorWrapper(Arc<dyn FakeSshConnector>);
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl SessionConnector for FakeConnectorWrapper {
+    type Session = FakeSessionWrapper;
+
+    async fn connect(&self, host: &str, port: u16) -> Result<Arc<Self::Session>> {
+        let s = self.0.connect(host, port).await?;
+        Ok(Arc::new(FakeSessionWrapper(s)))
+    }
+}
+
+fn is_name_lookup_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}").to_ascii_lowercase();
+    msg.contains("failed to lookup address information")
+        || msg.contains("nodename nor servname provided")
+        || msg.contains("name or service not known")
+        || msg.contains("temporary failure in name resolution")
+        || msg.contains("no such host is known")
+        || msg.contains("no address associated with hostname")
+}
+
+fn enrich_node_connect_error(
+    node: &str,
+    target: &ResolvedNodeSsh,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    if target.source == SshHostSource::NodeNameFallback && is_name_lookup_error(&err) {
+        return err.context(format!(
+            "no SSH host configured for node '{node}' and name lookup for '{}:{}' failed: \
+             add 'hosts = {{ {node} = \"<ip>:22\" }}' under [profiles.<profile>.ssh]",
+            target.host, target.port
+        ));
+    }
+    err
 }
 
 /// Verify that a session opened via the profile `url` fallback actually landed
@@ -144,9 +250,9 @@ pub struct SshPool {
     verifier: Arc<dyn HostKeyVerifier>,
     sessions: RwLock<HashMap<String, Arc<SshSession>>>,
     #[cfg(test)]
-    fake_sessions: RwLock<HashMap<String, Arc<dyn FakeSshSession>>>,
+    fake_sessions: RwLock<HashMap<String, Arc<FakeSessionWrapper>>>,
     #[cfg(test)]
-    fake_connector: Option<Arc<dyn FakeSshConnector>>,
+    fake_connector: Option<FakeConnectorWrapper>,
     semaphore: Arc<Semaphore>,
     passphrase: Option<crate::util::secret::SecretString>,
     api_url: Option<String>,
@@ -224,7 +330,7 @@ impl SshPool {
     #[cfg(test)]
     #[must_use]
     fn with_fake_connector(mut self, connector: Arc<dyn FakeSshConnector>) -> Self {
-        self.fake_connector = Some(connector);
+        self.fake_connector = Some(FakeConnectorWrapper(connector));
         self
     }
 
@@ -235,55 +341,70 @@ impl SshPool {
     /// 2. Otherwise queries `/cluster/status` at most once per pool (cached in
     ///    `self.local_node`) and falls back to the host in `self.api_url`
     ///    (port 22) iff `node` is the API-local node.
-    ///
-    /// # Errors
-    /// Returns an error if `/cluster/status` fails or if `node` is neither in
-    /// `cfg.hosts` nor the API-local node.
-    pub async fn resolve_node_target(&self, node: &str) -> Result<ResolvedNodeSsh> {
+    /// 3. For every other node — or if `/cluster/status` fails or no API
+    ///    gateway is attached (logged at `debug!`) — falls back to
+    ///    `(node.to_string(), 22)` (`SshHostSource::NodeNameFallback`).
+    pub async fn resolve_node_target(&self, node: &str) -> ResolvedNodeSsh {
         if let Some((host, port)) = self.cfg.resolve_explicit_host(node) {
-            return Ok(ResolvedNodeSsh {
+            return ResolvedNodeSsh {
                 host,
                 port,
                 source: SshHostSource::ExplicitHosts,
-            });
+            };
         }
 
         let local_node = self
             .local_node
-            .get_or_try_init(|| async {
+            .get_or_init(|| async {
                 let Some(ref api) = self.api_gateway else {
-                    return Ok::<Option<String>, anyhow::Error>(None);
+                    debug!(
+                        "ssh target resolution for node '{node}': no API gateway attached to SshPool; \
+                         skipping URL host fallback and using '{node}:22'"
+                    );
+                    return None;
                 };
-                let entries = api
-                    .cluster_status()
-                    .await
-                    .context("fetching /cluster/status to resolve API-local SSH node")?;
-                Ok(api_local_node_from_status(&entries))
+                match api.cluster_status().await {
+                    Ok(entries) => api_local_node_from_status(&entries),
+                    Err(e) => {
+                        debug!(
+                            "ssh target resolution for node '{node}': /cluster/status failed ({e:#}); \
+                             skipping URL host fallback and using '{node}:22'"
+                        );
+                        None
+                    }
+                }
             })
-            .await?;
+            .await;
 
         self.cfg
             .resolve_host(node, self.api_url.as_deref(), local_node.as_deref())
     }
 
-    #[cfg(test)]
-    async fn fake_session_for(&self, node: &str) -> Result<Arc<dyn FakeSshSession>> {
+    /// Single shared `resolve -> connect -> verify -> cache` sequence used by
+    /// both [`Self::session_for`] (production) and unit tests (`#328`).
+    async fn session_for_with<C: SessionConnector>(
+        &self,
+        node: &str,
+        sessions: &RwLock<HashMap<String, Arc<C::Session>>>,
+        connector: &C,
+    ) -> Result<Arc<C::Session>> {
+        // Fast path
         {
-            let map = self.fake_sessions.read().await;
+            let map = sessions.read().await;
             if let Some(s) = map.get(node) {
                 let idle = s.idle_for().await;
                 if idle < Duration::from_secs(self.cfg.idle_timeout_secs) {
                     return Ok(Arc::clone(s));
                 }
+                debug!("ssh session for {node} stale ({idle:?}), reopening");
             }
         }
 
-        let target = self.resolve_node_target(node).await?;
-        let connector = self
-            .fake_connector
-            .as_ref()
-            .context("fake_connector not set")?;
-        let session = connector.connect(&target.host, target.port).await?;
+        let target = self.resolve_node_target(node).await;
+        let session = match connector.connect(&target.host, target.port).await {
+            Ok(session) => session,
+            Err(err) => return Err(enrich_node_connect_error(node, &target, err)),
+        };
 
         verify_session_identity_if_fallback(node, &target, |opts| {
             let s = Arc::clone(&session);
@@ -291,8 +412,9 @@ impl SshPool {
         })
         .await?;
 
-        let mut map = self.fake_sessions.write().await;
+        let mut map = sessions.write().await;
         map.insert(node.to_string(), Arc::clone(&session));
+        info!("ssh session opened for node {node}");
         Ok(session)
     }
 
@@ -304,48 +426,11 @@ impl SshPool {
     /// returning the session.
     ///
     /// # Errors
-    /// Returns an error if key resolution, target resolution, SSH connection,
-    /// or fallback hostname verification fails.
+    /// Returns an error if key resolution, SSH connection, or fallback
+    /// hostname verification fails.
     pub async fn session_for(&self, node: &str) -> Result<Arc<SshSession>> {
-        // Fast path
-        {
-            let map = self.sessions.read().await;
-            if let Some(s) = map.get(node) {
-                let idle = s.idle_for().await;
-                if idle < Duration::from_secs(self.cfg.idle_timeout_secs) {
-                    return Ok(Arc::clone(s));
-                }
-                debug!("ssh session for {node} stale ({idle:?}), reopening");
-            }
-        }
-
-        let key_path = self
-            .cfg
-            .key_path_resolved()
-            .context("ssh.key_path not configured for this profile")?;
-
-        let target = self.resolve_node_target(node).await?;
-        let session = SshSession::connect(
-            target.host.clone(),
-            target.port,
-            self.cfg.user.clone(),
-            &key_path,
-            self.passphrase.as_deref(),
-            Arc::clone(&self.known),
-            Arc::clone(&self.verifier),
-        )
-        .await?;
-
-        verify_session_identity_if_fallback(node, &target, |opts| {
-            exec::exec(&session, "hostname", opts)
-        })
-        .await?;
-
-        let arc = Arc::new(session);
-        let mut map = self.sessions.write().await;
-        map.insert(node.to_string(), Arc::clone(&arc));
-        info!("ssh session opened for node {node}");
-        Ok(arc)
+        self.session_for_with(node, &self.sessions, &RealSessionConnector { pool: self })
+            .await
     }
 
     /// Run a command, capture output. Concurrency-capped by `max_concurrent`.
@@ -359,9 +444,11 @@ impl SshPool {
             .await
             .context("ssh semaphore closed")?;
         #[cfg(test)]
-        if self.fake_connector.is_some() {
-            let session = self.fake_session_for(node).await?;
-            return session.exec(command, opts).await;
+        if let Some(ref connector) = self.fake_connector {
+            let session = self
+                .session_for_with(node, &self.fake_sessions, connector)
+                .await?;
+            return session.0.exec(command, opts).await;
         }
         let session = self.session_for(node).await?;
         exec::exec(&session, command, opts).await
@@ -496,6 +583,30 @@ mod tests {
         }
     }
 
+    struct FailingClusterStatusGateway {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClusterStatusSource for Arc<FailingClusterStatusGateway> {
+        async fn cluster_status(&self) -> Result<Vec<ClusterStatusEntry>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("simulated /cluster/status 500 error")
+        }
+    }
+
+    struct LookupFailureConnector;
+
+    #[async_trait::async_trait]
+    impl FakeSshConnector for LookupFailureConnector {
+        async fn connect(&self, host: &str, port: u16) -> Result<Arc<dyn FakeSshSession>> {
+            anyhow::bail!(
+                "ssh connect {host}:{port}: failed to lookup address information: \
+                 nodename nor servname provided, or not known"
+            )
+        }
+    }
+
     /// Test 1 (`#328`):
     /// Standalone install (one node, `local = true`, no `hosts` map):
     /// the SSH target is the URL host on port 22.
@@ -511,9 +622,7 @@ mod tests {
         }];
 
         // Direct resolver test with injected status
-        let resolved = cfg
-            .resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status)
-            .expect("standalone node must resolve to URL host");
+        let resolved = cfg.resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status);
         assert_eq!(
             resolved,
             ResolvedNodeSsh {
@@ -532,25 +641,15 @@ mod tests {
         let pool = SshPool::new(cfg, None)
             .unwrap()
             .with_api("https://192.168.0.203:8006", gw);
-        let pool_target = pool
-            .resolve_node_target("opti7")
-            .await
-            .expect("pool target");
+        let pool_target = pool.resolve_node_target("opti7").await;
         assert_eq!(pool_target.host, "192.168.0.203");
         assert_eq!(pool_target.port, 22);
         assert_eq!(pool_target.source, SshHostSource::ApiUrlFallback);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// Test 2 (`#328`):
-    /// Multi-node cluster:
-    /// - When `node` is the local node (`local = true`), target is the URL host (port 22).
-    /// - When `node` is another cluster member (`local = false`), returns an error
-    ///   naming the node and showing `hosts = { <node> = "<ip>:22" }`, never the URL host.
-    #[tokio::test]
-    async fn test_2_cluster_local_node_uses_url_host_and_other_member_errors_with_hosts_hint() {
-        let cfg = empty_ssh_config();
-        let status = vec![
+    fn three_node_cluster_status() -> Vec<ClusterStatusEntry> {
+        vec![
             ClusterStatusEntry {
                 entry_type: "cluster".to_string(),
                 name: "homelab".to_string(),
@@ -579,22 +678,34 @@ mod tests {
                 local: false,
                 ..Default::default()
             },
-        ];
+        ]
+    }
+
+    /// Test 2 (`#328`):
+    /// Multi-node cluster:
+    /// - When `node` is the local node (`local = true`), target is the URL host (port 22, `ApiUrlFallback`).
+    /// - When `node` is another cluster member (`local = false`), target is `(node, 22)` (`NodeNameFallback`),
+    ///   never the URL host, with no identity check when DNS/`/etc/hosts` succeeds; and if connect fails
+    ///   with a name-lookup error, the error adds `hosts = { <node> = "<ip>:22" }`.
+    /// - If `/cluster/status` fails or no API gateway is attached, step 2 is skipped and step 3 (`(node, 22)`) is used.
+    #[tokio::test]
+    async fn test_2_cluster_local_node_uses_url_host_and_other_member_falls_back_to_node_name_with_lookup_hint(
+    ) {
+        let cfg = empty_ssh_config();
+        let status = three_node_cluster_status();
 
         let calls = Arc::new(AtomicUsize::new(0));
         let gw = Arc::new(MockClusterStatusGateway {
             calls: Arc::clone(&calls),
             entries: status,
         });
-        let pool = SshPool::new(cfg, None)
+        let pool = SshPool::new(cfg.clone(), None)
             .unwrap()
-            .with_api("https://192.168.0.122:8006", gw);
+            .with_api("https://192.168.0.122:8006", gw)
+            .with_fake_connector(Arc::new(LookupFailureConnector));
 
-        // Local node -> URL host
-        let local_target = pool
-            .resolve_node_target("pve-test-1")
-            .await
-            .expect("API-local node must resolve to URL host");
+        // 2a. Local node -> URL host
+        let local_target = pool.resolve_node_target("pve-test-1").await;
         assert_eq!(
             local_target,
             ResolvedNodeSsh {
@@ -604,11 +715,29 @@ mod tests {
             }
         );
 
-        // Non-local cluster member -> error naming the node and suggesting the exact `hosts` line
+        // 2b. Non-local cluster member -> `(node, 22)` (`NodeNameFallback`), never the URL host
+        let member_target = pool.resolve_node_target("pve-test-2").await;
+        assert_eq!(
+            member_target,
+            ResolvedNodeSsh {
+                host: "pve-test-2".to_string(),
+                port: 22,
+                source: SshHostSource::NodeNameFallback,
+            }
+        );
+
+        // `/cluster/status` was called only once across both resolutions on the same pool
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "/cluster/status must be resolved once per pool, not per command"
+        );
+
+        // 2c. Simulated name-lookup failure on `(node, 22)` produces the `hosts = { <node> = "<ip>:22" }` hint
         let err = pool
-            .resolve_node_target("pve-test-2")
+            .exec("pve-test-2", "uptime", ExecOptions::default())
             .await
-            .expect_err("non-API cluster member without hosts entry must fail");
+            .expect_err("lookup failure on NodeNameFallback must return enriched error");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("pve-test-2"),
@@ -623,11 +752,32 @@ mod tests {
             "error must not suggest or leak the API node's IP for another member: {msg}"
         );
 
-        // `/cluster/status` was called only once across both resolutions on the same pool
+        // 2d. When `/cluster/status` fails or no API gateway is attached, step 2 is skipped and step 3 (`(node, 22)`) is used
+        let failing_calls = Arc::new(AtomicUsize::new(0));
+        let failing_gw = Arc::new(FailingClusterStatusGateway {
+            calls: Arc::clone(&failing_calls),
+        });
+        let pool_status_err = SshPool::new(cfg.clone(), None)
+            .unwrap()
+            .with_api("https://192.168.0.122:8006", failing_gw);
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "/cluster/status must be resolved once per pool, not per command"
+            pool_status_err.resolve_node_target("pve-test-1").await,
+            ResolvedNodeSsh {
+                host: "pve-test-1".to_string(),
+                port: 22,
+                source: SshHostSource::NodeNameFallback,
+            }
+        );
+        assert_eq!(failing_calls.load(Ordering::SeqCst), 1);
+
+        let pool_no_api = SshPool::new(cfg, None).unwrap();
+        assert_eq!(
+            pool_no_api.resolve_node_target("pve-test-1").await,
+            ResolvedNodeSsh {
+                host: "pve-test-1".to_string(),
+                port: 22,
+                source: SshHostSource::NodeNameFallback,
+            }
         );
     }
 
@@ -661,7 +811,7 @@ mod tests {
             .with_api("https://192.168.0.122:8006", gw)
             .with_fake_connector(connector);
 
-        let t1 = pool.resolve_node_target("pve-test-1").await.unwrap();
+        let t1 = pool.resolve_node_target("pve-test-1").await;
         assert_eq!(
             t1,
             ResolvedNodeSsh {
@@ -670,7 +820,7 @@ mod tests {
                 source: SshHostSource::ExplicitHosts,
             }
         );
-        let t2 = pool.resolve_node_target("pve-test-2").await.unwrap();
+        let t2 = pool.resolve_node_target("pve-test-2").await;
         assert_eq!(
             t2,
             ResolvedNodeSsh {
@@ -816,25 +966,23 @@ mod tests {
         let cfg = empty_ssh_config();
 
         // 5a. IPv4 URL
-        let v4 = cfg
-            .resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status)
-            .unwrap();
+        let v4 = cfg.resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status);
         assert_eq!(v4.host, "192.168.0.203");
         assert_eq!(v4.port, 22);
         assert_eq!(v4.source, SshHostSource::ApiUrlFallback);
 
         // 5b. IPv6 literal URL (`[::1]`) -> unbracketed `"::1"`, port 22
-        let v6 = cfg
-            .resolve_host_with_status("opti7", "https://[::1]:8006", &status)
-            .unwrap();
+        let v6 = cfg.resolve_host_with_status("opti7", "https://[::1]:8006", &status);
         assert_eq!(v6.host, "::1");
         assert_eq!(v6.port, 22);
         assert_eq!(v6.source, SshHostSource::ApiUrlFallback);
 
         // 5c. DNS name URL
-        let dns = cfg
-            .resolve_host_with_status("opti7", "https://opti7.lan.example:8006/api2/json", &status)
-            .unwrap();
+        let dns = cfg.resolve_host_with_status(
+            "opti7",
+            "https://opti7.lan.example:8006/api2/json",
+            &status,
+        );
         assert_eq!(dns.host, "opti7.lan.example");
         assert_eq!(dns.port, 22);
         assert_eq!(dns.source, SshHostSource::ApiUrlFallback);
@@ -851,23 +999,20 @@ mod tests {
             .hosts
             .insert("dnsnode".to_string(), "pve.lan.example".to_string());
 
-        let c1 = cfg_custom
-            .resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status)
-            .unwrap();
+        let c1 =
+            cfg_custom.resolve_host_with_status("opti7", "https://192.168.0.203:8006", &status);
         assert_eq!(c1.host, "192.168.0.203");
         assert_eq!(c1.port, 2222);
         assert_eq!(c1.source, SshHostSource::ExplicitHosts);
 
-        let c2 = cfg_custom
-            .resolve_host_with_status("v6node", "https://192.168.0.203:8006", &status)
-            .unwrap();
+        let c2 =
+            cfg_custom.resolve_host_with_status("v6node", "https://192.168.0.203:8006", &status);
         assert_eq!(c2.host, "::1");
         assert_eq!(c2.port, 2200);
         assert_eq!(c2.source, SshHostSource::ExplicitHosts);
 
-        let c3 = cfg_custom
-            .resolve_host_with_status("dnsnode", "https://192.168.0.203:8006", &status)
-            .unwrap();
+        let c3 =
+            cfg_custom.resolve_host_with_status("dnsnode", "https://192.168.0.203:8006", &status);
         assert_eq!(c3.host, "pve.lan.example");
         assert_eq!(c3.port, 22);
         assert_eq!(c3.source, SshHostSource::ExplicitHosts);
