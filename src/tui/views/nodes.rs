@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::api::types::{GuestStatus, NodeStatus};
 use crate::app::AppState;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{usage_level, Theme, UsageMetric};
 
 /// Render the node list view. The bottom status row (mode pill +
 /// keybind hints) is rendered by the global `widgets::status_footer`
@@ -84,19 +84,22 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
                 NodeStatus::Unknown => "◐",
             };
 
-            let cpu_pct = if node.maxcpu > 0 {
+            let has_cpu = node.maxcpu > 0;
+            let cpu_pct = if has_cpu {
                 (node.cpu / f64::from(node.maxcpu)) * 100.0
             } else {
                 0.0
             };
 
-            let mem_pct = if node.maxmem > 0 {
+            let has_mem = node.maxmem > 0;
+            let mem_pct = if has_mem {
                 (node.mem as f64 / node.maxmem as f64) * 100.0
             } else {
                 0.0
             };
 
-            let disk_pct = if node.maxdisk > 0 {
+            let has_disk = node.maxdisk > 0;
+            let disk_pct = if has_disk {
                 (node.disk as f64 / node.maxdisk as f64) * 100.0
             } else {
                 0.0
@@ -119,22 +122,46 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
                 Style::default()
             };
 
+            let cpu_span = Theme::usage_span(
+                format!("{cpu_pct:.0}% ({:.1}/{})", node.cpu, node.maxcpu),
+                UsageMetric::Cpu,
+                cpu_pct,
+                has_cpu,
+            );
+            let cpu_bar_span = if has_cpu {
+                Span::styled(cpu_bar, usage_level(UsageMetric::Cpu, cpu_pct).style())
+            } else {
+                Span::raw(cpu_bar)
+            };
+            let mem_span = Theme::usage_span(
+                format!("{mem_pct:.0}%"),
+                UsageMetric::Memory,
+                mem_pct,
+                has_mem,
+            );
+            let mem_bar_span = if has_mem {
+                Span::styled(mem_bar, usage_level(UsageMetric::Memory, mem_pct).style())
+            } else {
+                Span::raw(mem_bar)
+            };
+            let disk_span = Theme::usage_span(
+                format!("{disk_pct:.0}%"),
+                UsageMetric::Disk,
+                disk_pct,
+                has_disk,
+            );
+
             Row::new(vec![
-                status_icon.to_string(),
-                node.node.clone(),
-                format!("{:?}", node.status).to_lowercase(),
-                format!(
-                    "{:.0}% ({}/{})",
-                    cpu_pct,
-                    format!("{:.1}", node.cpu),
-                    node.maxcpu
-                ),
-                cpu_bar,
-                format!("{:.0}%", mem_pct),
-                mem_bar,
-                format!("{:.0}%", disk_pct),
-                format_uptime(node.uptime),
-                format!("{running_count}/{guest_count}"),
+                Span::raw(status_icon.to_string()),
+                Span::raw(node.node.clone()),
+                Span::raw(format!("{:?}", node.status).to_lowercase()),
+                cpu_span,
+                cpu_bar_span,
+                mem_span,
+                mem_bar_span,
+                disk_span,
+                Span::raw(format_uptime(node.uptime)),
+                Span::raw(format!("{running_count}/{guest_count}")),
             ])
             .style(style)
         })
@@ -183,5 +210,139 @@ fn format_uptime(seconds: u64) -> String {
         format!("{hours}h {mins}m")
     } else {
         format!("{mins}m")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::api::types::Node;
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
+
+    fn render_buffer(state: &AppState) -> Buffer {
+        let backend = TestBackend::new(110, 15);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .expect("draw succeeds");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    fn find_col_of(buf: &Buffer, y: u16, needle: &str) -> u16 {
+        let line = row_string(buf, y);
+        let byte_idx = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("expected {needle:?} in row {y}: {line:?}"));
+        u16::try_from(line[..byte_idx].chars().count()).expect("col fits u16")
+    }
+
+    #[test]
+    fn nodes_view_disk_usage_colours_and_critical_marker() {
+        let mut state = AppState::new();
+        state.nodes = vec![
+            Node {
+                node: "n-low".into(),
+                status: NodeStatus::Online,
+                cpu: 0.4,
+                maxcpu: 4,
+                mem: 20,
+                maxmem: 100,
+                disk: 10,
+                maxdisk: 100,
+                uptime: 3600,
+            },
+            Node {
+                node: "n-high".into(),
+                status: NodeStatus::Online,
+                cpu: 0.4,
+                maxcpu: 4,
+                mem: 20,
+                maxmem: 100,
+                disk: 85,
+                maxdisk: 100,
+                uptime: 3600,
+            },
+            Node {
+                node: "n-crit".into(),
+                status: NodeStatus::Online,
+                cpu: 0.4,
+                maxcpu: 4,
+                mem: 20,
+                maxmem: 100,
+                disk: 96,
+                maxdisk: 100,
+                uptime: 3600,
+            },
+        ];
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("ram usage"))
+            .expect("header row present");
+        let disk_col = find_col_of(&buf, header_y, "disk");
+
+        let r0 = header_y + 1;
+        let r1 = header_y + 2;
+        let r2 = header_y + 3;
+
+        let cell_0: String = (disk_col..disk_col + 6)
+            .map(|x| buf[(x, r0)].symbol())
+            .collect();
+        let cell_1: String = (disk_col..disk_col + 6)
+            .map(|x| buf[(x, r1)].symbol())
+            .collect();
+        let cell_2: String = (disk_col..disk_col + 6)
+            .map(|x| buf[(x, r2)].symbol())
+            .collect();
+
+        assert_eq!(cell_0.trim(), "10%");
+        assert!(!cell_0.contains('!'));
+        assert_eq!(buf[(disk_col, r0)].fg, Theme::SUCCESS);
+
+        assert_eq!(cell_1.trim(), "85%");
+        assert!(!cell_1.contains('!'));
+        assert_eq!(buf[(disk_col, r1)].fg, Theme::ORANGE);
+
+        assert_eq!(cell_2.trim(), "96%!");
+        assert!(cell_2.contains('!'));
+        assert_eq!(buf[(disk_col, r2)].fg, Theme::DANGER);
+    }
+
+    #[test]
+    fn nodes_view_max_zero_has_no_marker_and_default_style() {
+        let mut state = AppState::new();
+        state.selected_index = 1; // keep row 0 unselected to verify default cell style
+        state.nodes = vec![Node {
+            node: "n-zero".into(),
+            status: NodeStatus::Offline,
+            cpu: 0.0,
+            maxcpu: 0,
+            mem: 0,
+            maxmem: 0,
+            disk: 0,
+            maxdisk: 0,
+            uptime: 0,
+        }];
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("ram usage"))
+            .expect("header row present");
+        let disk_col = find_col_of(&buf, header_y, "disk");
+        let row_y = header_y + 1;
+
+        let line = row_string(&buf, row_y);
+        assert!(
+            !line.contains('!'),
+            "max==0 row must not contain '!': {line}"
+        );
+        assert_eq!(buf[(disk_col, row_y)].fg, Color::Reset);
     }
 }

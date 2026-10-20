@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{usage_level, Theme, UsageMetric};
 
 /// Render the main dashboard. The bottom status bar (mode pill +
 /// keybind hints) is rendered globally by `status_footer`, not here
@@ -120,66 +120,62 @@ fn draw_aggregate_stats(f: &mut Frame, area: Rect, state: &AppState) {
         ])
         .split(area);
 
-    // CPU gauge
-    let cpu_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" CPU ")
-                .borders(Borders::ALL)
-                .border_style(Theme::border()),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(Theme::gauge_color(cpu_pct))
-                .bg(Theme::BG),
-        )
-        .ratio(cpu_pct.clamp(0.0, 100.0) / 100.0)
-        .label(format!(
-            "{cpu_pct:.0}%  ({total_cpu:.1}/{total_maxcpu} cores)"
-        ));
+    let cpu_gauge = usage_gauge(
+        " CPU ",
+        UsageMetric::Cpu,
+        cpu_pct,
+        total_maxcpu > 0,
+        &format!("{total_cpu:.1}/{total_maxcpu} cores"),
+    );
     f.render_widget(cpu_gauge, cols[0]);
 
-    // Memory gauge
-    let mem_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" RAM ")
-                .borders(Borders::ALL)
-                .border_style(Theme::border()),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(Theme::gauge_color(mem_pct))
-                .bg(Theme::BG),
-        )
-        .ratio(mem_pct.clamp(0.0, 100.0) / 100.0)
-        .label(format!(
-            "{mem_pct:.0}%  ({}/{})",
-            format_bytes(total_mem),
-            format_bytes(total_maxmem)
-        ));
+    let mem_gauge = usage_gauge(
+        " RAM ",
+        UsageMetric::Memory,
+        mem_pct,
+        total_maxmem > 0,
+        &format!("{}/{}", format_bytes(total_mem), format_bytes(total_maxmem)),
+    );
     f.render_widget(mem_gauge, cols[1]);
 
-    // Disk gauge
-    let disk_gauge = Gauge::default()
+    let disk_gauge = usage_gauge(
+        " DISK ",
+        UsageMetric::Disk,
+        disk_pct,
+        total_maxdisk > 0,
+        &format!(
+            "{}/{}",
+            format_bytes(total_disk),
+            format_bytes(total_maxdisk)
+        ),
+    );
+    f.render_widget(disk_gauge, cols[2]);
+}
+
+fn usage_gauge(
+    title: &'static str,
+    metric: UsageMetric,
+    pct: f64,
+    has_max: bool,
+    detail: &str,
+) -> Gauge<'static> {
+    let level = usage_level(metric, pct);
+    let fg = if has_max {
+        level.color()
+    } else {
+        Theme::TEXT_DIM
+    };
+    let marker = if has_max { level.marker() } else { "" };
+    Gauge::default()
         .block(
             Block::default()
-                .title(" DISK ")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Theme::border()),
         )
-        .gauge_style(
-            Style::default()
-                .fg(Theme::gauge_color(disk_pct))
-                .bg(Theme::BG),
-        )
-        .ratio(disk_pct.clamp(0.0, 100.0) / 100.0)
-        .label(format!(
-            "{disk_pct:.0}%  ({}/{})",
-            format_bytes(total_disk),
-            format_bytes(total_maxdisk)
-        ));
-    f.render_widget(disk_gauge, cols[2]);
+        .gauge_style(Style::default().fg(fg).bg(Theme::BG))
+        .ratio(pct.clamp(0.0, 100.0) / 100.0)
+        .label(format!("{pct:.0}%{marker}  ({detail})"))
 }
 
 fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
@@ -226,13 +222,28 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
             };
 
             Row::new(vec![
-                status_icon.to_string(),
-                node.node.clone(),
-                status_str,
-                format!("{cpu_pct:.0}%"),
-                format!("{mem_pct:.0}% ({})", format_bytes(node.maxmem)),
-                format!("{disk_pct:.0}%"),
-                format_uptime(node.uptime),
+                Span::raw(status_icon.to_string()),
+                Span::raw(node.node.clone()),
+                Span::raw(status_str),
+                Theme::usage_span(
+                    format!("{cpu_pct:.0}%"),
+                    UsageMetric::Cpu,
+                    cpu_pct,
+                    node.maxcpu > 0,
+                ),
+                Theme::usage_span(
+                    format!("{mem_pct:.0}% ({})", format_bytes(node.maxmem)),
+                    UsageMetric::Memory,
+                    mem_pct,
+                    node.maxmem > 0,
+                ),
+                Theme::usage_span(
+                    format!("{disk_pct:.0}%"),
+                    UsageMetric::Disk,
+                    disk_pct,
+                    node.maxdisk > 0,
+                ),
+                Span::raw(format_uptime(node.uptime)),
             ])
             .style(style)
         })

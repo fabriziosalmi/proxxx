@@ -11,7 +11,7 @@ pub mod event;
 pub mod fleet;
 mod ssh_handler;
 mod terminal_guard;
-mod theme;
+pub mod theme;
 // `views` + `widgets` are `pub` for the TUI snapshot test harness in
 // `tests/tui_snapshot.rs`. They are NOT part of the proxxx public
 // API and may change shape without a major version bump — the only

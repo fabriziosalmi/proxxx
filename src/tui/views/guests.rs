@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::api::types::{GuestStatus, GuestType};
 use crate::app::AppState;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{usage_level, Theme, UsageMetric};
 use crate::util::sanitize::sanitize_display;
 
 /// Render the guest list or guest detail. The bottom action-hint
@@ -161,22 +161,30 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 GuestType::Lxc => "LXC",
             };
 
-            let cpu_pct = if guest.cpus > 0 {
-                format!("{:.0}%", guest.cpu * 100.0)
+            let cpu_span = if guest.cpus > 0 {
+                let cpu_pct = guest.cpu * 100.0;
+                Theme::usage_span(format!("{cpu_pct:.0}%"), UsageMetric::Cpu, cpu_pct, true)
             } else {
-                "-".to_string()
+                Span::raw("-".to_string())
             };
 
-            let mem_pct = if guest.maxmem > 0 {
-                format!("{:.0}%", (guest.mem as f64 / guest.maxmem as f64) * 100.0)
+            let mem_span = if guest.maxmem > 0 {
+                let mem_pct = (guest.mem as f64 / guest.maxmem as f64) * 100.0;
+                Theme::usage_span(format!("{mem_pct:.0}%"), UsageMetric::Memory, mem_pct, true)
             } else {
-                "-".to_string()
+                Span::raw("-".to_string())
             };
 
-            let disk_str = if guest.maxdisk > 0 {
-                format_bytes(guest.maxdisk)
+            let disk_span = if guest.maxdisk > 0 {
+                let text = format_bytes(guest.maxdisk);
+                if guest.disk > 0 {
+                    let disk_pct = (guest.disk as f64 / guest.maxdisk as f64) * 100.0;
+                    Theme::usage_span(text, UsageMetric::Disk, disk_pct, true)
+                } else {
+                    Span::raw(text)
+                }
             } else {
-                "-".to_string()
+                Span::raw("-".to_string())
             };
 
             let tags = if guest.tags.is_empty() {
@@ -211,16 +219,16 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
             }
 
             Row::new(vec![
-                status_icon.to_string(),
-                guest.vmid.to_string(),
-                sanitize_display(&guest.name).into_owned(),
-                type_str.to_string(),
-                status_text,
-                cpu_pct,
-                mem_pct,
-                disk_str,
-                sanitize_display(&guest.node).into_owned(),
-                tags,
+                Span::raw(status_icon.to_string()),
+                Span::raw(guest.vmid.to_string()),
+                Span::raw(sanitize_display(&guest.name).into_owned()),
+                Span::raw(type_str.to_string()),
+                Span::raw(status_text),
+                cpu_span,
+                mem_span,
+                disk_span,
+                Span::raw(sanitize_display(&guest.node).into_owned()),
+                Span::raw(tags),
             ])
             .style(style)
         })
@@ -369,29 +377,59 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     );
 
     // Resources panel
-    let cpu_bar = make_bar((guest.cpu * 100.0).clamp(0.0, 100.0), 20);
-    let mem_pct = if guest.maxmem > 0 {
+    let has_cpu = guest.cpus > 0;
+    let cpu_pct = if has_cpu { guest.cpu * 100.0 } else { 0.0 };
+    let cpu_bar = make_bar(cpu_pct.clamp(0.0, 100.0), 20);
+    let cpu_level = usage_level(UsageMetric::Cpu, cpu_pct);
+    let cpu_res_span = if has_cpu {
+        Span::styled(
+            format!("{cpu_pct:<6.1}%{} {cpu_bar}", cpu_level.marker()),
+            cpu_level.style(),
+        )
+    } else {
+        Span::raw(format!("{cpu_pct:<6.1}% {cpu_bar}"))
+    };
+
+    let has_mem = guest.maxmem > 0;
+    let mem_pct = if has_mem {
         (guest.mem as f64 / guest.maxmem as f64) * 100.0
     } else {
         0.0
     };
     let mem_bar = make_bar(mem_pct, 20);
-    let disk_pct = if guest.maxdisk > 0 {
+    let mem_level = usage_level(UsageMetric::Memory, mem_pct);
+    let mem_res_span = if has_mem {
+        Span::styled(
+            format!("{mem_pct:<6.1}%{} {mem_bar}", mem_level.marker()),
+            mem_level.style(),
+        )
+    } else {
+        Span::raw(format!("{mem_pct:<6.1}% {mem_bar}"))
+    };
+
+    let has_disk = guest.maxdisk > 0;
+    let disk_pct = if has_disk {
         (guest.disk as f64 / guest.maxdisk as f64) * 100.0
     } else {
         0.0
     };
     let disk_bar = make_bar(disk_pct, 20);
+    let disk_level = usage_level(UsageMetric::Disk, disk_pct);
+    let disk_res_span = if has_disk {
+        Span::styled(
+            format!("{disk_pct:<6.1}%{} {disk_bar}", disk_level.marker()),
+            disk_level.style(),
+        )
+    } else {
+        Span::raw(format!("{disk_pct:<6.1}% {disk_bar}"))
+    };
 
     let res_text = vec![
         Line::from(vec![
             Span::styled("CPU:  ", Theme::dim()),
             Span::raw(format!("{} cores", guest.cpus)),
         ]),
-        Line::from(vec![
-            Span::styled("      ", Theme::dim()),
-            Span::raw(format!("{:<6.1}% {}", guest.cpu * 100.0, cpu_bar)),
-        ]),
+        Line::from(vec![Span::styled("      ", Theme::dim()), cpu_res_span]),
         Line::from(""),
         Line::from(vec![
             Span::styled("RAM:  ", Theme::dim()),
@@ -401,10 +439,7 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
                 format_bytes(guest.maxmem)
             )),
         ]),
-        Line::from(vec![
-            Span::styled("      ", Theme::dim()),
-            Span::raw(format!("{mem_pct:<6.1}% {mem_bar}")),
-        ]),
+        Line::from(vec![Span::styled("      ", Theme::dim()), mem_res_span]),
         Line::from(""),
         Line::from(vec![
             Span::styled("Disk: ", Theme::dim()),
@@ -414,10 +449,7 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
                 format_bytes(guest.maxdisk)
             )),
         ]),
-        Line::from(vec![
-            Span::styled("      ", Theme::dim()),
-            Span::raw(format!("{disk_pct:<6.1}% {disk_bar}")),
-        ]),
+        Line::from(vec![Span::styled("      ", Theme::dim()), disk_res_span]),
     ];
 
     f.render_widget(
@@ -478,8 +510,11 @@ pub(super) fn scroll_window(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
-    use super::scroll_window;
+    use super::*;
+    use crate::api::types::Guest;
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 
     #[test]
     fn empty_list_returns_empty_window() {
@@ -541,5 +576,139 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn render_buffer(state: &AppState) -> Buffer {
+        let backend = TestBackend::new(100, 15);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| draw(f, f.area(), state))
+            .expect("draw succeeds");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    fn find_col_of(buf: &Buffer, y: u16, needle: &str) -> u16 {
+        let line = row_string(buf, y);
+        let byte_idx = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("expected {needle:?} in row {y}: {line:?}"));
+        u16::try_from(line[..byte_idx].chars().count()).expect("col fits u16")
+    }
+
+    #[test]
+    fn guest_table_memory_usage_colours_and_critical_marker() {
+        let mut state = AppState::new();
+        state.nav_stack = vec![crate::app::View::GuestList];
+        state.guests = vec![
+            Guest {
+                vmid: 100,
+                name: "vm-low".into(),
+                guest_type: GuestType::Qemu,
+                status: GuestStatus::Running,
+                node: "pve1".into(),
+                cpus: 2,
+                cpu: 0.10,
+                mem: 10,
+                maxmem: 100,
+                ..Guest::default()
+            },
+            Guest {
+                vmid: 101,
+                name: "vm-high".into(),
+                guest_type: GuestType::Qemu,
+                status: GuestStatus::Running,
+                node: "pve1".into(),
+                cpus: 2,
+                cpu: 0.10,
+                mem: 85,
+                maxmem: 100,
+                ..Guest::default()
+            },
+            Guest {
+                vmid: 102,
+                name: "vm-crit".into(),
+                guest_type: GuestType::Qemu,
+                status: GuestStatus::Running,
+                node: "pve1".into(),
+                cpus: 2,
+                cpu: 0.10,
+                mem: 96,
+                maxmem: 100,
+                ..Guest::default()
+            },
+        ];
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("vmid"))
+            .expect("header row present");
+        let ram_col = find_col_of(&buf, header_y, "ram");
+
+        let r0 = header_y + 1;
+        let r1 = header_y + 2;
+        let r2 = header_y + 3;
+
+        let cell_0: String = (ram_col..ram_col + 5)
+            .map(|x| buf[(x, r0)].symbol())
+            .collect();
+        let cell_1: String = (ram_col..ram_col + 5)
+            .map(|x| buf[(x, r1)].symbol())
+            .collect();
+        let cell_2: String = (ram_col..ram_col + 5)
+            .map(|x| buf[(x, r2)].symbol())
+            .collect();
+
+        assert_eq!(cell_0.trim(), "10%");
+        assert!(!cell_0.contains('!'));
+        assert_eq!(buf[(ram_col, r0)].fg, Theme::SUCCESS);
+
+        assert_eq!(cell_1.trim(), "85%");
+        assert!(!cell_1.contains('!'));
+        assert_eq!(buf[(ram_col, r1)].fg, Theme::ORANGE);
+
+        assert_eq!(cell_2.trim(), "96%!");
+        assert!(cell_2.contains('!'));
+        assert_eq!(buf[(ram_col, r2)].fg, Theme::DANGER);
+    }
+
+    #[test]
+    fn guest_table_max_zero_has_no_marker_and_default_style() {
+        let mut state = AppState::new();
+        state.nav_stack = vec![crate::app::View::GuestList];
+        state.selected_index = 1; // keep row 0 unselected to verify default cell style
+        state.guests = vec![Guest {
+            vmid: 200,
+            name: "vm-zero".into(),
+            guest_type: GuestType::Qemu,
+            status: GuestStatus::Running,
+            node: "pve1".into(),
+            cpus: 0,
+            cpu: 0.99,
+            mem: 99,
+            maxmem: 0,
+            disk: 99,
+            maxdisk: 0,
+            ..Guest::default()
+        }];
+
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("vmid"))
+            .expect("header row present");
+        let ram_col = find_col_of(&buf, header_y, "ram");
+        let row_y = header_y + 1;
+
+        let line = row_string(&buf, row_y);
+        assert!(
+            !line.contains('!'),
+            "max==0 row must not contain '!': {line}"
+        );
+        assert_eq!(buf[(ram_col, row_y)].fg, Color::Reset);
     }
 }
