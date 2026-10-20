@@ -360,8 +360,42 @@ pub async fn enforce_preflight(
     guest: &crate::api::types::Guest,
     force: bool,
 ) -> Result<()> {
-    use crate::app::preflight::{assess_deep, max_level, RiskLevel};
-    let risks = assess_deep(client, pbs, op, guest).await;
+    enforce_preflight_with_notes(client, pbs, op, guest, force, None).await
+}
+
+/// Risks [`enforce_preflight_with_notes`] acts on: `assess_deep` plus the
+/// optional `skipped` note as a notice-level `DeepCheckSkipped`.
+pub async fn preflight_risks(
+    client: &crate::api::PxClient,
+    pbs: Option<&crate::pbs::PbsClient>,
+    op: crate::app::preflight::Op,
+    guest: &crate::api::types::Guest,
+    skipped: Option<String>,
+) -> Vec<(
+    crate::app::preflight::Risk,
+    crate::app::preflight::RiskLevel,
+)> {
+    use crate::app::preflight::{assess_deep, Risk, RiskLevel};
+    let mut risks = assess_deep(client, pbs, op, guest).await;
+    if let Some(reason) = skipped {
+        risks.push((Risk::DeepCheckSkipped { reason }, RiskLevel::Notice));
+    }
+    risks
+}
+
+/// [`enforce_preflight`] plus an optional `skipped` note, reported as a
+/// notice-level [`crate::app::preflight::Risk::DeepCheckSkipped`] when part
+/// of the check could not run (e.g. PBS configured but unreachable, #374).
+pub async fn enforce_preflight_with_notes(
+    client: &crate::api::PxClient,
+    pbs: Option<&crate::pbs::PbsClient>,
+    op: crate::app::preflight::Op,
+    guest: &crate::api::types::Guest,
+    force: bool,
+    skipped: Option<String>,
+) -> Result<()> {
+    use crate::app::preflight::{max_level, RiskLevel};
+    let risks = preflight_risks(client, pbs, op, guest, skipped).await;
     if risks.is_empty() {
         return Ok(());
     }
@@ -1148,6 +1182,30 @@ mod enforce_preflight_tests {
             .await
             .expect("client builds");
         (client, server)
+    }
+
+    /// #374: a part of the check that could not run (PBS configured but its
+    /// client unavailable) is reported, not silently dropped.
+    #[tokio::test]
+    async fn a_skipped_note_becomes_a_deep_check_skipped_notice() {
+        use crate::app::preflight::{Risk, RiskLevel};
+        let (client, _server) = idle_client().await;
+        let g = stopped_qemu(100);
+        let reason = "PBS is configured but its client could not be built".to_string();
+        let with =
+            super::preflight_risks(&client, None, Op::Delete, &g, Some(reason.clone())).await;
+        assert!(
+            with.iter().any(|(r, l)| *l == RiskLevel::Notice
+                && matches!(r, Risk::DeepCheckSkipped { reason: x } if *x == reason)),
+            "the note must be reported as a DeepCheckSkipped notice: {with:?}"
+        );
+        let without = super::preflight_risks(&client, None, Op::Delete, &g, None).await;
+        assert!(
+            !without
+                .iter()
+                .any(|(r, _)| matches!(r, Risk::DeepCheckSkipped { reason: x } if *x == reason)),
+            "no note, no extra notice"
+        );
     }
 
     /// max == Severe, force == false → bails. The error message must

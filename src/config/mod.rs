@@ -757,8 +757,11 @@ impl PbsConfig {
         // 1. CLI flag
         match cli_secret {
             Some(s) if !s.is_empty() => return Ok(SecretString::from(s)),
-            Some(_) => tried.push("CLI flag --pbs-token-secret (empty)".to_string()),
-            None => tried.push("CLI flag --pbs-token-secret (not given)".to_string()),
+            Some(_) => tried
+                .push("CLI flag --token-secret, `proxxx pbs` commands only (empty)".to_string()),
+            None => tried.push(
+                "CLI flag --token-secret, `proxxx pbs` commands only (not given)".to_string(),
+            ),
         }
 
         // 2. Env var
@@ -3298,7 +3301,7 @@ chat_id = "12345"
                 .unwrap_err()
         );
         assert!(
-            pbs_msg.contains("1. CLI flag --pbs-token-secret (not given)"),
+            pbs_msg.contains("1. CLI flag --token-secret, `proxxx pbs` commands only (not given)"),
             "{pbs_msg}"
         );
         assert!(

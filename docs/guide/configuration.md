@@ -101,8 +101,12 @@ How `token bootstrap` works:
 
 The resolution order for PVE (`token_secret`, `password`), PBS (`pbs.token_secret`), and Telegram (`telegram.bot_token`) is:
 
-1. **CLI flag** (`--token-secret VALUE`, `--pbs-token-secret VALUE`) — highest priority, takes
-   precedence over everything else.
+1. **CLI flag** (`--token-secret VALUE` or `--token-secret-file PATH`) — highest priority, takes
+   precedence over everything else. It holds ONE secret for the selected profile: it is
+   used for that profile's PVE credentials, and for PBS only by `proxxx pbs ...` commands
+   (there is no separate PBS flag; elsewhere PBS resolves its own secret). Commands that
+   contact every profile (`ls --all-profiles`, `find`, `fleet`) refuse it with exit 3, and
+   after a profile switch in the TUI the next profile resolves its own secret.
 2. **Environment variable** (`PROXXX_TOKEN_SECRET`, `PROXXX_PASSWORD`,
    `PROXXX_PBS_TOKEN_SECRET`, or `PROXXX_TELEGRAM_BOT_TOKEN`; capped at 64 KiB).
 3. **Inline TOML key** (`token_secret`, `password`, `pbs.token_secret`; note that for Telegram, `telegram.bot_token_file` is checked before inline `telegram.bot_token`).
