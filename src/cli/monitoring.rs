@@ -572,29 +572,7 @@ pub async fn execute_alerts(
             loop {
                 tokio::select! {
                     biased; // signals are higher priority than the next tick
-                    () = crate::util::shutdown::wait_for_shutdown_signal() => {
-                        tracing::info!("alert daemon: shutdown signal received, exiting cleanly");
-                        // Final flush so the dedup window survives the
-                        // shutdown — operator restarts the daemon, the
-                        // cache is current. Best-effort by design.
-                        // Phase 12 audit fix: async wrapper so a contended
-                        // SQLite flush at shutdown can't pin the runtime
-                        // and delay the systemd 90s SIGKILL window.
-                        if let Err(e) = crate::app::cache::save_alert_dedup_async(
-                            profile_label.to_owned(),
-                            dedup.entries(),
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "alert daemon: dedup cache flush at shutdown failed: {e:#}"
-                            );
-                        }
-                        return Ok((
-                            serde_json::json!({ "status": "shutdown" }),
-                            0,
-                        ));
-                    }
+                    () = crate::util::shutdown::wait_for_shutdown_signal() => break,
                     snap_res = snapshot(client) => {
                         let snap = match snap_res {
                             Ok(s) => s,
@@ -602,7 +580,14 @@ pub async fn execute_alerts(
                                 tracing::warn!(
                                     "snapshot fetch failed: {e:#} — retrying next tick"
                                 );
-                                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                                // #366: a shutdown during the sleep ends the loop.
+                                if !crate::util::shutdown::sleep_unless_shutdown(
+                                    std::time::Duration::from_secs(interval),
+                                )
+                                .await
+                                {
+                                    break;
+                                }
                                 continue;
                             }
                         };
@@ -614,7 +599,14 @@ pub async fn execute_alerts(
                             tracing::info!(
                                 "alert daemon: no rules in current config — idle tick"
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                            // #366: a shutdown during the sleep ends the loop.
+                            if !crate::util::shutdown::sleep_unless_shutdown(
+                                std::time::Duration::from_secs(interval),
+                            )
+                            .await
+                            {
+                                break;
+                            }
                             continue;
                         }
                         let parsed_routes: Vec<(
@@ -679,10 +671,31 @@ pub async fn execute_alerts(
                         {
                             tracing::warn!("alert daemon: dedup cache save failed: {e:#}");
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                        // #366: a shutdown during the sleep ends the loop.
+                        if !crate::util::shutdown::sleep_unless_shutdown(
+                            std::time::Duration::from_secs(interval),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
+            // Reached only on shutdown (#366: the signal is seen during the
+            // snapshot, the processing, or the sleep between ticks).
+            tracing::info!("alert daemon: shutdown signal received, exiting cleanly");
+            // Final flush so the dedup window survives the shutdown —
+            // operator restarts the daemon, the cache is current.
+            // Best-effort by design; async wrapper so a contended SQLite
+            // flush cannot pin the runtime.
+            if let Err(e) =
+                crate::app::cache::save_alert_dedup_async(profile_label.to_owned(), dedup.entries())
+                    .await
+            {
+                tracing::warn!("alert daemon: dedup cache flush at shutdown failed: {e:#}");
+            }
+            Ok((serde_json::json!({ "status": "shutdown" }), 0))
         }
         AlertsCommand::Test { route, severity } => {
             let ch = parse_route(&route)

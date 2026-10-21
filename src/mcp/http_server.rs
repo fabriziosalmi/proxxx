@@ -430,6 +430,12 @@ async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Respo
         })
     });
 
+    // #366: end the stream on shutdown, or graceful shutdown waits for a
+    // connected client forever.
+    let stream = futures_util::StreamExt::take_until(
+        stream,
+        crate::util::shutdown::wait_for_shutdown_signal(),
+    );
     Sse::new(stream)
         .keep_alive(
             axum::response::sse::KeepAlive::new()
@@ -622,38 +628,33 @@ pub async fn run_http_server_with_options(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("MCP HTTP server listening on http://{addr}/mcp");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    tokio::select! {
+        res = std::future::IntoFuture::into_future(server) => res?,
+        () = async {
+            crate::util::shutdown::wait_for_shutdown_signal().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!(
+                "MCP HTTP server: requests still open {}s after the shutdown signal; exiting",
+                SHUTDOWN_GRACE.as_secs()
+            );
+        }
+    }
 
     Ok(())
 }
 
+/// Resolves on the process-wide shutdown (SIGTERM / SIGINT, #366).
 async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        // Ignore the error — if we can't install the handler the process
-        // will simply not react to Ctrl-C, which is acceptable here.
-        let _ = signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
+    crate::util::shutdown::wait_for_shutdown_signal().await;
     tracing::info!("MCP HTTP server shutting down");
 }
+
+/// After a shutdown signal, how long open requests may run before the
+/// server exits anyway (#366). SSE streams end on the signal by themselves;
+/// this bounds anything else, such as a slow tool call.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {
