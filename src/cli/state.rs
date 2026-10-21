@@ -237,7 +237,7 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
 
             match output {
                 ExportFormat::Toml => {
-                    let s = toml::to_string_pretty(&exported)?;
+                    let s = state::export::render_export_toml(&exported, &resources)?;
                     print!("{s}");
                     if !s.ends_with('\n') {
                         println!();

@@ -284,7 +284,9 @@ async fn test_3_state_apply_and_reconcile_refuse_profile_mismatch_with_exit_3_an
     let prod_state_path = tmp.path().join("prod-state.toml");
     std::fs::write(
         &prod_state_path,
-        r#"[meta]
+        r#"pools = []
+
+[meta]
 schema_version = 1
 profile = "prod"
 exported_at = "2026-01-01T00:00:00Z"
