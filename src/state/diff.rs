@@ -307,7 +307,11 @@ fn diff_storage(declared: &[StorageDecl], live: &[StorageDecl], out: &mut Vec<Ch
 
     let mut updates: Vec<_> = decl_by
         .keys()
-        .filter(|k| live_by.get(*k).is_some_and(|live_s| *live_s != decl_by[*k]))
+        .filter(|k| {
+            live_by
+                .get(*k)
+                .is_some_and(|live_s| !storage_matches(live_s, decl_by[*k]))
+        })
         .collect();
     updates.sort_unstable();
     for k in updates {
@@ -337,6 +341,19 @@ fn diff_storage(declared: &[StorageDecl], live: &[StorageDecl], out: &mut Vec<Ch
             after: serde_json::to_value(decl_s).ok(),
         });
     }
+}
+
+/// Declared equals live. `content` and `nodes` are CSV sets: export sorts
+/// the live value, so a declared value in another order is not drift
+/// (#370; it used to update on every tick).
+fn storage_matches(live: &StorageDecl, declared: &StorageDecl) -> bool {
+    let csv = crate::state::export::normalize_csv;
+    let declared = StorageDecl {
+        content: csv(&declared.content),
+        nodes: csv(&declared.nodes),
+        ..declared.clone()
+    };
+    *live == declared
 }
 
 fn diff_backup_jobs(declared: &[BackupJobDecl], live: &[BackupJobDecl], out: &mut Vec<Change>) {

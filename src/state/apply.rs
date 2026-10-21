@@ -719,34 +719,18 @@ async fn apply_storage_update<C: StateWriteView + ?Sized>(
     client: &C,
     change: &Change,
 ) -> Result<()> {
-    let after: StorageDecl = serde_json::from_value(
-        change
-            .after
-            .clone()
-            .context("storage update change missing `after` value")?,
-    )
-    .context("decoding StorageDecl from change.after")?;
-
-    // `type` and `storage` are immutable; PVE rejects PUT with them
-    // in the body. Build the mutable subset.
-    let mut params: Vec<(String, String)> = Vec::new();
-    if !after.content.is_empty() {
-        params.push(("content".to_string(), after.content.clone()));
-    }
-    if !after.nodes.is_empty() {
-        params.push(("nodes".to_string(), after.nodes.clone()));
-    }
-    params.push((
-        "disable".to_string(),
-        if after.disable { "1" } else { "0" }.to_string(),
-    ));
-    push_optional(&mut params, "fingerprint", &after.fingerprint);
-    push_optional(&mut params, "username", &after.username);
-    // path/pool/server/export/datastore/vgname/thinpool/shared are
-    // immutable in PVE — operator must recreate the storage to change
-    // them. We don't error on attempt; PVE will reject and the
-    // outcome surfaces the message verbatim.
-
+    let decode = |v: &Option<serde_json::Value>, what: &str| -> Result<StorageDecl> {
+        serde_json::from_value(
+            v.clone()
+                .with_context(|| format!("storage update change missing `{what}` value"))?,
+        )
+        .with_context(|| format!("decoding StorageDecl from change.{what}"))
+    };
+    let before = decode(&change.before, "before")?;
+    let after = decode(&change.after, "after")?;
+    let Some(params) = storage_update_params(&before, &after)? else {
+        return Ok(());
+    };
     let borrowed: Vec<(&str, &str)> = params
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -754,6 +738,90 @@ async fn apply_storage_update<C: StateWriteView + ?Sized>(
     client
         .update_cluster_storage_view(&after.storage, &borrowed)
         .await
+}
+
+/// The `PUT /storage/{storage}` body that turns `before` into `after`
+/// (#370), or `None` when nothing PVE stores differs.
+///
+/// Only fields that changed are sent: PVE refuses a body that names a
+/// parameter fixed at creation for that storage type, even with its
+/// current value. A field cleared in `after` goes into `delete=`, since
+/// omitting it would leave the old value in place. `type`, `path`,
+/// `export`, `datastore`, `vgname` and `thinpool` are not accepted by
+/// `PUT /storage/{storage}` on any type (PVE 9.1 API schema); changing
+/// one is an error that asks for a recreate, before any request. `pool`
+/// and `server` are accepted for some types only; PVE answers for the
+/// others.
+///
+/// # Errors
+/// When an immutable field differs.
+pub(crate) fn storage_update_params(
+    before: &StorageDecl,
+    after: &StorageDecl,
+) -> Result<Option<Vec<(String, String)>>> {
+    let immutable: Vec<&str> = [
+        ("type", &before.storage_type, &after.storage_type),
+        ("path", &before.path, &after.path),
+        ("export", &before.export, &after.export),
+        ("datastore", &before.datastore, &after.datastore),
+        ("vgname", &before.vgname, &after.vgname),
+        ("thinpool", &before.thinpool, &after.thinpool),
+    ]
+    .into_iter()
+    .filter(|(_, b, a)| b != a)
+    .map(|(name, _, _)| name)
+    .collect();
+    anyhow::ensure!(
+        immutable.is_empty(),
+        "storage `{}`: {} cannot be changed in place (PVE fixes it when the \
+         storage is created); recreate the storage to change it",
+        after.storage,
+        immutable.join(", ")
+    );
+
+    let csv = crate::state::export::normalize_csv;
+    let mut params: Vec<(String, String)> = Vec::new();
+    let mut delete: Vec<&str> = Vec::new();
+    for (name, b, a, is_csv) in [
+        ("content", &before.content, &after.content, true),
+        ("nodes", &before.nodes, &after.nodes, true),
+        ("pool", &before.pool, &after.pool, false),
+        ("server", &before.server, &after.server, false),
+        (
+            "fingerprint",
+            &before.fingerprint,
+            &after.fingerprint,
+            false,
+        ),
+        ("username", &before.username, &after.username, false),
+    ] {
+        let same = if is_csv { csv(b) == csv(a) } else { b == a };
+        if same {
+            continue;
+        }
+        if a.is_empty() {
+            delete.push(name);
+        } else {
+            params.push((name.to_string(), a.clone()));
+        }
+    }
+    for (name, b, a) in [
+        ("disable", before.disable, after.disable),
+        ("shared", before.shared, after.shared),
+    ] {
+        if b == a {
+            continue;
+        }
+        if a {
+            params.push((name.to_string(), "1".to_string()));
+        } else {
+            delete.push(name);
+        }
+    }
+    if !delete.is_empty() {
+        params.push(("delete".to_string(), delete.join(",")));
+    }
+    Ok((!params.is_empty()).then_some(params))
 }
 
 async fn apply_storage_delete<C: StateWriteView + ?Sized>(
@@ -2692,6 +2760,243 @@ mod tests {
         assert_eq!(
             c.lines().await,
             vec!["delete_ha_resource(vm:8888)".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod storage_update_tests {
+    use super::*;
+    use crate::state::diff::{diff, ChangeKind};
+    use crate::state::model::ClusterState;
+    use crate::state::test_support::RecordingClient;
+
+    fn nfs() -> StorageDecl {
+        StorageDecl {
+            storage: "backups".into(),
+            storage_type: "nfs".into(),
+            content: "backup,iso".into(),
+            nodes: "pve1,pve2".into(),
+            server: "10.0.0.5".into(),
+            export: "/srv/backups".into(),
+            path: "/mnt/pve/backups".into(),
+            ..StorageDecl::default()
+        }
+    }
+
+    fn update(before: &StorageDecl, after: &StorageDecl) -> Change {
+        Change {
+            kind: ChangeKind::Update,
+            resource: "storage",
+            identity: after.storage.clone(),
+            before: serde_json::to_value(before).ok(),
+            after: serde_json::to_value(after).ok(),
+        }
+    }
+
+    /// What PVE stores after `PUT /storage/{id}` with `params`: each
+    /// named field is set, each field in `delete=` is cleared.
+    fn pve_after_put(before: &StorageDecl, params: &[(String, String)]) -> StorageDecl {
+        let mut s = before.clone();
+        for (k, v) in params {
+            let names: Vec<&str> = if k == "delete" {
+                v.split(',').collect()
+            } else {
+                vec![k.as_str()]
+            };
+            for name in names {
+                let val = if k == "delete" {
+                    String::new()
+                } else {
+                    v.clone()
+                };
+                match name {
+                    "content" => s.content = crate::state::export::normalize_csv(&val),
+                    "nodes" => s.nodes = crate::state::export::normalize_csv(&val),
+                    "pool" => s.pool = val,
+                    "server" => s.server = val,
+                    "fingerprint" => s.fingerprint = val,
+                    "username" => s.username = val,
+                    "disable" => s.disable = val == "1",
+                    "shared" => s.shared = val == "1",
+                    other => panic!("PUT /storage does not accept `{other}`"),
+                }
+            }
+        }
+        s
+    }
+
+    /// The issue's acceptance test: after applying the update, a re-diff
+    /// against the declared state is empty, for every mutable field,
+    /// including a cleared one.
+    #[test]
+    fn every_mutable_change_converges_on_re_diff() {
+        let before = nfs();
+        let cases: Vec<(&str, StorageDecl)> = vec![
+            (
+                "shared on",
+                StorageDecl {
+                    shared: true,
+                    ..nfs()
+                },
+            ),
+            (
+                "disable on",
+                StorageDecl {
+                    disable: true,
+                    ..nfs()
+                },
+            ),
+            (
+                "nodes cleared",
+                StorageDecl {
+                    nodes: String::new(),
+                    ..nfs()
+                },
+            ),
+            (
+                "nodes changed",
+                StorageDecl {
+                    nodes: "pve3".into(),
+                    ..nfs()
+                },
+            ),
+            (
+                "content changed",
+                StorageDecl {
+                    content: "images,backup".into(),
+                    ..nfs()
+                },
+            ),
+            (
+                "server changed",
+                StorageDecl {
+                    server: "10.0.0.6".into(),
+                    ..nfs()
+                },
+            ),
+            (
+                "fingerprint set",
+                StorageDecl {
+                    fingerprint: "aa:bb".into(),
+                    ..nfs()
+                },
+            ),
+        ];
+        for (name, after) in cases {
+            let params = storage_update_params(&before, &after)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name}: no params"));
+            let live = ClusterState {
+                storage: vec![pve_after_put(&before, &params)],
+                ..ClusterState::default()
+            };
+            let declared = ClusterState {
+                storage: vec![after.clone()],
+                ..ClusterState::default()
+            };
+            let left = diff(&declared, &live);
+            assert!(left.is_empty(), "{name}: params {params:?} leave {left:?}");
+        }
+        // And the reverse: turning flags off goes through delete=.
+        let on = StorageDecl {
+            shared: true,
+            disable: true,
+            ..nfs()
+        };
+        let params = storage_update_params(&on, &nfs()).unwrap().unwrap();
+        assert_eq!(
+            params,
+            vec![("delete".to_string(), "disable,shared".to_string())]
+        );
+    }
+
+    /// Only changed fields are sent: PVE refuses a body that names a
+    /// parameter fixed for the type, even with its current value.
+    #[test]
+    fn unchanged_fields_are_not_sent() {
+        let after = StorageDecl {
+            shared: true,
+            ..nfs()
+        };
+        let params = storage_update_params(&nfs(), &after).unwrap().unwrap();
+        assert_eq!(params, vec![("shared".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn content_in_another_order_is_not_a_change() {
+        let after = StorageDecl {
+            content: "iso,backup".into(),
+            ..nfs()
+        };
+        assert!(storage_update_params(&nfs(), &after).unwrap().is_none());
+        let declared = ClusterState {
+            storage: vec![after],
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            storage: vec![nfs()],
+            ..ClusterState::default()
+        };
+        assert!(diff(&declared, &live).is_empty(), "CSV order is not drift");
+    }
+
+    #[tokio::test]
+    async fn an_immutable_change_fails_without_a_request() {
+        for (field, after) in [
+            (
+                "path",
+                StorageDecl {
+                    path: "/mnt/other".into(),
+                    ..nfs()
+                },
+            ),
+            (
+                "export",
+                StorageDecl {
+                    export: "/srv/other".into(),
+                    ..nfs()
+                },
+            ),
+            (
+                "type",
+                StorageDecl {
+                    storage_type: "cifs".into(),
+                    ..nfs()
+                },
+            ),
+        ] {
+            let c = RecordingClient::default();
+            let err = apply_storage_update(&c, &update(&nfs(), &after))
+                .await
+                .expect_err("an immutable field cannot be updated");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(field) && msg.contains("recreate"),
+                "{field}: {msg}"
+            );
+            assert!(
+                c.lines().await.is_empty(),
+                "{field}: no request may be sent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_update_sends_the_changed_fields_and_delete() {
+        let c = RecordingClient::default();
+        let after = StorageDecl {
+            nodes: String::new(),
+            shared: true,
+            ..nfs()
+        };
+        apply_storage_update(&c, &update(&nfs(), &after))
+            .await
+            .unwrap();
+        let lines = c.lines().await;
+        assert_eq!(
+            lines,
+            vec![r#"update_storage(backups) [("shared", "1"), ("delete", "nodes")]"#.to_string()]
         );
     }
 }
