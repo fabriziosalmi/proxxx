@@ -1052,6 +1052,16 @@ mod tests {
             .with_writer(log_buf.clone())
             .with_ansi(false)
             .finish();
+        // tracing-core treats a process with a single registered dispatcher
+        // as "just one": a callsite first hit on another test's thread then
+        // takes that thread's (empty) default, caches a global "never", and
+        // the `debug!` below is dropped (19-31 failures in 300 runs). A
+        // second, permanent dispatcher keeps every registration asking all
+        // live dispatchers, including this test's scoped one.
+        static KEEP_REGISTRY_MULTI: std::sync::OnceLock<tracing::Dispatch> =
+            std::sync::OnceLock::new();
+        KEEP_REGISTRY_MULTI
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let (out, exit_code) = bootstrap_token_with(
