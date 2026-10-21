@@ -1080,7 +1080,17 @@ impl ProxmoxGateway for PxClient {
     async fn get_cluster_tasks(&self) -> Result<Vec<crate::api::types::TaskInfo>> {
         let resp: ApiResponse<Vec<crate::api::types::TaskInfo>> =
             self.get("/cluster/tasks").await?;
-        Ok(resp.data)
+        // #354: PVE returns this list grouped by node, not by time
+        // (measured: the first rows all from one node while the newest
+        // tasks alternate between nodes), so truncating it kept the wrong
+        // tasks. Newest first; the UPID breaks ties.
+        let mut tasks = resp.data;
+        tasks.sort_by(|a, b| {
+            b.starttime
+                .cmp(&a.starttime)
+                .then_with(|| a.upid.cmp(&b.upid))
+        });
+        Ok(tasks)
     }
 
     async fn get_task_status(
