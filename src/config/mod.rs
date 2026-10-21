@@ -1691,6 +1691,20 @@ pub enum ConfigError {
     )]
     NoDefaultProfile { available: String, example: String },
 
+    /// A profile-only config has top-level keys that no profile reads
+    /// (#440). Only `default`, `profiles` and `defaults` are read there.
+    #[error(
+        "{path}: top-level {keys} would be ignored. This config has [profiles.<name>] \
+         tables and no top-level `url`, so a profile reads only [profiles.<name>] and \
+         [defaults]. Move shared settings under [defaults] (for example \
+         [defaults.telegram] or [[defaults.alerts]]) or into the profile \
+         ([profiles.<name>.telegram], [[profiles.<name>.alerts]])."
+    )]
+    IgnoredTopLevelKeys {
+        path: std::path::PathBuf,
+        keys: String,
+    },
+
     /// Deserializing the `[defaults]` table into [`DefaultsConfigSchema`]
     /// failed — e.g. an unknown field or a type mismatch inside `[defaults]`.
     #[error("Failed to parse [defaults] from {path}: {source}")]
@@ -2347,6 +2361,7 @@ pub fn load_config_from_path(
         if let (Some(ref defaults), Some(profile_map)) = (&defaults_table, pval.as_table_mut()) {
             merge_defaults_into_profile(defaults, profile_map);
         }
+        reject_ignored_top_level_keys(&raw, config_path)?;
         pval
     } else {
         // No profile resolved. If the config is profile-only (no flat
@@ -2408,6 +2423,45 @@ pub fn load_config_from_path(
     cfg.validate_enum_like_fields()?;
     cfg.warn_on_shadowed_secret_sources();
     Ok(cfg)
+}
+
+/// Top-level keys a profile-only config may hold: everything else is read
+/// by no profile.
+const PROFILE_ONLY_TOP_LEVEL_KEYS: &[&str] = &["default", "profiles", "defaults"];
+
+/// Refuse a profile-only config (no top-level `url`) whose top level holds
+/// keys that no profile reads (#440).
+///
+/// A selected profile is built from `[profiles.<name>]` plus `[defaults]`
+/// only. Without a top-level `url` there is no flat profile either, so a
+/// top-level `[[alerts]]`, `[telegram]`, `[ssh]`, `[pbs]` or a misspelled
+/// key was dropped without a word: `alerts watch` reported "no [[alerts]]
+/// rules configured" while the file had rules. A config that also has a
+/// top-level `url` is a flat profile plus named ones, and its top-level
+/// keys belong to the flat profile, so it is left alone.
+fn reject_ignored_top_level_keys(
+    raw: &toml::Value,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    if raw.get("url").is_some() {
+        return Ok(());
+    }
+    let Some(table) = raw.as_table() else {
+        return Ok(());
+    };
+    let ignored: Vec<String> = table
+        .keys()
+        .filter(|k| !PROFILE_ONLY_TOP_LEVEL_KEYS.contains(&k.as_str()))
+        .map(|k| format!("`{k}`"))
+        .collect();
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    Err(ConfigError::IgnoredTopLevelKeys {
+        path: config_path.to_path_buf(),
+        keys: ignored.join(", "),
+    }
+    .into())
 }
 
 /// Sorted names of the `[profiles.*]` tables in a parsed config.

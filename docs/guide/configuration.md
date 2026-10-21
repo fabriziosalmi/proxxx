@@ -339,6 +339,14 @@ View the whole fleet (read-only) in one screen with `proxxx fleet` —
 see the [TUI reference](../reference/tui.md). `proxxx fleet` ignores
 `--profile`: it always aggregates every configured profile.
 
+::: tip Flat config or profiles
+The SSH, PBS, Telegram, policy and alert sections below are written at the
+top level, as in a flat config. With `[profiles.<name>]` tables, put them
+under the profile (`[profiles.homelab.telegram]`, `[[profiles.homelab.alerts]]`)
+or under `[defaults]` to share them; a top-level one is refused (exit 3)
+there, since no profile would read it.
+:::
+
 ## SSH
 
 For `proxxx ssh <vmid>`, `proxxx perms`, `proxxx gpu inspect`, `proxxx logs tail`, `proxxx doctor`, and the patching orchestrator (`proxxx patch apply`):
