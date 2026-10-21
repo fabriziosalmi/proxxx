@@ -165,7 +165,7 @@ within a major version.
 | :--- | :--- |
 | `dns {get,set}`        | Resolver config (search domain + up to 3 nameservers) |
 | `hosts {get,set}`      | `/etc/hosts` content (digest-guarded atomic replace) |
-| `journal [...]`        | Tail systemd journal with PVE filters |
+| `journal [--since EPOCH] [--until EPOCH] [--lastentries N]` | Systemd journal (times are UNIX epoch seconds; filter by unit with `syslog --service`) |
 | `syslog [...]`         | Tail `/var/log/syslog` (line-numbered for paging) |
 | `time {get,set}`       | NTP / timezone (clock itself is NTP-driven) |
 | `wol`                  | Wake-on-LAN magic packet via cluster network |
