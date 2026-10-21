@@ -16,7 +16,11 @@ use tracing::{info, warn};
 use crate::alerts::types::AlertEvent;
 
 /// One configured destination, parsed from a route string.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written: a webhook URL usually carries its credential
+/// in the path (Slack, Discord, Teams), and the daemon logs channels with
+/// `{ch:?}` (#384).
+#[derive(Clone, PartialEq, Eq)]
 pub enum Channel {
     /// Use the configured Telegram bot — chat id from profile config.
     Telegram,
@@ -24,6 +28,33 @@ pub enum Channel {
     Ntfy { topic: String },
     /// Generic webhook receiving JSON.
     Webhook { url: String },
+}
+
+impl std::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Telegram => f.write_str("Telegram"),
+            Self::Ntfy { topic } => f.debug_struct("Ntfy").field("topic", topic).finish(),
+            Self::Webhook { url } => f
+                .debug_struct("Webhook")
+                .field("url", &webhook_label(url))
+                .finish(),
+        }
+    }
+}
+
+/// A webhook URL reduced to scheme, host and port, for logs and errors.
+/// The path and query are where hosted webhooks keep their secret.
+#[must_use]
+pub fn webhook_label(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("?");
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}://{host}{port}/…", u.scheme())
+        }
+        Err(_) => "<unparseable webhook url>".to_string(),
+    }
 }
 
 /// Parse a route string. Recognised forms:
@@ -95,6 +126,7 @@ pub async fn send_event(
             Ok(())
         }
         Channel::Webhook { url } => {
+            let label = webhook_label(url);
             let body = serde_json::json!({
                 "rule": event.rule,
                 "severity": event.severity,
@@ -108,11 +140,13 @@ pub async fn send_event(
                 .json(&body)
                 .send()
                 .await
-                .with_context(|| format!("webhook POST {url}"))?;
+                // reqwest puts the full URL in its error text.
+                .map_err(reqwest::Error::without_url)
+                .with_context(|| format!("webhook POST {label}"))?;
             if !resp.status().is_success() {
-                anyhow::bail!("webhook {url} returned {}", resp.status());
+                anyhow::bail!("webhook {label} returned {}", resp.status());
             }
-            info!("alert {} routed to webhook {url}", event.rule);
+            info!("alert {} routed to webhook {label}", event.rule);
             Ok(())
         }
     }
@@ -204,5 +238,32 @@ mod tests {
             priority_for(&make(crate::alerts::types::Severity::Critical)),
             "5"
         );
+    }
+
+    /// #384: neither the Debug form nor a delivery error shows the path
+    /// or query of a webhook URL.
+    #[tokio::test]
+    async fn a_webhook_secret_stays_out_of_debug_and_errors() {
+        let secret = "T000/B000/XXXXSECRETXXXX";
+        let ch = parse_route(&format!("webhook:http://127.0.0.1:1/services/{secret}?k=v")).unwrap();
+        let dbg = format!("{ch:?}");
+        assert!(
+            !dbg.contains(secret) && dbg.contains("127.0.0.1:1"),
+            "{dbg}"
+        );
+        let event = AlertEvent {
+            rule: "r".into(),
+            severity: crate::alerts::types::Severity::Info,
+            target: "t".into(),
+            summary: "s".into(),
+            detail: serde_json::json!({}),
+            at: 0,
+        };
+        let err = send_event(&ch, &event, &Client::new(), None)
+            .await
+            .expect_err("nothing listens on port 1");
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains(secret) && !text.contains("k=v"), "{text}");
+        assert!(text.contains("127.0.0.1:1"), "{text}");
     }
 }

@@ -217,4 +217,47 @@ mod tests {
         assert!(matches!(api, proxxx::api::ApiError::Forbidden(_)));
         assert_eq!(api.exit_code(), 4);
     }
+
+    /// #384: a datastore name is encoded as one path segment, and a path
+    /// that would still carry a relative segment is refused before any
+    /// request leaves the client.
+    #[tokio::test]
+    async fn a_datastore_name_cannot_leave_its_path_segment() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        for store in ["..", ".", "../../access/users"] {
+            let err = c
+                .list_snapshots(store, None, None)
+                .await
+                .expect_err("a traversal in the datastore name is refused");
+            assert!(
+                format!("{err:#}").contains("relative segment"),
+                "{store}: {err:#}"
+            );
+            let err = c
+                .list_snapshot_files(store, "vm", "100", 1)
+                .await
+                .expect_err("refused");
+            assert!(
+                format!("{err:#}").contains("relative segment"),
+                "{store}: {err:#}"
+            );
+        }
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "nothing may reach the server"
+        );
+        // A name with a reserved character stays inside its segment.
+        c.list_snapshots("a/b?x=1", None, None).await.expect("ok");
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(
+            reqs[0].url.path(),
+            "/api2/json/admin/datastore/a%2Fb%3Fx%3D1/snapshots"
+        );
+        assert_eq!(reqs[0].url.query(), None);
+    }
 }

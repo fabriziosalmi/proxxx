@@ -120,14 +120,20 @@ fn main() -> Result<()> {
     // `PROXXX_LOG_DIR` (when set and non-empty) relocates the log files;
     // `.cargo/config.toml` points it into the build tree so the binaries
     // the e2e tests spawn do not log into the developer's data dir (#386).
-    let log_dir = match std::env::var_os("PROXXX_LOG_DIR").filter(|d| !d.is_empty()) {
+    let log_dir_env = std::env::var_os("PROXXX_LOG_DIR").filter(|d| !d.is_empty());
+    let log_dir = match &log_dir_env {
         Some(dir) => std::path::PathBuf::from(dir),
         None => directories::ProjectDirs::from("dev", "proxxx", "proxxx").map_or_else(
             || std::path::PathBuf::from("/tmp/proxxx"),
             |d| d.data_local_dir().to_path_buf(),
         ),
     };
-    std::fs::create_dir_all(&log_dir)?;
+    // #384: the default log dir is also the default audit dir, and it is
+    // created here first; created 0755 it held a world-readable log and
+    // audit.db. The appender cannot set a file mode, so the dir is the
+    // guard: 0700 when created, and the default dir is tightened when it
+    // already exists. A pre-existing PROXXX_LOG_DIR is the operator's.
+    util::durable::create_private_dir(&log_dir, log_dir_env.is_none())?;
     // The appender writes `<prefix>.<date>.<suffix>`; the startup line below
     // names the file from the same constants (#420).
     const LOG_FILE_PREFIX: &str = "proxxx";
@@ -205,6 +211,9 @@ fn main() -> Result<()> {
     // either mode — restores the terminal and writes the trace to the
     // audit log. Idempotent: the install function guards against a
     // second tui::run-side install layering on top.
+    util::panic_hook::set_log_file(
+        &log_dir.join(format!("{LOG_FILE_PREFIX}.<date>.{LOG_FILE_SUFFIX}")),
+    );
     util::panic_hook::install();
 
     let rt = tokio::runtime::Runtime::new()?;

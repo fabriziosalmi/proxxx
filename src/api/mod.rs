@@ -8,8 +8,8 @@ pub mod tls_pin;
 pub mod transport;
 pub mod types;
 
-pub(crate) use client::resolve_tofu_verifier;
 pub use client::PxClient;
+pub(crate) use client::{reject_path_traversal, resolve_tofu_verifier};
 pub use error::ApiError;
 pub use transport::{
     should_retry, should_retry_error_flags, should_retry_for_method, should_retry_status,

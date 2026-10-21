@@ -390,7 +390,9 @@ proxxx mcp serve-http --bind 0.0.0.0:8080
 #    --insecure-bind to override.
 ```
 
-`mcp_token` is a profile config field (or the `--token` flag). An
+`mcp_token` is a profile config field; `--token-file <path>` or
+`PROXXX_MCP_TOKEN` override it without putting the token in the process
+listing, which `--token` does. An
 **empty or whitespace token counts as absent** — don't set it to `""`
 and think you're covered. When the server is network-exposed and the
 token is absent, every request is denied (fail-closed), and that denial

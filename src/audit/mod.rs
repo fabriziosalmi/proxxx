@@ -91,6 +91,7 @@ impl AuditLogger {
     }
 
     fn open_at(path: &std::path::Path, key_path: &std::path::Path) -> Result<Self> {
+        create_db_file_private(path)?;
         let conn = Connection::open(path)
             .with_context(|| format!("open audit db at {}", path.display()))?;
         let _ = conn.busy_timeout(AUDIT_BUSY_TIMEOUT);
@@ -628,6 +629,47 @@ fn read_existing_key(path: &Path) -> Result<Vec<u8>> {
         bytes.len()
     );
     Ok(bytes)
+}
+
+/// `#384`: `SQLite` creates a missing database with the process umask
+/// (0644 under the usual 022), next to a `0600` key. Create the file
+/// `0600` first (an empty file is a valid empty database); its rollback
+/// journal takes the database's mode. A legacy database left wider by an
+/// older build, and its journal, are narrowed; that is best-effort and
+/// warned about, since the file may belong to someone else.
+fn create_db_file_private(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("create audit db {}", path.display()));
+            }
+        }
+        let mut journal = path.as_os_str().to_owned();
+        journal.push("-journal");
+        for p in [path, std::path::Path::new(&journal)] {
+            let Ok(meta) = std::fs::metadata(p) else {
+                continue;
+            };
+            if meta.permissions().mode() & 0o077 != 0 {
+                if let Err(e) = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!("audit: cannot narrow {} to 0600: {e}", p.display());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn ensure_audit_dir_exists(dir: &std::path::Path) -> Result<()> {
@@ -1836,6 +1878,25 @@ mod chain_transaction_tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .expect("pragma");
         assert_eq!(ms, 30_000);
+    }
+
+    /// `#384`: a new `audit.db` is owner-only like the key next to it, and
+    /// a legacy world-readable one is narrowed on the next open.
+    #[cfg(unix)]
+    #[test]
+    fn the_audit_db_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.db");
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+        lg.log("a", "u", None, None, None, "ok").expect("log");
+        drop(lg);
+        assert_eq!(mode(&db), 0o600, "a new audit.db");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        drop(AuditLogger::open_in(dir.path()).expect("reopen"));
+        assert_eq!(mode(&db), 0o600, "a legacy 0644 audit.db");
     }
 
     fn spawn_writers(dir: &std::path::Path, threads: usize, per_thread: usize) {

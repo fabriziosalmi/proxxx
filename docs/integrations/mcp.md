@@ -119,8 +119,12 @@ router layers:
      headers, as cross-origin browser access is not intended.
 2. **Bearer token authentication and `SIGHUP` reload persistence (`#343`)**:
    - `serve-http` **refuses to start** on a non-loopback bind (e.g. `0.0.0.0`)
-     unless a non-empty token is configured via `mcp_token` in the profile or
-     `--token` on the CLI — pass `--insecure-bind` to override that consciously.
+     unless a non-empty token is configured via `mcp_token` in the profile,
+     `--token-file`, `PROXXX_MCP_TOKEN` or `--token` (in that order of
+     precedence: file, flag, variable, profile; `--token` is visible in `ps`)
+     — pass `--insecure-bind` to override that consciously.
+   - An open SSE stream (`GET /mcp`) re-checks its bearer token before every
+     event and every 15 s, and ends once a `SIGHUP` reload has rotated it out.
    - A token passed via the `--token` CLI flag is kept out of the reloadable
      `ProfileConfig` (`ConfigHandle`) and stored in `McpState` at startup. When
      `--token` is set, the auth gate always checks `cli_token`; when `--token`

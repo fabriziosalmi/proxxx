@@ -401,8 +401,6 @@ async fn handle_single(state: &McpState, req: &Value) -> Value {
 /// the stream — the broker outlives the server, so this only fires
 /// when the server itself is shutting down.
 async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Response {
-    use tokio_stream::wrappers::BroadcastStream;
-
     if !state.auth_ok(&headers).await {
         return (
             StatusCode::UNAUTHORIZED,
@@ -412,23 +410,7 @@ async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Respo
             .into_response();
     }
 
-    let rx = state.notifications.subscribe();
-    let stream = BroadcastStream::new(rx).map(|res| {
-        Ok::<Event, Infallible>(match res {
-            Ok(n) => {
-                let envelope = crate::mcp::notifications::rpc_envelope(&n);
-                Event::default()
-                    .event("notifications/cluster-event")
-                    .data(envelope.to_string())
-            }
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                // Don't pretend nothing happened — tell the client.
-                Event::default()
-                    .event("notifications/lagged")
-                    .data(json!({"missed": n}).to_string())
-            }
-        })
-    });
+    let stream = authorised_events(state, headers, SSE_AUTH_RECHECK);
 
     // #366: end the stream on shutdown, or graceful shutdown waits for a
     // connected client forever.
@@ -443,6 +425,53 @@ async fn get_mcp_sse(State(state): State<McpState>, headers: HeaderMap) -> Respo
                 .text("keep-alive"),
         )
         .into_response()
+}
+
+/// How often an idle SSE stream re-checks its bearer token (#384).
+const SSE_AUTH_RECHECK: Duration = Duration::from_secs(15);
+
+/// The notification stream of one SSE client. `#384`: auth used to be
+/// checked only at connect, so a stream opened before a SIGHUP rotated
+/// `mcp_token` kept receiving events. The token the client connected with
+/// is checked again before every event and every `recheck`; when it no
+/// longer passes, the stream ends.
+fn authorised_events(
+    state: McpState,
+    headers: HeaderMap,
+    recheck: Duration,
+) -> impl futures_util::Stream<Item = Result<Event, Infallible>> {
+    use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+    use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
+
+    enum Item {
+        Note(Result<crate::mcp::notifications::McpNotification, BroadcastStreamRecvError>),
+        Recheck,
+    }
+    let notes = BroadcastStream::new(state.notifications.subscribe()).map(Item::Note);
+    let mut tick = tokio::time::interval(recheck);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let ticks = IntervalStream::new(tick).map(|_| Item::Recheck);
+    let checked = futures_util::StreamExt::then(notes.merge(ticks), move |item| {
+        let state = state.clone();
+        let headers = headers.clone();
+        async move { (state.auth_ok(&headers).await, item) }
+    });
+    let live = futures_util::StreamExt::take_while(checked, |(ok, _)| std::future::ready(*ok));
+    futures_util::StreamExt::filter_map(live, |(_, item)| {
+        std::future::ready(match item {
+            Item::Recheck => None,
+            Item::Note(Ok(n)) => {
+                let envelope = crate::mcp::notifications::rpc_envelope(&n);
+                Some(Ok(Event::default()
+                    .event("notifications/cluster-event")
+                    .data(envelope.to_string())))
+            }
+            // Don't pretend nothing happened — tell the client.
+            Item::Note(Err(BroadcastStreamRecvError::Lagged(n))) => Some(Ok(Event::default()
+                .event("notifications/lagged")
+                .data(json!({"missed": n}).to_string()))),
+        })
+    })
 }
 
 /// `GET /health` — liveness probe. No auth. Returns 200 + version JSON.
@@ -838,5 +867,65 @@ mod router_gate_tests {
             rest.contains("require_allowed_host_and_origin"),
             "the entire router (including /health) must apply require_allowed_host_and_origin"
         );
+    }
+
+    /// `#384`: an SSE stream opened with a token that a reload has since
+    /// rotated out ends, on the next event or on the next re-check.
+    #[tokio::test]
+    async fn an_sse_stream_ends_once_its_token_is_rotated_out() {
+        use futures_util::StreamExt as _;
+        let cfg = |tok: &str| -> crate::config::ProfileConfig {
+            toml::from_str(&format!(
+                "url = \"https://127.0.0.1:1\"\nuser = \"root@pam\"\ntoken_id = \"t\"\n\
+                 verify_tls = false\nmcp_token = \"{tok}\"\n"
+            ))
+            .expect("config")
+        };
+        let client = std::sync::Arc::new(
+            crate::api::PxClient::new(cfg("old"), Some("00000000-0000-0000-0000-000000000001"))
+                .await
+                .expect("client"),
+        );
+        let note = || crate::mcp::notifications::McpNotification::Incident {
+            event: "frozen",
+            reason: "r".into(),
+        };
+        let mut headers = super::HeaderMap::new();
+        headers.insert("authorization", "Bearer old".parse().expect("header"));
+        let wait = std::time::Duration::from_secs(5);
+
+        for (recheck, publish_after_rotation) in [
+            (std::time::Duration::from_hours(1), true),
+            (std::time::Duration::from_millis(50), false),
+        ] {
+            let handle = crate::config::watcher::new_handle(cfg("old"));
+            let broker = crate::mcp::notifications::Broker::new();
+            let state = super::McpState::new(
+                std::sync::Arc::clone(&client),
+                std::sync::Arc::clone(&handle),
+                broker.clone(),
+                false,
+                None,
+                std::sync::Arc::new(std::collections::HashSet::new()),
+            );
+            let mut stream = Box::pin(super::authorised_events(state, headers.clone(), recheck));
+            broker.publish(note());
+            let first = tokio::time::timeout(wait, stream.next())
+                .await
+                .expect("in time");
+            assert!(first.is_some(), "the valid token gets the event");
+
+            assert!(crate::config::watcher::reload_once(&handle, || Ok(cfg("new"))).await);
+            if publish_after_rotation {
+                broker.publish(note());
+            }
+            let next = tokio::time::timeout(wait, stream.next())
+                .await
+                .expect("the stream must end, not hang");
+            assert!(
+                next.is_none(),
+                "recheck {recheck:?}: the rotated-out token gets nothing more"
+            );
+        }
     }
 }

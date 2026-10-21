@@ -314,7 +314,8 @@ location](#file-location)), these tune runtime behaviour:
 | :--- | :--- |
 | `PROXXX_NO_CONVERGE` | Disable auto-converge for this process (same as `--no-converge`): the drift-watch still detects and alerts, but mutates nothing. |
 | `PROXXX_AUDIT_DIR` | Relocate the audit DB **and** its HMAC key off the default path (e.g. onto a separate volume). The directory is created `0700`. |
-| `PROXXX_LOG_DIR` | Relocate the rotating log files (`proxxx.<date>.log`, 14 kept; default: the platform data dir, the same directory as the audit DB). |
+| `PROXXX_LOG_DIR` | Relocate the rotating log files (`proxxx.<date>.log`, 14 kept; default: the platform data dir, the same directory as the audit DB). A directory proxxx creates is `0700`; the default data dir is narrowed to `0700` on start, while an existing `PROXXX_LOG_DIR` keeps its mode, so keep it owner-only (log files take the process umask). |
+| `PROXXX_MCP_TOKEN` | Bearer token for `mcp serve-http`, kept out of the process listing. `--token-file` and `--token` win over it; it wins over `mcp_token` in the profile. |
 | `PROXXX_CACHE_DIR` | Relocate the TUI / HITL state cache (`<profile>_state.db`, default `<platform cache dir>/proxxx`). It is only a cache: deleting it loses nothing that is not re-fetched. |
 | `PROXXX_AUDIT_KEY` | Relocate only the HMAC key, off the DB volume. A group/world-readable `audit.key` is refused on load (unix); `proxxx audit verify` exits non-zero on tamper. |
 
