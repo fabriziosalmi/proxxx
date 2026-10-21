@@ -26,7 +26,7 @@
 pub mod view;
 mod worker;
 
-pub use worker::{fetch_with_gateway, fleet_fetch_all, FleetDataMsg};
+pub use worker::{fetch_with_gateway, fleet_fetch_all, FleetClients, FleetDataMsg};
 
 use std::time::{Duration, Instant};
 
@@ -358,8 +358,10 @@ pub async fn run_fleet(cli_secret: Option<&str>) -> Result<Option<String>> {
     let secret = cli_secret.map(str::to_owned);
     // The worker is the only sender; it owns `tx` for its lifetime.
     let worker = tokio::spawn(async move {
+        // #379: one client per profile for the whole fleet session.
+        let mut clients = worker::FleetClients::default();
         loop {
-            fleet_fetch_all(secret.as_deref(), &tx).await;
+            fleet_fetch_all(secret.as_deref(), &tx, &mut clients).await;
             tokio::time::sleep(Duration::from_secs(FLEET_POLL_SECS)).await;
         }
     });
