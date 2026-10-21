@@ -45,7 +45,7 @@
 //! runs diff against the accepted snap.
 
 use proxxx::api::types::{Guest, GuestStatus, GuestType, Node, NodeStatus, StoragePool};
-use proxxx::app::{AppState, View};
+use proxxx::app::{self, Action, AppState, View};
 use proxxx::tui::fleet::{self, FleetCluster, FleetFocus, FleetState};
 use proxxx::tui::{views, widgets};
 use ratatui::backend::TestBackend;
@@ -669,4 +669,109 @@ fn fleet_view_renders_reachable_and_down_clusters() {
         dump_sel.contains("homelab-a"),
         "selected cluster summary present"
     );
+}
+
+// ── #378: a node whose guest fetch fails keeps its last-known guests ──
+
+fn loaded(state: &mut AppState, guests: Vec<Guest>, failed_nodes: &[&str]) {
+    app::update(
+        state,
+        Action::GuestsLoaded {
+            guests,
+            failed_nodes: failed_nodes.iter().map(|n| (*n).to_string()).collect(),
+        },
+    );
+}
+
+fn vmids(state: &AppState) -> Vec<u32> {
+    let mut v: Vec<u32> = state.guests.iter().map(|g| g.vmid).collect();
+    v.sort_unstable();
+    v
+}
+
+/// One failed fetch used to replace the guest list with the guests of the
+/// nodes that answered, so pve2's guests vanished from the dashboard.
+#[test]
+fn a_failed_node_keeps_its_last_known_guests_marked_stale() {
+    let mut state = AppState::new();
+    loaded(
+        &mut state,
+        vec![
+            running_qemu(100, "a", "pve1"),
+            stopped_lxc(200, "b", "pve2"),
+        ],
+        &[],
+    );
+    assert_eq!(vmids(&state), vec![100, 200]);
+    assert!(state.guests_stale_nodes.is_empty());
+
+    // pve2 fails: its guest stays, pve1 is refreshed.
+    loaded(
+        &mut state,
+        vec![running_qemu(100, "a-renamed", "pve1")],
+        &["pve2"],
+    );
+    assert_eq!(vmids(&state), vec![100, 200]);
+    assert!(state
+        .guests
+        .iter()
+        .any(|g| g.vmid == 100 && g.name == "a-renamed"));
+    assert!(state.guests_stale_nodes.contains("pve2"));
+
+    // pve2 answers again: fresh data, nothing stale.
+    loaded(
+        &mut state,
+        vec![
+            running_qemu(100, "a-renamed", "pve1"),
+            running_qemu(201, "c", "pve2"),
+        ],
+        &[],
+    );
+    assert_eq!(vmids(&state), vec![100, 201]);
+    assert!(state.guests_stale_nodes.is_empty());
+}
+
+/// A guest that is gone from a node that answered is gone; only a failed
+/// node's guests are kept.
+#[test]
+fn a_guest_removed_from_a_healthy_node_is_dropped() {
+    let mut state = AppState::new();
+    loaded(
+        &mut state,
+        vec![
+            running_qemu(100, "a", "pve1"),
+            running_qemu(101, "b", "pve1"),
+        ],
+        &[],
+    );
+    loaded(&mut state, vec![running_qemu(100, "a", "pve1")], &["pve2"]);
+    assert_eq!(vmids(&state), vec![100]);
+}
+
+#[test]
+fn the_guest_table_names_the_stale_node() {
+    let mut state = AppState::new();
+    state.nav_stack = vec![View::GuestList];
+    loaded(
+        &mut state,
+        vec![
+            running_qemu(100, "vm-a", "pve1"),
+            stopped_lxc(200, "ct-b", "pve2"),
+        ],
+        &[],
+    );
+    loaded(
+        &mut state,
+        vec![running_qemu(100, "vm-a", "pve1")],
+        &["pve2"],
+    );
+    let dump = render_to_string(120, 20, |f| {
+        views::guests::draw(f, f.area(), &state);
+    });
+    assert!(dump.contains("stale (fetch failed): pve2"), "{dump}");
+    assert!(
+        dump.contains("pve2?"),
+        "the stale guest's node is marked:\n{dump}"
+    );
+    assert!(!dump.contains("pve1?"), "{dump}");
 }

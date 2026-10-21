@@ -41,8 +41,18 @@ use crate::config;
 // ── Data messages from the API worker back to the controller ──
 pub enum DataMsg {
     Nodes(Vec<Node>),
-    Guests(Vec<Guest>),
-    Storage(Vec<StoragePool>),
+    /// One fetch cycle's guests. `failed_nodes` answered with an error;
+    /// their guests are not in `guests` (#378).
+    Guests {
+        guests: Vec<Guest>,
+        failed_nodes: Vec<String>,
+    },
+    /// One fetch cycle's storage. `partial` = at least one node's storage
+    /// fetch failed, so the list misses that node's pools.
+    Storage {
+        storage: Vec<StoragePool>,
+        partial: bool,
+    },
     ClusterTasks(Vec<crate::api::types::TaskInfo>),
     /// live cluster-quorum status. `false` means proxxx is
     /// talking to a node that has lost quorum and any data we render
@@ -786,22 +796,38 @@ pub async fn run(
                         DataMsg::Nodes(nodes) => {
                             app::update(&mut state, Action::NodesLoaded(nodes));
                         }
-                        DataMsg::Guests(guests) => {
-                            app::update(&mut state, Action::GuestsLoaded(guests));
+                        DataMsg::Guests { guests, failed_nodes } => {
+                            app::update(
+                                &mut state,
+                                Action::GuestsLoaded { guests, failed_nodes },
+                            );
                         }
-                        DataMsg::Storage(storage) => {
+                        DataMsg::Storage { storage, partial } => {
                             app::update(&mut state, Action::StorageLoaded(storage));
                             // Save to cache once a full sync cycle is complete.
                             // Phase 12 audit fix: async wrapper so the SQLite
                             // write doesn't pin this runtime worker through
                             // the busy_timeout under WAL-checkpoint contention.
-                            let _ = crate::app::cache::save_state_async(
-                                profile_label.clone(),
-                                state.nodes.clone(),
-                                state.guests.clone(),
-                                state.storage.clone(),
-                            )
-                            .await;
+                            //
+                            // #378: only a complete cycle is saved. The cache
+                            // seeds the next start, so saving a cycle in which
+                            // a node failed would persist a list without that
+                            // node's guests or storage.
+                            if !cycle_is_complete(&state, partial) {
+                                info!(
+                                    "skipping state cache save: a node failed this cycle \
+                                     (guests stale on {:?}, storage partial: {partial})",
+                                    state.guests_stale_nodes
+                                );
+                            } else {
+                                let _ = crate::app::cache::save_state_async(
+                                    profile_label.clone(),
+                                    state.nodes.clone(),
+                                    state.guests.clone(),
+                                    state.storage.clone(),
+                                )
+                                .await;
+                            }
                         }
                         DataMsg::ClusterTasks(tasks) => {
                             app::update(&mut state, Action::ClusterTasksLoaded(tasks));
@@ -966,6 +992,12 @@ pub async fn run(
     Ok(next_profile)
 }
 
+/// True when every node answered this fetch cycle, so its result may
+/// replace the state cache (#378).
+fn cycle_is_complete(state: &AppState, storage_partial: bool) -> bool {
+    !storage_partial && state.guests_stale_nodes.is_empty()
+}
+
 /// Fetch all data from Proxmox and send to controller
 async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
     // Nodes
@@ -999,6 +1031,8 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
             let mut all_guests = Vec::new();
             let mut all_storage = Vec::new();
             let mut guest_errors: Vec<String> = Vec::new();
+            let mut failed_nodes: Vec<String> = Vec::new();
+            let mut storage_partial = false;
 
             while let Some(res) = join_set.join_next().await {
                 if let Ok((node_name, guests_res, storage_res)) = res {
@@ -1016,17 +1050,31 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
                                 format!("{node_name}: {e}")
                             };
                             guest_errors.push(msg);
+                            failed_nodes.push(node_name.clone());
                         }
                     }
                     match storage_res {
                         Ok(pools) => all_storage.extend(pools),
-                        Err(e) => warn!("Failed to fetch storage from {node_name}: {e}"),
+                        Err(e) => {
+                            warn!("Failed to fetch storage from {node_name}: {e}");
+                            storage_partial = true;
+                        }
                     }
                 }
             }
 
-            let _ = tx.send(DataMsg::Guests(all_guests)).await;
-            let _ = tx.send(DataMsg::Storage(all_storage)).await;
+            let _ = tx
+                .send(DataMsg::Guests {
+                    guests: all_guests,
+                    failed_nodes,
+                })
+                .await;
+            let _ = tx
+                .send(DataMsg::Storage {
+                    storage: all_storage,
+                    partial: storage_partial,
+                })
+                .await;
             if !guest_errors.is_empty() {
                 let _ = tx.send(DataMsg::GuestsFetchErrors(guest_errors)).await;
             }
@@ -2532,4 +2580,20 @@ fn load_demo_data(state: &mut AppState) {
         netin: 0,
         netout: 0,
     }];
+}
+
+#[cfg(test)]
+mod cache_save_tests {
+    use super::*;
+
+    /// #378: the state cache seeds the next start, so a cycle in which a
+    /// node failed is not saved.
+    #[test]
+    fn only_a_complete_cycle_is_saved() {
+        let mut state = AppState::new();
+        assert!(cycle_is_complete(&state, false));
+        assert!(!cycle_is_complete(&state, true), "storage of a node failed");
+        state.guests_stale_nodes.insert("pve2".into());
+        assert!(!cycle_is_complete(&state, false), "guests of a node failed");
+    }
 }

@@ -120,6 +120,11 @@ pub struct AppState {
     /// token rotation.
     pub guests_fetch_errors: Vec<String>,
 
+    /// Nodes whose guest fetch failed in the last cycle (#378). Their
+    /// guests are the last-known ones, kept and shown as stale instead of
+    /// dropped; a cycle with any stale node is not saved to the cache.
+    pub guests_stale_nodes: std::collections::BTreeSet<String>,
+
     /// Sorted list of named profiles from config. Populated at TUI
     /// startup; used by the `P` keybinding to open the profile picker.
     /// Empty when no `[profiles.NAME]` sections exist.
@@ -264,7 +269,11 @@ pub enum Action {
     // Data
     Tick,
     NodesLoaded(Vec<Node>),
-    GuestsLoaded(Vec<Guest>),
+    /// One fetch cycle's guests; `failed_nodes` answered with an error.
+    GuestsLoaded {
+        guests: Vec<Guest>,
+        failed_nodes: Vec<String>,
+    },
     StorageLoaded(Vec<StoragePool>),
     ClusterTasksLoaded(Vec<crate::api::types::TaskInfo>),
     /// live cluster quorum flag — drives the TUI banner.
@@ -561,6 +570,7 @@ impl Default for AppState {
             hw_guest_configs: std::collections::HashMap::new(),
             hw_loading: false,
             guests_fetch_errors: Vec::new(),
+            guests_stale_nodes: std::collections::BTreeSet::new(),
             available_profiles: Vec::new(),
         }
     }
@@ -898,7 +908,21 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
             state.is_loading = false;
             state.last_sync = Some(std::time::Instant::now());
         }
-        Action::GuestsLoaded(guests) => {
+        Action::GuestsLoaded {
+            mut guests,
+            failed_nodes,
+        } => {
+            // #378: a node whose fetch failed keeps its last-known guests,
+            // marked stale, instead of vanishing until the next good cycle.
+            let failed: std::collections::BTreeSet<String> = failed_nodes.into_iter().collect();
+            guests.extend(
+                state
+                    .guests
+                    .iter()
+                    .filter(|g| failed.contains(&g.node))
+                    .cloned(),
+            );
+            state.guests_stale_nodes = failed;
             // SPOF 5.1 (Category 5 audit): emit a forensic trail when
             // a guest's tag set changes between snapshots. proxxx can't
             // PREVENT out-of-band tag mutation (the attacker uses the
