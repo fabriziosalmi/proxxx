@@ -47,11 +47,29 @@ struct Cli {
     secure: bool,
 }
 
+/// True when the innermost subcommand's own output flag (`--output`,
+/// `--print`, `--json`) was given on the command line, not defaulted.
+fn local_output_flag_given(matches: &clap::ArgMatches) -> bool {
+    let mut leaf = matches;
+    while let Some((_, sub)) = leaf.subcommand() {
+        leaf = sub;
+    }
+    cli::LOCAL_OUTPUT_FLAG_IDS.iter().any(|id| {
+        leaf.ids().any(|i| i.as_str() == *id)
+            && leaf.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
+    })
+}
+
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     // #363: positional identifiers refuse "" before any request.
     let matches = proxxx::cli::args::reject_empty_positionals(Cli::command()).get_matches();
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // #362: the global `--format json` selects JSON for commands with their
+    // own output flag, unless that flag was given on the command line.
+    if let Some(cmd) = cli.command.as_mut() {
+        cli::honour_global_json(cmd, cli.format, local_output_flag_given(&matches));
+    }
 
     // #283 — resolve the file form once, here, so every downstream call
     // site sees one value and neither has to know which flag supplied

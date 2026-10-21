@@ -3,6 +3,8 @@
 Every command supports `--format json|json-envelope|table|plain`. Default
 is `table`.
 
+Commands with their own output flag (`--output`, `--print`, `--json`: `explain`, `describe`, `cloud-img`, `schedule list`, `backup-verify`, `heatmap`, `anomaly`, `upgrade-check`, `accounting`, `import`, `gpu-inspect`, `state`, `reconcile`, `mcp tools`) print JSON under `--format json` or `json-envelope` unless that flag is given; given explicitly, it wins. Their JSON is printed as is, without the envelope.
+
 `json-envelope` wraps the same payload as `json` in
 `{"proxxx": "<version>", "data": …}`. Use it when a consumer must work
 against more than one proxxx version at once — a CI fleet mid-rollout, a
