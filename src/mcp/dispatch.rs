@@ -12,6 +12,21 @@ use crate::api::PxClient;
 use crate::config::{ConfigHandle, ProfileConfig};
 use crate::mcp::tools::{ToolAction, TOOLS};
 
+/// The MCP answer when a policy requires approval but no approval request
+/// could be sent (#458). It used to report the action as pending, with a
+/// transaction id nobody had been asked about.
+fn approval_not_sent(name: &str, policy: &crate::hitl::policy::Policy, why: &str) -> Value {
+    tracing::warn!("MCP HITL: no approval request sent for '{name}': {why}");
+    json!({
+        "content": [{"type": "text", "text": format!(
+            "Refused: '{name}' requires {} approval(s) via {}, but {why}, so no approval \
+             request was sent. The action was not run.",
+            policy.require, policy.channel
+        )}],
+        "isError": true
+    })
+}
+
 /// Execute a single MCP tool call and return the MCP content envelope.
 ///
 /// Returns `Ok(json!({"content": [{"type":"text","text":...}]}))` on success.
@@ -26,7 +41,7 @@ pub async fn handle_tool_call(
     name: &str,
     args: &Value,
 ) -> Result<Value> {
-    handle_tool_call_with_store(client.as_ref(), config, name, args, None).await
+    handle_tool_call_with_store(client.as_ref(), config, name, args, None, None).await
 }
 
 /// Execute a single MCP tool call using an optional caller-supplied
@@ -48,6 +63,7 @@ pub async fn handle_tool_call_with_store(
     name: &str,
     args: &Value,
     pending_store: Option<&crate::hitl::pending::PendingStore>,
+    approval_gateway: Option<&crate::hitl::telegram::TelegramGateway>,
 ) -> Result<Value> {
     let tool_def = TOOLS
         .iter()
@@ -157,69 +173,92 @@ pub async fn handle_tool_call_with_store(
             is_hitl_pending = true;
             let target = vmid.map(|v| v.to_string()).unwrap_or_default();
 
-            let txn_id = if config.telegram.is_some() || pending_store.is_some() {
-                let (resolved_node, resolved_gt) = if let Some(v) = guest_id_arg {
-                    let g = match fetched_guest {
-                        Some(g) => g,
-                        None => client
-                            .find_guest(v)
-                            .await?
-                            .ok_or_else(|| anyhow::anyhow!("Guest {v} not found"))?,
-                    };
-                    if g.node.is_empty() {
-                        anyhow::bail!(
-                            "cannot record HITL request for guest {v}: guest has no resolved node"
-                        );
-                    }
-                    (g.node, g.guest_type)
-                } else {
-                    let node = args
-                        .get("node")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Missing required 'node' for HITL request '{name}'")
-                        })?;
-                    let gt = match args.get("type").and_then(Value::as_str) {
-                        Some("qemu") => crate::api::types::GuestType::Qemu,
-                        Some("lxc") => crate::api::types::GuestType::Lxc,
-                        other => {
-                            anyhow::bail!(
-                                "Invalid or missing guest type {other:?} for HITL request '{name}'"
-                            );
-                        }
-                    };
-                    (node, gt)
-                };
-                let new_req =
-                    crate::hitl::pending::NewPendingRequest::new(name, vmid, policy.require)
-                        .with_node(resolved_node)
-                        .with_guest_type(resolved_gt)
-                        .with_params(args.clone());
-                let row = match pending_store {
-                    Some(store) => store.insert(&new_req)?,
-                    None => crate::hitl::pending::PendingStore::open_default()
-                        .and_then(|store| store.insert(&new_req))?,
-                };
-                let id = row.id;
-                if let Some(ref tg) = config.telegram {
-                    match crate::hitl::telegram::TelegramGateway::from_config(tg).await {
-                        Ok(tg_gateway) => {
-                            let reason = format!("MCP requested action: {name}");
-                            let _ = tg_gateway
-                                .request_approval(name, &target, &reason, &id, policy.require)
-                                .await;
+            // #458: an approval is pending only when its request was sent.
+            // Check the channel first (no PVE call for a request nobody can
+            // receive), then resolve the guest, record and send.
+            let built_gateway;
+            let gateway: &crate::hitl::telegram::TelegramGateway = match approval_gateway {
+                Some(g) => g,
+                None => match &config.telegram {
+                    Some(tg) => match crate::hitl::telegram::TelegramGateway::from_config(tg).await
+                    {
+                        Ok(g) => {
+                            built_gateway = g;
+                            &built_gateway
                         }
                         Err(e) => {
-                            tracing::warn!("Telegram gateway init failed for MCP HITL: {e:#}");
+                            return Ok(approval_not_sent(
+                                name,
+                                policy,
+                                &format!("the Telegram gateway could not be set up ({e:#})"),
+                            ));
                         }
+                    },
+                    None => {
+                        return Ok(approval_not_sent(
+                            name,
+                            policy,
+                            "no [telegram] section is configured",
+                        ));
                     }
-                }
-                id
-            } else {
-                crate::hitl::pending::generate_request_id()?
+                },
             };
+            let (resolved_node, resolved_gt) = if let Some(v) = guest_id_arg {
+                let g = match fetched_guest {
+                    Some(g) => g,
+                    None => client
+                        .find_guest(v)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("Guest {v} not found"))?,
+                };
+                if g.node.is_empty() {
+                    anyhow::bail!(
+                        "cannot record HITL request for guest {v}: guest has no resolved node"
+                    );
+                }
+                (g.node, g.guest_type)
+            } else {
+                let node = args
+                    .get("node")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing required 'node' for HITL request '{name}'")
+                    })?;
+                let gt = match args.get("type").and_then(Value::as_str) {
+                    Some("qemu") => crate::api::types::GuestType::Qemu,
+                    Some("lxc") => crate::api::types::GuestType::Lxc,
+                    other => {
+                        anyhow::bail!(
+                            "Invalid or missing guest type {other:?} for HITL request '{name}'"
+                        );
+                    }
+                };
+                (node, gt)
+            };
+            let new_req = crate::hitl::pending::NewPendingRequest::new(name, vmid, policy.require)
+                .with_node(resolved_node)
+                .with_guest_type(resolved_gt)
+                .with_params(args.clone());
+            let opened_store;
+            let store = if let Some(s) = pending_store {
+                s
+            } else {
+                opened_store = crate::hitl::pending::PendingStore::open_default()?;
+                &opened_store
+            };
+            let txn_id = store.insert(&new_req)?.id;
+            let reason = format!("MCP requested action: {name}");
+            if let Err(e) = gateway
+                .request_approval(name, &target, &reason, &txn_id, policy.require)
+                .await
+            {
+                // Nobody was asked, so nobody can approve: close the row.
+                let why = format!("approval request {txn_id} could not be sent ({e:#})");
+                store.mark_failed(&txn_id, &why)?;
+                return Ok(approval_not_sent(name, policy, &why));
+            }
 
             hitl_msg = format!(
                 "Action intercepted by HITL policy. Requires {} approval(s) via {}. Transaction: {}",

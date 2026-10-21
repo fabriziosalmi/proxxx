@@ -102,11 +102,11 @@ async fn mcp_destructive_without_policy_is_refused() {
 }
 
 #[tokio::test]
-async fn mcp_destructive_with_matching_policy_routes_to_approval_not_execution() {
-    // Positive control: a wildcard policy governs the op → it is INTERCEPTED
-    // for HITL approval, not executed inline. Telegram is unconfigured, so the
-    // approval request is skipped but the intercept envelope is still returned;
-    // the op never reaches PVE.
+async fn mcp_destructive_with_matching_policy_and_no_channel_is_refused() {
+    // #458: a wildcard policy governs the op, but Telegram is unconfigured,
+    // so no approval request can be sent. The call is refused (isError),
+    // not reported as pending with a transaction id nobody was asked about,
+    // and the op never reaches PVE (the offline client would fail if it did).
     let client = offline_client().await;
     let cfg = base_cfg(Some(vec![Policy {
         action: "*".into(),
@@ -122,21 +122,17 @@ async fn mcp_destructive_with_matching_policy_routes_to_approval_not_execution()
         &json!({ "guest_id": 100 }),
     )
     .await
-    .expect("dispatch returns the intercept envelope");
+    .expect("dispatch returns a refusal, not a transport error");
 
     let text = out["content"][0]["text"]
         .as_str()
         .expect("content text present");
     assert!(
-        text.contains("intercepted by HITL policy"),
-        "matching policy must intercept for approval, got: {text}"
+        text.contains("no approval request was sent") && text.contains("no [telegram]"),
+        "got: {text}"
     );
-    // Not flagged as an error — it's a pending approval, a legitimate outcome.
-    assert_ne!(
-        out.get("isError").and_then(serde_json::Value::as_bool),
-        Some(true),
-        "intercept is not an error envelope"
-    );
+    assert!(!text.contains("Transaction"), "no transaction id: {text}");
+    assert_eq!(out["isError"], json!(true));
 }
 
 #[tokio::test]
