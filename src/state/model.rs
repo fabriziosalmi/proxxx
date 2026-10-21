@@ -550,27 +550,55 @@ pub struct BackupJobDecl {
 /// Cluster firewall options — the global switch + default policy.
 /// `GET|PUT /cluster/firewall/options`. A singleton; the `digest`
 /// stale-check token from PVE's response is not modelled (it would
-/// churn the TOML). Bools are always serialised (the on/off state is
-/// the whole point); the policy / ratelimit strings are skipped when
-/// empty so a minimal block can set just `enable`.
+/// churn the TOML).
+///
+/// Every key is optional (#349). An absent key is not managed: the diff
+/// does not compare it and apply does not send it, so PVE keeps its value.
+/// Export writes only the keys PVE returned. These used to be plain
+/// values: an unset `ebtables` (PVE default ON) was exported as `false`
+/// and dropped from the file, and every firewall-options update then sent
+/// `ebtables=0`, turning L2 filtering off; an undeclared policy diffed
+/// against the live one on every tick without ever being sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FirewallOptionsDecl {
     /// Master switch. `false` disables the entire cluster firewall.
-    pub enable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable: Option<bool>,
     /// Default inbound action with no matching rule: `ACCEPT` |
-    /// `REJECT` | `DROP`. Empty = leave PVE's current value.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub policy_in: String,
-    /// Default outbound action. Empty = leave current.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub policy_out: String,
-    /// Whether ebtables (L2) hooks are wired alongside iptables.
-    #[serde(skip_serializing_if = "is_false")]
-    pub ebtables: bool,
+    /// `REJECT` | `DROP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_in: Option<String>,
+    /// Default outbound action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_out: Option<String>,
+    /// Default forward action (PVE 8.2+): `ACCEPT` | `DROP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_forward: Option<String>,
+    /// Whether ebtables (L2) hooks are wired alongside iptables. PVE
+    /// default when unset: on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ebtables: Option<bool>,
     /// Encoded ratelimit sub-spec, e.g. `enable=1,burst=5,rate=1/second`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub log_ratelimit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_ratelimit: Option<String>,
+}
+
+impl FirewallOptionsDecl {
+    /// True when every key this declaration sets has the same value in
+    /// `live`. Keys the declaration leaves out are not managed.
+    #[must_use]
+    pub fn satisfied_by(&self, live: &Self) -> bool {
+        fn ok<T: PartialEq>(declared: Option<&T>, live: Option<&T>) -> bool {
+            declared.is_none() || declared == live
+        }
+        ok(self.enable.as_ref(), live.enable.as_ref())
+            && ok(self.policy_in.as_ref(), live.policy_in.as_ref())
+            && ok(self.policy_out.as_ref(), live.policy_out.as_ref())
+            && ok(self.policy_forward.as_ref(), live.policy_forward.as_ref())
+            && ok(self.ebtables.as_ref(), live.ebtables.as_ref())
+            && ok(self.log_ratelimit.as_ref(), live.log_ratelimit.as_ref())
+    }
 }
 
 /// One cluster firewall CIDR alias. `name` is the identity; `cidr` +
@@ -1206,11 +1234,12 @@ members = ["qemu/100", "storage/ceph-rbd"]
         // round-trip: serialize → deserialize → equal.
         let s = ClusterState {
             firewall_options: Some(FirewallOptionsDecl {
-                enable: true,
-                policy_in: "DROP".into(),
-                policy_out: "ACCEPT".into(),
-                ebtables: true,
-                log_ratelimit: "enable=1,rate=1/second".into(),
+                enable: Some(true),
+                policy_in: Some("DROP".into()),
+                policy_out: Some("ACCEPT".into()),
+                policy_forward: None,
+                ebtables: Some(true),
+                log_ratelimit: Some("enable=1,rate=1/second".into()),
             }),
             firewall_aliases: vec![FirewallAliasDecl {
                 name: "web".into(),
@@ -1490,5 +1519,27 @@ mod declares_no_family_tests {
         ] {
             ClusterState::from_toml_str(text).unwrap_or_else(|e| panic!("{text:?}: {e:#}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod firewall_options_compat_tests {
+    use super::ClusterState;
+
+    /// #349: a state file exported before this change has `enable` and,
+    /// when they were set, the policies; `ebtables` only when it was on.
+    /// It loads with the missing keys unmanaged, so a converge does not
+    /// send `ebtables=0` to a cluster where it is on by default.
+    #[test]
+    fn an_older_export_leaves_missing_keys_unmanaged() {
+        let s = ClusterState::from_toml_str(
+            "[firewall_options]\nenable = true\npolicy_in = \"DROP\"\n",
+        )
+        .expect("an older export still loads");
+        let o = s.firewall_options.expect("declared");
+        assert_eq!(o.enable, Some(true));
+        assert_eq!(o.policy_in.as_deref(), Some("DROP"));
+        assert_eq!(o.ebtables, None);
+        assert_eq!(o.policy_out, None);
     }
 }

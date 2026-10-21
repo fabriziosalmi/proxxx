@@ -3216,11 +3216,86 @@ mod tests {
             .await;
         let c = mock_client(&server).await;
         let opts = c.get_cluster_firewall_options().await.expect("opts");
-        assert!(opts.enable);
-        assert!(!opts.ebtables);
-        assert_eq!(opts.policy_in, "DROP");
-        assert_eq!(opts.policy_out, "ACCEPT");
-        assert_eq!(opts.log_ratelimit, "enable=1,burst=5,rate=1/second");
+        assert_eq!(opts.enable, Some(true));
+        assert_eq!(opts.ebtables, Some(false));
+        assert_eq!(opts.policy_in.as_deref(), Some("DROP"));
+        assert_eq!(opts.policy_out.as_deref(), Some("ACCEPT"));
+        assert_eq!(
+            opts.log_ratelimit.as_deref(),
+            Some("enable=1,burst=5,rate=1/second")
+        );
+    }
+
+    /// #349: an untouched cluster returns only `digest`. Absent keys are
+    /// `None` and are left out of the output, not shown as `false` / `""`.
+    #[tokio::test]
+    async fn unset_option_keys_are_absent_not_zero() {
+        let server = MockServer::start().await;
+        for (p, data) in [
+            (
+                "/api2/json/cluster/firewall/options",
+                serde_json::json!({"digest": "d"}),
+            ),
+            (
+                "/api2/json/nodes/pve1/qemu/100/firewall/options",
+                serde_json::json!({"digest": "d"}),
+            ),
+            (
+                "/api2/json/cluster/options",
+                serde_json::json!({"allowed-tags": [], "keyboard": "it", "mac_prefix": "BC:24:11"}),
+            ),
+            (
+                "/api2/json/cluster/acme/plugins",
+                serde_json::json!([
+                    {"plugin": "standalone", "type": "standalone", "digest": "d"},
+                    {"plugin": "dns1", "type": "dns", "validation-delay": 120, "digest": "d"}
+                ]),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": data })),
+                )
+                .mount(&server)
+                .await;
+        }
+        let c = mock_client(&server).await;
+
+        let fw = serde_json::to_value(c.get_cluster_firewall_options().await.unwrap()).unwrap();
+        assert_eq!(
+            fw,
+            serde_json::json!({"digest": "d"}),
+            "no invented enable/ebtables/policies"
+        );
+
+        let g = c
+            .get_guest_firewall_options("pve1", 100, proxxx::api::types::GuestType::Qemu)
+            .await
+            .unwrap();
+        assert_eq!(
+            g.macfilter, None,
+            "unset macfilter is PVE's default (on), not false"
+        );
+        assert_eq!(
+            serde_json::to_value(&g).unwrap(),
+            serde_json::json!({"digest": "d"})
+        );
+
+        let o = serde_json::to_value(c.get_cluster_options().await.unwrap()).unwrap();
+        assert_eq!(
+            o,
+            serde_json::json!({"allowed-tags": [], "keyboard": "it", "mac_prefix": "BC:24:11"}),
+            "no invented max_workers = 0, and allowed-tags is kept"
+        );
+
+        let plugins = c.list_acme_plugins().await.unwrap();
+        assert_eq!(plugins[0].validation_delay, None);
+        assert_eq!(
+            plugins[1].validation_delay,
+            Some(120),
+            "PVE's key is validation-delay"
+        );
     }
 
     #[tokio::test]
@@ -3373,15 +3448,15 @@ mod tests {
             .get_guest_firewall_options("pve1", 100, GuestType::Qemu)
             .await
             .expect("opts");
-        assert!(opts.enable);
-        assert_eq!(opts.policy_in, "DROP");
-        assert_eq!(opts.log_level_in, "warning");
-        assert!(opts.dhcp);
-        assert!(opts.ndp);
-        assert!(opts.macfilter);
-        assert!(!opts.ipfilter);
-        // radv defaulted from missing wire field.
-        assert!(!opts.radv);
+        assert_eq!(opts.enable, Some(true));
+        assert_eq!(opts.policy_in.as_deref(), Some("DROP"));
+        assert_eq!(opts.log_level_in.as_deref(), Some("warning"));
+        assert_eq!(opts.dhcp, Some(true));
+        assert_eq!(opts.ndp, Some(true));
+        assert_eq!(opts.macfilter, Some(true));
+        assert_eq!(opts.ipfilter, Some(false));
+        // #349: a key missing on the wire is unset, not false.
+        assert_eq!(opts.radv, None);
     }
 
     #[tokio::test]
@@ -4294,20 +4369,23 @@ mod tests {
             .await;
         let c = mock_client(&server).await;
         let opts = c.get_cluster_options().await.expect("options");
-        assert_eq!(opts.mac_prefix, "BC:24:11");
-        assert_eq!(opts.console, "html5");
-        assert_eq!(opts.max_workers, 4);
-        assert!(opts.migration_unsecure);
+        assert_eq!(opts.mac_prefix.as_deref(), Some("BC:24:11"));
+        assert_eq!(opts.console.as_deref(), Some("html5"));
+        assert_eq!(opts.max_workers, Some(4));
+        assert_eq!(opts.migration_unsecure, Some(true));
         // Hyphenated wire fields → snake_case via #[serde(rename)].
-        assert_eq!(opts.registered_tags, "prod;dev;staging");
-        assert_eq!(opts.tag_style, "free");
+        assert_eq!(
+            opts.registered_tags,
+            Some(serde_json::json!("prod;dev;staging"))
+        );
+        assert_eq!(opts.tag_style, Some(serde_json::json!("free")));
     }
 
     #[tokio::test]
     async fn get_cluster_options_tolerates_minimal_response() {
         // Defensive: a fresh cluster with default options has most
-        // fields absent. All of them must default to empty/zero, not
-        // crash the deserializer.
+        // fields absent. They are unset (#349), and the deserializer
+        // must not crash.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api2/json/cluster/options"))
@@ -4319,9 +4397,9 @@ mod tests {
             .await;
         let c = mock_client(&server).await;
         let opts = c.get_cluster_options().await.expect("options");
-        assert_eq!(opts.mac_prefix, "");
-        assert_eq!(opts.max_workers, 0);
-        assert!(!opts.migration_unsecure);
+        assert_eq!(opts.mac_prefix, None);
+        assert_eq!(opts.max_workers, None);
+        assert_eq!(opts.migration_unsecure, None);
     }
 
     #[tokio::test]
@@ -5229,7 +5307,7 @@ mod tests {
                         "type": "dns",
                         "api": "cloudflare",
                         "data": "CF_Token=REDACTED",
-                        "validation_delay": 30
+                        "validation-delay": 30
                     },
                     {
                         // HTTP-01 standalone: api/data empty.
@@ -5246,11 +5324,11 @@ mod tests {
         assert_eq!(plugins.len(), 2);
         assert_eq!(plugins[0].plugin_type, "dns");
         assert_eq!(plugins[0].api, "cloudflare");
-        assert_eq!(plugins[0].validation_delay, 30);
+        assert_eq!(plugins[0].validation_delay, Some(30));
         // standalone row: api/data default to empty.
         assert_eq!(plugins[1].plugin_type, "standalone");
         assert_eq!(plugins[1].api, "");
-        assert_eq!(plugins[1].validation_delay, 0);
+        assert_eq!(plugins[1].validation_delay, None);
     }
 
     #[tokio::test]

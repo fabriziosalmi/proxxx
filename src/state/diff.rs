@@ -421,7 +421,8 @@ fn diff_firewall_options(
     let Some(decl) = declared else {
         return;
     };
-    if live == Some(decl) {
+    // #349: only the keys the declaration sets are compared.
+    if live.is_some_and(|l| decl.satisfied_by(l)) {
         return;
     }
     out.push(Change {
@@ -1277,8 +1278,8 @@ mod tests {
         // touch the live firewall, even if live has one.
         let live = ClusterState {
             firewall_options: Some(FirewallOptionsDecl {
-                enable: true,
-                policy_in: "DROP".into(),
+                enable: Some(true),
+                policy_in: Some("DROP".into()),
                 ..FirewallOptionsDecl::default()
             }),
             ..ClusterState::default()
@@ -1291,16 +1292,16 @@ mod tests {
     fn diff_firewall_options_differing_is_single_update() {
         let declared = ClusterState {
             firewall_options: Some(FirewallOptionsDecl {
-                enable: true,
-                policy_in: "DROP".into(),
+                enable: Some(true),
+                policy_in: Some("DROP".into()),
                 ..FirewallOptionsDecl::default()
             }),
             ..ClusterState::default()
         };
         let live = ClusterState {
             firewall_options: Some(FirewallOptionsDecl {
-                enable: false,
-                policy_in: "ACCEPT".into(),
+                enable: Some(false),
+                policy_in: Some("ACCEPT".into()),
                 ..FirewallOptionsDecl::default()
             }),
             ..ClusterState::default()
@@ -1315,9 +1316,9 @@ mod tests {
     #[test]
     fn diff_firewall_options_equal_is_no_change() {
         let o = FirewallOptionsDecl {
-            enable: true,
-            policy_in: "DROP".into(),
-            policy_out: "ACCEPT".into(),
+            enable: Some(true),
+            policy_in: Some("DROP".into()),
+            policy_out: Some("ACCEPT".into()),
             ..FirewallOptionsDecl::default()
         };
         let s = ClusterState {
@@ -1325,6 +1326,37 @@ mod tests {
             ..ClusterState::default()
         };
         assert!(diff(&s, &s).is_empty());
+    }
+
+    /// #349: keys the declaration leaves out are not compared, so an
+    /// undeclared policy or an unset live `ebtables` is not drift.
+    #[test]
+    fn diff_firewall_options_compares_only_declared_keys() {
+        let declared = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: Some(true),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        let live = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                enable: Some(true),
+                policy_in: Some("DROP".into()),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        assert!(diff(&declared, &live).is_empty());
+        // A declared key that differs is still drift.
+        let declared = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl {
+                ebtables: Some(false),
+                ..FirewallOptionsDecl::default()
+            }),
+            ..ClusterState::default()
+        };
+        assert_eq!(diff(&declared, &live).len(), 1);
     }
 
     // ── Firewall aliases (full CRUD) ──────────────────────

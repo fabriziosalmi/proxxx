@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{deserialize_bool_from_int, deserialize_u64_from_str_or_num};
+use super::{
+    deserialize_bool_from_int, deserialize_opt_bool_from_int, deserialize_u64_from_str_or_num,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,34 +36,55 @@ pub struct ClusterResource {
 /// typed ones below are the operator-facing essentials (`mac_prefix`,
 /// migration network, etc.). Less-common knobs (crs, fencing, u2f
 /// schema) are reachable via `--raw KEY=VAL` on the CLI.
+///
+/// PVE returns only the keys that are set, so every field is an `Option`
+/// and an unset one is omitted from output instead of shown as `0` / `""`
+/// (#349: `max_workers` printed `0`, which PVE does not allow).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClusterOptions {
     /// MAC prefix for auto-generated guest NIC MACs (e.g. `BC:24:11`).
-    pub mac_prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_prefix: Option<String>,
     /// Per-traffic-type bandwidth caps (string-encoded sub-spec).
-    pub bwlimit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bwlimit: Option<String>,
     /// Console viewer choice: `applet` | `vv` | `html5` | `xtermjs`.
-    pub console: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console: Option<String>,
     /// Free-form cluster description shown in the web UI.
-    pub description: String,
-    pub email_from: String,
-    pub http_proxy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_proxy: Option<String>,
     /// Default keyboard layout for VNC/console (e.g. `en-us`, `it`).
-    pub keyboard: String,
-    pub language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     /// Default migration network/type (encoded sub-spec, e.g.
     /// `type=insecure` or `network=10.0.0.0/24`).
-    pub migration: String,
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub migration_unsecure: bool,
-    pub max_workers: u32,
-    /// Tags allowed on guests (semicolon-separated).
-    #[serde(rename = "registered-tags", default)]
-    pub registered_tags: String,
-    /// Tag-style policy: `free` | `restricted` | `must-be-defined`.
-    #[serde(rename = "tag-style", default)]
-    pub tag_style: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<String>,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub migration_unsecure: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<u32>,
+    /// Tags allowed on guests. Kept as PVE sends it.
+    #[serde(rename = "registered-tags", skip_serializing_if = "Option::is_none")]
+    pub registered_tags: Option<serde_json::Value>,
+    /// Tag-style policy. Kept as PVE sends it.
+    #[serde(rename = "tag-style", skip_serializing_if = "Option::is_none")]
+    pub tag_style: Option<serde_json::Value>,
+    /// Tags a non-admin user may set. Kept as PVE sends it (a list on 9.1);
+    /// it used to be dropped.
+    #[serde(rename = "allowed-tags", skip_serializing_if = "Option::is_none")]
+    pub allowed_tags: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::deserialize_bool_from_int;
+use super::{deserialize_bool_from_int, deserialize_opt_bool_from_int};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,51 +81,94 @@ pub struct FirewallIpsetCidr {
     pub digest: String,
 }
 
+/// `GET /cluster/firewall/options`. PVE returns only the keys that are set
+/// (an untouched cluster returns just `digest`), so every option is an
+/// `Option`: `None` means "unset, PVE's default applies", which for
+/// `ebtables` is ON. Printing an absent key as `false` told the operator a
+/// protection was off when it was on (#349). `None` is omitted from output.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FirewallOptions {
-    /// Master switch — `0` disables the entire cluster firewall.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub enable: bool,
+    /// Master switch. PVE default when unset: off.
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable: Option<bool>,
     /// Default action for inbound traffic with no matching rule:
     /// `ACCEPT` | `REJECT` | `DROP`.
-    pub policy_in: String,
-    pub policy_out: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_out: Option<String>,
+    /// Forward policy (PVE 8.2+): `ACCEPT` | `DROP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_forward: Option<String>,
     /// Whether ebtables (L2) hooks are wired in addition to iptables.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub ebtables: bool,
+    /// PVE default when unset: on.
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ebtables: Option<bool>,
     /// Encoded sub-spec, e.g. `"enable=1,burst=5,rate=1/second"`.
-    pub log_ratelimit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_ratelimit: Option<String>,
     pub digest: String,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+/// `GET /nodes/{node}/{qemu|lxc}/{vmid}/firewall/options`. Same shape as
+/// [`FirewallOptions`]: PVE returns only the keys that are set, and an
+/// absent key is `None` (PVE default applies), not `false` (#349). PVE
+/// defaults when unset: `enable` off, `dhcp` off, `macfilter` ON, `ndp` ON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuestFirewallOptions {
     /// Per-guest master switch.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub enable: bool,
-    pub policy_in: String,
-    pub policy_out: String,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_out: Option<String>,
     /// `emerg` | `alert` | `crit` | `err` | `warning` | `notice` |
-    /// `info` | `debug` | `nolog`. Empty = inherit cluster default.
-    pub log_level_in: String,
-    pub log_level_out: String,
+    /// `info` | `debug` | `nolog`. Unset = inherit cluster default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level_out: Option<String>,
     /// Auto-allow DHCP request/reply traffic.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub dhcp: bool,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dhcp: Option<bool>,
     /// Auto-allow IPv6 NDP (neighbour discovery).
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub ndp: bool,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ndp: Option<bool>,
     /// Drop frames whose source MAC doesn't match the configured NIC MAC.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub macfilter: bool,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub macfilter: Option<bool>,
     /// Drop frames whose source IP isn't in the per-VM `ipfilter-net*` ipset.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub ipfilter: bool,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ipfilter: Option<bool>,
     /// LXC-only: allow IPv6 router-advertisements out of the container.
-    #[serde(deserialize_with = "deserialize_bool_from_int", default)]
-    pub radv: bool,
+    #[serde(
+        deserialize_with = "deserialize_opt_bool_from_int",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub radv: Option<bool>,
     pub digest: String,
 }

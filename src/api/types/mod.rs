@@ -119,6 +119,20 @@ where
     deserializer.deserialize_any(StrOrNum)
 }
 
+/// `Option<bool>` counterpart of [`deserialize_bool_from_int`], for keys PVE
+/// omits when unset (#349). Use with `#[serde(default)]`: an absent key is
+/// `None`, which is not the same as `false`.
+pub(crate) fn deserialize_opt_bool_from_int<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    struct Flag(#[serde(deserialize_with = "deserialize_bool_from_int")] bool);
+    Ok(<Option<Flag> as serde::Deserialize>::deserialize(deserializer)?.map(|f| f.0))
+}
+
 pub(crate) fn deserialize_bool_from_int<'de, D>(
     deserializer: D,
 ) -> std::result::Result<bool, D::Error>
