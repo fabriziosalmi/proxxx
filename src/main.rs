@@ -60,10 +60,26 @@ fn local_output_flag_given(matches: &clap::ArgMatches) -> bool {
     })
 }
 
+/// `--version` and the startup line: the package version, plus the commit a
+/// release build was made from (#384; `release.yml` sets
+/// `PROXXX_BUILD_COMMIT`). A local build has no commit to report.
+static VERSION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| version_string(option_env!("PROXXX_BUILD_COMMIT")));
+
+fn version_string(commit: Option<&str>) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match commit.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => format!("{version} (commit {})", c.get(..12).unwrap_or(c)),
+        None => version.to_string(),
+    }
+}
+
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     // #363: positional identifiers refuse "" before any request.
-    let matches = proxxx::cli::args::reject_empty_positionals(Cli::command()).get_matches();
+    let matches =
+        proxxx::cli::args::reject_empty_positionals(Cli::command().version(VERSION.as_str()))
+            .get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // #362: the global `--format json` selects JSON for commands with their
     // own output flag, unless that flag was given on the command line.
@@ -200,7 +216,7 @@ fn main() -> Result<()> {
 
     info!(
         "proxxx v{} starting (log file: {})",
-        env!("CARGO_PKG_VERSION"),
+        VERSION.as_str(),
         log_dir
             .join(format!("{LOG_FILE_PREFIX}.<date>.{LOG_FILE_SUFFIX}"))
             .display()
@@ -552,5 +568,21 @@ mod tests {
             format!("{:?}", freeze_none.command),
             "Some(Incident { action: Freeze { reason: \"x\", ttl: None, profile: None } })"
         );
+    }
+
+    /// #384: a release build reports the commit it was built from.
+    #[test]
+    fn the_version_names_the_build_commit_when_there_is_one() {
+        let v = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            super::version_string(Some("3c206c0a1b2c3d4e5f60718293a4b5c6d7e8f901")),
+            format!("{v} (commit 3c206c0a1b2c)")
+        );
+        assert_eq!(
+            super::version_string(Some("abc")),
+            format!("{v} (commit abc)")
+        );
+        assert_eq!(super::version_string(Some("  ")), v);
+        assert_eq!(super::version_string(None), v);
     }
 }

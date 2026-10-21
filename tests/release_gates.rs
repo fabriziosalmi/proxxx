@@ -39,8 +39,9 @@ fn the_release_build_needs_the_ci_gate() {
     );
     let build = job(&rel, "build");
     assert!(
-        build.iter().any(|l| l.trim() == "needs: gate"),
-        "release.yml job `build` must need `gate`, or a red commit can be published"
+        build.iter().any(|l| l.trim() == "needs: [gate, version]"),
+        "release.yml job `build` must need `gate` (or a red commit can be published) \
+         and `version` (or a tag can name a version the binary does not report)"
     );
     let ci = workflow("ci.yml");
     assert!(
@@ -82,5 +83,41 @@ fn every_cargo_command_that_resolves_dependencies_uses_locked() {
         missing.is_empty(),
         "cargo commands without --locked:\n{}",
         missing.join("\n")
+    );
+}
+
+/// #384: the tag must match `Cargo.toml`, the cross image is pinned by
+/// digest, release builds carry their commit, and the SBOM is signed.
+#[test]
+fn release_inputs_are_pinned_and_every_published_file_is_signed() {
+    let rel = workflow("release.yml");
+    let version = job(&rel, "version").join("\n");
+    assert!(
+        version.contains("GITHUB_REF_NAME#v") && version.contains("Cargo.toml"),
+        "job `version` must compare the tag with Cargo.toml"
+    );
+    let build = job(&rel, "build").join("\n");
+    assert!(
+        build.contains("PROXXX_BUILD_COMMIT: ${{ github.sha }}"),
+        "the release build must embed the tagged commit"
+    );
+    let release = job(&rel, "release").join("\n");
+    assert!(
+        release.contains("cosign sign-blob") && release.contains(".cdx.json.cosign.bundle"),
+        "the release job must sign the SBOM"
+    );
+    let cross = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cross.toml"))
+        .expect("Cross.toml");
+    let image = cross
+        .lines()
+        .find(|l| l.trim_start().starts_with("image"))
+        .expect("Cross.toml pins an image");
+    assert!(
+        image.contains("@sha256:"),
+        "the cross image must be pinned by digest: {image}"
+    );
+    assert!(
+        cross.contains("\"PROXXX_BUILD_COMMIT\""),
+        "cross must pass PROXXX_BUILD_COMMIT into the container"
     );
 }

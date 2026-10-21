@@ -39,13 +39,18 @@ cosign verify-blob \
 
 # Layer 3 (optional) — audit the dependency tree
 gh release download v${VERSION} --repo fabriziosalmi/proxxx \
-  --pattern "*.cdx.json" --pattern "*.cdx.json.sha256"
+  --pattern "*.cdx.json" --pattern "*.cdx.json.sha256" --pattern "*.cdx.json.cosign.bundle"
 shasum -a 256 -c proxxx-${VERSION}.cdx.json.sha256
+cosign verify-blob \
+  --bundle proxxx-${VERSION}.cdx.json.cosign.bundle \
+  --certificate-identity-regexp 'https://github.com/fabriziosalmi/proxxx/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  proxxx-${VERSION}.cdx.json   # releases after v0.14.0 sign the SBOM too
 grype sbom:proxxx-${VERSION}.cdx.json   # or trivy, cyclonedx-cli
 
 tar xzf proxxx-${VERSION}-${TARGET}.tar.gz
 sudo mv proxxx-${VERSION}-${TARGET}/proxxx /usr/local/bin/
-proxxx --version
+proxxx --version   # "proxxx X.Y.Z (commit <first 12 hex>)": the tagged commit, releases after v0.14.0
 ```
 
 Targets shipped today:

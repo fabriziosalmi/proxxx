@@ -14,13 +14,12 @@
 
 [advisories]
 ignore = [
-    # rsa 0.10.0-rc.16 — Marvin Attack timing sidechannel (CVSS 5.9 medium).
-    # Path (post russh 0.60 bump): russh 0.60 → internal-russh-forked-
-    # ssh-key 0.6.18 → rsa 0.10. The fork is upstream-tracked and
-    # pulls a release-candidate of `rsa` that STILL contains the
-    # advisory — the upstream `rsa` crate has had no fix since
-    # 2023-11. So russh 0.60 (despite the deduplication of -keys)
-    # did NOT close this advisory; we expected it to but it didn't.
+    # rsa 0.10.0-rc.18 — Marvin Attack timing sidechannel (CVSS 5.9 medium).
+    # Path (Cargo.lock, `cargo tree -i rsa`, 2026-10-21): russh 0.64.1
+    # → rsa 0.10.0-rc.18, directly and through ssh-key 0.7.0-rc.11.
+    # The advisory lists no patched version (rsa 0.9.10 and
+    # 0.10.0-rc.18 are both affected as of its 2026-09-14 update), so
+    # no russh bump can close it.
     # Why accepted: the Marvin Attack requires a network attacker
     # who can issue many adaptive RSA decryption queries against a
     # long-lived key under timing observation — not the proxxx

@@ -1,0 +1,13 @@
+# cross (release.yml, aarch64-unknown-linux-musl) — #384.
+#
+# The image is pinned by digest: the `0.2.5` tag alone is mutable, and the
+# image holds the linker and C toolchain that build the released binary.
+# The digest is the multi-arch index of ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5,
+# read on 2026-10-21 with `docker buildx imagetools inspect`. Bump it with
+# the `cross --version` pin in release.yml.
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4"
+
+[build.env]
+# release.yml sets it to the tagged commit for `--version`.
+passthrough = ["PROXXX_BUILD_COMMIT"]
