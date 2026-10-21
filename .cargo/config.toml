@@ -1,0 +1,9 @@
+# Environment for every process cargo starts (`cargo test`, `cargo run`,
+# build scripts). Not applied to an installed binary.
+[env]
+# Keep the TUI / HITL state cache and the log files of test runs (the e2e
+# tests spawn the real binary), and of `cargo run`, out of the developer's
+# real cache and data directories (#386). An explicit value in the shell
+# still wins (`force = false`).
+PROXXX_CACHE_DIR = { value = "target/proxxx-test-cache", relative = true, force = false }
+PROXXX_LOG_DIR = { value = "target/proxxx-test-logs", relative = true, force = false }
