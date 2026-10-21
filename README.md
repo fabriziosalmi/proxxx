@@ -282,7 +282,7 @@ proxxx novnc  100 --node pve1                     # opens browser to web UI's no
 
 ```bash
 # Long-running daemon — alerts + HITL + schedule under ONE process
-proxxx daemon serve                               # all three with one SIGTERM
+proxxx daemon serve                               # every configured component, one SIGTERM
 proxxx daemon serve --no-hitl                     # alerts + schedule only
 proxxx schedule add --name nightly-snap --every 1d --cmd "vm snapshot 100 --yes"
 

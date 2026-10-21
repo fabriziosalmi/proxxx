@@ -37,19 +37,25 @@
 //!                  abort all → wait → exit 0
 //! ```
 //!
+//! ## Which components run
+//!
+//! schedule always runs (unless `--no-schedule`). alerts, HITL and
+//! reconcile run only when their section is configured: `[[alerts]]`
+//! rules, `[telegram]`, `[reconcile]` (#372). The startup message names
+//! the ones not started and why. A SIGHUP reload does not start them;
+//! adding the section needs a restart.
+//!
 //! ## Shutdown semantics
 //!
-//! - SIGTERM/SIGINT cancels the outer `await`. We then `.abort()`
-//!   every spawned task and `.await` it to allow Drop cleanup.
-//! - A component that exits on its own — panic, or a loop that returns —
-//!   is a fault, not a no-op (#264). The supervisor selects the shutdown
-//!   signal against the component watchers, stops the rest, and exits
-//!   non-zero so `Restart=on-failure` can act. Before v0.13.4 nothing
+//! - SIGTERM/SIGINT sets the process-wide shutdown flag (#366). Each
+//!   component returns on its own; whatever is still running after
+//!   `SHUTDOWN_GRACE` is aborted. Exit code 0.
+//! - A component that exits on its own — panic, error, or a loop that
+//!   returns — is a fault, not a no-op (#264). The supervisor selects the
+//!   shutdown signal against the component watchers, stops the rest, and
+//!   exits non-zero so `Restart=on-failure` can act. Before v0.13.4 nothing
 //!   polled the handles: the process stayed up and exited zero with a
 //!   dead pillar, so systemd never noticed.
-//! - Per-task panics propagate as `JoinError`. We log + continue —
-//!   the remaining daemons keep running. A panicking alerts loop
-//!   shouldn't kill the HITL receiver.
 //!
 //! ## Why not one event loop with branches per work-kind
 //!
@@ -102,13 +108,14 @@ pub enum DaemonCommand {
         no_schedule: bool,
 
         /// Skip the alerts task. Useful in dev environments
-        /// where alert-noise to Telegram is unwanted.
+        /// where alert-noise to Telegram is unwanted. Without
+        /// `[[alerts]]` rules the alerts task is not started anyway.
         #[arg(long)]
         no_alerts: bool,
 
-        /// Skip the HITL task. Useful when Telegram isn't
-        /// configured or when running alongside an existing
-        /// HITL listener process.
+        /// Skip the HITL task. Useful when running alongside an
+        /// existing HITL listener process. Without a `[telegram]`
+        /// section the HITL task is not started anyway.
         #[arg(long)]
         no_hitl: bool,
 
@@ -196,24 +203,42 @@ async fn run_unified(
         });
     }
 
+    // #372: alerts and HITL are opt-in by configuration, like reconcile.
+    // Each one refuses to run without its section, and a component that
+    // exits is a fault, so starting one that is not configured turned a
+    // missing optional section into a daemon that exits 1 at startup.
+    let mut not_started: Vec<&'static str> = Vec::new();
+
     if enable_alerts {
-        let client = Arc::clone(client);
-        let cfg = Arc::clone(&config_handle);
-        components.push(Component {
-            name: "alerts",
-            handle: tokio::spawn(alerts_loop(client, cfg, alerts_secs)),
-        });
+        if config
+            .alerts
+            .as_ref()
+            .is_some_and(|rules| !rules.is_empty())
+        {
+            let client = Arc::clone(client);
+            let cfg = Arc::clone(&config_handle);
+            components.push(Component {
+                name: "alerts",
+                handle: tokio::spawn(alerts_loop(client, cfg, alerts_secs)),
+            });
+        } else {
+            not_started.push("alerts (no [[alerts]] rules)");
+        }
     }
 
     if enable_hitl {
-        // The existing HITL serve loop owns its own Telegram
-        // long-poll + replay-protection store. We just spawn it.
-        let client = Arc::clone(client);
-        let cfg = config.clone();
-        components.push(Component {
-            name: "hitl",
-            handle: tokio::spawn(crate::cli::hitl_serve(client, cfg)),
-        });
+        if config.telegram.is_some() {
+            // The existing HITL serve loop owns its own Telegram
+            // long-poll + replay-protection store. We just spawn it.
+            let client = Arc::clone(client);
+            let cfg = config.clone();
+            components.push(Component {
+                name: "hitl",
+                handle: tokio::spawn(crate::cli::hitl_serve(client, cfg)),
+            });
+        } else {
+            not_started.push("hitl (no [telegram] section)");
+        }
     }
 
     // GitOps drift watch — the 4th pillar. Opt-in: only spawns when the
@@ -248,13 +273,21 @@ async fn run_unified(
                     enable_converge,
                 )),
             });
+        } else {
+            not_started.push("reconcile (no [reconcile] section)");
         }
     }
 
+    let not_started = not_started.join(", ");
     if components.is_empty() {
         anyhow::bail!(
-            "no daemons enabled — at least one of schedule/alerts/hitl must be active. \
-             Drop the --no-* flags to enable."
+            "no daemon component to run. Not started: {}. \
+             Drop the --no-* flags or configure a component, then start again.",
+            if not_started.is_empty() {
+                "none"
+            } else {
+                &not_started
+            }
         );
     }
 
@@ -267,6 +300,14 @@ async fn run_unified(
             .collect::<Vec<_>>()
             .join(" + "),
     );
+    if !not_started.is_empty() {
+        // A SIGHUP reload does not start these: adding the section needs a
+        // restart.
+        eprintln!(
+            "proxxx daemon: not started: {not_started}. \
+             Add the section and restart the daemon to run them."
+        );
+    }
 
     // Audit 2026-09-09 (#264) — actually supervise the components.
     //
@@ -977,9 +1018,9 @@ mod tests {
     }
 
     /// The unified daemon is mostly a wiring layer; the per-component
-    /// logic is already covered by each module's tests. We pin only
-    /// the "no daemons enabled = error" guardrail, which is the
-    /// behavioural contract distinct to this orchestration layer.
+    /// logic is already covered by each module's tests. Which
+    /// components start, and the "nothing to run = error" guardrail,
+    /// are covered end to end in `tests/daemon_components_e2e.rs`.
     #[test]
     fn component_struct_holds_name_plus_handle() {
         // Spawn a trivial completing task to validate the struct

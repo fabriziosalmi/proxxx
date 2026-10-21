@@ -299,6 +299,8 @@ restart: `read_only` (checked before every write, so setting `read_only = true` 
 `auto_converge`), `[[alerts]]`, `[[policies]]`, the `[telegram]` structure and `mcp_token`.
 Restart required: `url`, `user`, `token_id`, the token secret, `rate_limit`,
 `reconcile.interval_secs` and Telegram bot credentials. The reload log line lists both.
+`daemon serve` starts its alerts, HITL and reconcile components only when `[[alerts]]` rules,
+`[telegram]` and `[reconcile]` are present at startup; adding one of them later needs a restart.
 
 ### Multi-Proxmox pattern (prod read-only + writable test)
 
