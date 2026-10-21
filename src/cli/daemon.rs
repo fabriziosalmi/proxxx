@@ -316,25 +316,50 @@ async fn run_unified(
     // Drop our sender so `recv()` resolves to None if every watcher ends.
     drop(exit_tx);
 
+    // #366: `biased` and `is_shutting_down`. Components watch the same
+    // process-wide shutdown flag and return when it is set; a component
+    // that returned because of the shutdown is not a fault. The flag is set
+    // before any waiter wakes, so this check cannot race the component.
     let exit_code = tokio::select! {
+        biased;
         () = crate::util::shutdown::wait_for_shutdown_signal() => {
             eprintln!("\nproxxx daemon: shutdown signal received, stopping components...");
             0
         }
         Some((name, outcome)) = exit_rx.recv() => {
-            eprintln!(
-                "\nproxxx daemon: component `{name}` stopped on its own ({outcome}). \
-                 Stopping the remaining components and exiting non-zero so the \
-                 process supervisor can restart the daemon."
-            );
-            tracing::error!("daemon component `{name}` exited unexpectedly: {outcome}");
-            1
+            if crate::util::shutdown::is_shutting_down() {
+                eprintln!("\nproxxx daemon: shutdown signal received, stopping components...");
+                eprintln!("  - {name} stopped");
+                0
+            } else {
+                eprintln!(
+                    "\nproxxx daemon: component `{name}` stopped on its own ({outcome}). \
+                     Stopping the remaining components and exiting non-zero so the \
+                     process supervisor can restart the daemon."
+                );
+                tracing::error!("daemon component `{name}` exited unexpectedly: {outcome}");
+                1
+            }
         }
     };
 
+    if exit_code == 0 {
+        // Let the components finish their own shutdown (the alerts loop
+        // flushes its dedup cache) before aborting whatever is left. The
+        // channel closes once every watcher has ended.
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
+            while let Some((name, _)) = exit_rx.recv().await {
+                eprintln!("  - {name} stopped");
+            }
+        })
+        .await;
+    }
+
     for (name, abort) in &aborts {
-        abort.abort();
-        eprintln!("  - {name} stopped");
+        if !abort.is_finished() {
+            abort.abort();
+            eprintln!("  - {name} stopped");
+        }
     }
 
     // Drain whatever the watchers reported while we were stopping, so a
@@ -350,6 +375,10 @@ async fn run_unified(
         exit_code,
     ))
 }
+
+/// How long `daemon serve` waits, after a shutdown signal, for its
+/// components to return on their own before aborting them (#366).
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Schedule tick loop. Every `interval_secs`, fires
 /// `schedule::run_due` on a `spawn_blocking` thread (it shells
