@@ -166,13 +166,13 @@ pub async fn converge_with_changes<C: StateWriteView + ?Sized>(
     force: bool,
     audit_user: &str,
 ) -> Result<ConvergeReport> {
-    // Pre-flight risk gate — only when actually mutating (dry-run is
-    // exploration). Atomic: a single Severe change refuses the whole batch
-    // unless `force`. Propagates as Err(PreflightRefusal) → exit 6 on the CLI /
-    // "needs human review" on the daemon. (Gating an empty set is a no-op.)
-    if !opts.dry_run {
-        enforce_state_preflight(&changes, live, force)?;
-    }
+    // Pre-flight risk gate. Atomic: a single Severe change refuses the whole
+    // batch unless `force`. Propagates as Err(PreflightRefusal) → exit 6 on the
+    // CLI / "needs human review" on the daemon. (Gating an empty set is a
+    // no-op.) It runs on a dry-run too, so the rehearsal refuses exactly when
+    // the real run would (#369), and it assesses only what apply would send:
+    // deletes are skipped without prune.
+    enforce_state_preflight(&changes, live, force, opts.prune)?;
     Ok(apply_and_audit(
         client,
         profile,
@@ -458,6 +458,61 @@ mod tests {
         assert_eq!(report.skipped, 1);
         assert!(!report.dispatched());
         assert!(c.lines().await.is_empty(), "dry-run issues no PVE call");
+    }
+
+    /// #369: without prune apply skips every delete, so a Severe delete
+    /// (non-empty pool) must not refuse the changes that do run. It used to
+    /// refuse every unmanned tick while one undeclared non-empty pool existed.
+    #[tokio::test]
+    async fn a_severe_delete_that_prune_off_skips_does_not_block_the_rest() {
+        let c = RecordingClient::default();
+        let live = live_with_nonempty_pool("prod");
+        let mut create = ch(ChangeKind::Create, "pool", "tenant-a");
+        create.after = Some(serde_json::json!({ "poolid": "tenant-a" }));
+        let changes = vec![ch(ChangeKind::Delete, "pool", "prod"), create];
+        let report = converge_with_changes(
+            &c,
+            "p",
+            "src",
+            changes,
+            &live,
+            ApplyOptions::default(),
+            false,
+            "u",
+        )
+        .await
+        .expect("a delete that will not run must not refuse the run");
+        assert_eq!((report.applied, report.skipped), (1, 1));
+        let lines = c.lines().await;
+        assert!(
+            lines.iter().any(|l| l.starts_with("create_pool")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("delete")), "{lines:?}");
+    }
+
+    /// #369: the rehearsal refuses exactly when the real run would.
+    #[tokio::test]
+    async fn a_dry_run_is_gated_like_the_real_run() {
+        let c = RecordingClient::default();
+        let live = live_with_nonempty_pool("prod");
+        let opts = ApplyOptions {
+            dry_run: true,
+            prune: true,
+            ..ApplyOptions::default()
+        };
+        let changes = vec![ch(ChangeKind::Delete, "pool", "prod")];
+        let err = converge_with_changes(&c, "p", "src", changes.clone(), &live, opts, false, "u")
+            .await
+            .expect_err("a Severe change refuses the dry-run too");
+        assert!(err
+            .downcast_ref::<crate::app::preflight::PreflightRefusal>()
+            .is_some());
+        let report = converge_with_changes(&c, "p", "src", changes, &live, opts, true, "u")
+            .await
+            .expect("--allow-risk passes the dry-run");
+        assert_eq!(report.skipped, 1);
+        assert!(c.lines().await.is_empty(), "a dry-run issues no PVE call");
     }
 
     #[tokio::test]

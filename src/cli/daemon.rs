@@ -670,9 +670,20 @@ fn retain_allowed_families(
     }
 }
 
+/// The number of changes an unmanned tick would send to PVE: the count the
+/// cap applies to. Without prune apply skips every delete, so a held delete
+/// does not use up the cap (#369).
+fn unmanned_dispatch_count(changes: &[crate::state::diff::Change], prune: bool) -> usize {
+    changes
+        .iter()
+        .filter(|c| crate::state::preflight::dispatched_by_apply(c, prune))
+        .count()
+}
+
 /// True when an unmanned change count exceeds the configured per-tick cap
 /// (`[reconcile] max_unmanned_changes`). `None` = no cap (default). The cap is
-/// applied AFTER family filtering, so it bounds exactly what would be applied.
+/// applied AFTER family filtering, to [`unmanned_dispatch_count`], so it
+/// bounds exactly what would be applied.
 const fn exceeds_unmanned_cap(count: usize, cap: Option<u32>) -> bool {
     match cap {
         Some(max) => count > max as usize,
@@ -757,8 +768,9 @@ async fn run_auto_converge(
 
     let filtered = retain_allowed_families(changes, rec.allowed_families.as_deref());
 
-    if exceeds_unmanned_cap(filtered.len(), rec.max_unmanned_changes) {
-        let n = filtered.len();
+    let dispatched = unmanned_dispatch_count(&filtered, opts.prune);
+    if exceeds_unmanned_cap(dispatched, rec.max_unmanned_changes) {
+        let n = dispatched;
         let cap = rec.max_unmanned_changes.unwrap_or(0);
         tracing::warn!(
             profile = %profile_label,
@@ -1087,6 +1099,30 @@ mod tests {
             "no prune → never deletes regardless of cap"
         );
         assert!(!effective_unmanned_prune(false, None));
+    }
+
+    /// #369: with prune off (deletes held) a delete does not count toward
+    /// `max_unmanned_changes`; with prune on it does.
+    #[test]
+    fn held_deletes_do_not_use_up_the_unmanned_cap() {
+        let mut changes = n_pool_deletes(5);
+        changes.push(Change {
+            kind: ChangeKind::Update,
+            resource: "pool",
+            identity: "tenant-a".into(),
+            before: None,
+            after: None,
+        });
+        assert_eq!(unmanned_dispatch_count(&changes, false), 1);
+        assert!(!exceeds_unmanned_cap(
+            unmanned_dispatch_count(&changes, false),
+            Some(1)
+        ));
+        assert_eq!(unmanned_dispatch_count(&changes, true), 6);
+        assert!(exceeds_unmanned_cap(
+            unmanned_dispatch_count(&changes, true),
+            Some(1)
+        ));
     }
 
     #[tokio::test]

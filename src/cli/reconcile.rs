@@ -210,8 +210,8 @@ async fn converge_cmd(
             allow_profile_mismatch,
         )
         .await?;
-        state::preflight::enforce_state_preflight(&changes, &live, allow_risk)?;
-        let approved = super::state::interactive_hitl_filter(&changes, &live);
+        state::preflight::enforce_state_preflight(&changes, &live, allow_risk, prune)?;
+        let approved = super::state::interactive_hitl_filter(&changes, &live, prune);
         state::converge::apply_and_audit(
             client.as_ref(),
             profile_label,

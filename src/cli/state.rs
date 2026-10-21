@@ -345,20 +345,18 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
 
             let mut changes = state::diff::diff(&declared_state, &live_state);
 
-            // Pre-flight risk gate. Dry-run skips the gate (the
-            // operator is exploring, not committing) — every other
-            // path goes through enforce_state_preflight, which
-            // prints the risk list and may refuse with
-            // PreflightRefusal (exit 6).
-            if !dry_run {
-                state::preflight::enforce_state_preflight(&changes, &live_state, allow_risk)?;
-            }
+            // Pre-flight risk gate: prints the risk list and may refuse
+            // with PreflightRefusal (exit 6). It runs on `--dry-run` too,
+            // so the rehearsal refuses exactly when the real run would,
+            // and it assesses only what apply would send: without
+            // `--prune` deletes are skipped, so they are not gated (#369).
+            state::preflight::enforce_state_preflight(&changes, &live_state, allow_risk, prune)?;
 
             // Interactive HITL: per-Severe-change stdin prompt.
             // Filtered before dispatch so a rejected change becomes
             // an explicit operator-skipped outcome.
             if interactive && !dry_run {
-                changes = interactive_hitl_filter(&changes, &live_state);
+                changes = interactive_hitl_filter(&changes, &live_state, prune);
             }
 
             let opts = state::apply::ApplyOptions {
@@ -419,6 +417,7 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
 pub(crate) fn interactive_hitl_filter(
     changes: &[state::diff::Change],
     live_state: &state::model::ClusterState,
+    prune: bool,
 ) -> Vec<state::diff::Change> {
     use std::io::{BufRead, Write};
 
@@ -426,6 +425,12 @@ pub(crate) fn interactive_hitl_filter(
     let stdin = std::io::stdin();
 
     for change in changes {
+        // A delete that apply will skip (no `--prune`) needs no consent;
+        // it passes through and is reported as skipped (#369).
+        if !state::preflight::dispatched_by_apply(change, prune) {
+            approved.push(change.clone());
+            continue;
+        }
         // Re-assess this single change to know its severity tier.
         // The full-list assess() runs cluster-wide checks (bulk
         // count) that we don't want to repeat per change; for the
