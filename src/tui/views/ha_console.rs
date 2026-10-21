@@ -86,7 +86,10 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
         .ha_manager
         .as_ref()
         .map_or(("(unknown)", "(unknown)"), |m| {
-            (m.master.as_str(), m.mode.as_str())
+            (
+                m.master().unwrap_or("(none elected)"),
+                m.master_mode().unwrap_or("(unknown)"),
+            )
         });
     let mode_style = if mode == "active" {
         Style::default().fg(Theme::SUCCESS)

@@ -780,9 +780,11 @@ mod tests {
                     comment: String::new(),
                 }],
                 manager: HaManagerStatus {
-                    master: "pve1".into(),
-                    mode: "active".into(),
-                    node_status: std::collections::HashMap::new(),
+                    manager_status: proxxx::api::types::HaCrmStatus {
+                        master_node: Some("pve1".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
                 },
                 cluster: vec![],
                 repl_status: vec![],
@@ -791,7 +793,7 @@ mod tests {
         assert!(!state.ha_loading);
         assert_eq!(state.ha_groups.len(), 1);
         assert_eq!(state.ha_resources.len(), 1);
-        assert_eq!(state.ha_manager.as_ref().unwrap().master, "pve1");
+        assert_eq!(state.ha_manager.as_ref().unwrap().master(), Some("pve1"));
     }
 
     #[test]

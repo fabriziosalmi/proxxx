@@ -1605,10 +1605,19 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api2/json/cluster/ha/status/manager_status"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                // The shape PVE 9.1.1 returns (captured on the test cluster).
                 "data": {
-                    "master": "pve1",
-                    "mode": "active",
-                    "node_status": {"pve1": "online", "pve2": "online"}
+                    "lrm_status": {
+                        "pve1": {"mode": "active", "results": {}, "state": "wait_for_agent_lock", "timestamp": 1792602100},
+                        "pve2": {"mode": "shutdown", "results": {}, "state": "wait_for_agent_lock", "timestamp": 1789735933}
+                    },
+                    "manager_status": {
+                        "master_node": "pve1",
+                        "node_status": {"pve1": "online", "pve2": "online"},
+                        "service_status": {},
+                        "timestamp": 1787997229
+                    },
+                    "quorum": {"node": "pve1", "quorate": "1"}
                 }
             })))
             .expect(1)
@@ -1616,8 +1625,27 @@ mod tests {
             .await;
         let c = mock_client(&server).await;
         let m = c.ha_manager_status().await.expect("status");
-        assert_eq!(m.master, "pve1");
-        assert_eq!(m.mode, "active");
+        assert_eq!(m.master(), Some("pve1"));
+        assert_eq!(m.master_mode(), Some("active"));
+        assert_eq!(m.manager_status.node_status.len(), 2);
+        assert_eq!(m.lrm_status["pve2"].mode, "shutdown");
+        assert_eq!(m.quorum.as_ref().map(|q| q.quorate), Some(1));
+    }
+
+    /// #350: a response without `manager_status` (the flat shape the old
+    /// type expected) is a parse error, not an empty status.
+    #[tokio::test]
+    async fn ha_manager_status_without_manager_status_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/ha/status/manager_status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"master": "pve1", "mode": "active", "node_status": {}}
+            })))
+            .mount(&server)
+            .await;
+        let c = mock_client(&server).await;
+        assert!(c.ha_manager_status().await.is_err());
     }
 
     #[tokio::test]
