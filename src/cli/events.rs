@@ -216,7 +216,7 @@ fn emit_event(kind: &str, task: &TaskInfo, elapsed: Option<u64>, json: bool) {
             "endtime":  task.endtime,
             "elapsed_secs": elapsed,
         });
-        println!("{obj}");
+        crate::outln!("{obj}");
     } else {
         let ts = fmt_ts(task.starttime);
         let elapsed_str = elapsed.map(|s| format!("  [{s}s]")).unwrap_or_default();
@@ -229,7 +229,7 @@ fn emit_event(kind: &str, task: &TaskInfo, elapsed: Option<u64>, json: bool) {
         } else {
             format!("  vmid={}", task.id)
         };
-        println!(
+        crate::outln!(
             "{ts}  {kind:<8}  {node:<14}  {ty:<22}{id}{status}{elapsed}",
             node = task.node,
             ty = task.task_type,

@@ -268,13 +268,14 @@ pub async fn execute_upgrade_check(
                     "infos": findings.iter().filter(|f| f.severity == Severity::Info).count(),
                 }
             });
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         UpgradeOutput::Text => {
             if findings.is_empty() {
-                println!("✓ no upgrade-check findings for target {target}");
+                crate::outln!("✓ no upgrade-check findings for target {target}");
             } else {
-                println!("upgrade-check → target {target}\n");
+                crate::outln!("upgrade-check → target {target}\n");
                 for f in &findings {
                     let sigil = match f.severity {
                         Severity::Block => "✗ BLOCK",
@@ -282,16 +283,16 @@ pub async fn execute_upgrade_check(
                         Severity::Info => "ℹ INFO ",
                     };
                     let node = f.node.as_deref().unwrap_or("(cluster)");
-                    println!("{sigil}  [{}] on {node}", f.component);
-                    println!("  {}", f.description);
+                    crate::outln!("{sigil}  [{}] on {node}", f.component);
+                    crate::outln!("  {}", f.description);
                     if let Some(d) = &f.detail {
-                        println!("  detail: {d}");
+                        crate::outln!("  detail: {d}");
                     }
-                    println!("  remediation: {}", f.remediation);
+                    crate::outln!("  remediation: {}", f.remediation);
                     if !f.reference.is_empty() {
-                        println!("  reference: {}", f.reference);
+                        crate::outln!("  reference: {}", f.reference);
                     }
-                    println!();
+                    crate::outln!();
                 }
             }
         }

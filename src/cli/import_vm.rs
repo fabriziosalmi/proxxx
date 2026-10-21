@@ -167,20 +167,21 @@ pub fn execute_import(args: &ImportArgs) -> Result<(Value, i32)> {
 
     match args.print {
         ImportOutput::Json => {
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         ImportOutput::Text => {
-            println!("input:    {}", report.input);
-            println!("detected: {}", report.detected_format);
-            println!("output:   {} ({})", report.output, report.output_format);
-            println!("command:  {}", report.command.join(" "));
+            crate::outln!("input:    {}", report.input);
+            crate::outln!("detected: {}", report.detected_format);
+            crate::outln!("output:   {} ({})", report.output, report.output_format);
+            crate::outln!("command:  {}", report.command.join(" "));
             if args.dry_run {
-                println!("(dry-run — not executed)");
+                crate::outln!("(dry-run — not executed)");
             } else if let Some(code) = report.exit_code {
                 if code == 0 {
-                    println!("✓ converted successfully");
+                    crate::outln!("✓ converted successfully");
                 } else {
-                    println!("✗ qemu-img exited {code}");
+                    crate::outln!("✗ qemu-img exited {code}");
                 }
             }
         }

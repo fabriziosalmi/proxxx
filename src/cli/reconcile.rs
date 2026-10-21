@@ -154,7 +154,7 @@ async fn run(
     let changes = compute_drift(client.as_ref(), profile_label, source, path).await?;
 
     if json {
-        println!(
+        crate::outln!(
             "{}",
             serde_json::to_string_pretty(&report_json(source, profile_label, &changes))?
         );
@@ -237,6 +237,7 @@ async fn converge_cmd(
     };
 
     if json {
+        // raw-output: JSON for machines; removing characters would change the data
         println!("{}", serde_json::to_string_pretty(&report.outcomes)?);
     } else {
         print_converge_text(source, profile_label, &report);
@@ -248,19 +249,21 @@ async fn converge_cmd(
 /// Human-readable converge output: a per-outcome line (reusing `state apply`'s
 /// renderer so the eye correlates a diff line with the action) plus a tally.
 fn print_converge_text(source: &str, profile: &str, report: &state::converge::ConvergeReport) {
-    println!("reconcile converge — source {source} (profile {profile})");
-    println!();
+    crate::outln!("reconcile converge — source {source} (profile {profile})");
+    crate::outln!();
     if report.outcomes.is_empty() {
-        println!("  ✓ IN SYNC — live matches desired (0 changes)");
+        crate::outln!("  ✓ IN SYNC — live matches desired (0 changes)");
         return;
     }
     for o in &report.outcomes {
-        println!("  {}", super::state::apply_summary_line(o));
+        crate::outln!("  {}", super::state::apply_summary_line(o));
     }
-    println!();
-    println!(
+    crate::outln!();
+    crate::outln!(
         "  → applied {} / failed {} / skipped {}",
-        report.applied, report.failed, report.skipped
+        report.applied,
+        report.failed,
+        report.skipped
     );
 }
 
@@ -475,14 +478,14 @@ fn report_json(source: &str, profile: &str, changes: &[Change]) -> Value {
 }
 
 fn print_text(source: &str, profile: &str, changes: &[Change]) {
-    println!("reconcile — source {source} (profile {profile})");
-    println!();
+    crate::outln!("reconcile — source {source} (profile {profile})");
+    crate::outln!();
     if changes.is_empty() {
-        println!("  ✓ IN SYNC — live matches desired (0 changes)");
+        crate::outln!("  ✓ IN SYNC — live matches desired (0 changes)");
         return;
     }
     let families = by_family(changes);
-    println!(
+    crate::outln!(
         "  ✗ DRIFT — {} change(s) across {} famil{}",
         changes.len(),
         families.len(),
@@ -499,14 +502,16 @@ fn print_text(source: &str, profile: &str, changes: &[Change]) {
         if d.delete > 0 {
             parts.push(format!("{} delete", d.delete));
         }
-        println!("     {fam:<22} {}", parts.join(", "));
+        crate::outln!("     {fam:<22} {}", parts.join(", "));
     }
-    println!();
+    crate::outln!();
     for c in changes {
-        println!("  {}", state::diff::summary_line(c));
+        crate::outln!("  {}", state::diff::summary_line(c));
     }
-    println!();
-    println!("  → run `proxxx state apply` to converge, or `proxxx state diff` for full detail");
+    crate::outln!();
+    crate::outln!(
+        "  → run `proxxx state apply` to converge, or `proxxx state diff` for full detail"
+    );
 }
 
 #[cfg(test)]

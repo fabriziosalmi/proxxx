@@ -178,13 +178,14 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
 
     match args.output {
         VerifyOutput::Json => {
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&results)?);
         }
         VerifyOutput::Text => {
             if results.is_empty() {
-                println!("(no guests / no backups found)");
+                crate::outln!("(no guests / no backups found)");
             } else {
-                println!(
+                crate::outln!(
                     "{vmid:<8}  {node:<14}  {status:<8}  {age:<8}  reason",
                     vmid = "vmid",
                     node = "node",
@@ -192,7 +193,7 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                     age = "age(d)",
                 );
                 let sep = "─".repeat(80);
-                println!("{sep}");
+                crate::outln!("{sep}");
                 for r in &results {
                     let st = match r.status {
                         VerifyStatus::Pass => "✓ pass",
@@ -200,7 +201,7 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                         VerifyStatus::Missing => "✗ miss",
                         VerifyStatus::Error => "✗ ERROR",
                     };
-                    println!(
+                    crate::outln!(
                         "{vmid:<8}  {node:<14}  {status:<8}  {age:<8.1}  {reason}",
                         vmid = r.vmid,
                         node = r.node,

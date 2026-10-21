@@ -159,6 +159,7 @@ pub async fn execute_describe(client: &Arc<PxClient>, args: DescribeArgs) -> Res
         DescribeFormat::LlmContext => print_llm_context(&digest),
         DescribeFormat::Json => {
             let s = serde_json::to_string_pretty(&digest)?;
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{s}");
         }
     }
@@ -345,41 +346,43 @@ fn fmt_uptime(secs: u64) -> String {
 }
 
 fn print_text(d: &ClusterDigest) {
-    println!("# Cluster ({})", d.cluster.pve_version);
-    println!(
+    crate::outln!("# Cluster ({})", d.cluster.pve_version);
+    crate::outln!(
         "  {} nodes  /  {} guests  /  {} storages\n",
-        d.cluster.node_count, d.cluster.guest_count, d.cluster.storage_count
+        d.cluster.node_count,
+        d.cluster.guest_count,
+        d.cluster.storage_count
     );
     // #278 — say it where the reader is, not only in the JSON. A digest
     // that silently omits a section it could not read is worse than one
     // that says so, because the reader has no way to tell.
     if let Some(missing) = &d.unavailable {
-        println!("## INCOMPLETE — some sections could not be read");
+        crate::outln!("## INCOMPLETE — some sections could not be read");
         for m in missing {
-            println!("  ! {m}");
+            crate::outln!("  ! {m}");
         }
-        println!("  (empty sections below may be empty, or unreadable — do not");
-        println!("   infer absence from them)\n");
+        crate::outln!("  (empty sections below may be empty, or unreadable — do not");
+        crate::outln!("   infer absence from them)\n");
     }
-    println!("## Nodes");
+    crate::outln!("## Nodes");
     for n in &d.nodes {
         let mem_used = format_bytes_gib(n.mem_used_bytes);
         let mem_total = format_bytes_gib(n.mem_total_bytes);
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
-        println!(
+        crate::outln!(
             "  {name:<14} {status:<8}  cpu={cpu_pct:>5.1}%  mem={mem_used} / {mem_total}  up={up}",
             name = n.node,
             status = n.status,
             up = fmt_uptime(n.uptime_secs),
         );
     }
-    println!("\n## Guests");
+    crate::outln!("\n## Guests");
     for g in &d.guests {
         let res = match (g.cores, g.mem_mb) {
             (Some(c), Some(m)) => format!("{c}c/{m}MB"),
             _ => "—".into(),
         };
-        println!(
+        crate::outln!(
             "  {vmid:<6} {kind:<5} {name:<20} on {node:<10} {status:<8} {res}",
             vmid = g.vmid,
             kind = g.kind,
@@ -389,7 +392,7 @@ fn print_text(d: &ClusterDigest) {
             res = res,
         );
     }
-    println!("\n## Storages");
+    crate::outln!("\n## Storages");
     for s in &d.storages {
         let shared = if s.shared { "shared" } else { "local" };
         let used_pct = if s.total_bytes > 0 {
@@ -399,7 +402,7 @@ fn print_text(d: &ClusterDigest) {
         } else {
             "  n/a".into()
         };
-        println!(
+        crate::outln!(
             "  {name:<14} {kind:<10} {used:<5}  on {n} nodes  ({shared})",
             name = s.storage,
             kind = s.kind,
@@ -408,9 +411,9 @@ fn print_text(d: &ClusterDigest) {
         );
     }
     if let Some(failures) = &d.recent_failures {
-        println!("\n## Recent failures ({})", failures.len());
+        crate::outln!("\n## Recent failures ({})", failures.len());
         for t in failures {
-            println!(
+            crate::outln!(
                 "  {start}  {node:<12} {kind:<14} {id:<6}  {user:<18}  {status}",
                 start = t.start,
                 node = t.node,
@@ -422,26 +425,28 @@ fn print_text(d: &ClusterDigest) {
         }
     }
     if let Some(r) = &d.rbac {
-        println!("\n## RBAC");
-        println!("  {} pools  /  {} users", r.pool_count, r.user_count);
+        crate::outln!("\n## RBAC");
+        crate::outln!("  {} pools  /  {} users", r.pool_count, r.user_count);
         if !r.pools.is_empty() {
-            println!("  Pools: {}", r.pools.join(", "));
+            crate::outln!("  Pools: {}", r.pools.join(", "));
         }
     }
 }
 
 fn print_markdown(d: &ClusterDigest) {
-    println!("# Cluster — PVE {}\n", d.cluster.pve_version);
-    println!(
+    crate::outln!("# Cluster — PVE {}\n", d.cluster.pve_version);
+    crate::outln!(
         "**{} nodes** · **{} guests** · **{} storages**\n",
-        d.cluster.node_count, d.cluster.guest_count, d.cluster.storage_count
+        d.cluster.node_count,
+        d.cluster.guest_count,
+        d.cluster.storage_count
     );
-    println!("## Nodes\n");
-    println!("| Node | Status | CPU | Memory | Uptime |");
-    println!("| :--- | :----- | --: | :----- | :----- |");
+    crate::outln!("## Nodes\n");
+    crate::outln!("| Node | Status | CPU | Memory | Uptime |");
+    crate::outln!("| :--- | :----- | --: | :----- | :----- |");
     for n in &d.nodes {
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
-        println!(
+        crate::outln!(
             "| `{}` | {} | {:.1}% | {} / {} | {} |",
             n.node,
             n.status,
@@ -451,18 +456,22 @@ fn print_markdown(d: &ClusterDigest) {
             fmt_uptime(n.uptime_secs),
         );
     }
-    println!("\n## Guests\n");
-    println!("| VMID | Kind | Name | Node | Status |");
-    println!("| ---: | :--- | :--- | :--- | :----- |");
+    crate::outln!("\n## Guests\n");
+    crate::outln!("| VMID | Kind | Name | Node | Status |");
+    crate::outln!("| ---: | :--- | :--- | :--- | :----- |");
     for g in &d.guests {
-        println!(
+        crate::outln!(
             "| {} | {} | {} | `{}` | {} |",
-            g.vmid, g.kind, g.name, g.node, g.status
+            g.vmid,
+            g.kind,
+            g.name,
+            g.node,
+            g.status
         );
     }
-    println!("\n## Storages\n");
-    println!("| Storage | Type | Used | Shared | Nodes |");
-    println!("| :------ | :--- | ---: | :----- | ----: |");
+    crate::outln!("\n## Storages\n");
+    crate::outln!("| Storage | Type | Used | Shared | Nodes |");
+    crate::outln!("| :------ | :--- | ---: | :----- | ----: |");
     for s in &d.storages {
         let used_pct = if s.total_bytes > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -471,7 +480,7 @@ fn print_markdown(d: &ClusterDigest) {
         } else {
             "n/a".into()
         };
-        println!(
+        crate::outln!(
             "| `{}` | {} | {} | {} | {} |",
             s.storage,
             s.kind,
@@ -481,19 +490,22 @@ fn print_markdown(d: &ClusterDigest) {
         );
     }
     if let Some(failures) = &d.recent_failures {
-        println!("\n## Recent failures ({})\n", failures.len());
+        crate::outln!("\n## Recent failures ({})\n", failures.len());
         for t in failures {
-            println!(
+            crate::outln!(
                 "- `{}` on `{}` ({}, status: {})",
-                t.kind, t.node, t.id, t.status
+                t.kind,
+                t.node,
+                t.id,
+                t.status
             );
         }
     }
     if let Some(r) = &d.rbac {
-        println!("\n## RBAC\n");
-        println!("- {} pools / {} users", r.pool_count, r.user_count);
+        crate::outln!("\n## RBAC\n");
+        crate::outln!("- {} pools / {} users", r.pool_count, r.user_count);
         if !r.pools.is_empty() {
-            println!("- Pools: {}", r.pools.join(", "));
+            crate::outln!("- Pools: {}", r.pools.join(", "));
         }
     }
 }
@@ -502,15 +514,18 @@ fn print_markdown(d: &ClusterDigest) {
 /// paste at the top of a chat. Avoids markdown tables (they cost
 /// tokens) in favour of one-line summaries.
 fn print_llm_context(d: &ClusterDigest) {
-    println!(
+    crate::outln!(
         "Proxmox cluster: PVE {}, {} nodes, {} guests, {} storages.",
-        d.cluster.pve_version, d.cluster.node_count, d.cluster.guest_count, d.cluster.storage_count
+        d.cluster.pve_version,
+        d.cluster.node_count,
+        d.cluster.guest_count,
+        d.cluster.storage_count
     );
-    println!();
-    println!("Nodes:");
+    crate::outln!();
+    crate::outln!("Nodes:");
     for n in &d.nodes {
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
-        println!(
+        crate::outln!(
             "- {} ({}): cpu {:.1}%, mem {} / {}, up {}",
             n.node,
             n.status,
@@ -520,13 +535,13 @@ fn print_llm_context(d: &ClusterDigest) {
             fmt_uptime(n.uptime_secs),
         );
     }
-    println!();
-    println!("Guests (vmid kind name@node status):");
+    crate::outln!();
+    crate::outln!("Guests (vmid kind name@node status):");
     for g in &d.guests {
-        println!("- {} {} {}@{} {}", g.vmid, g.kind, g.name, g.node, g.status);
+        crate::outln!("- {} {} {}@{} {}", g.vmid, g.kind, g.name, g.node, g.status);
     }
-    println!();
-    println!("Storages (name kind used%/shared nodes):");
+    crate::outln!();
+    crate::outln!("Storages (name kind used%/shared nodes):");
     for s in &d.storages {
         let used_pct = if s.total_bytes > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -536,7 +551,7 @@ fn print_llm_context(d: &ClusterDigest) {
             "n/a".into()
         };
         let shared = if s.shared { "shared" } else { "local" };
-        println!(
+        crate::outln!(
             "- {} {} {}/{}  on {} nodes",
             s.storage,
             s.kind,
@@ -547,16 +562,16 @@ fn print_llm_context(d: &ClusterDigest) {
     }
     if let Some(failures) = &d.recent_failures {
         if !failures.is_empty() {
-            println!();
-            println!("Recent failures ({}):", failures.len());
+            crate::outln!();
+            crate::outln!("Recent failures ({}):", failures.len());
             for t in failures {
-                println!("- {} on {}: {} (id {})", t.kind, t.node, t.status, t.id);
+                crate::outln!("- {} on {}: {} (id {})", t.kind, t.node, t.status, t.id);
             }
         }
     }
     if let Some(r) = &d.rbac {
-        println!();
-        println!(
+        crate::outln!();
+        crate::outln!(
             "RBAC: {} pools ({}), {} users.",
             r.pool_count,
             r.pools.join(", "),
