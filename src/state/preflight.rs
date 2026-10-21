@@ -33,8 +33,10 @@
 //!
 //! ## Decision contract
 //!
-//! [`enforce_state_preflight`] returns `Ok(())` only when:
-//!   * Every change is below `Severe`, **OR**
+//! [`enforce_state_preflight`] assesses the changes the run would send to
+//! PVE: without `--prune` a `Delete` is skipped by apply, so it is not
+//! assessed and not counted (#369). It returns `Ok(())` only when:
+//!   * Every assessed change is below `Severe`, **OR**
 //!   * `force == true` (operator passed `--allow-risk`).
 //!
 //! On refusal it returns a typed [`crate::app::preflight::PreflightRefusal`]
@@ -584,18 +586,35 @@ fn find_acl_by_identity_in(identity: &str, value: Option<&serde_json::Value>) ->
 /// Prints the risk list to stderr regardless (so the operator
 /// always sees what was flagged, even on a successful pass).
 ///
+/// Only the changes the run would dispatch are assessed: with
+/// `prune == false` apply skips every `Delete`, so a delete it will not
+/// perform neither refuses the run nor counts toward the batch size
+/// (#369). It used to, so one undeclared non-empty pool refused every
+/// unmanned tick, and `state apply` without `--prune` exited 6 for a
+/// delete it would not run, which pushed operators to `--allow-risk`.
+///
 /// Mirrors the `enforce_preflight` contract from `cli::common`
 /// so main.rs's exit-code dispatch needs no changes — the same
 /// `PreflightRefusal` carries through.
-pub fn enforce_state_preflight(changes: &[Change], live: &ClusterState, force: bool) -> Result<()> {
-    let risks = assess(changes, live);
+pub fn enforce_state_preflight(
+    changes: &[Change],
+    live: &ClusterState,
+    force: bool,
+    prune: bool,
+) -> Result<()> {
+    let dispatched: Vec<Change> = changes
+        .iter()
+        .filter(|c| dispatched_by_apply(c, prune))
+        .cloned()
+        .collect();
+    let risks = assess(&dispatched, live);
     if risks.is_empty() {
         return Ok(());
     }
     eprintln!(
         "STATE PRE-FLIGHT ({} change{}):",
-        changes.len(),
-        if changes.len() == 1 { "" } else { "s" }
+        dispatched.len(),
+        if dispatched.len() == 1 { "" } else { "s" }
     );
     for r in &risks {
         eprintln!("  [{:7}] {}", r.level().as_str(), r.describe());
@@ -612,6 +631,13 @@ pub fn enforce_state_preflight(changes: &[Change], live: &ClusterState, force: b
         eprintln!("  --allow-risk passed; overriding SEVERE risk(s) and proceeding.");
     }
     Ok(())
+}
+
+/// True when `apply` sends `change` to PVE: without `prune` a `Delete`
+/// is reported as skipped (`SkipReason::PrunePolicy`) instead.
+#[must_use]
+pub fn dispatched_by_apply(change: &Change, prune: bool) -> bool {
+    prune || change.kind != ChangeKind::Delete
 }
 
 #[cfg(test)]
@@ -838,15 +864,15 @@ mod tests {
         let live = sample_live();
         let changes = vec![delete_change("pool", "empty-pool")];
         // No risks → passes regardless of force flag.
-        assert!(enforce_state_preflight(&changes, &live, false).is_ok());
-        assert!(enforce_state_preflight(&changes, &live, true).is_ok());
+        assert!(enforce_state_preflight(&changes, &live, false, true).is_ok());
+        assert!(enforce_state_preflight(&changes, &live, true, true).is_ok());
     }
 
     #[test]
     fn enforce_refuses_severe_without_force() {
         let live = sample_live();
         let changes = vec![delete_change("pool", "prod-pool")];
-        let err = enforce_state_preflight(&changes, &live, false).unwrap_err();
+        let err = enforce_state_preflight(&changes, &live, false, true).unwrap_err();
         // Typed PreflightRefusal so main.rs exit-code dispatch
         // doesn't need a new arm.
         assert!(err.downcast_ref::<PreflightRefusal>().is_some());
@@ -857,7 +883,40 @@ mod tests {
         let live = sample_live();
         let changes = vec![delete_change("pool", "prod-pool")];
         // --allow-risk → proceeds.
-        assert!(enforce_state_preflight(&changes, &live, true).is_ok());
+        assert!(enforce_state_preflight(&changes, &live, true, true).is_ok());
+    }
+
+    /// #369: without `--prune` apply skips deletes, so a Severe delete
+    /// must not refuse the run, and skipped deletes do not count toward
+    /// the batch size.
+    #[test]
+    fn a_delete_that_prune_off_skips_is_not_gated() {
+        let live = sample_live();
+        let changes = vec![delete_change("pool", "prod-pool")];
+        assert!(
+            enforce_state_preflight(&changes, &live, false, false).is_ok(),
+            "a delete that will not run must not refuse the run"
+        );
+        assert!(
+            enforce_state_preflight(&changes, &live, false, true).is_err(),
+            "with --prune the same delete runs and is still Severe"
+        );
+    }
+
+    #[test]
+    fn skipped_deletes_do_not_count_toward_the_batch_size() {
+        let live = sample_live();
+        let changes: Vec<Change> = (0..60)
+            .map(|i| delete_change("pool", &format!("p{i}")))
+            .collect();
+        assert!(
+            enforce_state_preflight(&changes, &live, false, false).is_ok(),
+            "60 skipped deletes are not a batch of 60"
+        );
+        assert!(
+            enforce_state_preflight(&changes, &live, false, true).is_err(),
+            "60 deletes under --prune are a Severe batch"
+        );
     }
 
     #[test]
