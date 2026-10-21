@@ -69,18 +69,19 @@ pub enum NodeSystemCommand {
     #[command(subcommand)]
     Hosts(NodeHostsCommand),
     /// Tail systemd journal with PVE filters.
+    /// The systemd journal. To filter by unit, use `syslog --service`;
+    /// PVE's journal endpoint has no unit filter.
     Journal {
-        /// ISO timestamp or relative (`-1h`, `yesterday`).
+        /// Entries since this time, as UNIX epoch seconds (what PVE's
+        /// journal endpoint takes).
         #[arg(long)]
-        since: Option<String>,
+        since: Option<u64>,
+        /// Entries until this time, as UNIX epoch seconds.
         #[arg(long)]
-        until: Option<String>,
+        until: Option<u64>,
         /// Cap on returned entries.
         #[arg(long)]
         lastentries: Option<u32>,
-        /// Filter to one systemd unit (e.g. `ssh`, `corosync`).
-        #[arg(long)]
-        service: Option<String>,
     },
     /// Tail `/var/log/syslog` (line-numbered for paging).
     Syslog {
@@ -348,15 +349,13 @@ pub async fn execute_system(
             since,
             until,
             lastentries,
-            service,
         } => {
             let mut q: Vec<(&str, String)> = vec![];
-            push_opt(&mut q, "since", since);
-            push_opt(&mut q, "until", until);
+            push_opt(&mut q, "since", since.map(|t| t.to_string()));
+            push_opt(&mut q, "until", until.map(|t| t.to_string()));
             if let Some(n) = lastentries {
                 q.push(("lastentries", n.to_string()));
             }
-            push_opt(&mut q, "service", service);
             let lines = client.get_node_journal(node, &as_refs(&q)).await?;
             Ok((
                 serde_json::json!({"node": node, "count": lines.len(), "lines": lines}),

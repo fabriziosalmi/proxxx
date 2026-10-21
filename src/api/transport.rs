@@ -292,6 +292,16 @@ where
 pub(super) async fn read_bounded_body(resp: Response, path: &str) -> Result<Vec<u8>> {
     use futures_util::StreamExt;
 
+    // #351: PVE sends some bodies gzip-compressed even though proxxx does
+    // not ask for it (`/nodes/{node}/journal`, measured on 9.1.1), and
+    // reqwest is built without decompression. The compressed bytes went
+    // to the JSON parser ("expected value at line 1 column 1").
+    let gzip = resp
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("gzip"));
+
     if let Some(declared) = resp.content_length() {
         if declared as usize > MAX_RESPONSE_BYTES {
             anyhow::bail!(
@@ -318,12 +328,54 @@ pub(super) async fn read_bounded_body(resp: Response, path: &str) -> Result<Vec<
         }
         buf.extend_from_slice(&chunk);
     }
+    if gzip {
+        return gunzip_bounded(&buf, path);
+    }
     Ok(buf)
+}
+
+/// Decompress a gzip body, refusing to grow past `MAX_RESPONSE_BYTES` so a
+/// small compressed body cannot expand into an unbounded allocation.
+fn gunzip_bounded(compressed: &[u8], path: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut out = Vec::with_capacity(compressed.len().saturating_mul(4));
+    flate2::read::GzDecoder::new(compressed)
+        .take(MAX_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| anyhow::anyhow!("decompressing the gzip response from {path}: {e}"))?;
+    if out.len() > MAX_RESPONSE_BYTES {
+        anyhow::bail!(
+            "response from {path} exceeded {MAX_RESPONSE_BYTES} bytes after decompression"
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #351: a gzip body may not expand past the response limit.
+    #[test]
+    fn gunzip_refuses_to_expand_past_the_limit() {
+        use std::io::Write as _;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(&vec![0_u8; MAX_RESPONSE_BYTES + 1]).unwrap();
+        let bomb = e.finish().unwrap();
+        assert!(
+            bomb.len() < 1024 * 1024,
+            "the test input is small compressed"
+        );
+        let err = gunzip_bounded(&bomb, "/x").unwrap_err();
+        assert!(format!("{err}").contains("after decompression"), "{err}");
+
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(b"{\"data\": 1}").unwrap();
+        assert_eq!(
+            gunzip_bounded(&e.finish().unwrap(), "/x").unwrap(),
+            b"{\"data\": 1}"
+        );
+    }
     use reqwest::Method;
 
     const fn http(status: StatusCode, has_retry_after: bool) -> RetryOutcome {
