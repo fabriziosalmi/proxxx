@@ -1944,6 +1944,16 @@ pub async fn execute(
                     .await?
             } else {
                 let mut all = client.get_cluster_tasks().await?;
+                // #354: `/cluster/tasks` holds only the recent tasks PVE
+                // keeps cluster-wide (50 on PVE 9.1), so a larger
+                // `--limit` used to return fewer rows without a word.
+                if all.len() < limit {
+                    eprintln!(
+                        "note: the cluster-wide task list returned {} task(s), fewer than \
+                         --limit {limit}; use --node <name> to list more of one node's tasks",
+                        all.len()
+                    );
+                }
                 all.truncate(limit);
                 all
             };
