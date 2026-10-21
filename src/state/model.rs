@@ -4,6 +4,8 @@
 //! Each resource family is a separate `*Decl` struct. The top-level
 //! [`ClusterState`] is a forest of those: a partial state (e.g. only
 //! `[[pools]]`) is a valid file, since every field defaults to empty.
+//! A file must declare at least one family (#371); `pools = []` declares
+//! an empty one.
 //! This lets operators export only what they care about and merge
 //! cross-PR without conflict.
 //!
@@ -262,8 +264,9 @@ impl ClusterState {
     /// latter as "delete everything in it" (#259).
     ///
     /// # Errors
-    /// When the text is not valid TOML, does not match the schema, or
-    /// declares the same identity twice within a family (#261).
+    /// When the text is not valid TOML, does not match the schema,
+    /// declares the same identity twice within a family (#261), or
+    /// declares no family at all (#371).
     pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
         let mut state: Self = toml::from_str(text)?;
         let raw: toml::Value = toml::from_str(text)?;
@@ -281,6 +284,20 @@ impl ClusterState {
                 CURRENT_STATE_SCHEMA
             );
         }
+        // #371: a document that mentions no family manages nothing, so
+        // `diff` reports "no changes" whatever the cluster holds. An empty
+        // or cut-off file passed a CI drift gate that way.
+        let declares_a_family = state
+            .declared_families
+            .as_ref()
+            .is_some_and(|keys| keys.iter().any(|k| k != "meta"));
+        anyhow::ensure!(
+            declares_a_family,
+            "state document declares no resource family (it is empty, holds only \
+             comments or only [meta]), so there would be nothing to compare. \
+             Export one with `proxxx state export`, or declare a family; \
+             `pools = []` declares that the cluster has no pools."
+        );
         Ok(state)
     }
 
@@ -1401,6 +1418,8 @@ pve_version = "9.1.9"
     fn a_document_without_the_field_still_loads() {
         let s = ClusterState::from_toml_str(
             r#"
+pools = []
+
 [meta]
 profile = "prod"
 exported_at = "2026-07-01T00:00:00Z"
@@ -1420,6 +1439,8 @@ pve_version = "9.1.9"
     fn the_current_schema_loads() {
         let toml = format!(
             r#"
+pools = []
+
 [meta]
 schema_version = {CURRENT_STATE_SCHEMA}
 profile = "prod"
@@ -1429,5 +1450,45 @@ pve_version = "9.1.9"
 "#
         );
         ClusterState::from_toml_str(&toml).expect("the current schema must load");
+    }
+}
+
+#[cfg(test)]
+mod declares_no_family_tests {
+    use super::ClusterState;
+
+    fn refusal(text: &str) -> String {
+        let err = ClusterState::from_toml_str(text).expect_err("must be refused");
+        format!("{err:#}")
+    }
+
+    /// #371: `: > empty.toml; proxxx state diff empty.toml` reported no
+    /// drift and exited 0. An empty, comment-only or `[meta]`-only
+    /// document manages nothing and is refused instead.
+    #[test]
+    fn a_document_without_a_family_is_refused() {
+        for text in [
+            "",
+            "\n  \n",
+            "# state for prod\n",
+            "[meta]\nprofile = \"prod\"\nexported_at = \"2026-10-21T00:00:00Z\"\n",
+        ] {
+            let msg = refusal(text);
+            assert!(
+                msg.contains("declares no resource family") && msg.contains("pools = []"),
+                "{text:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_declared_family_is_enough() {
+        for text in [
+            "pools = []\n",
+            "[[storage]]\nstorage = \"local\"\n",
+            "[firewall_options]\n",
+        ] {
+            ClusterState::from_toml_str(text).unwrap_or_else(|e| panic!("{text:?}: {e:#}"));
+        }
     }
 }

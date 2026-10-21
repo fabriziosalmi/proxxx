@@ -138,6 +138,66 @@ impl Resource {
             Self::MappingsUsb => "mappings-usb",
         }
     }
+
+    /// The top-level document keys this resource exports into.
+    #[must_use]
+    pub const fn family_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Pools => &["pools"],
+            Self::Acl => &["acl"],
+            Self::Storage => &["storage"],
+            Self::BackupJobs => &["backup_jobs"],
+            Self::FirewallCluster => &[
+                "firewall_options",
+                "firewall_aliases",
+                "firewall_ipsets",
+                "firewall_groups",
+            ],
+            Self::Notifications => &["notification_matchers"],
+            Self::HaResources => &["ha_resources"],
+            Self::HaRules => &["ha_rules"],
+            Self::MappingsPci => &["mappings_pci"],
+            Self::MappingsUsb => &["mappings_usb"],
+        }
+    }
+}
+
+/// Render an exported state as TOML, declaring every exported family.
+///
+/// An exported family with no members is written as `key = []` (#371).
+/// The model skips empty lists on serialisation, so an export of a family
+/// with no members used to contain only `[meta]`: the file declared
+/// nothing, a later diff left that family unmanaged, and a member created
+/// afterwards was never reported as drift.
+///
+/// The `key = []` lines go first, since every family is a table or an
+/// array of tables and top-level keys must precede them. Everything else
+/// is the plain serialisation, byte for byte, so files already in git do
+/// not change shape.
+///
+/// # Errors
+/// When the state does not serialise.
+pub fn render_export_toml(state: &ClusterState, resources: &[Resource]) -> Result<String> {
+    let body = toml::to_string_pretty(state)?;
+    let present: std::collections::BTreeSet<String> = match toml::Value::try_from(state)? {
+        toml::Value::Table(t) => t.keys().cloned().collect(),
+        _ => std::collections::BTreeSet::new(),
+    };
+    let mut head = String::new();
+    for r in resources {
+        for k in r.family_keys() {
+            if !present.contains(*k) {
+                head.push_str(k);
+                head.push_str(" = []\n");
+            }
+        }
+    }
+    if head.is_empty() {
+        return Ok(body);
+    }
+    head.push('\n');
+    head.push_str(&body);
+    Ok(head)
 }
 
 /// Minimal read-only surface the state exporter needs from PVE. A
@@ -1633,5 +1693,77 @@ mod tests {
             !toml_str.contains("origin"),
             "origin dropped, got:\n{toml_str}"
         );
+    }
+}
+
+#[cfg(test)]
+mod render_export_tests {
+    use super::*;
+    use crate::state::model::{FirewallOptionsDecl, PoolDecl, StateMeta};
+
+    fn exported(pools: Vec<PoolDecl>) -> ClusterState {
+        ClusterState {
+            meta: Some(StateMeta {
+                profile: "lab".into(),
+                ..StateMeta::default()
+            }),
+            pools,
+            ..ClusterState::default()
+        }
+    }
+
+    /// #371: an exported family with no members is written as `key = []`,
+    /// so the file still declares it and parses back as managing it.
+    #[test]
+    fn an_empty_exported_family_is_declared_in_toml() {
+        let out = render_export_toml(&exported(Vec::new()), &[Resource::Pools]).unwrap();
+        assert!(out.lines().any(|l| l == "pools = []"), "got:\n{out}");
+        let back = ClusterState::from_toml_str(&out).expect("the export parses back");
+        assert!(back.manages("pools"));
+        assert!(back.pools.is_empty());
+        // Families that were not exported stay out of the file.
+        assert!(!back.manages("acl"), "got:\n{out}");
+    }
+
+    /// A family with members is rendered exactly as before.
+    #[test]
+    fn a_non_empty_family_renders_as_before() {
+        let state = exported(vec![PoolDecl {
+            poolid: "tenant-a".into(),
+            ..PoolDecl::default()
+        }]);
+        let out = render_export_toml(&state, &[Resource::Pools]).unwrap();
+        assert_eq!(out, toml::to_string_pretty(&state).unwrap());
+    }
+
+    /// `firewall-cluster` covers four keys; the empty lists are declared
+    /// next to the options table.
+    #[test]
+    fn firewall_cluster_declares_all_four_keys() {
+        let state = ClusterState {
+            firewall_options: Some(FirewallOptionsDecl::default()),
+            ..exported(Vec::new())
+        };
+        let out = render_export_toml(&state, &[Resource::FirewallCluster]).unwrap();
+        let back = ClusterState::from_toml_str(&out).expect("parses back");
+        for k in Resource::FirewallCluster.family_keys() {
+            assert!(back.manages(k), "{k} not declared in:\n{out}");
+        }
+        assert!(!back.manages("pools"));
+    }
+
+    /// Every family key names a real top-level field: a typo here would
+    /// write a key the parser rejects.
+    #[test]
+    fn every_family_key_parses_as_an_empty_family() {
+        for r in Resource::all() {
+            for k in r.family_keys() {
+                if *k == "firewall_options" {
+                    continue; // a table, not a list
+                }
+                ClusterState::from_toml_str(&format!("{k} = []\n"))
+                    .unwrap_or_else(|e| panic!("{k}: {e:#}"));
+            }
+        }
     }
 }
