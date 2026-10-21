@@ -63,6 +63,14 @@ pub struct AuditLogger {
     key_path: PathBuf,
 }
 
+/// How long an audit connection waits for another writer's lock (#468).
+/// Appends are rollback-journal transactions with an fsync each, and
+/// `SQLite`'s busy handler is not fair: with 8 writers on Linux one
+/// connection waited more than 5 s in 1 of 20 idle runs and 4 of 20 loaded
+/// ones, and a mutation whose write-ahead row times out is refused (#406).
+/// At 30 s the same runs failed 0 of 20 and 0 of 20.
+const AUDIT_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl AuditLogger {
     pub fn open() -> Result<Self> {
         let path = audit_db_path()?;
@@ -85,7 +93,7 @@ impl AuditLogger {
     fn open_at(path: &std::path::Path, key_path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("open audit db at {}", path.display()))?;
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        let _ = conn.busy_timeout(AUDIT_BUSY_TIMEOUT);
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -835,7 +843,7 @@ pub fn rotate_key_at(db_path: &Path, primary: &Path) -> Result<String> {
 
     let mut conn = Connection::open(db_path)
         .with_context(|| format!("open audit db at {}", db_path.display()))?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let _ = conn.busy_timeout(AUDIT_BUSY_TIMEOUT);
     migrate_key_id(&conn)?;
 
     // 1. Exclusive writer for the whole rotation.
@@ -1817,6 +1825,18 @@ mod key_rotation_tests {
 mod chain_transaction_tests {
     use super::{AuditLogger, PRIMARY_KEY_ID};
     use rusqlite::Connection;
+
+    /// `#468`: every audit connection waits 30 s for a busy lock.
+    #[test]
+    fn audit_connections_wait_thirty_seconds_for_a_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lg = AuditLogger::open_in(dir.path()).expect("open");
+        let ms: i64 = lg
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("pragma");
+        assert_eq!(ms, 30_000);
+    }
 
     fn spawn_writers(dir: &std::path::Path, threads: usize, per_thread: usize) {
         let handles: Vec<_> = (0..threads)
