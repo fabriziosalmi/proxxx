@@ -1629,10 +1629,21 @@ pub async fn execute(
                 Ok((serde_json::to_value(nodes)?, 0))
             }
             "guests" => Ok((serde_json::to_value(client.get_all_guests().await?)?, 0)),
-            "storage" => Ok((
-                serde_json::to_value(client.get_all_storage_pools().await?)?,
-                0,
-            )),
+            "storage" => {
+                let (pools, skipped) = client.get_all_storage_pools_and_skipped().await?;
+                // #352: an offline node's pools are not in the list; say so.
+                if !skipped.is_empty() {
+                    eprintln!(
+                        "note: not listed, node not online: {}",
+                        skipped
+                            .iter()
+                            .map(|n| crate::util::sanitize::sanitize_display(n).into_owned())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                Ok((serde_json::to_value(pools)?, 0))
+            }
             other => anyhow::bail!("Unknown resource: {other}. Use: nodes, guests, storage"),
         },
         Command::Start {

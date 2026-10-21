@@ -6,6 +6,11 @@ use super::deserialize_bool_from_int;
 #[serde(default)]
 pub struct StoragePool {
     pub storage: String,
+    /// Node this row was read from. `/nodes/{node}/storage` does not send
+    /// it; the client fills it in (#352). A storage that exists on several
+    /// nodes has one row per node, and without the node those rows could
+    /// not be told apart.
+    pub node: String,
     #[serde(rename = "type")]
     pub storage_type: String,
     pub used: u64,

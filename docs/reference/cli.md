@@ -205,7 +205,7 @@ within a major version.
 | `proxxx alerts test --route R`      | Send a synthetic event end-to-end |
 | `proxxx schedule {add,list,remove,pause,resume,run-due}` | Interval-based scheduler for recurring proxxx ops. TOML-backed at `<data_dir>/schedules.toml`. |
 | `proxxx watch --since 1h`           | Diff cluster state vs N ago |
-| `proxxx watch <target> --until X`   | Wait for a condition; optionally `--notify telegram` |
+| `proxxx watch <target> --until X`   | Wait for a condition; optionally `--notify telegram`. Targets: `vm-<id>`, `storage-<id>`, `storage-<id>@<node>` (required for a node-local storage that exists on several nodes). |
 | `proxxx replay <timestamp>`         | Show cached cluster state at a point in time |
 
 ## Cluster-state GitOps loop

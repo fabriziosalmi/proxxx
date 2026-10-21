@@ -265,6 +265,7 @@ mod tests {
         r.threshold_percent = 80;
         let snap = ClusterSnapshot {
             storage: vec![StoragePool {
+                node: String::new(),
                 storage: "local-lvm".into(),
                 storage_type: "lvm".into(),
                 used: 850,
@@ -289,6 +290,7 @@ mod tests {
         let snap = ClusterSnapshot {
             storage: vec![
                 StoragePool {
+                    node: String::new(),
                     storage: "local-lvm".into(),
                     storage_type: "lvm".into(),
                     used: 950,
@@ -299,6 +301,7 @@ mod tests {
                     shared: false,
                 },
                 StoragePool {
+                    node: String::new(),
                     storage: "ceph".into(),
                     storage_type: "rbd".into(),
                     used: 300,
@@ -323,6 +326,7 @@ mod tests {
         let r = rule("s_full", "storage_above");
         let snap = ClusterSnapshot {
             storage: vec![StoragePool {
+                node: String::new(),
                 storage: "broken".into(),
                 storage_type: "lvm".into(),
                 used: 100,
