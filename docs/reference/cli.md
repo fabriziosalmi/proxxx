@@ -247,7 +247,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 | `proxxx heatmap [--output text\|json]` | Per-node API RTT bucketed green/yellow/red. |
 | `proxxx anomaly [--threshold 3.0] [--output text\|json]` | Z-score outlier detection on cluster CPU + mem%. Exit 1 on any anomaly. |
 | `proxxx accounting --group-by pool\|node\|tag [--timeframe none\|hour\|day\|week\|month\|year] [--include-unassigned] [--output text\|json]` | Per-group resource accounting. With `--timeframe` set, integrates per-guest RRD into CPU-hours / GiB·h / net GiB / disk GiB. |
-| `proxxx backup-verify [--max-age-days 7] [--output text\|json]` | Metadata-level integrity probe of each guest's most-recent backup. Exit 1 on any missing/error. |
+| `proxxx backup-verify [--max-age-days 7] [--output text\|json]` | Metadata-level integrity probe of each guest's most-recent backup. Status per guest: `pass`, `stale`, `missing`, `error`, or `unknown` when a backup storage or the node's guest list could not be read (the reason names it). Exit 1 on any missing, error or unknown. |
 | `proxxx upgrade-check --target 9.x [--output text\|json]` | PVE major-upgrade pre-flight scanner. Exit 1 on any block-severity finding. |
 | `proxxx migrate <vmid> <target> --yes --stream` | Live per-disk progress (TTY bars) or NDJSON; works with `--format json` for pipelines. |
 | `proxxx serial <vmid> --node N --record [PATH]` | Open the serial console AND record it as asciinema cast v2. |

@@ -54,9 +54,14 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyResult {
-    pub vmid: u32,
+    /// Absent on a node-level row (the node's guests could not be listed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vmid: Option<u32>,
     pub node: String,
-    pub age_days: f64,
+    /// Absent when no backup was found or the state is unknown (#357):
+    /// `0.0` read as "a backup from today".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<f64>,
     pub size_bytes: u64,
     pub status: VerifyStatus,
     pub reason: String,
@@ -69,6 +74,55 @@ pub enum VerifyStatus {
     Stale,
     Missing,
     Error,
+    /// The backups could not be checked: a backup storage or the node's
+    /// guest list could not be read (#357). Not the same as `missing`.
+    Unknown,
+}
+
+/// One node's backups, read once per backup-capable storage: the newest
+/// `(ctime, size)` per vmid, and the storages that could not be read.
+struct NodeBackups {
+    newest: std::collections::HashMap<u32, (u64, u64)>,
+    unreadable: Vec<String>,
+}
+
+async fn read_node_backups(
+    client: &Arc<PxClient>,
+    node: &str,
+    storages: &[crate::api::types::StoragePool],
+) -> NodeBackups {
+    use crate::api::ProxmoxGateway;
+    let mut out = NodeBackups {
+        newest: std::collections::HashMap::new(),
+        unreadable: Vec::new(),
+    };
+    // Only storages that can hold backups. Listing `content=backup` on the
+    // others returns nothing, and an unrelated storage that is down must
+    // not make every guest unknown.
+    for s in storages
+        .iter()
+        .filter(|s| s.content.split(',').any(|c| c.trim() == "backup"))
+    {
+        match client
+            .list_storage_content(node, &s.storage, Some("backup"))
+            .await
+        {
+            Ok(content) => {
+                for item in content {
+                    if let Some(vmid) = item.vmid {
+                        let e = out.newest.entry(vmid).or_insert((item.ctime, item.size));
+                        if item.ctime > e.0 {
+                            *e = (item.ctime, item.size);
+                        }
+                    }
+                }
+            }
+            // #357: this used to be skipped, and a guest whose backups
+            // live on an unreachable storage was reported "missing".
+            Err(e) => out.unreadable.push(format!("{}: {e:#}", s.storage)),
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
@@ -77,54 +131,57 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
 
     let nodes = client.get_nodes().await?;
     let mut results: Vec<VerifyResult> = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
-    // For each guest, query its most-recent backup from PVE's
-    // /nodes/{n}/storage/{s}/content?content=backup. We need to
-    // know which storage hosts the backups — operators usually
-    // have one PBS-backed storage; we walk every storage and pick
-    // the freshest backup per vmid.
+    // For each guest, find its most-recent backup across the node's
+    // backup-capable storages (`/nodes/{n}/storage/{s}/content?content=backup`).
     for n in &nodes {
+        let unknown_node = |reason: String| VerifyResult {
+            vmid: None,
+            node: n.node.clone(),
+            age_days: None,
+            size_bytes: 0,
+            status: VerifyStatus::Unknown,
+            reason,
+        };
         let guests = match client.get_guests(&n.node).await {
             Ok(g) => g,
-            Err(_) => continue,
+            Err(e) => {
+                results.push(unknown_node(format!("could not list guests: {e:#}")));
+                continue;
+            }
         };
-        let storages = match client.get_storage_pools(&n.node).await {
-            Ok(s) => s,
-            Err(_) => continue,
+        if guests.is_empty() {
+            continue;
+        }
+        let backups = match client.get_storage_pools(&n.node).await {
+            Ok(storages) => read_node_backups(client, &n.node, &storages).await,
+            Err(e) => NodeBackups {
+                newest: std::collections::HashMap::new(),
+                unreadable: vec![format!("storage list: {e:#}")],
+            },
         };
 
         for g in &guests {
-            // Find most-recent backup of this vmid across all storages
-            // on this node. PVE returns `volid`, `size`, `ctime`,
-            // `vmid`. Pick the largest ctime.
-            let mut best: Option<(u64, u64)> = None; // (ctime, size)
-            for s in &storages {
-                if let Ok(content) = client
-                    .list_storage_content(&n.node, &s.storage, Some("backup"))
-                    .await
-                {
-                    for item in content {
-                        if item.vmid == Some(g.vmid) {
-                            let ctime = item.ctime;
-                            let size = item.size;
-                            if best.is_none_or(|(t, _)| ctime > t) {
-                                best = Some((ctime, size));
-                            }
-                        }
-                    }
-                }
-            }
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let result = match best {
-                None => VerifyResult {
-                    vmid: g.vmid,
+            let result = match backups.newest.get(&g.vmid).copied() {
+                None if !backups.unreadable.is_empty() => VerifyResult {
+                    vmid: Some(g.vmid),
                     node: n.node.clone(),
-                    age_days: 0.0,
+                    age_days: None,
+                    size_bytes: 0,
+                    status: VerifyStatus::Unknown,
+                    reason: format!(
+                        "no backup in the readable storages; could not read {}",
+                        backups.unreadable.join("; ")
+                    ),
+                },
+                None => VerifyResult {
+                    vmid: Some(g.vmid),
+                    node: n.node.clone(),
+                    age_days: None,
                     size_bytes: 0,
                     status: VerifyStatus::Missing,
                     reason: "no backup found for this guest".to_string(),
@@ -132,39 +189,42 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                 Some((ctime, size)) => {
                     #[allow(clippy::cast_precision_loss)]
                     let age_days = (now.saturating_sub(ctime) as f64) / 86400.0;
-                    if size == 0 {
-                        VerifyResult {
-                            vmid: g.vmid,
-                            node: n.node.clone(),
-                            age_days,
-                            size_bytes: 0,
-                            status: VerifyStatus::Error,
-                            reason: "backup size 0 — likely corrupt manifest".to_string(),
-                        }
+                    // A newer backup may sit on a storage that could not
+                    // be read; say so instead of judging silently.
+                    let caveat = if backups.unreadable.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (could not read {})", backups.unreadable.join("; "))
+                    };
+                    let (status, reason) = if size == 0 {
+                        (
+                            VerifyStatus::Error,
+                            "backup size 0 — likely corrupt manifest".to_string(),
+                        )
                     } else if age_days > args.max_age_days as f64 {
-                        VerifyResult {
-                            vmid: g.vmid,
-                            node: n.node.clone(),
-                            age_days,
-                            size_bytes: size,
-                            status: VerifyStatus::Stale,
-                            reason: format!(
+                        (
+                            VerifyStatus::Stale,
+                            format!(
                                 "newest backup is {age_days:.1} days old (threshold {})",
                                 args.max_age_days
                             ),
-                        }
+                        )
                     } else {
-                        VerifyResult {
-                            vmid: g.vmid,
-                            node: n.node.clone(),
-                            age_days,
-                            size_bytes: size,
-                            status: VerifyStatus::Pass,
-                            reason: format!(
+                        (
+                            VerifyStatus::Pass,
+                            format!(
                                 "{:.1} GiB, {age_days:.1}d old",
                                 size as f64 / (1024.0 * 1024.0 * 1024.0)
                             ),
-                        }
+                        )
+                    };
+                    VerifyResult {
+                        vmid: Some(g.vmid),
+                        node: n.node.clone(),
+                        age_days: Some(age_days),
+                        size_bytes: size,
+                        status,
+                        reason: reason + &caveat,
                     }
                 }
             };
@@ -172,9 +232,12 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
         }
     }
 
-    let any_failure = results
-        .iter()
-        .any(|r| matches!(r.status, VerifyStatus::Missing | VerifyStatus::Error));
+    let any_failure = results.iter().any(|r| {
+        matches!(
+            r.status,
+            VerifyStatus::Missing | VerifyStatus::Error | VerifyStatus::Unknown
+        )
+    });
 
     match args.output {
         VerifyOutput::Json => {
@@ -186,7 +249,7 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                 crate::outln!("(no guests / no backups found)");
             } else {
                 crate::outln!(
-                    "{vmid:<8}  {node:<14}  {status:<8}  {age:<8}  reason",
+                    "{vmid:<8}  {node:<14}  {status:<9}  {age:<8}  reason",
                     vmid = "vmid",
                     node = "node",
                     status = "status",
@@ -200,13 +263,16 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                         VerifyStatus::Stale => "! stale",
                         VerifyStatus::Missing => "✗ miss",
                         VerifyStatus::Error => "✗ ERROR",
+                        VerifyStatus::Unknown => "? unknown",
                     };
+                    let vmid = r.vmid.map_or_else(|| "-".to_string(), |v| v.to_string());
+                    let age = r
+                        .age_days
+                        .map_or_else(|| "-".to_string(), |a| format!("{a:.1}"));
                     crate::outln!(
-                        "{vmid:<8}  {node:<14}  {status:<8}  {age:<8.1}  {reason}",
-                        vmid = r.vmid,
+                        "{vmid:<8}  {node:<14}  {status:<9}  {age:<8}  {reason}",
                         node = r.node,
                         status = st,
-                        age = r.age_days,
                         reason = r.reason,
                     );
                 }
@@ -230,5 +296,9 @@ mod tests {
             "missing"
         );
         assert_eq!(serde_json::to_value(VerifyStatus::Error).unwrap(), "error");
+        assert_eq!(
+            serde_json::to_value(VerifyStatus::Unknown).unwrap(),
+            "unknown"
+        );
     }
 }
