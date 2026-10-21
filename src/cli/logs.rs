@@ -61,9 +61,16 @@ pub enum LogsCommand {
 
         /// Time window. Anything `journalctl --since` accepts:
         /// `"1 hour ago"`, `"2026-05-20 01:00:00"`, `"yesterday"`.
-        /// Without this, follow starts from "now" — no history.
+        /// Without it, a follow shows journalctl's last few lines and
+        /// then new ones; `--no-follow` shows the last `--lines` lines.
         #[arg(long)]
         since: Option<String>,
+
+        /// Show at most the last N lines of each node's journal
+        /// (`journalctl -n N`). With `--no-follow` and no `--since` it
+        /// defaults to 200, so the command never dumps a whole journal.
+        #[arg(long)]
+        lines: Option<u32>,
 
         /// Don't follow; emit lines up to "now" then exit. Useful for
         /// a finite window scan: `--since "1 hour ago" --no-follow`.
@@ -196,6 +203,7 @@ pub async fn execute_logs(
             grep,
             service,
             since,
+            lines,
             no_follow,
         } => {
             let ssh_cfg = config.ssh.clone().context(
@@ -218,7 +226,8 @@ pub async fn execute_logs(
                 anyhow::bail!("no cluster nodes found — is the API reachable?");
             }
 
-            let cmd = build_journalctl_command(service.as_deref(), since.as_deref(), !no_follow);
+            let cmd =
+                build_journalctl_command(service.as_deref(), since.as_deref(), lines, !no_follow);
 
             // Fan out: one tokio task per node, all feeding a single
             // mpsc. Bounded channel sized to 4 × node count so a slow
@@ -323,7 +332,12 @@ pub async fn execute_logs(
 /// always set so timestamps are parseable. Single-quoted args are
 /// shell-safe because we control every input (no user-supplied raw
 /// command fragments).
-fn build_journalctl_command(service: Option<&str>, since: Option<&str>, follow: bool) -> String {
+fn build_journalctl_command(
+    service: Option<&str>,
+    since: Option<&str>,
+    lines: Option<u32>,
+    follow: bool,
+) -> String {
     let mut parts: Vec<String> = vec![
         "journalctl".to_string(),
         "--no-pager".to_string(),
@@ -341,8 +355,19 @@ fn build_journalctl_command(service: Option<&str>, since: Option<&str>, follow: 
         parts.push("--since".to_string());
         parts.push(shell_single_quote(window));
     }
+    // #392: without a window or a count, a non-follow run asked journalctl
+    // for the whole retained journal (277,187 lines on a lab node).
+    let lines = lines.or((!follow && since.is_none()).then_some(DEFAULT_NO_FOLLOW_LINES));
+    if let Some(n) = lines {
+        parts.push("--lines".to_string());
+        parts.push(n.to_string());
+    }
     parts.join(" ")
 }
+
+/// Lines per node a `--no-follow` run shows when neither `--since` nor
+/// `--lines` bounds it (#392).
+const DEFAULT_NO_FOLLOW_LINES: u32 = 200;
 
 /// Single-quote a value for `sh -c`. Wraps in `'…'` and escapes
 /// embedded single quotes via the standard `'\''` trick. Used for
@@ -523,7 +548,7 @@ mod tests {
 
     #[test]
     fn build_journalctl_command_minimal() {
-        let cmd = build_journalctl_command(None, None, true);
+        let cmd = build_journalctl_command(None, None, None, true);
         assert!(cmd.contains("--follow"));
         assert!(cmd.contains("--output short-iso"));
         assert!(!cmd.contains("--unit"));
@@ -532,16 +557,29 @@ mod tests {
 
     #[test]
     fn build_journalctl_command_with_unit_and_since() {
-        let cmd = build_journalctl_command(Some("pveproxy"), Some("1 hour ago"), true);
+        let cmd = build_journalctl_command(Some("pveproxy"), Some("1 hour ago"), None, true);
         assert!(cmd.contains("--unit 'pveproxy'"));
         assert!(cmd.contains("--since '1 hour ago'"));
     }
 
     #[test]
     fn build_journalctl_command_no_follow_finite_window() {
-        let cmd = build_journalctl_command(None, Some("yesterday"), false);
+        let cmd = build_journalctl_command(None, Some("yesterday"), None, false);
         assert!(!cmd.contains("--follow"));
         assert!(cmd.contains("--since 'yesterday'"));
+    }
+
+    /// #392: a non-follow run with no window is bounded.
+    #[test]
+    fn a_no_follow_run_without_since_is_bounded() {
+        let cmd = build_journalctl_command(None, None, None, false);
+        assert!(cmd.contains("--lines 200"), "{cmd}");
+        // An explicit count wins; a window needs no default.
+        assert!(build_journalctl_command(None, None, Some(50), false).contains("--lines 50"));
+        let windowed = build_journalctl_command(None, Some("1 hour ago"), None, false);
+        assert!(!windowed.contains("--lines"), "{windowed}");
+        // A follow keeps journalctl's own behaviour unless asked.
+        assert!(!build_journalctl_command(None, None, None, true).contains("--lines"));
     }
 
     #[test]
