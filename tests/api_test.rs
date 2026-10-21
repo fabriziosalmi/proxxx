@@ -6834,3 +6834,119 @@ mod issue_348_no_retry_mutations {
         );
     }
 }
+
+/// #438: lists PVE returns in no stable order come back sorted by their
+/// identity, so two runs over an unchanged cluster print the same output.
+#[cfg(test)]
+mod stable_order {
+    use proxxx::api::ProxmoxGateway;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn serve(server: &MockServer, p: &str, data: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/api2/json{p}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn unordered_lists_come_back_sorted() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/access/roles",
+            json!([
+                {"roleid": "PVEVMAdmin", "privs": ""},
+                {"roleid": "Administrator", "privs": ""},
+                {"roleid": "PVEAuditor", "privs": ""},
+            ]),
+        )
+        .await;
+        serve(
+            &server,
+            "/access/domains",
+            json!([
+                {"realm": "pve", "type": "pve"},
+                {"realm": "pam", "type": "pam"},
+            ]),
+        )
+        .await;
+        serve(
+            &server,
+            "/storage",
+            json!([
+                {"storage": "local-lvm", "type": "lvmthin"},
+                {"storage": "backups", "type": "nfs"},
+                {"storage": "local", "type": "dir"},
+            ]),
+        )
+        .await;
+        serve(
+            &server,
+            "/nodes",
+            json!([
+                {"node": "pve3", "status": "online"},
+                {"node": "pve1", "status": "online"},
+                {"node": "pve2", "status": "offline"},
+            ]),
+        )
+        .await;
+        for n in ["pve1", "pve3"] {
+            serve(
+                &server,
+                &format!("/nodes/{n}/storage"),
+                json!([
+                    {"storage": "local-lvm", "type": "lvmthin"},
+                    {"storage": "local", "type": "dir"},
+                ]),
+            )
+            .await;
+        }
+        let c = super::tests::mock_client(&server).await;
+
+        let roles: Vec<String> = c
+            .list_roles()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.roleid)
+            .collect();
+        assert_eq!(roles, ["Administrator", "PVEAuditor", "PVEVMAdmin"]);
+        let realms: Vec<String> = c
+            .list_realms()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.realm)
+            .collect();
+        assert_eq!(realms, ["pam", "pve"]);
+        let defs: Vec<String> = c
+            .list_cluster_storages()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.storage)
+            .collect();
+        assert_eq!(defs, ["backups", "local", "local-lvm"]);
+        let nodes: Vec<String> = c
+            .get_nodes()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node)
+            .collect();
+        assert_eq!(nodes, ["pve1", "pve2", "pve3"]);
+        // `ls storage`: nodes in order, each node's storages in order.
+        let pools: Vec<String> = c
+            .get_all_storage_pools()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.storage)
+            .collect();
+        assert_eq!(pools, ["local", "local-lvm", "local", "local-lvm"]);
+    }
+}
