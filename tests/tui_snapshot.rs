@@ -134,11 +134,11 @@ fn stopped_lxc(vmid: u32, name: &str, node: &str) -> Guest {
 }
 
 fn storage_pool(name: &str, used: u64, total: u64) -> StoragePool {
-    // Note: StoragePool intentionally has no `node` field; PVE returns
-    // it without one (the route puts the node in the URL). proxxx
-    // discards the URL context when modeling.
+    // PVE returns the row without a node (the route puts it in the URL);
+    // the client fills `node` in (#352).
     StoragePool {
         storage: name.to_string(),
+        node: "pve1".to_string(),
         used,
         total,
         avail: total.saturating_sub(used),

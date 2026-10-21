@@ -208,10 +208,12 @@ async fn collect(
 
     // Storage: PVE returns one row per (storage, node) pair; we
     // collapse to one row per storage with `on_nodes` carrying the
-    // node names the storage is visible on. Shared storages
-    // typically appear on every node; we infer `shared` heuristically
-    // by counting nodes (a storage on >1 node is effectively shared
-    // from the perspective of an operator's mental model).
+    // node names the storage is visible on. `shared` is PVE's own flag
+    // (#352: it was inferred from the node count, so every node-local
+    // `local` / `local-lvm` read as shared). A shared storage is one
+    // volume seen from every node, so one row's usage is the usage; a
+    // node-local one is a separate volume per node, so usage and size
+    // are summed (it used to take whichever node came first).
     let mut storage_map: std::collections::BTreeMap<String, StorageSummary> =
         std::collections::BTreeMap::new();
     for n in &nodes_raw {
@@ -219,24 +221,25 @@ async fn collect(
             continue;
         }
         for s in client.get_storage_pools(&n.node).await? {
+            let first = !storage_map.contains_key(&s.storage);
             let entry = storage_map
                 .entry(s.storage.clone())
                 .or_insert_with(|| StorageSummary {
                     storage: s.storage.clone(),
                     kind: s.storage_type.clone(),
-                    used_bytes: s.used,
-                    total_bytes: s.total,
-                    shared: false, // refined after the loop
+                    used_bytes: 0,
+                    total_bytes: 0,
+                    shared: s.shared,
                     on_nodes: Vec::new(),
                 });
+            if first || !entry.shared {
+                entry.used_bytes += s.used;
+                entry.total_bytes += s.total;
+            }
             if !entry.on_nodes.contains(&n.node) {
                 entry.on_nodes.push(n.node.clone());
             }
         }
-    }
-    // A storage visible on >1 node is shared by inference.
-    for entry in storage_map.values_mut() {
-        entry.shared = entry.on_nodes.len() > 1;
     }
     let storages: Vec<StorageSummary> = storage_map.into_values().collect();
 

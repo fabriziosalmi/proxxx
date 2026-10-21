@@ -105,6 +105,7 @@ fn debian_lxc(vmid: u32, node: &str) -> Guest {
 fn local_storage() -> StoragePool {
     StoragePool {
         storage: "local".to_string(),
+        node: "pve1".to_string(),
         used: 5 * 1024 * 1024 * 1024,
         total: 100 * 1024 * 1024 * 1024,
         avail: 95 * 1024 * 1024 * 1024,

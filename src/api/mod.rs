@@ -48,13 +48,23 @@ pub trait ProxmoxGateway: Send + Sync {
     /// Every storage pool across the cluster (online nodes only; a failed fetch
     /// on a reachable node propagates rather than silently dropping pools).
     async fn get_all_storage_pools(&self) -> Result<Vec<StoragePool>> {
+        Ok(self.get_all_storage_pools_and_skipped().await?.0)
+    }
+
+    /// Like [`Self::get_all_storage_pools`], plus the nodes that were
+    /// skipped because they are not online, so a caller can say that their
+    /// pools are missing instead of leaving them out silently (#352).
+    async fn get_all_storage_pools_and_skipped(&self) -> Result<(Vec<StoragePool>, Vec<String>)> {
         let mut out = Vec::new();
+        let mut skipped = Vec::new();
         for n in self.get_nodes().await? {
             if matches!(n.status, crate::api::types::NodeStatus::Online) {
                 out.extend(self.get_storage_pools(&n.node).await?);
+            } else {
+                skipped.push(n.node);
             }
         }
-        Ok(out)
+        Ok((out, skipped))
     }
 
     /// Resolve a vmid to its guest (carrying `.node` + `.guest_type`) by scanning

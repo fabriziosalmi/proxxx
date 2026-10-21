@@ -61,7 +61,9 @@ async fn watch_until(
         } else if target.starts_with("storage-") {
             met = check_storage_condition(client, &target, &key, comparator, value_str).await?;
         } else {
-            anyhow::bail!("Unsupported target format. Use vm-<id> or storage-<id>");
+            anyhow::bail!(
+                "Unsupported target format. Use vm-<id>, storage-<id> or storage-<id>@<node>"
+            );
         }
     }
 
@@ -104,17 +106,17 @@ async fn check_storage_condition(
     comparator: char,
     value_str: &str,
 ) -> Result<bool> {
-    let pool_id = target.trim_start_matches("storage-");
-    let pool = client
-        .get_all_storage_pools()
-        .await?
-        .into_iter()
-        .find(|p| p.storage == pool_id)
-        .ok_or_else(|| {
-            crate::api::ApiError::NotFound(format!("Target storage {target} not found"))
-        })?;
     if key != "usage" {
         anyhow::bail!("Unsupported condition key for storage: {key}");
+    }
+    let pool = select_storage_row(client.get_all_storage_pools().await?, target)?;
+    // #352: total 0 gave NaN, which never matched; say why instead.
+    if pool.total == 0 {
+        anyhow::bail!(
+            "storage {} on {} reports a size of 0 (inactive or not mounted?)",
+            pool.storage,
+            pool.node
+        );
     }
     let usage_pct = (pool.used as f64 / pool.total as f64) * 100.0;
     let threshold: f64 = value_str.trim_end_matches('%').parse()?;
@@ -123,6 +125,41 @@ async fn check_storage_condition(
         '>' => usage_pct > threshold,
         _ => (usage_pct - threshold).abs() < 0.01,
     })
+}
+
+/// Pick the row a `storage-<id>[@<node>]` target means (#352). A storage
+/// on several nodes has one row per node; the first one found used to be
+/// taken, from an arbitrary node. With `@<node>` that node's row is used.
+/// Without it, one row, or a shared storage (one volume seen from every
+/// node), is unambiguous; a node-local storage on several nodes is an
+/// error that names the nodes.
+fn select_storage_row(
+    pools: Vec<crate::api::types::StoragePool>,
+    target: &str,
+) -> Result<crate::api::types::StoragePool> {
+    let spec = target.trim_start_matches("storage-");
+    let (id, node) = match spec.split_once('@') {
+        Some((id, node)) => (id, Some(node)),
+        None => (spec, None),
+    };
+    let mut rows: Vec<_> = pools
+        .into_iter()
+        .filter(|p| p.storage == id && node.is_none_or(|n| p.node == n))
+        .collect();
+    let not_found =
+        || crate::api::ApiError::NotFound(format!("Target storage {target} not found")).into();
+    match rows.len() {
+        0 => Err(not_found()),
+        1 => Ok(rows.remove(0)),
+        _ if rows.iter().all(|p| p.shared) => Ok(rows.remove(0)),
+        _ => {
+            let nodes: Vec<String> = rows.iter().map(|p| p.node.clone()).collect();
+            anyhow::bail!(
+                "storage {id} is node-local and exists on {}; pick one with storage-{id}@<node>",
+                nodes.join(", ")
+            )
+        }
+    }
 }
 
 fn watch_since(profile_label: &str, since: &str) -> Result<(Value, i32)> {
@@ -184,4 +221,52 @@ fn watch_since(profile_label: &str, since: &str) -> Result<(Value, i32)> {
         }),
         0,
     ))
+}
+
+#[cfg(test)]
+mod storage_target_tests {
+    use super::select_storage_row;
+    use crate::api::types::StoragePool;
+
+    fn row(storage: &str, node: &str, used: u64, shared: bool) -> StoragePool {
+        StoragePool {
+            storage: storage.into(),
+            node: node.into(),
+            used,
+            total: 100,
+            shared,
+            ..StoragePool::default()
+        }
+    }
+
+    /// #352: a node-local storage on several nodes is ambiguous; the first
+    /// row found used to be taken, from an arbitrary node.
+    #[test]
+    fn a_node_local_storage_on_several_nodes_needs_a_node() {
+        let pools = vec![
+            row("local-lvm", "pve1", 26, false),
+            row("local-lvm", "pve2", 0, false),
+        ];
+        let err = select_storage_row(pools.clone(), "storage-local-lvm").unwrap_err();
+        assert!(
+            format!("{err}").contains("storage-local-lvm@<node>"),
+            "{err}"
+        );
+        let r = select_storage_row(pools, "storage-local-lvm@pve2").unwrap();
+        assert_eq!((r.node.as_str(), r.used), ("pve2", 0));
+    }
+
+    #[test]
+    fn a_shared_storage_or_a_single_row_needs_no_node() {
+        let shared = vec![row("nfs", "pve1", 25, true), row("nfs", "pve2", 25, true)];
+        assert_eq!(select_storage_row(shared, "storage-nfs").unwrap().used, 25);
+        let single = vec![row("local", "pve1", 10, false)];
+        assert_eq!(
+            select_storage_row(single, "storage-local").unwrap().node,
+            "pve1"
+        );
+        assert!(select_storage_row(vec![], "storage-x").is_err());
+        let one = vec![row("local", "pve1", 10, false)];
+        assert!(select_storage_row(one, "storage-local@pve9").is_err());
+    }
 }

@@ -1025,6 +1025,9 @@ impl ProxmoxGateway for PxClient {
         // #438: unordered on the PVE side; sort by the identity.
         let mut pools = resp.data;
         pools.sort_by(|a, b| a.storage.cmp(&b.storage));
+        for p in &mut pools {
+            p.node = node.to_string();
+        }
         Ok(pools)
     }
 
