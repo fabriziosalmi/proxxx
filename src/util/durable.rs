@@ -143,6 +143,20 @@ mod call_site_tests {
     }
 }
 
+/// A tag for a temp file name, `<pid>.<n>`, where `n` comes from a
+/// process-wide counter. The pid alone (or pid plus a clock reading) is not
+/// unique: two threads of one process writing the same target picked the
+/// same temp name, and one removed or failed on the other's file.
+#[must_use]
+pub fn unique_temp_tag() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 /// Write `bytes` to `path` without ever exposing them with wider permissions
 /// or half written (`#376`).
 ///
@@ -177,7 +191,7 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let name = path
         .file_name()
         .map_or_else(|| "proxxx".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", unique_temp_tag()));
     let _ = std::fs::remove_file(&tmp);
     let written = (|| -> Result<()> {
         let mut opts = std::fs::OpenOptions::new();
@@ -205,6 +219,45 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod private_write_tests {
     use super::write_private_atomic;
+
+    /// Threads of one process writing the same file must not share a temp
+    /// file: every write succeeds, the result is one complete payload, and no
+    /// temp file is left behind.
+    #[test]
+    fn concurrent_writers_in_one_process_each_use_their_own_temp_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("secret");
+        let payloads: Vec<Vec<u8>> = (0..16u8).map(|i| vec![b'a' + i; 4096]).collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(payloads.len()));
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|p| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_private_atomic(&path, &p)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join()
+                .expect("join")
+                .expect("every concurrent write succeeds");
+        }
+        let got = std::fs::read(&path).expect("read");
+        assert!(
+            payloads.contains(&got),
+            "the file must hold one complete payload"
+        );
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .expect("ls")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["secret".to_string()], "no temp file may remain");
+    }
 
     #[test]
     fn creates_a_0600_file_in_a_new_0700_directory_and_replaces_atomically() {

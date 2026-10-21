@@ -536,16 +536,13 @@ fn load_or_create_key(path: &Path) -> Result<Vec<u8>> {
 fn create_key_once(path: &Path) -> Result<Vec<u8>> {
     let mut key = vec![0u8; 32];
     getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
     let tmp = path.with_file_name(format!(
-        "{}.{}-{nanos}.tmp",
+        "{}.{}.tmp",
         path.file_name().map_or_else(
             || "audit.key".to_string(),
             |n| n.to_string_lossy().into_owned()
         ),
-        std::process::id()
+        crate::util::durable::unique_temp_tag()
     ));
     write_new_key_file(&tmp, &key)?;
     let linked = std::fs::hard_link(&tmp, path);
