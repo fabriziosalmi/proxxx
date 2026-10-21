@@ -73,6 +73,22 @@ fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
         ),
         Span::styled(format!(" {vms} VM  {lxc} LXC "), Theme::dim()),
     ]);
+    // #378: guests of a node whose last fetch failed are last-known data.
+    let title = if state.guests_stale_nodes.is_empty() {
+        title
+    } else {
+        let nodes: Vec<String> = state
+            .guests_stale_nodes
+            .iter()
+            .map(|n| sanitize_display(n).into_owned())
+            .collect();
+        let mut spans = title.spans;
+        spans.push(Span::styled(
+            format!(" stale (fetch failed): {} ", nodes.join(", ")),
+            Style::default().fg(Theme::WARNING),
+        ));
+        Line::from(spans)
+    };
 
     f.render_widget(
         Paragraph::new(title).block(
@@ -227,7 +243,14 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 cpu_span,
                 mem_span,
                 disk_span,
-                Span::raw(sanitize_display(&guest.node).into_owned()),
+                if state.guests_stale_nodes.contains(&guest.node) {
+                    Span::styled(
+                        format!("{}?", sanitize_display(&guest.node)),
+                        Style::default().fg(Theme::WARNING),
+                    )
+                } else {
+                    Span::raw(sanitize_display(&guest.node).into_owned())
+                },
                 Span::raw(tags),
             ])
             .style(style)
