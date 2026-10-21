@@ -752,6 +752,36 @@ impl IntoArray for serde_json::Value {
     }
 }
 
+/// Exit code of a batch operation whose approval request was sent and is
+/// waiting for an answer (#360). Documented in the exit-code reference.
+pub const EXIT_HITL_PENDING: i32 = 9;
+
+/// Batch exit code: 2 when any guest failed, else 9 when any is waiting
+/// for approval, else 0. A failure is the more urgent signal, so it wins.
+const fn batch_exit_code(has_failure: bool, hitl_pending: bool) -> i32 {
+    if has_failure {
+        2
+    } else if hitl_pending {
+        EXIT_HITL_PENDING
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod batch_exit_code_tests {
+    use super::*;
+
+    /// #360: pending approval used to exit 3, the configuration-error code.
+    #[test]
+    fn pending_has_its_own_code_and_a_failure_wins() {
+        assert_eq!(batch_exit_code(false, false), 0);
+        assert_eq!(batch_exit_code(false, true), 9);
+        assert_eq!(batch_exit_code(true, true), 2);
+        assert_eq!(batch_exit_code(true, false), 2);
+    }
+}
+
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 async fn execute_batch_op_full(
     client: &std::sync::Arc<crate::api::PxClient>,
@@ -917,9 +947,8 @@ async fn execute_batch_op_full(
                     .with_guest_type(guest.guest_type)
                     .with_params(params);
 
-                    let row = crate::hitl::pending::PendingStore::open_default()
-                        .and_then(|store| store.insert(&new_req))?;
-                    let id = row.id;
+                    let store = crate::hitl::pending::PendingStore::open_default()?;
+                    let id = store.insert(&new_req)?.id;
 
                     let reason = format!("CLI requested batch op: {action_str}");
                     if let Err(e) = tg
@@ -932,11 +961,42 @@ async fn execute_batch_op_full(
                         )
                         .await
                     {
-                        error!("Failed to send Telegram approval request: {}", e);
+                        // #360: nobody was asked, so nobody can approve. Close
+                        // the request instead of leaving it pending forever,
+                        // and report the operation as not run.
+                        error!("Failed to send Telegram approval request: {e:#}");
+                        let message = format!(
+                            "requires {} approval(s), but the approval request could not \
+                             be sent: {e:#}. The operation was not run.",
+                            policy.require
+                        );
+                        store.mark_failed(&id, &message)?;
+                        results.push(serde_json::json!({
+                            "vmid": vmid,
+                            "status": "error",
+                            "txn_id": id,
+                            "message": message,
+                        }));
+                        has_failure = true;
+                        continue;
                     }
                     id
                 } else {
-                    crate::hitl::pending::generate_request_id()?
+                    // #360: a policy requires approval but there is no channel
+                    // to ask on. This used to report `pending_hitl` with a
+                    // made-up id and exit 3, while no request existed.
+                    results.push(serde_json::json!({
+                        "vmid": vmid,
+                        "status": "error",
+                        "message": format!(
+                            "requires {} approval(s) via {} (policy {} {}), but no [telegram] \
+                             section is configured, so no approval request can be sent. \
+                             The operation was not run.",
+                            policy.require, policy.channel, policy.action, policy.target
+                        ),
+                    }));
+                    has_failure = true;
+                    continue;
                 };
 
                 results.push(serde_json::json!({
@@ -1043,13 +1103,10 @@ async fn execute_batch_op_full(
         }
     }
 
-    let exit_code = if hitl_pending {
-        3 // HITL Pending takes precedence in batch semantics
-    } else if has_failure {
-        2 // Partial Failure
-    } else {
-        0 // Full Success
-    };
+    // #360: "waiting for approval" has its own exit code; it used to be 3,
+    // the configuration-error code. A failure is the more urgent signal,
+    // so it wins over pending.
+    let exit_code = batch_exit_code(has_failure, hitl_pending);
 
     Ok((serde_json::Value::Array(results), exit_code))
 }
