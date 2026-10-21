@@ -14,6 +14,7 @@ instead of grepping stderr.
 | `6` | Pre-flight risk refused | A `SEVERE` risk surfaced and `--allow-risk` was not passed. Fires from per-guest pre-flight (running guest, etc.) and state-apply / `reconcile converge` pre-flight (non-empty pool delete, root-role ACL delete, shared-storage delete, batch ≥ 50). The unmanned daemon `auto_converge` always runs as if `--allow-risk` were absent, so a Severe drift is left for a human (no exit code — it alerts + skips). |
 | `7` | Cluster transient | `RateLimited` / `StorageHang` / persistent retries exhausted |
 | `8` | Mutation refused by a local lock | A mutation was refused by a proxxx-side lock before reaching PVE. Either `proxxx incident freeze` is in effect (run `proxxx incident thaw` first, or wait for the TTL), or the active profile is configured `read_only = true` (point at a writable profile, or remove the flag from `config.toml`). |
+| `9` | Waiting for approval | A batch operation (`start`, `stop`, `restart`, `suspend`, `resume`) matched a HITL policy and its approval request was sent; the guest was not acted on yet. If a guest also failed, the exit is `2`. When the request cannot be sent (no `[telegram]`, or Telegram refused it), the guest is reported as an error and nothing is pending. |
 
 ## Handling in shell
 
