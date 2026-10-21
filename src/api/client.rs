@@ -910,7 +910,12 @@ fn flatten_zfs_children(nodes: &[RawZfsNode], out: &mut Vec<crate::api::types::Z
 impl ProxmoxGateway for PxClient {
     async fn get_nodes(&self) -> Result<Vec<Node>> {
         let resp: ApiResponse<Vec<Node>> = self.get("/nodes").await?;
-        Ok(resp.data)
+        // #438: PVE returns this list in no stable order (measured: the
+        // order changes between calls), so two identical runs printed
+        // different output. Sort by the identity.
+        let mut nodes = resp.data;
+        nodes.sort_by(|a, b| a.node.cmp(&b.node));
+        Ok(nodes)
     }
 
     async fn get_guests(&self, node: &str) -> Result<Vec<Guest>> {
@@ -1017,7 +1022,10 @@ impl ProxmoxGateway for PxClient {
                 node = urlenc_segment(node)
             ))
             .await?;
-        Ok(resp.data)
+        // #438: unordered on the PVE side; sort by the identity.
+        let mut pools = resp.data;
+        pools.sort_by(|a, b| a.storage.cmp(&b.storage));
+        Ok(pools)
     }
 
     async fn get_task_log(
@@ -2695,12 +2703,18 @@ impl ProxmoxGateway for PxClient {
 
     async fn list_roles(&self) -> Result<Vec<crate::api::types::Role>> {
         let resp: ApiResponse<Vec<crate::api::types::Role>> = self.get("/access/roles").await?;
-        Ok(resp.data)
+        // #438: unordered on the PVE side; sort by the identity.
+        let mut roles = resp.data;
+        roles.sort_by(|a, b| a.roleid.cmp(&b.roleid));
+        Ok(roles)
     }
 
     async fn list_realms(&self) -> Result<Vec<crate::api::types::Realm>> {
         let resp: ApiResponse<Vec<crate::api::types::Realm>> = self.get("/access/domains").await?;
-        Ok(resp.data)
+        // #438: unordered on the PVE side; sort by the identity.
+        let mut realms = resp.data;
+        realms.sort_by(|a, b| a.realm.cmp(&b.realm));
+        Ok(realms)
     }
 
     async fn list_tfa(&self, userid: &str) -> Result<Vec<crate::api::types::TfaEntry>> {
@@ -3894,7 +3908,10 @@ impl ProxmoxGateway for PxClient {
     async fn list_cluster_storages(&self) -> Result<Vec<crate::api::types::StorageDefinition>> {
         let resp: ApiResponse<Vec<crate::api::types::StorageDefinition>> =
             self.get("/storage").await?;
-        Ok(resp.data)
+        // #438: unordered on the PVE side; sort by the identity.
+        let mut defs = resp.data;
+        defs.sort_by(|a, b| a.storage.cmp(&b.storage));
+        Ok(defs)
     }
     async fn get_cluster_storage(
         &self,
