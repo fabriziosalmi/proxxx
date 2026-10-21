@@ -19,6 +19,17 @@ If both `default` and `[profiles.X]` are present, `default` selects
 which profile to load. If only top-level fields are present, those
 fields are the implicit profile.
 
+::: warning Where the sections below go
+The sections on this page (`[ssh]`, `[telegram]`, `[[policies]]`,
+`[pbs]`, `[[alerts]]`, ...) are shown at the top level, which is where
+they go in a flat config. In a config made of `[profiles.<name>]` tables
+(no top-level `url`), write them per profile (`[profiles.<name>.telegram]`,
+`[[profiles.<name>.alerts]]`) or once for every profile under `[defaults]`
+(`[defaults.telegram]`, `[[defaults.alerts]]`). There the top level may hold
+only `default`, `profiles` and `defaults`; any other key is a configuration
+error (exit 3), because no profile would read it.
+:::
+
 ## `[defaults]` (shared profile base)
 
 Optional top-level table merged under every `[profiles.<name>]` entry before
@@ -151,7 +162,7 @@ max_unmanned_changes = 5              # hard cap on changes-per-tick for the UNM
                                       # unmanned-delete band.
 ```
 
-## `[ssh]` (top-level default)
+## `[ssh]`
 
 ```toml
 [ssh]
@@ -339,5 +350,9 @@ Common errors:
 - **`token_secret` has trailing whitespace** — copy-paste from the
   web UI sometimes appends a newline; trim it
 - **`auth = "token"` without `token_id`** — both fields are required
+- **A top-level section in a profile-only config** — with `[profiles.<name>]`
+  tables and no top-level `url`, a top-level `[[alerts]]`, `[telegram]`,
+  `[ssh]` or misspelled key is refused, naming the key; move it under
+  `[defaults]` or `[profiles.<name>]`
 - **`[ssh]` referenced but `key_path` is missing** — `proxxx ssh <vmid>`,
   `proxxx perms`, and `proxxx patch apply` all require it
