@@ -5,6 +5,7 @@ use serde_json::Value;
 mod access;
 mod accounting;
 mod anomaly;
+pub mod args;
 mod audit_cmd;
 mod backup_verify;
 mod cloudimg;

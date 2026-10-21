@@ -4,7 +4,7 @@
 // module appeared twice (once per crate target). Now main.rs is a thin
 // orchestrator and the lib is the single compilation unit.
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tracing::info;
 
 use proxxx::{cli, tui, util};
@@ -49,7 +49,9 @@ struct Cli {
 
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // #363: positional identifiers refuse "" before any request.
+    let matches = proxxx::cli::args::reject_empty_positionals(Cli::command()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // #283 — resolve the file form once, here, so every downstream call
     // site sees one value and neither has to know which flag supplied
