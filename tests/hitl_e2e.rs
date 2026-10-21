@@ -4714,3 +4714,85 @@ async fn mcp_approval_send_failure_refuses_and_closes_the_request() {
     assert_eq!(row.status, proxxx::hitl::pending::RequestStatus::Failed);
     assert!(gw.calls_for("delete_guest").is_empty(), "nothing executed");
 }
+
+/// #380: a failed start, stop, restart, snapshot, delete or migrate reaches
+/// the TUI as `DataMsg::Error` (the status-line banner) naming the action,
+/// the guest and the error. It was only written to the log file.
+#[tokio::test]
+async fn failed_tui_actions_are_reported_on_screen() {
+    use proxxx::app::{AppState, SideEffect};
+    use proxxx::tui::{dispatch_side_effect, DataMsg, HitlCoordinator};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let coord = Arc::new(HitlCoordinator::new());
+    let mut g = guest(200, "vm-x");
+    g.node = "pve01".to_string();
+    let client = Arc::new(
+        HitlMockGateway::new()
+            .with_node_and_guest("pve01", g.clone())
+            .fail_mutations("PVE said no"),
+    );
+    let mut state = AppState::new();
+    state.guests = vec![g];
+
+    let cases: [(&str, SideEffect); 6] = [
+        ("start 200 failed", SideEffect::StartGuest { vmid: 200 }),
+        (
+            "stop 200 failed",
+            SideEffect::StopGuest {
+                vmid: 200,
+                force: true,
+            },
+        ),
+        ("restart 200 failed", SideEffect::RestartGuest { vmid: 200 }),
+        (
+            "snapshot of 200 failed",
+            SideEffect::CreateSnapshot {
+                vmid: 200,
+                name: "s1".into(),
+            },
+        ),
+        ("delete 200 failed", SideEffect::DeleteGuest { vmid: 200 }),
+        (
+            "migrate 200 failed",
+            SideEffect::MigrateGuest {
+                node: "pve01".into(),
+                vmid: 200,
+                target_node: "pve02".into(),
+            },
+        ),
+    ];
+    for (expected, effect) in cases {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        // skip_hitl: these run as if already approved.
+        dispatch_side_effect(
+            effect,
+            &state,
+            &client,
+            &tx,
+            &[],
+            true,
+            None,
+            &coord,
+            "default",
+        )
+        .await;
+        let mut seen = None;
+        for _ in 0..100 {
+            match rx.try_recv() {
+                Ok(DataMsg::Error(e)) => {
+                    seen = Some(e);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        let msg = seen.unwrap_or_else(|| panic!("no on-screen error for '{expected}'"));
+        assert!(
+            msg.contains(expected) && msg.contains("PVE said no"),
+            "{msg}"
+        );
+    }
+}

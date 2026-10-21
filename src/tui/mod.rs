@@ -1533,6 +1533,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to start guest {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("start {vmid} failed: {e}")))
+                                .await;
                         }
                     }
                     let _ = tx_cloned.send(DataMsg::GuestTaskFinished(vmid)).await;
@@ -1558,6 +1562,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to stop guest {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("stop {vmid} failed: {e}")))
+                                .await;
                         }
                     }
 
@@ -1614,6 +1622,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to restart guest {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("restart {vmid} failed: {e}")))
+                                .await;
                         }
                     }
                     let _ = tx_cloned.send(DataMsg::GuestTaskFinished(vmid)).await;
@@ -1632,6 +1644,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to create snapshot for {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("snapshot of {vmid} failed: {e}")))
+                                .await;
                         }
                     }
                 });
@@ -1649,6 +1665,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to delete guest {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("delete {vmid} failed: {e}")))
+                                .await;
                         }
                     }
                 });
@@ -1693,11 +1713,21 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         }
                         Err(e) => {
                             error!("Failed to migrate guest {vmid}: {e}");
+                            // #380: say it on screen, not only in the log file.
+                            let _ = tx_cloned
+                                .send(DataMsg::Error(format!("migrate {vmid} failed: {e}")))
+                                .await;
                         }
                     }
                 });
             } else {
                 error!("Cannot migrate {vmid}: guest type unknown (not in state)");
+                // #380: the key press did nothing; say why.
+                let _ = tx
+                    .send(DataMsg::Error(format!(
+                        "migrate {vmid}: guest type unknown, refresh and retry"
+                    )))
+                    .await;
             }
         }
         SideEffect::ExecuteGuestCommand {
@@ -1707,6 +1737,7 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
             command,
         } => {
             let client_cloned = Arc::clone(client);
+            let tx_cloned = tx.clone();
             crate::util::spawn_traced::spawn_traced("execute_guest_command", async move {
                 match client_cloned
                     .execute_guest_command(&node, vmid, &guest_type, &command)
@@ -1722,6 +1753,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                     }
                     Err(e) => {
                         error!("Guest {vmid} command failed: {e}");
+                        // #380: say it on screen, not only in the log file.
+                        let _ = tx_cloned
+                            .send(DataMsg::Error(format!("command in {vmid} failed: {e}")))
+                            .await;
                     }
                 }
             });
@@ -1742,6 +1777,10 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                     }
                     Err(e) => {
                         error!("Failed to fetch task log: {e}");
+                        // #380: the operator asked for it; say why it is missing.
+                        let _ = tx_cloned
+                            .send(DataMsg::Error(format!("task log: {e}")))
+                            .await;
                     }
                 }
             });
@@ -2109,7 +2148,12 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                     Ok(upid) => {
                         let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
                     }
-                    Err(e) => error!("move_disk {vmid} failed: {e}"),
+                    Err(e) => {
+                        error!("move_disk {vmid} failed: {e}");
+                        let _ = tx_cloned
+                            .send(DataMsg::Error(format!("move disk of {vmid} failed: {e}")))
+                            .await;
+                    }
                 }
             });
         }
@@ -2131,7 +2175,12 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                     Ok(upid) => {
                         let _ = tx_cloned.send(DataMsg::TaskStarted(upid)).await;
                     }
-                    Err(e) => error!("resize_disk {vmid} failed: {e}"),
+                    Err(e) => {
+                        error!("resize_disk {vmid} failed: {e}");
+                        let _ = tx_cloned
+                            .send(DataMsg::Error(format!("resize disk of {vmid} failed: {e}")))
+                            .await;
+                    }
                 }
             });
         }
