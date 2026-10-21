@@ -348,11 +348,12 @@ pub async fn execute_accounting(
     let has_window = timeframe_pve.is_some();
     match args.output {
         AccountingOutput::Json => {
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
         AccountingOutput::Text if has_window => {
             // Wide format: include the time-window columns.
-            println!(
+            crate::outln!(
                 "{group:<20}  {guests:<6}  {cores:<5}  {mem:<10}  {disk:<10}  {cpuh:<10}  {memh:<14}  {netin:<10}  net-out",
                 group = "group",
                 guests = "guests",
@@ -364,9 +365,9 @@ pub async fn execute_accounting(
                 netin = "net-in",
             );
             let sep = "─".repeat(110);
-            println!("{sep}");
+            crate::outln!("{sep}");
             for r in &rows {
-                println!(
+                crate::outln!(
                     "{group:<20}  {guests:<6}  {cores:<5}  {mem:<10}  {disk:<10}  {cpuh:<10.2}  {memh:<14.1}  {netin:<10.2}  {netout:.2} GiB",
                     group = r.group,
                     guests = r.guest_count,
@@ -387,7 +388,7 @@ pub async fn execute_accounting(
             }
         }
         AccountingOutput::Text => {
-            println!(
+            crate::outln!(
                 "{group:<24}  {guests:<8}  {cores:<8}  {mem:<12}  disk",
                 group = "group",
                 guests = "guests",
@@ -395,9 +396,9 @@ pub async fn execute_accounting(
                 mem = "mem"
             );
             let sep = "─".repeat(72);
-            println!("{sep}");
+            crate::outln!("{sep}");
             for r in &rows {
-                println!(
+                crate::outln!(
                     "{group:<24}  {guests:<8}  {cores:<8}  {mem:<12}  {disk}",
                     group = r.group,
                     guests = r.guest_count,

@@ -77,10 +77,11 @@ pub async fn execute_heatmap(client: &Arc<PxClient>, args: HeatmapArgs) -> Resul
 
     match args.output {
         HeatmapOutput::Json => {
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&samples)?);
         }
         HeatmapOutput::Text => {
-            println!(
+            crate::outln!(
                 "{node:<16}  {endpoint:<10}  {rtt:>9}  {bucket:<7}  status",
                 node = "node",
                 endpoint = "endpoint",
@@ -88,9 +89,9 @@ pub async fn execute_heatmap(client: &Arc<PxClient>, args: HeatmapArgs) -> Resul
                 bucket = "bucket"
             );
             let sep = "─".repeat(70);
-            println!("{sep}");
+            crate::outln!("{sep}");
             for s in &samples {
-                println!(
+                crate::outln!(
                     "{node:<16}  {endpoint:<10}  {rtt:>9.1}  {bucket:<7}  {status}",
                     node = s.node,
                     endpoint = s.endpoint,

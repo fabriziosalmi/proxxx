@@ -91,17 +91,18 @@ pub async fn execute_anomaly(client: &Arc<PxClient>, args: AnomalyArgs) -> Resul
                 "node_count": nodes.len(),
                 "anomalies": anomalies,
             });
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         AnomalyOutput::Text => {
             if anomalies.is_empty() {
-                println!(
+                crate::outln!(
                     "✓ no anomalies above z={threshold} across {n} nodes",
                     threshold = args.threshold,
                     n = nodes.len()
                 );
             } else {
-                println!(
+                crate::outln!(
                     "{node:<16}  {metric:<10}  {value:<10}  {mean:<10}  {std:<10}  z",
                     node = "node",
                     metric = "metric",
@@ -110,9 +111,9 @@ pub async fn execute_anomaly(client: &Arc<PxClient>, args: AnomalyArgs) -> Resul
                     std = "stddev"
                 );
                 let sep = "─".repeat(72);
-                println!("{sep}");
+                crate::outln!("{sep}");
                 for a in &anomalies {
-                    println!(
+                    crate::outln!(
                         "{node:<16}  {metric:<10}  {value:<10.3}  {mean:<10.3}  {std:<10.3}  {z:.2}",
                         node = a.node,
                         metric = a.metric,

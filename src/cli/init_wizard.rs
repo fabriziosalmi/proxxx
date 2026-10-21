@@ -204,7 +204,7 @@ fn prompt_existing_action(path: &Path) -> Result<ExistingAction> {
     println!(
         "{}A config already exists at {}{}",
         YELLOW,
-        path.display(),
+        safe(&path.display().to_string()),
         RESET
     );
     let choice = prompt_choice(
@@ -1034,28 +1034,40 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 
+// The wizard prints its own ANSI colours, so it keeps `println!` (the
+// `outln!` sanitizer would strip them) and sanitizes each interpolated
+// value instead (#437): messages and defaults can carry text from the
+// cluster (node names, version strings, API errors).
+fn safe(s: &str) -> std::borrow::Cow<'_, str> {
+    crate::util::sanitize::sanitize_display(s)
+}
 fn ok(msg: &str) {
-    println!("  {}✓{} {msg}", GREEN, RESET);
+    println!("  {}✓{} {}", GREEN, RESET, safe(msg));
 }
 fn warn(msg: &str) {
-    println!("  {}⚠{} {msg}", YELLOW, RESET);
+    println!("  {}⚠{} {}", YELLOW, RESET, safe(msg));
 }
 fn fail(msg: &str) {
-    println!("  {}✗{} {msg}", RED, RESET);
+    println!("  {}✗{} {}", RED, RESET, safe(msg));
 }
 fn info(msg: &str) {
-    println!("{}{msg}{}", DIM, RESET);
+    println!("{}{}{}", DIM, safe(msg), RESET);
 }
 fn step(n: u8, total: u8, label: &str) {
     println!();
     println!(
         "{}{}Step {n}/{total}{} · {}{}{}",
-        BOLD, CYAN, RESET, BOLD, label, RESET
+        BOLD,
+        CYAN,
+        RESET,
+        BOLD,
+        safe(label),
+        RESET
     );
 }
 
 fn prompt_string(label: &str) -> Result<String> {
-    print!("{label}: ");
+    print!("{}: ", safe(label));
     io::stdout().flush()?;
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
@@ -1063,7 +1075,7 @@ fn prompt_string(label: &str) -> Result<String> {
 }
 
 fn prompt_string_default(label: &str, default: &str) -> Result<String> {
-    print!("{label} [{default}]: ");
+    print!("{} [{}]: ", safe(label), safe(default));
     io::stdout().flush()?;
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
@@ -1078,7 +1090,7 @@ fn prompt_string_default(label: &str, default: &str) -> Result<String> {
 fn prompt_yn(label: &str, default: bool) -> Result<bool> {
     let hint = if default { "[Y/n]" } else { "[y/N]" };
     loop {
-        print!("{label} {hint}: ");
+        print!("{} {hint}: ", safe(label));
         io::stdout().flush()?;
         let mut s = String::new();
         io::stdin().read_line(&mut s)?;
@@ -1093,10 +1105,10 @@ fn prompt_yn(label: &str, default: bool) -> Result<bool> {
 }
 
 fn prompt_choice(label: &str, options: &[&str], default: usize) -> Result<usize> {
-    println!("{label}:");
+    println!("{}:", safe(label));
     for (i, opt) in options.iter().enumerate() {
         let marker = if i == default { ">" } else { " " };
-        println!("  {marker} {}) {opt}", i + 1);
+        println!("  {marker} {}) {}", i + 1, safe(opt));
     }
     loop {
         print!("  Choice [{}]: ", default + 1);
@@ -1119,7 +1131,7 @@ fn prompt_choice(label: &str, options: &[&str], default: usize) -> Result<usize>
 /// if the terminal can't be put into raw mode (rare; happens when
 /// stdin is piped from a script).
 fn prompt_password(label: &str) -> Result<String> {
-    print!("{label}: ");
+    print!("{}: ", safe(label));
     io::stdout().flush()?;
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};

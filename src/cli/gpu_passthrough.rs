@@ -120,11 +120,12 @@ pub async fn execute_gpu_inspect(
 
     match args.output {
         GpuOutput::Json => {
+            // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         GpuOutput::Text => {
-            println!("== GPU/PCI passthrough probe — node {} ==\n", report.node);
-            println!(
+            crate::outln!("== GPU/PCI passthrough probe — node {} ==\n", report.node);
+            crate::outln!(
                 "IOMMU enabled:   {} ({})",
                 if report.iommu_enabled {
                     "✓ yes"
@@ -137,8 +138,8 @@ pub async fn execute_gpu_inspect(
                     &report.iommu_evidence
                 }
             );
-            println!("IOMMU groups:    {}", report.iommu_group_count);
-            println!(
+            crate::outln!("IOMMU groups:    {}", report.iommu_group_count);
+            crate::outln!(
                 "vfio module:     {}",
                 if report.vfio_loaded {
                     "✓ loaded"
@@ -146,9 +147,9 @@ pub async fn execute_gpu_inspect(
                     "✗ NOT loaded"
                 }
             );
-            println!("\nDevices ({}):", report.devices.len());
+            crate::outln!("\nDevices ({}):", report.devices.len());
             for d in &report.devices {
-                println!(
+                crate::outln!(
                     "  {addr:<10}  {vendor:<8}:{device:<8}  {class:<24}  driver={driver}",
                     addr = d.address,
                     vendor = d.vendor,
@@ -157,15 +158,15 @@ pub async fn execute_gpu_inspect(
                     driver = d.driver,
                 );
             }
-            println!();
+            crate::outln!();
             if !report.iommu_enabled {
-                println!(
+                crate::outln!(
                     "✗ IOMMU is not enabled — passthrough will not work. \
                      Enable in BIOS (`VT-d` / `AMD-Vi`) and on the kernel cmdline \
                      (`intel_iommu=on iommu=pt` or `amd_iommu=on iommu=pt`)."
                 );
             } else if !report.vfio_loaded {
-                println!(
+                crate::outln!(
                     "! IOMMU on but vfio not loaded — pre-stage with \
                      `echo vfio-pci >> /etc/modules-load.d/vfio.conf`."
                 );

@@ -304,6 +304,7 @@ fn emit(line: &LogLine, grep: Option<&str>, render: LogsRenderMode) {
     }
     match render {
         LogsRenderMode::Json => match serde_json::to_string(line) {
+            // raw-output: JSON for machines; removing characters would change the data
             Ok(s) => println!("{s}"),
             Err(e) => tracing::warn!("logs tail: serialise failure: {e}"),
         },
@@ -311,9 +312,9 @@ fn emit(line: &LogLine, grep: Option<&str>, render: LogsRenderMode) {
             // Time first because it sorts; node next so columns
             // align visually across lines from the same host.
             if line.timestamp.is_empty() {
-                println!("(no-ts)               [{}] {}", line.node, line.text);
+                crate::outln!("(no-ts)               [{}] {}", line.node, line.text);
             } else {
-                println!("{}  [{}] {}", line.timestamp, line.node, line.text);
+                crate::outln!("{}  [{}] {}", line.timestamp, line.node, line.text);
             }
         }
     }

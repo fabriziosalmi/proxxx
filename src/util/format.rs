@@ -75,10 +75,36 @@ fn table_cell(s: &str) -> String {
     crate::util::sanitize::sanitize_display(&escaped).into_owned()
 }
 
+/// `println!` for human-readable CLI output (#437): the formatted text
+/// goes through [`safe_text`], so a control sequence inside an
+/// interpolated cluster string (a guest name, a journal line, a resource
+/// comment) is removed instead of reaching the terminal. Line breaks and
+/// tabs are kept. Machine output (JSON, TOML documents) keeps `println!`
+/// with a `// raw-output:` note, since removing characters would change
+/// the data.
+#[macro_export]
+macro_rules! outln {
+    () => {
+        ::std::println!()
+    };
+    ($($arg:tt)*) => {
+        ::std::println!("{}", $crate::util::format::safe_text(&::std::format!($($arg)*)))
+    };
+}
+
+/// `print!` counterpart of [`outln!`](crate::outln).
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => {
+        ::std::print!("{}", $crate::util::format::safe_text(&::std::format!($($arg)*)))
+    };
+}
+
 /// Whole-text output (pretty JSON, plain lines). JSON escapes C0 controls
 /// inside strings but not DEL or C1, which are removed here (#365); the
 /// line breaks of the layout are kept.
-fn safe_text(s: &str) -> String {
+#[must_use]
+pub fn safe_text(s: &str) -> String {
     s.split('\n')
         .map(|line| crate::util::sanitize::sanitize_display(line))
         .collect::<Vec<_>>()

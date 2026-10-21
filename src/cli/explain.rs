@@ -370,15 +370,16 @@ fn print_catalog(output: ExplainFormat) {
             .map(|e| serde_json::json!({"id": e.id, "title": e.title}))
             .collect();
         match serde_json::to_string_pretty(&cat) {
+            // raw-output: JSON for machines; removing characters would change the data
             Ok(s) => println!("{s}"),
             Err(e) => eprintln!("explain catalog json: {e}"),
         }
     } else {
-        println!("Known error IDs (run `proxxx explain <id>` for full details):\n");
+        crate::outln!("Known error IDs (run `proxxx explain <id>` for full details):\n");
         // Compute column width once so titles align.
         let max_id = ENTRIES.iter().map(|e| e.id.len()).max().unwrap_or(8);
         for e in ENTRIES {
-            println!(
+            crate::outln!(
                 "  {id:<width$}   {title}",
                 id = e.id,
                 width = max_id,
@@ -389,57 +390,58 @@ fn print_catalog(output: ExplainFormat) {
 }
 
 fn print_text(e: &ExplainEntry) {
-    println!("# {} ({})\n", e.title, e.id);
-    println!("Cause:");
-    println!("  {}", wrap_indent(e.cause, "  "));
+    crate::outln!("# {} ({})\n", e.title, e.id);
+    crate::outln!("Cause:");
+    crate::outln!("  {}", wrap_indent(e.cause, "  "));
     if !e.fixes.is_empty() {
-        println!("\nFixes:");
+        crate::outln!("\nFixes:");
         for (i, fix) in e.fixes.iter().enumerate() {
-            println!("  {n}. {fix}", n = i + 1);
+            crate::outln!("  {n}. {fix}", n = i + 1);
         }
     }
     if !e.commands.is_empty() {
-        println!("\nDiagnostic commands:");
+        crate::outln!("\nDiagnostic commands:");
         for c in e.commands {
-            println!("  $ {c}");
+            crate::outln!("  $ {c}");
         }
     }
     if !e.references.is_empty() {
-        println!("\nReferences:");
+        crate::outln!("\nReferences:");
         for r in e.references {
-            println!("  - {r}");
+            crate::outln!("  - {r}");
         }
     }
 }
 
 fn print_markdown(e: &ExplainEntry) {
-    println!("# {} (`{}`)\n", e.title, e.id);
-    println!("## Cause\n\n{}\n", e.cause);
+    crate::outln!("# {} (`{}`)\n", e.title, e.id);
+    crate::outln!("## Cause\n\n{}\n", e.cause);
     if !e.fixes.is_empty() {
-        println!("## Fixes\n");
+        crate::outln!("## Fixes\n");
         for (i, fix) in e.fixes.iter().enumerate() {
-            println!("{n}. {fix}", n = i + 1);
+            crate::outln!("{n}. {fix}", n = i + 1);
         }
-        println!();
+        crate::outln!();
     }
     if !e.commands.is_empty() {
-        println!("## Diagnostic commands\n\n```bash");
+        crate::outln!("## Diagnostic commands\n\n```bash");
         for c in e.commands {
-            println!("{c}");
+            crate::outln!("{c}");
         }
-        println!("```\n");
+        crate::outln!("```\n");
     }
     if !e.references.is_empty() {
-        println!("## References\n");
+        crate::outln!("## References\n");
         for r in e.references {
-            println!("- {r}");
+            crate::outln!("- {r}");
         }
-        println!();
+        crate::outln!();
     }
 }
 
 fn print_json(e: &ExplainEntry) -> Result<()> {
     let s = serde_json::to_string_pretty(e)?;
+    // raw-output: JSON for machines; removing characters would change the data
     println!("{s}");
     Ok(())
 }

@@ -273,15 +273,16 @@ pub fn execute_schedule(action: ScheduleCommand, secure: bool) -> Result<(Value,
             let store = load_store()?;
             if matches!(output, ScheduleOutput::Json) {
                 let s = serde_json::to_string_pretty(&store.schedules)?;
+                // raw-output: JSON for machines; removing characters would change the data
                 println!("{s}");
                 return Ok((Value::Null, 0));
             }
             if store.schedules.is_empty() {
-                println!("(no schedules — add one with `proxxx schedule add`)");
+                crate::outln!("(no schedules — add one with `proxxx schedule add`)");
                 return Ok((Value::Null, 0));
             }
             let now = now_secs();
-            println!(
+            crate::outln!(
                 "{name:<24}  {enabled:<7}  {every:<8}  {next:<8}  cmd",
                 name = "name",
                 enabled = "enabled",
@@ -289,7 +290,7 @@ pub fn execute_schedule(action: ScheduleCommand, secure: bool) -> Result<(Value,
                 next = "next"
             );
             let sep = "─".repeat(72);
-            println!("{sep}");
+            crate::outln!("{sep}");
             for s in &store.schedules {
                 let every = fmt_interval(s.interval_secs);
                 let next = if s.next_run <= now {
@@ -297,7 +298,7 @@ pub fn execute_schedule(action: ScheduleCommand, secure: bool) -> Result<(Value,
                 } else {
                     format!("{}s", s.next_run.saturating_sub(now))
                 };
-                println!(
+                crate::outln!(
                     "{name:<24}  {enabled:<7}  {every:<8}  {next:<8}  {cmd}",
                     name = s.name,
                     enabled = s.enabled,

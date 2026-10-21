@@ -238,13 +238,16 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
             match output {
                 ExportFormat::Toml => {
                     let s = state::export::render_export_toml(&exported, &resources)?;
+                    // raw-output: TOML document for machines; removing characters would change the data
                     print!("{s}");
                     if !s.ends_with('\n') {
+                        // raw-output: TOML document for machines; removing characters would change the data
                         println!();
                     }
                 }
                 ExportFormat::Json => {
                     let s = serde_json::to_string_pretty(&exported)?;
+                    // raw-output: JSON for machines; removing characters would change the data
                     println!("{s}");
                 }
             }
@@ -287,15 +290,16 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
             match output {
                 DiffFormat::Text => {
                     if changes.is_empty() {
-                        println!("(no changes — live state matches declared)");
+                        crate::outln!("(no changes — live state matches declared)");
                     } else {
                         for c in &changes {
-                            println!("{}", state::diff::summary_line(c));
+                            crate::outln!("{}", state::diff::summary_line(c));
                         }
                     }
                 }
                 DiffFormat::Json => {
                     let json = serde_json::to_string_pretty(&changes)?;
+                    // raw-output: JSON for machines; removing characters would change the data
                     println!("{json}");
                 }
             }
@@ -385,15 +389,16 @@ pub async fn execute_state(client: &Arc<PxClient>, action: StateCommand) -> Resu
             match output {
                 ApplyOutputFormat::Text => {
                     if outcomes.is_empty() {
-                        println!("(no changes — live state matches declared)");
+                        crate::outln!("(no changes — live state matches declared)");
                     } else {
                         for o in outcomes {
-                            println!("{}", apply_summary_line(o));
+                            crate::outln!("{}", apply_summary_line(o));
                         }
                     }
                 }
                 ApplyOutputFormat::Json => {
                     let json = serde_json::to_string_pretty(outcomes)?;
+                    // raw-output: JSON for machines; removing characters would change the data
                     println!("{json}");
                 }
             }

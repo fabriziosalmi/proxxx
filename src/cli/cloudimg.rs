@@ -371,10 +371,11 @@ pub async fn execute_cloudimg(
             if matches!(output, CloudImgOutput::Json) {
                 let v: Vec<&CloudImg> = REGISTRY.iter().collect();
                 let s = serde_json::to_string_pretty(&v)?;
+                // raw-output: JSON for machines; removing characters would change the data
                 println!("{s}");
                 return Ok((Value::Null, 0));
             }
-            println!(
+            crate::outln!(
                 "{id:<32}  {distro:<8}  {version:<40}  {arch:<8}  {size:<10}  checksum",
                 id = "id",
                 distro = "distro",
@@ -383,12 +384,12 @@ pub async fn execute_cloudimg(
                 size = "size"
             );
             let sep = "─".repeat(130);
-            println!("{sep}");
+            crate::outln!("{sep}");
             for e in REGISTRY {
                 // Char-boundary safe (checksums are ASCII hex, but use
                 // the shared helper for consistency).
                 let sum_short = crate::util::sanitize::truncate_ellipsis(e.checksum, 16);
-                println!(
+                crate::outln!(
                     "{id:<32}  {distro:<8}  {version:<40}  {arch:<8}  {size:<10}  {algo}:{sum}",
                     id = e.id,
                     distro = e.distro,
@@ -594,6 +595,7 @@ pub async fn execute_cloudimg(
                 "state": final_state,
             });
             if matches!(output, CloudImgOutput::Json) {
+                // raw-output: JSON for machines; removing characters would change the data
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
                 let what = match final_state {
@@ -601,9 +603,9 @@ pub async fn execute_cloudimg(
                     "started" => format!("running VM {vmid} ({name})"),
                     _ => format!("VM {vmid} ({name})"),
                 };
-                println!("✓ provisioned {what} on {node} from {}", entry.id);
+                crate::outln!("✓ provisioned {what} on {node} from {}", entry.id);
                 if final_state == "template" {
-                    println!("  clone it: proxxx clone {vmid} <new-vmid> --name <name>");
+                    crate::outln!("  clone it: proxxx clone {vmid} <new-vmid> --name <name>");
                 }
             }
             // Self-printed above (text or JSON), so return Null to avoid a
