@@ -16,6 +16,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+static LOG_FILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record where the log file is, so a panic message can name it (#384:
+/// it named a fixed `~/.local/share/proxxx (proxxx.log)`, which is not
+/// the file on any platform). The first call wins.
+pub fn set_log_file(path: &std::path::Path) {
+    let _ = LOG_FILE.set(path.display().to_string());
+}
 
 /// Install the global panic hook. Safe to call multiple times — only
 /// the first call wires the chain; later calls are no-ops.
@@ -66,7 +74,9 @@ pub fn install() {
         // message printed to a CI log or screenshot is just as
         // dangerous as one in the audit file.
         eprintln!("   payload: {payload}");
-        eprintln!("   audit log: ~/.local/share/proxxx (proxxx.log)");
+        if let Some(log) = LOG_FILE.get() {
+            eprintln!("   log file: {log}");
+        }
         eprintln!();
 
         // 4. Run the original hook for the colourful trace.

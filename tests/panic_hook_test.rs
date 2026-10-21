@@ -29,8 +29,10 @@ mod tests {
 
     #[test]
     fn dev_panic_triggers_flight_recorder_hook() {
+        let logs = tempfile::tempdir().expect("tempdir");
         let out = Command::new(cargo_bin())
             .args(["dev-panic", "--message", "smoke-payload-xyz"])
+            .env("PROXXX_LOG_DIR", logs.path())
             .output()
             .expect("spawn proxxx");
 
@@ -49,9 +51,15 @@ mod tests {
             stderr.contains("smoke-payload-xyz"),
             "panic payload missing from stderr:\n{stderr}"
         );
+        // #384: the pointer names the log file that exists, not a fixed
+        // `~/.local/share/proxxx (proxxx.log)`.
+        let expected = format!(
+            "log file: {}",
+            logs.path().join("proxxx.<date>.log").display()
+        );
         assert!(
-            stderr.contains("audit log:"),
-            "audit log pointer missing from stderr:\n{stderr}"
+            stderr.contains(&expected),
+            "log file pointer `{expected}` missing from stderr:\n{stderr}"
         );
     }
 }

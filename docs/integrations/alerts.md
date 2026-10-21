@@ -53,7 +53,7 @@ gate.
 | :--- | :--- |
 | `telegram` | Reuses the `[telegram]` config from HITL |
 | `ntfy:<topic>` | HTTPS POST to `https://ntfy.sh/<topic>` (or self-hosted ntfy) |
-| `webhook:<url>` | HTTPS POST `application/json` with the full event |
+| `webhook:<url>` | HTTPS POST `application/json` with the full event. Logs and errors name only the scheme, host and port: the path and query, where hosted webhooks keep their secret, are never written. |
 
 Unknown channel specs are warned and skipped — the daemon does not
 abort on a misconfigured channel; the others still fire.

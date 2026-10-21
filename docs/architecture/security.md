@@ -239,7 +239,10 @@ read.
 `proxxx mcp serve-http` **refuses to start** on a non-loopback bind
 (e.g. `0.0.0.0`) unless `mcp_token` is set — pass `--insecure-bind` to
 override consciously. An empty or whitespace `mcp_token` counts as
-absent. The token is a profile config field (or the `--token` CLI flag);
+absent. The token is a profile config field, or comes from `--token-file`,
+`PROXXX_MCP_TOKEN` or `--token` (the last is visible in `ps`). An open SSE
+stream re-checks its token before every event and every 15 s and ends
+once a reload has rotated it out;
 when the server is network-exposed and the token is absent, every
 request is denied (fail-closed), and this survives a `SIGHUP` that
 clears the token.
@@ -311,7 +314,9 @@ DB volume so a stolen database is not a stolen chain:
 - `PROXXX_AUDIT_KEY` relocates just the HMAC key (keep the key and the
   DB on separate volumes).
 - `PROXXX_AUDIT_DIR` relocates both the DB and the key.
-- The audit directory is created `0700`.
+- The audit directory is created `0700`; the default data directory, which
+  also holds the log files, is narrowed to `0700` on start.
+- `audit.db` is created `0600`, and an older, wider one is narrowed on open.
 - A group- or world-readable `audit.key` is **refused on load** (unix) —
   tighten the mode before proxxx will read it.
 - `proxxx audit verify` exits non-zero on tamper.

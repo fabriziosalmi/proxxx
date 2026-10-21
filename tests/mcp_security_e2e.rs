@@ -665,3 +665,31 @@ async fn host_and_origin_check_runs_before_bearer_auth() {
 
     srv.abort();
 }
+
+/// #384: an integer parameter beyond u32 is refused before use. It was
+/// narrowed with `as u32`, so `guest_id` 4294967396 acted on VMID 100 and the
+/// HITL policy check saw the wrapped id.
+#[tokio::test]
+async fn an_out_of_range_integer_parameter_is_refused() {
+    let client = offline_client().await;
+    let cfg = base_cfg(Some(vec![Policy {
+        action: "*".into(),
+        target: "100".into(),
+        channel: "telegram".into(),
+        require: 1,
+    }]));
+    for bad in [json!(4_294_967_396_u64), json!(-1)] {
+        let err = proxxx::mcp::dispatch::handle_tool_call(
+            &client,
+            &cfg,
+            "get_guest_status",
+            &json!({ "guest_id": bad }),
+        )
+        .await
+        .expect_err("out-of-range guest_id must be refused");
+        assert!(
+            format!("{err}").contains("expected an integer from 0 to"),
+            "{err}"
+        );
+    }
+}

@@ -78,8 +78,19 @@ pub async fn handle_tool_call_with_store(
             use crate::mcp::tools::ParamType;
             match p.param_type {
                 ParamType::Int => {
-                    if !val.is_u64() && !val.is_i64() {
-                        anyhow::bail!("Parameter '{}': expected integer, got {}", p.name, val);
+                    // #384: every integer parameter (VMIDs, cores, memory,
+                    // disk size, limit) is narrowed to u32 below with `as`.
+                    // A larger or negative value wrapped: guest_id
+                    // 4294967396 acted on VMID 100, and the HITL policy
+                    // check saw the wrapped id. Refuse it here instead.
+                    let in_range = val.as_u64().is_some_and(|n| u32::try_from(n).is_ok());
+                    if !in_range {
+                        anyhow::bail!(
+                            "Parameter '{}': expected an integer from 0 to {}, got {}",
+                            p.name,
+                            u32::MAX,
+                            val
+                        );
                     }
                 }
                 ParamType::Bool => {

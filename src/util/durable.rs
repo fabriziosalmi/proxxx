@@ -157,6 +157,48 @@ pub fn unique_temp_tag() -> String {
     )
 }
 
+/// Create `dir` and its missing parents owner-only (`0700` on unix).
+/// With `tighten`, an existing `dir` that grants group or other access is
+/// narrowed to `0700`; pass it only for a directory proxxx owns outright,
+/// never for one an operator named (#384).
+///
+/// # Errors
+/// When the directory cannot be created, read, or narrowed.
+pub fn create_private_dir(dir: &Path, tighten: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("create directory {}", dir.display()))?;
+        if tighten {
+            let mode = std::fs::metadata(dir)
+                .with_context(|| format!("read directory {}", dir.display()))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| {
+                        format!(
+                            "narrow {} from {:o} to 700 (it holds proxxx's logs and audit trail)",
+                            dir.display(),
+                            mode & 0o777
+                        )
+                    })?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tighten;
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create directory {}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Write `bytes` to `path` without ever exposing them with wider permissions
 /// or half written (`#376`).
 ///
@@ -326,6 +368,10 @@ mod private_write_tests {
             (
                 "src/app/cache.rs",
                 "tightens the SQLite db and -wal/-shm sidecars SQLite created",
+            ),
+            (
+                "src/audit/mod.rs",
+                "audit.db created with mode(0o600); chmod only tightens a legacy db and its journal",
             ),
         ];
         let mut hits = Vec::new();

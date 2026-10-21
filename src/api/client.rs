@@ -49,7 +49,7 @@ const fn type_path(t: crate::api::types::GuestType) -> &'static str {
 /// from being constructed; this is the chokepoint that makes a forgotten
 /// call site loud instead of exploitable. Checked on a lowercased,
 /// partially percent-decoded view so `%2e%2e` cannot slip past.
-fn reject_path_traversal(path: &str) -> Result<()> {
+pub(crate) fn reject_path_traversal(path: &str) -> Result<()> {
     let normalised = path
         .to_ascii_lowercase()
         .replace("%2e", ".")

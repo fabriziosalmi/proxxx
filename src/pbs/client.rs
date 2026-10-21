@@ -93,6 +93,9 @@ impl PbsClient {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        // #384: the same chokepoint the PVE client has; a path built from
+        // an unencoded caller value fails loudly instead of escaping.
+        crate::api::reject_path_traversal(path)?;
         self.limiter.until_ready().await;
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("PBS GET {url}");
@@ -207,7 +210,8 @@ impl PbsGateway for PbsClient {
     ) -> Result<Vec<SnapshotInfo>> {
         // Build the query string only with the params actually given —
         // PBS rejects unknown empties on some endpoints.
-        let mut path = format!("/admin/datastore/{store}/snapshots");
+        // #384: the datastore name is a path segment; encode it.
+        let mut path = format!("/admin/datastore/{}/snapshots", urlencode(store));
         let mut q: Vec<(&str, &str)> = Vec::new();
         if let Some(t) = backup_type {
             q.push(("backup-type", t));
@@ -237,6 +241,7 @@ impl PbsGateway for PbsClient {
     ) -> Result<Vec<ArchiveInfo>> {
         let path = format!(
             "/admin/datastore/{store}/files?backup-type={t}&backup-id={id}&backup-time={time}",
+            store = urlencode(store),
             t = urlencode(backup_type),
             id = urlencode(backup_id),
             time = backup_time

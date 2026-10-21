@@ -995,9 +995,16 @@ pub enum McpCommand {
         /// Port to listen on (default: 3000)
         #[arg(long, default_value_t = 3000)]
         port: u16,
-        /// Bearer token for auth (overrides `mcp_token` in config and survives SIGHUP reload)
+        /// Bearer token for auth (overrides `mcp_token` in config and survives SIGHUP reload).
+        /// Visible in the process listing for as long as the server runs;
+        /// prefer --token-file or `PROXXX_MCP_TOKEN`.
         #[arg(long)]
         token: Option<String>,
+        /// Read the bearer token from a file; trailing whitespace is
+        /// trimmed. Takes precedence over --token and `PROXXX_MCP_TOKEN`,
+        /// which in turn win over `mcp_token` in config (#384).
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<std::path::PathBuf>,
         /// DANGEROUS: allow binding to a non-loopback address WITHOUT auth.
         /// By default proxxx refuses to expose the MCP server on the network
         /// unless `mcp_token` (or --token) is set. Only pass this on a trusted
@@ -1445,6 +1452,29 @@ pub const fn cli_hitl_action(cmd: &Command) -> Option<&'static str> {
         | Command::Doctor
         | Command::Network { .. } => None,
     }
+}
+
+/// The `mcp serve-http` bearer token from, in order, `--token-file`,
+/// `--token` and `PROXXX_MCP_TOKEN` (#384: `--token` alone put it in the
+/// process listing). An empty variable counts as unset; an empty file is
+/// an error, since the operator plainly meant to set a token.
+fn resolve_mcp_token(
+    flag: Option<String>,
+    file: Option<&std::path::Path>,
+    env: Option<String>,
+) -> Result<Option<String>> {
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading --token-file {}: {e}", path.display()))?;
+        let trimmed = raw.trim();
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "--token-file {} is empty",
+            path.display()
+        );
+        return Ok(Some(trimmed.to_string()));
+    }
+    Ok(flag.or_else(|| env.filter(|t| !t.trim().is_empty())))
 }
 
 /// `--token-secret` / `--token-secret-file` hold ONE profile's secret
@@ -2222,12 +2252,18 @@ pub async fn execute(
                 bind,
                 port,
                 token,
+                token_file,
                 insecure_bind,
                 allowed_hosts,
             } => {
                 // Keep CLI --token OUT of the reloadable config (#343) so a
                 // SIGHUP reload can never drop a token given on the command line.
-                let cli_token = token.map(crate::util::secret::SecretString::new);
+                let cli_token = resolve_mcp_token(
+                    token,
+                    token_file.as_deref(),
+                    std::env::var("PROXXX_MCP_TOKEN").ok(),
+                )?
+                .map(crate::util::secret::SecretString::new);
                 let handle = crate::config::watcher::new_handle(config);
                 client.attach_live_config(std::sync::Arc::clone(&handle));
                 crate::config::watcher::spawn_reload_on_sighup(
