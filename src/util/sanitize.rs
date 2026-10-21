@@ -8,7 +8,9 @@
 //! tags and PBS backup notes.
 //!
 //! Approach: strip C0 control characters (0x00–0x1F) **except** TAB
-//! (0x09) and DEL (0x7F). Everything that ratatui can interpret as a
+//! (0x09), DEL (0x7F), and the C1 controls U+0080–U+009F (#365: some
+//! terminals read U+009B as CSI and U+009D as OSC, the same commands as
+//! `ESC [` and `ESC ]`). Everything that ratatui can interpret as a
 //! formatting command starts with ESC (0x1B) — which falls in this
 //! range — so dropping the whole class is sufficient and avoids the
 //! need to ship a full ANSI parser. NL (0x0A) and CR (0x0D) are also
@@ -23,13 +25,16 @@
 
 use std::borrow::Cow;
 
-/// Strip C0 control codes (except TAB) and DEL from a display string.
+/// Strip C0 control codes (except TAB), DEL and C1 control codes from a
+/// display string.
 ///
 /// Returns `Cow::Borrowed` when the input is already safe — the hot
 /// path (every guest row, every frame, ~30 Hz) does not allocate.
 /// Allocates only for actually-malicious input.
 pub fn sanitize_display(s: &str) -> Cow<'_, str> {
-    if s.bytes().all(is_safe_byte) {
+    // Per char, not per byte: a C1 control is two bytes in UTF-8 (0xC2
+    // 0x80..0x9F), both of which pass a per-byte check.
+    if s.chars().all(is_safe_char) {
         return Cow::Borrowed(s);
     }
     Cow::Owned(s.chars().filter(|c| is_safe_char(*c)).collect())
@@ -45,10 +50,10 @@ const fn is_safe_char(c: char) -> bool {
     if (c as u32) < 0x80 {
         is_safe_byte(c as u8)
     } else {
-        // Multi-byte UTF-8: keep. The dangerous control chars all live
-        // in the ASCII range; non-ASCII letters / emoji are safe to
-        // render. ratatui handles wide chars correctly.
-        true
+        // Multi-byte UTF-8: keep everything but the C1 controls
+        // (U+0080–U+009F). Non-ASCII letters / emoji are safe to
+        // render; ratatui handles wide chars correctly.
+        (c as u32) > 0x9F
     }
 }
 
@@ -142,6 +147,16 @@ mod tests {
         assert_eq!(clean, "nameend");
     }
 
+    /// #365: C1 CSI (U+009B) and OSC (U+009D) are removed, including on
+    /// the fast path, while other non-ASCII text is kept.
+    #[test]
+    fn strips_c1_controls() {
+        let s = "a\u{9b}2Jb\u{9d}52;c;eA==\u{9c}c é ✓ \u{a0}";
+        let out = sanitize_display(s);
+        assert_eq!(out, "a2Jb52;c;eA==c é ✓ \u{a0}");
+        assert!(out.chars().all(|c| !(0x80..=0x9f).contains(&(c as u32))));
+    }
+
     #[test]
     fn empty_string_is_borrowed() {
         let s = sanitize_display("");
@@ -215,8 +230,9 @@ mod proptests {
 
     proptest! {
         /// For ANY UTF-8 input, the sanitized output contains no
-        /// C0 control byte (except TAB) and no DEL — the full set of
-        /// bytes ratatui interprets as escape sequence prefixes.
+        /// C0 control byte (except TAB), no DEL and no C1 control — the
+        /// full set of characters a terminal or ratatui interprets as
+        /// escape sequence prefixes.
         ///
         /// This is the security invariant: a hostile VM name like
         /// `\x1b[2J\x1b[H<spoofed>` cannot reach the renderer.
@@ -232,6 +248,10 @@ mod proptests {
                         "found unsafe byte 0x{b:02X} in output {out:?}"
                     );
                 }
+                prop_assert!(
+                    !(0x80..=0x9F).contains(&code),
+                    "found C1 control U+{code:04X} in output {out:?}"
+                );
             }
         }
 
@@ -257,8 +277,8 @@ mod proptests {
 
         /// Hot-path performance contract: a string that is already
         /// safe must round-trip as `Cow::Borrowed` (no allocation,
-        /// no copy). Tests the `bytes().all(is_safe_byte)` fast path
-        /// at line 32.
+        /// no copy). Tests the `chars().all(is_safe_char)` fast path
+        /// in `sanitize_display`.
         #[test]
         fn clean_ascii_borrows(s in "[a-zA-Z0-9 \t._-]{0,200}") {
             let out = sanitize_display(&s);
@@ -285,13 +305,14 @@ mod proptests {
             }
         }
 
-        /// Non-ASCII passthrough: every char with codepoint >= 0x80
+        /// Non-ASCII passthrough: every char with codepoint >= 0xA0
         /// in the input also appears in the output (in order). Pins
-        /// the design choice that the filter is ASCII-class only;
-        /// emoji, CJK, and accented Latin must NOT be stripped.
+        /// the design choice that only control characters are removed
+        /// (C0, DEL, and since #365 C1); emoji, CJK, and accented Latin
+        /// must NOT be stripped.
         #[test]
         fn non_ascii_chars_preserved(s in any::<String>()) {
-            let in_non_ascii: String = s.chars().filter(|c| (*c as u32) >= 0x80).collect();
+            let in_non_ascii: String = s.chars().filter(|c| (*c as u32) >= 0xA0).collect();
             let out = sanitize_display(&s);
             let out_non_ascii: String =
                 out.chars().filter(|c| (*c as u32) >= 0x80).collect();

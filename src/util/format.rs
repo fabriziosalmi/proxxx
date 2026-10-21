@@ -52,71 +52,105 @@ pub fn print(data: &Value, format: OutputFormat) -> Result<()> {
             println!("{}", render_json_output(data, format)?);
         }
         OutputFormat::Table => {
-            print_table(data);
+            print!("{}", render_table(data));
         }
         OutputFormat::Plain => {
-            print_plain(data);
+            print!("{}", render_plain(data));
         }
     }
     Ok(())
 }
 
-fn print_table(data: &Value) {
+/// One table cell (#365). A value is printed between tabs, so a raw tab or
+/// newline inside it would split the row a script reads: they become the
+/// two-character escapes `\t`, `\n` and `\r`. Every other control
+/// character (ESC and the rest of C0, DEL, C1) is removed, so a string from
+/// the API cannot move the cursor, retitle the terminal or write the
+/// clipboard (OSC 52).
+fn table_cell(s: &str) -> String {
+    let escaped = s
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    crate::util::sanitize::sanitize_display(&escaped).into_owned()
+}
+
+/// Whole-text output (pretty JSON, plain lines). JSON escapes C0 controls
+/// inside strings but not DEL or C1, which are removed here (#365); the
+/// line breaks of the layout are kept.
+fn safe_text(s: &str) -> String {
+    s.split('\n')
+        .map(|line| crate::util::sanitize::sanitize_display(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `--format table`: a TSV-like table for arrays of objects (header from the
+/// first object's keys), pretty JSON for an object, the bare value otherwise.
+fn render_table(data: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     match data {
         Value::Array(items) => {
             if items.is_empty() {
-                println!("(no results)");
-                return;
+                out.push_str("(no results)\n");
+                return out;
             }
             // Extract headers from first item
             if let Some(Value::Object(first)) = items.first() {
                 let headers: Vec<&str> = first.keys().map(String::as_str).collect();
-                // Print header
-                for (i, h) in headers.iter().enumerate() {
-                    if i > 0 {
-                        print!("\t");
-                    }
-                    print!("{}", h.to_uppercase());
-                }
-                println!();
-                // Print rows
+                let header_row: Vec<String> = headers
+                    .iter()
+                    .map(|h| table_cell(&h.to_uppercase()))
+                    .collect();
+                out.push_str(&header_row.join("\t"));
+                out.push('\n');
                 for item in items {
                     if let Value::Object(obj) = item {
-                        for (i, h) in headers.iter().enumerate() {
-                            if i > 0 {
-                                print!("\t");
-                            }
-                            match obj.get(*h) {
-                                Some(Value::String(s)) => print!("{s}"),
-                                Some(Value::Number(n)) => print!("{n}"),
-                                Some(Value::Bool(b)) => print!("{b}"),
-                                Some(Value::Null) | None => print!("-"),
-                                Some(other) => print!("{other}"),
-                            }
-                        }
-                        println!();
+                        let row: Vec<String> = headers
+                            .iter()
+                            .map(|h| match obj.get(*h) {
+                                Some(Value::String(s)) => table_cell(s),
+                                Some(Value::Null) | None => "-".to_string(),
+                                Some(other) => table_cell(&other.to_string()),
+                            })
+                            .collect();
+                        out.push_str(&row.join("\t"));
+                        out.push('\n');
                     }
                 }
             }
         }
         Value::Object(_) => {
-            println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
+            let _ = writeln!(
+                out,
+                "{}",
+                safe_text(&serde_json::to_string_pretty(data).unwrap_or_default())
+            );
         }
         other => {
-            println!("{other}");
+            let _ = writeln!(out, "{}", safe_text(&other.to_string()));
         }
     }
+    out
 }
 
-fn print_plain(data: &Value) {
+/// `--format plain`: one compact JSON value per line.
+fn render_plain(data: &Value) -> String {
+    let mut out = String::new();
     match data {
         Value::Array(items) => {
             for item in items {
-                println!("{item}");
+                out.push_str(&safe_text(&item.to_string()));
+                out.push('\n');
             }
         }
-        other => println!("{other}"),
+        other => {
+            out.push_str(&safe_text(&other.to_string()));
+            out.push('\n');
+        }
     }
+    out
 }
 
 /// Render a fatal CLI error as `Json` or `JsonEnvelope` (#361).
@@ -142,6 +176,81 @@ pub fn render_fatal_error(
     }
     let err_json = Value::Array(vec![err_obj]);
     render_json_output(&err_json, format)
+}
+
+#[cfg(test)]
+mod terminal_safety_tests {
+    //! #365: table and plain output never pass control sequences from API
+    //! strings to the terminal, and a cell never splits its row.
+    use super::{render_plain, render_table};
+    use serde_json::json;
+
+    const OSC52: &str = "\u{1b}]52;c;ZXZpbA==\u{7}";
+    const C1_CSI: &str = "\u{9b}2J";
+
+    fn assert_no_controls(out: &str) {
+        for c in out.chars() {
+            let u = c as u32;
+            assert!(
+                c == '\n' || c == '\t' || (u >= 0x20 && u != 0x7f && !(0x80..=0x9f).contains(&u)),
+                "control U+{u:04X} reached the output: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_cells_lose_escape_sequences_and_keep_one_line_per_row() {
+        let data = json!([
+            {"name": format!("vm{OSC52}"), "comment": format!("a\tb\nc\rd{C1_CSI}"), "n": 1},
+            {"name": "plain", "comment": "ok", "n": 2}
+        ]);
+        let out = render_table(&data);
+        assert_no_controls(&out);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows, got {out:?}");
+        for l in &lines {
+            assert_eq!(l.matches('\t').count(), 2, "3 columns in {l:?}");
+        }
+        assert!(lines[1].contains("vm]52;c;ZXZpbA=="), "{out:?}");
+        assert!(lines[1].contains("a\\tb\\nc\\rd2J"), "{out:?}");
+        // Columns follow the sorted keys: comment, n, name.
+        assert_eq!(lines[2], "ok\t2\tplain");
+    }
+
+    #[test]
+    fn table_headers_are_sanitized() {
+        let data = json!([{ format!("x{OSC52}"): 1 }]);
+        let out = render_table(&data);
+        assert_no_controls(&out);
+        assert!(out.starts_with("X]52;C;ZXZPBA==\n"), "{out:?}");
+    }
+
+    #[test]
+    fn table_object_and_plain_output_drop_c1_and_del_but_keep_layout() {
+        let obj = json!({"comment": format!("x{C1_CSI}\u{7f}y"), "id": 1});
+        let table = render_table(&obj);
+        assert_no_controls(&table);
+        assert!(
+            table.lines().count() > 1,
+            "pretty JSON keeps its lines: {table:?}"
+        );
+        assert!(table.contains("x2Jy"), "{table:?}");
+
+        let plain = render_plain(&json!([obj, "z\u{9d}0;t\u{9c}"]));
+        assert_no_controls(&plain);
+        assert_eq!(plain.lines().count(), 2, "{plain:?}");
+    }
+
+    #[test]
+    fn clean_values_render_as_before() {
+        let data = json!([{"vmid": 100, "name": "web", "running": true, "tags": null}]);
+        assert_eq!(
+            render_table(&data),
+            "NAME\tRUNNING\tTAGS\tVMID\nweb\ttrue\t-\t100\n"
+        );
+        assert_eq!(render_table(&json!([])), "(no results)\n");
+        assert_eq!(render_plain(&json!([{"a": 1}, 2])), "{\"a\":1}\n2\n");
+    }
 }
 
 #[cfg(test)]
