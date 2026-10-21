@@ -244,7 +244,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 | Command | What it does |
 | :--- | :--- |
 | `proxxx logs tail [--node N] [--service U] [--since "1h ago"] [--grep PAT] [--no-follow]` | Cross-node `journalctl --follow` via SSH; client-side merge + filter. The lines of the nodes that answer are printed; a node that fails (SSH error, or `journalctl` exiting non-zero, e.g. on a bad `--since`) is reported on stderr, not as a log line, and the command exits 1. |
-| `proxxx heatmap [--output text\|json]` | Per-node API RTT bucketed green/yellow/red. |
+| `proxxx heatmap [--output text\|json]` | Per-node API round trip, timed on each node (`/nodes/{node}/time`), bucketed green/yellow/red, or `down` when the node does not answer. Exit 1 when any node is down. |
 | `proxxx anomaly [--threshold 3.0] [--output text\|json]` | Z-score outlier detection on cluster CPU + mem%. Exit 1 on any anomaly. |
 | `proxxx accounting --group-by pool\|node\|tag [--timeframe none\|hour\|day\|week\|month\|year] [--include-unassigned] [--output text\|json]` | Per-group resource accounting. With `--timeframe` set, integrates per-guest RRD into CPU-hours / GiB·h / net GiB / disk GiB. |
 | `proxxx backup-verify [--max-age-days 7] [--output text\|json]` | Metadata-level integrity probe of each guest's most-recent backup. Status per guest: `pass`, `stale`, `missing`, `error`, or `unknown` when a backup storage or the node's guest list could not be read (the reason names it). Exit 1 on any missing, error or unknown. |
