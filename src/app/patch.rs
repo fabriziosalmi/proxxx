@@ -1096,6 +1096,9 @@ mod tests {
         async fn get_api_version(&self) -> Result<crate::api::types::ApiVersion> {
             Ok(Default::default())
         }
+        async fn get_node_version(&self, _node: &str) -> Result<crate::api::types::ApiVersion> {
+            Ok(Default::default())
+        }
         async fn get_cluster_options(&self) -> Result<crate::api::types::ClusterOptions> {
             Ok(Default::default())
         }

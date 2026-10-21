@@ -1,11 +1,12 @@
 ---
 source: tests/proxmox_map_coverage.rs
+assertion_line: 405
 expression: report
 ---
 # proxxx API surface coverage
 
-Map endpoints      : 190
-Covered            : 163 (85%)
+Map endpoints      : 191
+Covered            : 164 (85%)
 Uncovered          : 27
 Undocumented (drift): 2
 
@@ -120,6 +121,7 @@ Undocumented (drift): 2
 - proxmox_api_surface_absolute.nodes.system.subscription `/nodes/{node}/subscription` [GET|POST|PUT|DELETE]
 - proxmox_api_surface_absolute.nodes.system.syslog `/nodes/{node}/syslog` [GET]
 - proxmox_api_surface_absolute.nodes.system.time `/nodes/{node}/time` [GET|PUT]
+- proxmox_api_surface_absolute.nodes.system.version `/nodes/{node}/version` [GET]
 - proxmox_api_surface_absolute.nodes.system.wakeonlan `/nodes/{node}/wakeonlan` [POST]
 - proxmox_api_surface_absolute.nodes.tasks.list `/nodes/{node}/tasks` [GET]
 - proxmox_api_surface_absolute.nodes.tasks.log `/nodes/{node}/tasks/{upid}/log` [GET]

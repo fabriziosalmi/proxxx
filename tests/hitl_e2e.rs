@@ -889,6 +889,9 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn get_api_version(&self) -> Result<proxxx::api::types::ApiVersion> {
         Ok(Default::default())
     }
+    async fn get_node_version(&self, _node: &str) -> Result<proxxx::api::types::ApiVersion> {
+        Ok(Default::default())
+    }
     async fn get_cluster_options(&self) -> Result<proxxx::api::types::ClusterOptions> {
         Ok(Default::default())
     }
