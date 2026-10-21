@@ -6,7 +6,7 @@ instead of grepping stderr.
 | Exit | Meaning | When |
 | :--- | :--- | :--- |
 | `0` | Success | Operation completed (for `ls <kind> --all-profiles`, every profile succeeded; for `find <vmid>`, at least one profile owns the VMID and no profile errored) |
-| `1` | Generic failure | Catch-all; check stderr for the message. Also returned by `ls <kind> --all-profiles` and `find <vmid>` when any profile fails (all successful and `error` rows are still printed in table and JSON) |
+| `1` | Generic failure | Catch-all; check stderr for the message. Also returned by `ls <kind> --all-profiles` and `find <vmid>` when any profile fails (all successful and `error` rows are still printed in table and JSON), and by `logs tail` when any node fails (the other nodes' lines are still printed) |
 | `2` | Usage error / diff present | clap rejected the arguments **OR** a read-only check found drift (`state diff`, `reconcile run`) **OR** a mutation had a failed change (`state apply`, `reconcile converge`) |
 | `3` | Configuration error | TOML invalid, required field missing, profile not found, no default profile, invalid enum-like setting, `proxxx pbs` without a `[pbs]` / `[profiles.<name>.pbs]` section, or `state apply` / `reconcile converge` when `[meta] profile` mismatches the resolved target profile without `--allow-profile-mismatch` |
 | `4` | Authentication / authorization | `Unauthorized` (401) or `Forbidden` (403) — see [errors](/reference/errors) |
