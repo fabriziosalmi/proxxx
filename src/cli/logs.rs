@@ -101,6 +101,31 @@ fn node_failure(outcome: &Result<Option<u32>>) -> Option<String> {
     }
 }
 
+/// Hand one message to the consumer without losing it (#449).
+///
+/// The SSH callback is synchronous, and it used `try_send`, which drops the
+/// message when the merge channel is full: a `--no-follow` window arrives
+/// in one burst, and on the test cluster 29 to 151 lines of ~800 were lost
+/// on each run, without a word. On the multi-thread runtime the CLI uses,
+/// the callback now waits for room (`block_in_place` + `blocking_send`):
+/// the SSH stream is held back instead, and memory stays bounded. On a
+/// current-thread runtime, where blocking is not allowed, it falls back to
+/// `try_send` and counts what it drops, so the loss is reported.
+fn deliver(
+    tx: &tokio::sync::mpsc::Sender<NodeMsg>,
+    msg: NodeMsg,
+    dropped: &std::sync::atomic::AtomicUsize,
+) {
+    let multi_thread = tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if multi_thread {
+        // Err only when the consumer is gone (shutdown); nothing to keep.
+        let _ = tokio::task::block_in_place(|| tx.blocking_send(msg));
+    } else if tx.try_send(msg).is_err() {
+        dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Exit 1 when any node failed (#364), as `ls --all-profiles` does for a
 /// failed profile; the lines of the nodes that answered are still printed.
 fn exit_code(failed_nodes: &[String]) -> i32 {
@@ -199,6 +224,7 @@ pub async fn execute_logs(
             // mpsc. Bounded channel sized to 4 × node count so a slow
             // consumer applies backpressure but bursts don't stall.
             let (tx, mut rx) = tokio::sync::mpsc::channel::<NodeMsg>(nodes.len().max(8) * 4);
+            let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let mut handles = Vec::with_capacity(nodes.len());
 
             for n in nodes {
@@ -207,6 +233,7 @@ pub async fn execute_logs(
                 let tx = tx.clone();
                 let node_name = n.clone();
                 let tx_end = tx.clone();
+                let dropped = Arc::clone(&dropped);
                 let handle = tokio::spawn(async move {
                     let on_line = move |line: StreamLine| {
                         let msg = match line {
@@ -219,10 +246,7 @@ pub async fn execute_logs(
                                 text: s,
                             },
                         };
-                        // try_send: drop the line if the consumer is
-                        // catatonic. Better than blocking the SSH
-                        // event loop indefinitely.
-                        let _ = tx.try_send(msg);
+                        deliver(&tx, msg, &dropped);
                     };
                     let opts = ExecOptions {
                         // No timeout — follow streams are long-lived.
@@ -269,6 +293,10 @@ pub async fn execute_logs(
                 }
             }
 
+            // A per-node task may be waiting in `blocking_send` (#449);
+            // closing the receiver makes that send return at once, so the
+            // tasks can be stopped and awaited.
+            drop(rx);
             if stopped {
                 // A follow stream never ends on its own; stop the tasks
                 // instead of waiting for them.
@@ -280,6 +308,10 @@ pub async fn execute_logs(
                 let _ = h.await;
             }
 
+            let lost = dropped.load(std::sync::atomic::Ordering::Relaxed);
+            if lost > 0 {
+                eprintln!("logs tail: {lost} line(s) dropped (the output could not keep up)");
+            }
             Ok((Value::Null, exit_code(&failed_nodes)))
         }
     }
@@ -393,6 +425,50 @@ fn emit(line: &LogLine, grep: Option<&str>, render: LogsRenderMode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(i: usize) -> NodeMsg {
+        NodeMsg::Line(LogLine {
+            timestamp: String::new(),
+            node: "pve1".into(),
+            text: i.to_string(),
+        })
+    }
+
+    /// #449: with a full channel and a slow consumer, every line still
+    /// arrives; `try_send` dropped them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deliver_waits_for_room_instead_of_dropping() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<NodeMsg>(2);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let d = Arc::clone(&dropped);
+        let producer = tokio::spawn(async move {
+            for i in 0..200 {
+                deliver(&tx, line(i), &d);
+            }
+        });
+        let mut got = 0;
+        while rx.recv().await.is_some() {
+            got += 1;
+            if got % 50 == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        producer.await.unwrap();
+        assert_eq!(got, 200);
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// On a current-thread runtime blocking is not allowed; what does not
+    /// fit is counted, so the loss can be reported.
+    #[tokio::test(flavor = "current_thread")]
+    async fn on_a_current_thread_runtime_drops_are_counted() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<NodeMsg>(2);
+        let dropped = std::sync::atomic::AtomicUsize::new(0);
+        for i in 0..10 {
+            deliver(&tx, line(i), &dropped);
+        }
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 8);
+    }
 
     /// #364: only a journalctl that ran and exited 0 is a success. An
     /// unknown or offline node (SSH error) and a bad `--since` (non-zero
