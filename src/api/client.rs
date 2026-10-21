@@ -1880,6 +1880,13 @@ impl ProxmoxGateway for PxClient {
         Ok(resp.data)
     }
 
+    async fn get_node_version(&self, node: &str) -> Result<crate::api::types::ApiVersion> {
+        let resp: ApiResponse<crate::api::types::ApiVersion> = self
+            .get(&format!("/nodes/{}/version", urlenc_segment(node)))
+            .await?;
+        Ok(resp.data)
+    }
+
     // ── Cluster options + log impls ────────────────────────
 
     async fn get_cluster_options(&self) -> Result<crate::api::types::ClusterOptions> {

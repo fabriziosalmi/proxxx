@@ -88,6 +88,7 @@
         "rrddata": { "method": "GET", "path": "/nodes/{node}/rrddata", "desc": "Node historical metrics" },
         "report": { "method": "GET", "path": "/nodes/{node}/report", "desc": "pvereport generation" },
         "time": { "method": "GET|PUT", "path": "/nodes/{node}/time", "desc": "NTP & Timezone" },
+        "version": { "method": "GET", "path": "/nodes/{node}/version", "desc": "PVE version installed on the node" },
         "dns": { "method": "GET|PUT", "path": "/nodes/{node}/dns" },
         "hosts": { "method": "GET|PUT", "path": "/nodes/{node}/hosts" },
         "wakeonlan": { "method": "POST", "path": "/nodes/{node}/wakeonlan" },

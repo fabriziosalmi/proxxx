@@ -21,7 +21,8 @@
 //!   known-deprecated fields against the rules.
 //! - **Output**: text (default) for humans; JSON for CI gating.
 //! - **Exit code**: 0 on info/warn only; 1 on any `block`-severity
-//!   finding. Operators can `proxxx upgrade-check --target 9.x ||
+//!   finding or when a node could not be checked (indeterminate, #355);
+//!   2 for a target with no rules. Operators can `proxxx upgrade-check --target 9.x ||
 //!   echo "DO NOT UPGRADE"` in their CI pipelines.
 //!
 //! ## Scope deferred per #60
@@ -178,29 +179,41 @@ pub async fn execute_upgrade_check(
         anyhow::bail!("--target is required (e.g. `--target 9.x`)");
     }
     let target_major = target.split('.').next().unwrap_or(target);
+    // #355: a target with no rules used to report "no findings", exit 0.
+    // Nothing was checked, so it is a usage error.
+    let supported = supported_targets();
+    if !supported.contains(&target_major) {
+        eprintln!(
+            "upgrade-check: no checks exist for target `{}`; supported targets: {}",
+            crate::util::sanitize::sanitize_display(target),
+            supported.join(", ")
+        );
+        return Ok((Value::Null, 2));
+    }
     let applicable = rules_for_target(target);
 
     let mut findings: Vec<Finding> = Vec::new();
+    // Nodes whose version could not be read (#355). Any entry makes the
+    // result indeterminate: a gate must not pass on a check it could not
+    // make.
+    let mut indeterminate: Vec<Indeterminate> = Vec::new();
 
-    // Per-node version check. Propagate the node-list fetch — a transient
-    // failure must not read as "no upgrade issues".
-    {
-        let nodes = client.get_nodes().await?;
-        for n in nodes {
-            // Best-effort per-node version probe — PVE's `pveversion`
-            // is per-node; the cluster `get_api_version` returns
-            // whichever node the API call landed on. We could SSH
-            // per-node for a richer probe; v1 uses the cluster value
-            // as a coarse signal.
-            if let Ok(v) = client.get_api_version().await {
+    // Per-node version check, one `GET /nodes/{node}/version` per node.
+    // It used to read `/version` once, which answers for the API node
+    // only: a cluster with that node on 9.x and the others on 8.x passed.
+    // Propagate the node-list fetch — a transient failure must not read
+    // as "no upgrade issues".
+    let nodes = client.get_nodes().await?;
+    let node_rule = applicable
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.component == "node");
+    for n in nodes {
+        match client.get_node_version(&n.node).await {
+            Ok(v) => {
                 let observed_major = v.version.split('.').next().unwrap_or(&v.version);
                 if observed_major != target_major {
-                    // Find the matching node-rule.
-                    if let Some((rule_id, rule)) = applicable
-                        .iter()
-                        .enumerate()
-                        .find(|(_, r)| r.component == "node")
-                    {
+                    if let Some((rule_id, rule)) = node_rule {
                         findings.push(Finding {
                             rule_id,
                             severity: rule.severity,
@@ -213,11 +226,11 @@ pub async fn execute_upgrade_check(
                         });
                     }
                 }
-                // First node's version is representative for the
-                // cluster-wide rule; bail to avoid duplicate
-                // findings if PVE only exposes a cluster version.
-                break;
             }
+            Err(e) => indeterminate.push(Indeterminate {
+                node: n.node.clone(),
+                error: format!("could not read its PVE version: {e:#}"),
+            }),
         }
     }
 
@@ -254,25 +267,36 @@ pub async fn execute_upgrade_check(
         }
     }
 
-    // Exit code: 1 if any Block-severity finding; 0 otherwise.
+    // Exit code: 1 if any Block-severity finding or any node could not be
+    // checked; 0 otherwise.
     let has_block = findings.iter().any(|f| f.severity == Severity::Block);
+    let result = if has_block {
+        "block"
+    } else if indeterminate.is_empty() {
+        "pass"
+    } else {
+        "indeterminate"
+    };
 
     match args.output {
         UpgradeOutput::Json => {
             let v = serde_json::json!({
                 "target": target,
+                "result": result,
                 "findings": findings,
+                "indeterminate": indeterminate,
                 "summary": {
                     "blocks": findings.iter().filter(|f| f.severity == Severity::Block).count(),
                     "warns": findings.iter().filter(|f| f.severity == Severity::Warn).count(),
                     "infos": findings.iter().filter(|f| f.severity == Severity::Info).count(),
+                    "indeterminate": indeterminate.len(),
                 }
             });
             // raw-output: JSON for machines; removing characters would change the data
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         UpgradeOutput::Text => {
-            if findings.is_empty() {
+            if findings.is_empty() && indeterminate.is_empty() {
                 crate::outln!("✓ no upgrade-check findings for target {target}");
             } else {
                 crate::outln!("upgrade-check → target {target}\n");
@@ -294,11 +318,36 @@ pub async fn execute_upgrade_check(
                     }
                     crate::outln!();
                 }
+                for i in &indeterminate {
+                    crate::outln!("? INDETERMINATE  on {}: {}", i.node, i.error);
+                }
+                if !indeterminate.is_empty() {
+                    crate::outln!(
+                        "\n{} node(s) could not be checked; the result is not a pass.",
+                        indeterminate.len()
+                    );
+                }
             }
         }
     }
 
-    Ok((Value::Null, i32::from(has_block)))
+    Ok((Value::Null, i32::from(result != "pass")))
+}
+
+/// A node the check could not run against.
+#[derive(Debug, Clone, Serialize)]
+pub struct Indeterminate {
+    pub node: String,
+    pub error: String,
+}
+
+/// Upgrade targets (majors) with at least one rule, sorted.
+#[must_use]
+pub fn supported_targets() -> Vec<&'static str> {
+    let mut t: Vec<&'static str> = RULES.iter().map(|r| r.target).collect();
+    t.sort_unstable();
+    t.dedup();
+    t
 }
 
 #[cfg(test)]
@@ -312,6 +361,11 @@ mod tests {
         assert!(!rules_for_target("9.x").is_empty());
         assert!(rules_for_target("10").is_empty());
         assert!(rules_for_target("").is_empty());
+    }
+
+    #[test]
+    fn supported_targets_are_the_rule_majors() {
+        assert_eq!(supported_targets(), vec!["9"]);
     }
 
     #[test]

@@ -539,6 +539,10 @@ pub trait ProxmoxGateway: Send + Sync {
     /// gating before invoking PVE-version-dependent endpoints.
     async fn get_api_version(&self) -> Result<crate::api::types::ApiVersion>;
 
+    /// `GET /nodes/{node}/version` — the PVE version installed on one
+    /// node. `get_api_version` answers for whichever node served the call.
+    async fn get_node_version(&self, node: &str) -> Result<crate::api::types::ApiVersion>;
+
     // ── Cluster-wide config + log (cluster.core.{options,log}) ──
 
     async fn get_cluster_options(&self) -> Result<crate::api::types::ClusterOptions>;
