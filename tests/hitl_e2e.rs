@@ -4200,6 +4200,7 @@ async fn mcp_delete_guest_policy_to_store_to_daemon_executes_once() {
         "delete_guest",
         &args,
         Some(&pending),
+        Some(&tg),
     )
     .await
     .expect("handle_tool_call_with_store");
@@ -4586,6 +4587,8 @@ async fn unbound_row_missing_node_or_guest_type_marks_failed_and_makes_no_gatewa
 /// the caller (not swallowed) and inserts NO row into `PendingStore`.
 #[tokio::test]
 async fn mcp_delete_guest_with_failing_lookup_inserts_no_row_and_returns_error() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
     let (_dir, pending) = temp_pending_store();
     let cfg: proxxx::config::ProfileConfig = toml::from_str(
         r#"
@@ -4616,6 +4619,7 @@ async fn mcp_delete_guest_with_failing_lookup_inserts_no_row_and_returns_error()
         "delete_guest",
         &args,
         Some(&pending),
+        Some(&tg),
     )
     .await
     .expect_err("failing guest lookup must return Err, not swallow it");
@@ -4638,6 +4642,7 @@ async fn mcp_delete_guest_with_failing_lookup_inserts_no_row_and_returns_error()
         "delete_guest",
         &serde_json::json!({ "guest_id": 500 }),
         Some(&pending),
+        Some(&tg),
     )
     .await
     .expect_err("missing guest must return Err at request time");
@@ -4650,4 +4655,62 @@ async fn mcp_delete_guest_with_failing_lookup_inserts_no_row_and_returns_error()
         0,
         "no row may be inserted when guest is missing"
     );
+}
+
+/// #458: when the Telegram send fails, the MCP call is refused and the
+/// recorded request is closed as failed. The send result used to be
+/// ignored and the agent was told the action was pending.
+#[tokio::test]
+async fn mcp_approval_send_failure_refuses_and_closes_the_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/botfaketoken/sendMessage"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+            "ok": false, "description": "Internal Server Error"
+        })))
+        .mount(&server)
+        .await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", guest(500, "vm-500"));
+    let cfg: proxxx::config::ProfileConfig = toml::from_str(
+        r#"
+        url = "https://127.0.0.1:8006/"
+        user = "root@pam"
+        token_id = "test"
+        token_secret = "00000000-0000-0000-0000-000000000000"
+
+        [[policies]]
+        action = "delete_guest"
+        target = "*"
+        require = 1
+        channel = "telegram"
+        "#,
+    )
+    .expect("parse ProfileConfig");
+
+    let resp = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw,
+        &cfg,
+        "delete_guest",
+        &serde_json::json!({ "guest_id": 500 }),
+        Some(&pending),
+        Some(&tg),
+    )
+    .await
+    .expect("a refusal, not an error");
+    let text = resp["content"][0]["text"].as_str().expect("text");
+    assert_eq!(resp["isError"], serde_json::json!(true), "{text}");
+    assert!(
+        text.contains("could not be sent") && !text.contains("Transaction:"),
+        "{text}"
+    );
+    let id = text
+        .split("approval request ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .expect("request id in the message");
+    let row = pending.get(id).expect("get").expect("row exists");
+    assert_eq!(row.status, proxxx::hitl::pending::RequestStatus::Failed);
+    assert!(gw.calls_for("delete_guest").is_empty(), "nothing executed");
 }
