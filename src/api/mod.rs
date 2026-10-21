@@ -103,7 +103,12 @@ pub trait ProxmoxGateway: Send + Sync {
         upid: &str,
     ) -> Result<crate::api::types::TaskStatus>;
 
-    // ── Write Operations (all go through HITL gate) ─────
+    // ── Write Operations ─────
+    //
+    // The gateway itself does not gate writes. HITL approval and the
+    // `--secure` refusal are applied by the callers before these run (CLI
+    // batch policies, the TUI dispatcher, the MCP dispatcher); see
+    // docs/integrations/hitl.md for which surface matches which action.
     //
     // These all take a `GuestType` to dispatch between Proxmox's two
     // disjoint URL hierarchies: `/qemu/{vmid}/...` for VMs and

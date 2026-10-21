@@ -41,32 +41,50 @@ Note the ID (negative for groups, positive for DMs).
 
 ```toml
 [telegram]
-bot_token = "123456:ABC..."
-chat_id   = "-1001234567890"
+bot_token         = "123456:ABC..."
+chat_id           = "-1001234567890"
+allowed_approvers = [123456789]   # numeric Telegram user IDs allowed to press Approve
 ```
+
+`allowed_approvers` is required in practice: an empty or missing list refuses
+every callback, so nothing can ever be approved.
 
 ### 4. Add policies
 
 ```toml
 [[policies]]
-action  = "delete"
+action  = "stop"
 target  = "tag:prod"
 channel = "telegram"
 require = 1
 
 [[policies]]
-action  = "stop"
-target  = "tag:critical"
+action  = "delete"          # TUI action name
+target  = "tag:prod"
 channel = "telegram"
-require = 1
+require = 2                 # two distinct approvers
 ```
+
+`action` is matched against a different name on each surface:
+
+| Surface | Names a policy can match |
+| :--- | :--- |
+| CLI | `start`, `stop`, `restart`, `suspend`, `resume`: the batch commands (`proxxx stop 100 101`) |
+| TUI | `start`, `stop`, `restart`, `delete`, `snapshot`, `migrate`, `exec`, `download_iso`, `move_disk`, `resize_disk` |
+| MCP | the tool name: `stop_guest`, `restart_guest`, `delete_guest`, `create_snapshot`, ... |
+
+On the CLI, `delete`, `migrate` and the other single-guest destructive
+commands do **not** consult policies: they run once `--yes` is given. Use
+`--secure` to refuse them outright (exit 8), or run them from the TUI, where
+the `delete` policy above applies. A policy written for the CLI (`stop`)
+does not match the MCP tool (`stop_guest`); declare both if you need both.
 
 ### 5. Test
 
 ```sh
 proxxx hitl serve  # in one terminal
-# elsewhere:
-proxxx delete 100 --yes  # if guest 100 is tagged prod
+# elsewhere, with guest 100 tagged prod:
+proxxx stop 100    # exits 9: waiting for approval in Telegram
 ```
 
 You should see an inline keyboard appear in your chat with **Approve**
@@ -236,17 +254,16 @@ Pre-execution safety gates:
 
 ## Audit trail
 
-Every callback is logged at `INFO` level in the proxxx audit log
-(file appender, daily rotation, 14-day retention by default):
-
-```
-2026-05-03T09:32:14.123Z INFO  HITL approve: delete vm-100 by user_id=12345
-2026-05-03T09:32:14.124Z INFO  Executing delete on vm-100
-2026-05-03T09:32:14.567Z INFO  Task completed: UPID:pve1:00045A:...:vmrm:100:root@pam:
-```
-
-Telegram itself preserves the chat history with the responder's
-identity. proxxx writes the audit-side correlation.
+- The PVE call that runs after an approval goes through the same client as
+  every other mutation, so it is recorded in the HMAC-chained audit log
+  (`audit.db`, verify with `proxxx audit verify`).
+- The request itself, its approvers' Telegram IDs (`approvers`), its final
+  status and the resulting UPID or error are kept in `hitl_pending.db`;
+  terminal rows are pruned after 7 days.
+- The daemon's log file records each callback it receives
+  (`Received HITL callback: ...`), refused callbacks with the reason, and
+  quorum progress (`HITL quorum not yet met for <id>: <n>/<require>`).
+- Telegram keeps the chat history with each responder's identity.
 
 ## TUI gated actions
 
