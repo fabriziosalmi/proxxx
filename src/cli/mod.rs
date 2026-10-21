@@ -1481,6 +1481,63 @@ pub fn enforce_cli_secure_mode(cmd: &Command, secure: bool) -> Result<()> {
     Ok(())
 }
 
+/// Argument ids of the per-command output flags that the global
+/// `--format json` stands in for (#362).
+pub const LOCAL_OUTPUT_FLAG_IDS: &[&str] = &["output", "print", "json"];
+
+/// Make the global `--format json` (or `json-envelope`) select JSON for the
+/// commands that have their own output flag, unless that flag was given
+/// explicitly (#362). These commands print their own output, and the
+/// global flag used to be ignored: `proxxx --format json describe` printed
+/// text and exited 0, so `| jq` failed. Their JSON is printed as is, not
+/// wrapped in the envelope.
+pub const fn honour_global_json(
+    cmd: &mut Command,
+    format: crate::util::format::OutputFormat,
+    local_flag_given: bool,
+) {
+    use crate::util::format::OutputFormat;
+    if local_flag_given || !matches!(format, OutputFormat::Json | OutputFormat::JsonEnvelope) {
+        return;
+    }
+    match cmd {
+        Command::Explain(a) => a.output = explain::ExplainFormat::Json,
+        Command::Describe(a) => a.output = describe::DescribeFormat::Json,
+        Command::UpgradeCheck(a) => a.output = upgrade_check::UpgradeOutput::Json,
+        Command::Accounting(a) => a.output = accounting::AccountingOutput::Json,
+        Command::Heatmap(a) => a.output = heatmap::HeatmapOutput::Json,
+        Command::Anomaly(a) => a.output = anomaly::AnomalyOutput::Json,
+        Command::BackupVerify(a) => a.output = backup_verify::VerifyOutput::Json,
+        Command::Import(a) => a.print = import_vm::ImportOutput::Json,
+        Command::GpuInspect(a) => a.output = gpu_passthrough::GpuOutput::Json,
+        Command::CloudImg { action } => match action {
+            cloudimg::CloudImgCommand::List { output }
+            | cloudimg::CloudImgCommand::Provision { output, .. } => {
+                *output = cloudimg::CloudImgOutput::Json;
+            }
+            cloudimg::CloudImgCommand::Download { .. } => {}
+        },
+        Command::Schedule {
+            action: schedule::ScheduleCommand::List { output },
+        } => *output = schedule::ScheduleOutput::Json,
+        Command::State { action } => match action {
+            state::StateCommand::Export { output, .. } => *output = state::ExportFormat::Json,
+            state::StateCommand::Diff { output, .. } => *output = state::DiffFormat::Json,
+            state::StateCommand::Apply { output, .. } => {
+                *output = state::ApplyOutputFormat::Json;
+            }
+        },
+        Command::Reconcile { action } => match action {
+            reconcile::ReconcileCommand::Run { json, .. }
+            | reconcile::ReconcileCommand::Converge { json, .. } => *json = true,
+        },
+        Command::Mcp {
+            action: McpCommand::Tools { json, .. },
+        } => *json = true,
+        _ => {}
+    }
+}
+
 /// Execute a CLI command — returns JSON-serializable result and exit code.
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute(
