@@ -810,7 +810,7 @@ async fn export_ha_rules<C: StateReadView + ?Sized>(client: &C) -> Result<Vec<Ha
 /// input maps to empty output. Whitespace around commas is preserved
 /// (PVE doesn't emit any; if it ever does, we'd reformat on round-
 /// trip rather than break declared-vs-live equality on whitespace).
-fn normalize_csv(s: &str) -> String {
+pub(crate) fn normalize_csv(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
