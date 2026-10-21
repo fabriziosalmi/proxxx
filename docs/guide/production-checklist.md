@@ -521,7 +521,11 @@ audit trail and cryptographic keys must survive if the machine is rebuilt.
 | `telegram_hmac.key` (in `<config_dir>`) | Optional | 32-byte HMAC key signing Telegram inline keyboards (`0600`). Regenerated automatically if absent, which invalidates any in-flight buttons. |
 | `hitl_pending.db` (in `<config_dir>`) | No | SQLite store (`0600`, alongside `telegram_hmac.key`) holding pending HITL requests, quorum votes, 120 s TTL expiry, and a 7-day terminal replay log. Recreated automatically on start. |
 | `freeze.lock`, `freeze.<profile>.lock` | No | Runtime kill-switch state. Absent means thawed, which is the correct default after a rebuild. |
-| `cache.db` | No | Cluster snapshots and the operation queue. Regenerates from the cluster on next start. |
+| `known_certs/` (in `<config_dir>`) | Optional | TLS certificates pinned on first contact (`tls_pin_mode`). Without them the next connection pins again, so a changed certificate is no longer detected across the rebuild. |
+| `known_hosts` (in `<config_dir>`, or `[ssh] known_hosts`) | Optional | SSH host keys accepted so far. Without it the next SSH connection trusts on first use again. |
+| `secrets/` (in `<config_dir>`) | **Yes**, if you use it | Token secret files (`token_secret_file`), e.g. from `token bootstrap`. Not reconstructible without issuing new tokens. |
+| `schedules.toml` (in the local data directory) | **Yes**, if you use `schedule` | The recurring operations `schedule add` created. |
+| `<profile>_state.db` (in the cache directory) | No | Cluster snapshots and the operation queue, one file per profile. Regenerates from the cluster on next start. |
 | `proxxx.log*` | No | 14 daily rotations, forensic convenience only. |
 
 Config (`config.toml`) lives under the config directory alongside
@@ -565,14 +569,18 @@ What is compatible across an upgrade:
 ```bash
 systemctl stop proxxx-hitl
 # reinstall the previous binary
-rm -f "$(proxxx doctor --json | jq -r '.cache_path // empty')"   # or delete cache.db by hand
+# delete the profile's state cache (schema is not backwards compatible):
+#   Linux: ~/.cache/proxxx/<profile>_state.db
+#   macOS: ~/Library/Caches/proxxx/<profile>_state.db
+#   or $PROXXX_CACHE_DIR/<profile>_state.db when that is set
+rm -f ~/.cache/proxxx/<profile>_state.db
 systemctl start proxxx-hitl
 ```
 
 The cache database records a schema version and **refuses to open when
 that version is newer than the running binary** — an older proxxx will
 report `cache DB schema version N is newer than this binary's M` rather
-than silently misreading it. Deleting `cache.db` is safe: it is
+than silently misreading it. Deleting `<profile>_state.db` is safe: it is
 regenerated from the cluster on the next start. The audit DB and its key
 need no action, and must not be deleted.
 

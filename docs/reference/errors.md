@@ -230,20 +230,19 @@ explicitly.
 
 ## Surfacing in the TUI
 
-Each error category has a UI affordance:
+The TUI does not map these categories to separate widgets. What it shows:
 
-| Category | TUI surface |
-| :--- | :--- |
-| `Unauthorized`     | Modal: "Token rejected — re-enter or check `token_secret`" |
-| `Forbidden`        | Toast: "Permission denied: {path}" |
-| `NotFound`         | Toast: "Resource gone — refreshing list" |
-| `RateLimited`      | Status bar: "Cluster busy, backing off…" |
-| `StorageHang`      | DANGER banner: "Storage hang on node {N} — read-only mode" |
-| `Transport`        | Toast: "Network error — will retry" |
-| `Parse`            | Modal: "Schema drift; please open an issue with the version" |
-| `Other`            | Modal: "Unexpected status {N} from {path}" |
-| `PreflightRefusal` | Modal: "Pre-flight refused: {risks} — confirm with --allow-risk" |
-| `FreezeRefusal`    | DANGER banner: "Cluster frozen — read-only until thaw" |
+- **Red status-line banner**, for 5 seconds, with the error text: a failed
+  background fetch, and a failed action such as start, stop, delete, migrate
+  or a snapshot (the message names the action and the guest).
+- **`QUORUM LOST — STALE DATA`** while the last `/cluster/status` reported no
+  quorum.
+- **`STALE DATA (Ns)`** when the last successful refresh is more than 10
+  seconds old.
+- A confirm modal before a destructive action, describing it.
+
+Everything is also written to the log file. The categories above matter on
+the CLI, where they decide the [exit code](/reference/exit-codes).
 
 ## See also
 
