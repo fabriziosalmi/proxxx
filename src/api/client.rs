@@ -3416,8 +3416,8 @@ impl ProxmoxGateway for PxClient {
     }
 
     async fn ha_manager_status(&self) -> Result<crate::api::types::HaManagerStatus> {
-        // Some PVE versions return a flat object, others wrap node_status
-        // in an array. We accept the simple object form (current default).
+        // #350: the nested PVE shape; a response without
+        // `manager_status` fails to parse instead of reading as empty.
         let resp: ApiResponse<crate::api::types::HaManagerStatus> =
             self.get("/cluster/ha/status/manager_status").await?;
         Ok(resp.data)

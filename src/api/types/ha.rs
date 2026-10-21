@@ -173,19 +173,76 @@ impl HaResource {
     }
 }
 
+/// `GET /cluster/ha/status/manager_status`, in the shape PVE returns it
+/// (measured on PVE 9.1.1): the CRM state under `manager_status`, one
+/// LRM entry per node under `lrm_status`, and `quorum`.
+///
+/// `manager_status` is required: a response without it is a schema
+/// mismatch and fails to parse (#350). The previous type expected
+/// top-level `master` / `mode` / `node_status` with every field
+/// defaulted, so the real response parsed as an empty status and
+/// `ha status` printed `{"master": "", "mode": "", "node_status": {}}`
+/// with exit 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HaManagerStatus {
+    pub manager_status: HaCrmStatus,
+    /// Per-node local resource manager state, keyed by node.
+    #[serde(default)]
+    pub lrm_status: std::collections::BTreeMap<String, HaLrmStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quorum: Option<HaQuorum>,
+}
+
+impl HaManagerStatus {
+    /// The node running the CRM master, if one is elected.
+    #[must_use]
+    pub fn master(&self) -> Option<&str> {
+        self.manager_status.master_node.as_deref()
+    }
+
+    /// The LRM mode (`active`, `maintenance`, `shutdown`, ...) of the
+    /// master node.
+    #[must_use]
+    pub fn master_mode(&self) -> Option<&str> {
+        self.lrm_status.get(self.master()?).map(|l| l.mode.as_str())
+    }
+}
+
+/// The CRM part of the HA manager status.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct HaManagerStatus {
-    /// Active master node name (the one running pve-ha-manager).
-    #[serde(default)]
-    pub master: String,
-    /// `"active"`, `"unsafe"`, etc. — `unsafe` means quorum lost.
-    #[serde(default)]
+pub struct HaCrmStatus {
+    /// Node running the CRM master. Absent when none is elected (for
+    /// example on a cluster that never used HA).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_node: Option<String>,
+    /// CRM view of each node (`online`, `unknown`, `fence`, ...).
+    pub node_status: std::collections::BTreeMap<String, String>,
+    /// Per-resource CRM state, kept as PVE sends it.
+    pub service_status: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+}
+
+/// One node's local resource manager state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaLrmStatus {
+    /// `active`, `maintenance`, `shutdown`, ...
     pub mode: String,
-    /// Per-node service runtime states (key = node, value = state).
-    /// Proxmox returns `node_status` as a map; we keep it flat here.
-    #[serde(default)]
-    pub node_status: std::collections::HashMap<String, String>,
+    /// e.g. `wait_for_agent_lock`, `active`.
+    pub state: String,
+    pub timestamp: u64,
+}
+
+/// Quorum as seen by the node that answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HaQuorum {
+    pub node: String,
+    /// `1` when quorate. PVE sends it as a string here (`"1"`).
+    #[serde(deserialize_with = "super::deserialize_u32_from_str_or_num")]
+    pub quorate: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
