@@ -1,0 +1,76 @@
+# Fuzzing — cargo-fuzz targets in fuzz/ for the code that reads untrusted
+# input: MCP path-segment shapes, terminal sanitization, guest spec
+# parsing, PVE response deserialization. Weekly, on demand, and on PRs
+# that change the targets.
+#
+# Dev profile on purpose: a release build of the proxxx lib with coverage
+# instrumentation was killed for memory in a 6 GB container; the dev build
+# runs at about 3000 exec/s per target. No sanitizer: the crate is safe
+# Rust, and the targets assert their own invariants.
+#
+# Actions are pinned to a commit SHA (see ci.yml). The nightly is pinned
+# by date; cargo-fuzz by version and its own Cargo.lock.
+
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mcp_shape, sanitize, guest_specs, api_json]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
+        with:
+          toolchain: nightly-2026-10-15
+
+      - name: Install cargo-fuzz
+        # Built with stable: cargo-fuzz 0.12.0's own lock does not build on
+        # this nightly (an old rustix), and the tool itself needs no nightly.
+        run: cargo +stable install --locked --version 0.12.0 cargo-fuzz
+
+      - name: Check fuzz/Cargo.lock is current
+        # `cargo fuzz` has no --locked; a fetch with --locked fails on a
+        # stale lock, and the build that follows then reuses it unchanged.
+        run: cargo +nightly-2026-10-15 fetch --locked --manifest-path fuzz/Cargo.toml
+
+      - name: Run ${{ matrix.target }}
+        env:
+          SECS: ${{ github.event_name == 'pull_request' && '30' || '120' }}
+        run: |
+          cd fuzz
+          cargo +nightly-2026-10-15 fuzz run --dev -s none "${{ matrix.target }}" -- \
+            -max_total_time="$SECS" -rss_limit_mb=2048
+
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/
+          retention-days: 30

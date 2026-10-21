@@ -1,0 +1,47 @@
+# cargo-fuzz targets for the code that reads untrusted input (Scorecard
+# Fuzzing). Needs a nightly toolchain: `cargo +nightly fuzz run <target>`.
+# Kept out of the main crate: its own workspace and its own Cargo.lock.
+[package]
+name = "proxxx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+proxxx = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "mcp_shape"
+path = "fuzz_targets/mcp_shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize"
+path = "fuzz_targets/sanitize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guest_specs"
+path = "fuzz_targets/guest_specs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "api_json"
+path = "fuzz_targets/api_json.rs"
+test = false
+doc = false
+bench = false
