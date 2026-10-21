@@ -34,7 +34,11 @@ pub struct AcmePlugin {
     /// DNS API credentials (encoded sub-spec, masked on read).
     pub data: String,
     /// Time the plugin gives DNS records to propagate before validating.
-    pub validation_delay: u32,
+    /// PVE's key is `validation-delay`, sent only when set; unset means
+    /// PVE's default (30 s). It was read as `validation_delay`, so it was
+    /// always 0 (#349).
+    #[serde(rename = "validation-delay", skip_serializing_if = "Option::is_none")]
+    pub validation_delay: Option<u32>,
     /// Disable without deleting.
     #[serde(deserialize_with = "deserialize_bool_from_int", default)]
     pub disable: bool,

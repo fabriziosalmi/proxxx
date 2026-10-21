@@ -951,18 +951,29 @@ async fn apply_fw_options_update<C: StateWriteView + ?Sized>(
     change: &Change,
 ) -> Result<()> {
     let after: FirewallOptionsDecl = decode(change.after.as_ref(), "firewall options")?;
+    // #349: send only the keys the declaration sets. `ebtables` used to be
+    // sent on every update, as `0` whenever the file did not say `true`.
+    let flag = |b: bool| if b { "1" } else { "0" }.to_string();
     let mut params: Vec<(String, String)> = Vec::new();
-    params.push((
-        "enable".to_string(),
-        if after.enable { "1" } else { "0" }.to_string(),
-    ));
-    params.push((
-        "ebtables".to_string(),
-        if after.ebtables { "1" } else { "0" }.to_string(),
-    ));
-    push_optional(&mut params, "policy_in", &after.policy_in);
-    push_optional(&mut params, "policy_out", &after.policy_out);
-    push_optional(&mut params, "log_ratelimit", &after.log_ratelimit);
+    if let Some(v) = after.enable {
+        params.push(("enable".to_string(), flag(v)));
+    }
+    if let Some(v) = after.ebtables {
+        params.push(("ebtables".to_string(), flag(v)));
+    }
+    for (key, value) in [
+        ("policy_in", &after.policy_in),
+        ("policy_out", &after.policy_out),
+        ("policy_forward", &after.policy_forward),
+        ("log_ratelimit", &after.log_ratelimit),
+    ] {
+        if let Some(v) = value {
+            params.push((key.to_string(), v.clone()));
+        }
+    }
+    if params.is_empty() {
+        return Ok(());
+    }
     client
         .update_cluster_firewall_options_view(&borrow(&params))
         .await
@@ -1967,12 +1978,14 @@ mod tests {
         }
     }
 
+    /// #349: only the keys the declaration sets are sent. `ebtables` used
+    /// to be sent on every update, as `0` when the file did not say `true`,
+    /// which turned L2 filtering off.
     #[tokio::test]
-    async fn fw_options_update_always_sends_enable_and_ebtables() {
+    async fn fw_options_update_sends_only_declared_keys() {
         let after = FirewallOptionsDecl {
-            enable: true,
-            policy_in: "DROP".into(),
-            ebtables: false,
+            enable: Some(true),
+            policy_in: Some("DROP".into()),
             ..FirewallOptionsDecl::default()
         };
         let c = RecordingClient::default();
@@ -1988,8 +2001,28 @@ mod tests {
         let line = &c.lines().await[0];
         assert!(line.starts_with("update_fw_options"));
         assert!(line.contains("\"enable\", \"1\""));
-        assert!(line.contains("\"ebtables\", \"0\""), "ebtables always sent");
         assert!(line.contains("\"policy_in\", \"DROP\""));
+        assert!(
+            !line.contains("ebtables"),
+            "undeclared ebtables must not be sent: {line}"
+        );
+        assert!(!line.contains("policy_out"), "{line}");
+
+        // Declared explicitly, it is sent.
+        let after = FirewallOptionsDecl {
+            ebtables: Some(false),
+            ..FirewallOptionsDecl::default()
+        };
+        let c = RecordingClient::default();
+        let change = fw_change(
+            ChangeKind::Update,
+            "firewall_options",
+            "cluster",
+            None,
+            Some(serde_json::to_value(&after).unwrap()),
+        );
+        apply(&c, vec![change], ApplyOptions::default()).await;
+        assert!(c.lines().await[0].contains("\"ebtables\", \"0\""));
     }
 
     #[tokio::test]

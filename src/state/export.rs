@@ -560,10 +560,12 @@ async fn export_firewall_options<C: StateReadView + ?Sized>(
         .get_cluster_firewall_options_view()
         .await
         .context("reading firewall options")?;
+    // #349: only what PVE returned; an unset key stays unset.
     Ok(FirewallOptionsDecl {
         enable: o.enable,
         policy_in: o.policy_in,
         policy_out: o.policy_out,
+        policy_forward: o.policy_forward,
         ebtables: o.ebtables,
         log_ratelimit: o.log_ratelimit,
     })
@@ -1534,18 +1536,31 @@ mod tests {
     async fn export_firewall_options_drops_digest() {
         let mut fake = FakeStateView::default();
         fake.fw_options = FirewallOptions {
-            enable: true,
-            policy_in: "DROP".into(),
-            policy_out: "ACCEPT".into(),
-            ebtables: true,
-            log_ratelimit: "enable=1".into(),
+            enable: Some(true),
+            policy_in: Some("DROP".into()),
+            policy_out: Some("ACCEPT".into()),
+            ebtables: Some(true),
+            log_ratelimit: Some("enable=1".into()),
             digest: "abc123".into(),
+            ..Default::default()
         };
         let o = export_firewall_options(&fake).await.expect("export");
-        assert!(o.enable && o.ebtables);
-        assert_eq!(o.policy_in, "DROP");
+        assert_eq!((o.enable, o.ebtables), (Some(true), Some(true)));
+        assert_eq!(o.policy_in.as_deref(), Some("DROP"));
         let toml_str = toml::to_string(&o).expect("serialize");
         assert!(!toml_str.contains("digest") && !toml_str.contains("abc123"));
+    }
+
+    /// #349: PVE returns only `digest` for an untouched cluster. The export
+    /// writes no key it did not get; it used to write `enable = false` and
+    /// drop the unset `ebtables` (PVE default ON) as `false`.
+    #[tokio::test]
+    async fn export_firewall_options_writes_only_keys_pve_returned() {
+        let mut fake = FakeStateView::default();
+        fake.fw_options = serde_json::from_value(serde_json::json!({"digest": "d"})).unwrap();
+        let o = export_firewall_options(&fake).await.expect("export");
+        assert_eq!(o, FirewallOptionsDecl::default());
+        assert_eq!(toml::to_string(&o).unwrap(), "");
     }
 
     #[tokio::test]
@@ -1634,7 +1649,7 @@ mod tests {
     async fn export_state_firewall_cluster_populates_all_four() {
         let mut fake = FakeStateView::default();
         fake.fw_options = FirewallOptions {
-            enable: true,
+            enable: Some(true),
             ..Default::default()
         };
         fake.fw_aliases = vec![FirewallAlias {
