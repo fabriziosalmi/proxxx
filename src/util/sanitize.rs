@@ -331,19 +331,24 @@ mod proptests {
             max in 0usize..512,
         ) {
             let out = truncate_ellipsis(&s, max);
-            let out_chars = out.chars().count();
-            // Either we kept everything (no ellipsis, ≤ max chars)…
-            let kept_all = !out.ends_with('…') && out_chars <= max;
-            // …or we truncated (ellipsis present, body is exactly `max`
-            // chars so total is max + 1).
-            let truncated = out.ends_with('…') && out_chars == max + 1;
-            // Edge: max == 0 always yields just "…" (1 char).
-            let zero_case = max == 0 && out == "…" && s.chars().next().is_some();
-            prop_assert!(
-                kept_all || truncated || zero_case,
-                "unexpected truncate output {out:?} for max={max} input len {}",
-                s.chars().count()
+            let in_chars = s.chars().count();
+            // Decide from the input, not from the output: an input that
+            // already ends in '…' must not look truncated (`s = "…"`,
+            // `max = 1` failed the old output-based check).
+            let expected = if in_chars <= max {
+                s
+            } else {
+                format!("{}…", s.chars().take(max).collect::<String>())
+            };
+            prop_assert_eq!(
+                &out,
+                &expected,
+                "unexpected truncate output for max={} input len {}",
+                max,
+                in_chars
             );
+            // At most `max + 1` chars: the body plus the ellipsis.
+            prop_assert!(out.chars().count() <= max + 1);
         }
 
         /// Truncating a string already within budget is the identity.
