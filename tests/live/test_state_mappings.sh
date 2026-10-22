@@ -83,19 +83,25 @@ ok()    { log "  [OK   ] $*"; PASS=$((PASS + 1)); }
 bad()   { log "  [FAIL ] $*"; FAIL=$((FAIL + 1)); }
 
 RETRY_OUT=""
+RETRY_STDOUT=""
 retry() {
-    local attempt out rc
+    local attempt out stdout rc errf
+    errf="$(mktemp)"
     for attempt in 1 2 3 4 5; do
-        out="$("$@" 2>&1)"
+        # stdout alone is the command's output (a state export is TOML);
+        # tracing writes INFO lines to stderr, so they must not end up in it.
+        stdout="$("$@" 2>"$errf")"
         rc=$?
+        out="$stdout"$'\n'"$(cat "$errf")"
         if echo "$out" | grep -qiE 'transport error|error sending request|connection (closed|reset|refused)|timed out|operation timed out'; then
             sleep 2
             continue
         fi
-        RETRY_OUT="$out"
-        return "$rc"
+        break
     done
+    rm -f "$errf"
     RETRY_OUT="$out"
+    RETRY_STDOUT="$stdout"
     return "$rc"
 }
 
@@ -106,6 +112,7 @@ api() { curl -ks --retry 3 --retry-all-errors --retry-delay 2 "$@"; }
 emit_decl() {
     local dest="$1" pci_desc="$2"
     cp "$BASELINE" "$dest"
+    drop_empty_families "$dest" mappings_pci mappings_usb
     cat >> "$dest" <<EOF
 
 [[mappings_pci]]
@@ -151,7 +158,7 @@ retry "$BIN" state export --resource all
 if [[ $? -ne 0 ]]; then
     log "[setup] FATAL: baseline export failed after retries:"; log "$RETRY_OUT"; exit 1
 fi
-printf '%s\n' "$RETRY_OUT" > "$BASELINE"
+printf '%s\n' "$RETRY_STDOUT" > "$BASELINE"
 retry "$BIN" state diff "$BASELINE"
 if [[ $? -ne 0 ]]; then
     log "[setup] FATAL: live is not in sync with its own baseline export"
