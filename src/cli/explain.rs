@@ -396,7 +396,8 @@ fn print_text(e: &ExplainEntry) {
     if !e.fixes.is_empty() {
         crate::outln!("\nFixes:");
         for (i, fix) in e.fixes.iter().enumerate() {
-            crate::outln!("  {n}. {fix}", n = i + 1);
+            let n = i + 1;
+            crate::outln!("  {n}. {fix}");
         }
     }
     if !e.commands.is_empty() {
@@ -419,7 +420,8 @@ fn print_markdown(e: &ExplainEntry) {
     if !e.fixes.is_empty() {
         crate::outln!("## Fixes\n");
         for (i, fix) in e.fixes.iter().enumerate() {
-            crate::outln!("{n}. {fix}", n = i + 1);
+            let n = i + 1;
+            crate::outln!("{n}. {fix}");
         }
         crate::outln!();
     }
