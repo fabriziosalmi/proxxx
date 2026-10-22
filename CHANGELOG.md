@@ -16,14 +16,47 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-22
+
+Headline: **the 2026-10-18 audit milestone, closed.** Hints, help and
+table output now say what the commands do, lookups tell a mistyped node
+from an offline one, the bundled images exist again, and a TUI refresh no
+longer grows with three requests per node. A few changes reach scripts and
+setups; they are listed first, each with its migration.
+
+### Breaking (SSH keys, exit codes, output)
+
+**SSH**
+
+- **An RSA client key under 2048 bits, or any DSA key, is refused before connecting (#485).** **Migration:** create an Ed25519 key (`ssh-keygen -t ed25519`), install it on the nodes and point `key_path` at it.
+
+**Exit codes**
+
+- **A `--node` that is not a cluster member exits 5 (was 1); an offline member stays 1 with a message that says so (#383).**
+- **`ha preview --node <non-member>` exits 5 (was 0 with empty previews) (#383).**
+- **`patch changelog --package <unknown>` exits 5 (was 0, printing apt's error as the changelog) (#383).**
+- **`find <vmid>` for a guest on an offline node exits 1 (was 5, "not found") (#383).** A teardown script that treats 5 as "already gone" no longer reads a guest that still exists as deleted.
+- **`metrics` refuses a series the RRD does not have (exit 1, was 0 with all nulls), and `watch` refuses a condition or `--since` it cannot read (#385).**
+- **`feature --feature` and `cluster-resources --kind` refuse values outside their lists (exit 2) (#385).** PVE refused most of them already.
+- **Migration:** a script that branches on these exit codes: re-check the cases above.
+
+**Output**
+
+- **`audit export --export-format csv` prints RFC 4180 CSV, not a JSON object holding it (#383).** **Migration:** read the output as CSV.
+- **`--format table` prints an object as key/value rows instead of pretty JSON (#385).** **Migration:** use `--format json` for machine-readable output (`version` keeps printing JSON).
+- **`search` reports `"stopped"` / `"qemu"` instead of `"Stopped"` / `"Qemu"`; `accounting` labels guests without a tag `(none)` instead of `(no-tag)`; `--format json mcp tools` prints the registry object, not a one-element array (#385).**
+
 ### Security
 
 - **An SSH client key below the NIST minimum through 2030 is refused before proxxx connects (#485).** proxxx used any key the configuration named: a 1024-bit RSA key loaded and signed (measured). It now refuses an RSA key under 2048 bits and any DSA key, naming the file and pointing to `ssh-keygen -t ed25519`. Ed25519, ECDSA and RSA of 2048 bits or more are unchanged. **Breaking** for a setup that uses such a key. **Migration:** create an Ed25519 key (`ssh-keygen -t ed25519`), install its public key on the nodes and point `key_path` at it.
 - **The operator name in the audit log is looked up with the reentrant `getpwuid_r` (#476).** `getpwuid` returns a pointer into one static buffer shared by every thread, and the lookup runs from the audit hooks inside the multi-threaded runtime, so two concurrent lookups made the copy a data race (undefined behaviour) on the value sealed into the audit actor. The lookup now uses a buffer of its own, grown on `ERANGE`; a test keeps the non-reentrant passwd and group calls out of `src/`.
 
-### Fixed
+### Performance
 
 - **A TUI refresh costs N+4 requests instead of 3N+3, and leaves offline nodes alone (#493).** Every 5 s cycle listed qemu, lxc and storage on every node, offline ones included; against the default 10 requests/s it saturated around 16 nodes, and since #491 each offline node also cost a `/nodes` lookup per failed request (measured on the lab, 3 nodes with 1 offline: 15 requests per cycle). Guests now come from one `/cluster/resources` call and storage from the online nodes only (6 per cycle on the same lab; saturation moves to about 46 nodes). Guest status in the dashboard can trail the node by a few seconds (measured 3-5 s, pvestatd's cycle); the checks before a mutation still read the node itself. Storage stays per node because `/cluster/resources` has no exact `avail` (it overstated free space on a `dir` storage by its 5% root reserve). If `/cluster/resources` fails, the nodes are walked as before. An offline node keeps its last-known guests, marked stale; on a first load its guests are shown as PVE reports them.
+
+### Fixed
+
 - **`iso list` / `iso download` and `cloud-img download` point at images that exist (#492).** On 2026-10-22, 4 of the 6 bundled ISO-library URLs answered 404 (Ubuntu 22.04 and 24.04, Fedora 41, Rocky 9; measured), because mirrors delete old builds and the weekly re-pin covered only `cloudimg.rs`. Both registries are re-pinned from the official manifests (two of them checked by downloading the image and hashing it). Ubuntu now comes from `releases/<codename>/release-YYYYMMDD/`, which Ubuntu keeps since GA, and the end-of-life Fedora 41 from the permanent Fedora archive. `scripts/repin-cloudimg.py` now re-pins `iso_library.rs` too, refreshes the ISO view snapshot in the same bump, and the weekly workflow fails when a pinned URL stops answering (`--check-urls`). This supersedes the pending bot PR #244.
 - **A node name outside the cluster is "not found" (exit 5), and an offline member says it is offline (#383).** PVE answers a request for a node it cannot route with the same HTTP 500 "hostname lookup failed" for a typo and for an offline member (measured on PVE 9.1.1), and proxxx passed it on with exit 1. proxxx now asks `/nodes` which one it is. `ha preview --node <name>` refuses a name that is not a member instead of printing a preview in which nothing is affected (it exited 0). **Breaking** for a script that tests the exit code: a mistyped `--node` now exits 5.
 - **`find`, MCP and the HITL daemon no longer report a guest on an offline node as missing (#383).** The lookup walked online nodes only, so such a guest came back "not found" and `find <vmid>` exited 5, the code a teardown script reads as "already gone". It is now an error naming the offline node (exit 1), as `docs/reference/exit-codes.md` already stated.
@@ -48,6 +81,12 @@ SemVer contract:
 - **`mcp tools --json` prints the registry as is (#385).** The flag was ignored, so the default printed the table form and `--format json` wrapped the registry in a one-element array.
 - **`accounting --include-unassigned` labels guests without a tag `(none)`, as it does guests without a pool (#385).** It used `(no-tag)`. **Breaking** for a consumer keyed on `(no-tag)`.
 - **`metrics` labels a guest by its real type and refuses series that do not exist (#385).** `metrics vm` on a container printed "VM" (PVE serves the RRD under either path); `--field loadavg` or `iowait` on a guest, `diskread`/`diskwrite` on a node and anything but `used`/`total` on a storage returned all nulls with exit 0 and are now errors. `metrics node --field used|total` reads the root filesystem, as its help says, instead of returning nulls.
+
+### Tests and tooling
+
+- **The live harness runs again and cannot pass by accident (#479, #480, #489).** The bash scripts build a private config from the curl target and never read or rewrite the user's config; an enabled cargo live suite with an incomplete env fails instead of passing in 0.00 s; the state and reconcile scripts were repaired; `setup_demo.sh` reads its VM from `PROXXX_E2E_DEMO_VMID`.
+- **The weekly image re-pin covers both registries and fails on a dead URL (#492).**
+- **CONTRIBUTING: a pull request comes with tests that fail without the change, or says why it has none (#484).**
 
 ## [0.15.0] - 2026-10-22
 
