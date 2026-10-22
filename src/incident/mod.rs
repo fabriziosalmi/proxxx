@@ -258,26 +258,66 @@ fn real_uid() -> u32 {
 }
 
 /// Resolve a uid to its login name via the passwd database.
+///
+/// `getpwuid_r` with a buffer owned by this call: `getpwuid` returns a
+/// pointer into one static buffer shared by every thread, and this runs
+/// from the audit hooks inside the multi-threaded runtime, so two lookups
+/// at once made the copy a data race (#476).
 #[cfg(unix)]
 fn login_name_for_uid(uid: u32) -> Option<String> {
-    // SAFETY: `getpwuid` returns a pointer into a static buffer owned by
-    // libc, or NULL when the uid has no passwd entry. We copy the name
-    // out immediately and never retain the pointer, and the buffer is
-    // not mutated between the call and the copy on any single-threaded
-    // path through here.
-    unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
+    login_name_for_uid_with(uid, 1024)
+}
+
+/// [`login_name_for_uid`] starting from a `capacity`-byte buffer, doubled
+/// on `ERANGE` up to 1 MiB.
+#[cfg(unix)]
+fn login_name_for_uid_with(uid: u32, capacity: usize) -> Option<String> {
+    const MAX_BUFFER: usize = 1 << 20;
+    let mut buf: Vec<libc::c_char> = vec![0; capacity.max(1)];
+    loop {
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to memory owned by this frame: `pwd`
+        // is written by libc before `result` points at it, `buf` holds
+        // the strings `pwd` refers to and is `buf.len()` bytes long, and
+        // `result` is a valid out-pointer. Nothing is shared with other
+        // threads.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid as libc::uid_t,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &raw mut result,
+            )
+        };
+        if rc == libc::EINTR {
+            continue;
+        }
+        if rc == libc::ERANGE && buf.len() < MAX_BUFFER {
+            let grown = buf.len() * 2;
+            buf.resize(grown, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
             return None;
         }
-        let name = (*pw).pw_name;
+        // SAFETY: a zero return with a non-null `result` means libc found
+        // the entry and filled `pwd` (POSIX: `result` then points at
+        // `pwd`), so it is initialised. `result` itself is only compared
+        // with null, never dereferenced.
+        let pwd = unsafe { pwd.assume_init() };
+        // `pw_name` is NULL or a NUL-terminated string inside `buf`, which
+        // is still alive here.
+        let name = pwd.pw_name;
         if name.is_null() {
             return None;
         }
-        std::ffi::CStr::from_ptr(name)
+        // SAFETY: as above, `name` is NUL-terminated within `buf`.
+        return unsafe { std::ffi::CStr::from_ptr(name) }
             .to_str()
             .ok()
-            .map(str::to_owned)
+            .map(str::to_owned);
     }
 }
 
@@ -844,6 +884,81 @@ mod operator_identity_tests {
     /// is right that a test failure should not be the thing that prints
     /// it into CI output. The structural description is what a reader
     /// debugging a failure actually needs.
+    /// #476: uid 0 is `root` on every unix proxxx supports; starting
+    /// from a 1-byte buffer forces the `ERANGE` growth path.
+    #[cfg(unix)]
+    #[test]
+    fn a_passwd_lookup_grows_its_own_buffer() {
+        assert_eq!(
+            super::login_name_for_uid_with(0, 1).as_deref(),
+            Some("root")
+        );
+        assert_eq!(super::login_name_for_uid(0).as_deref(), Some("root"));
+    }
+
+    /// #476: lookups from many threads at once agree with a single one.
+    /// This cannot prove the absence of a data race; the source check
+    /// below is what keeps the non-reentrant calls out.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_lookups_agree() {
+        let uid = super::real_uid();
+        let expected = super::login_name_for_uid(uid);
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    (0..200)
+                        .map(|_| super::login_name_for_uid(uid))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for h in handles {
+            for got in h.join().unwrap() {
+                assert_eq!(got, expected);
+            }
+        }
+    }
+
+    /// #476: the passwd functions that return a pointer into a static
+    /// buffer are not used anywhere in `src/`.
+    #[test]
+    fn no_non_reentrant_passwd_calls_in_src() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in text.lines().enumerate() {
+                        let code = line.split("//").next().unwrap_or("");
+                        for f in [
+                            "getpwuid(",
+                            "getpwnam(",
+                            "getpwent(",
+                            "getgrgid(",
+                            "getgrnam(",
+                        ] {
+                            if code.contains(&format!("::{f}")) {
+                                hits.push(format!("{}:{}: {f}", path.display(), n + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
+        assert!(
+            hits.is_empty(),
+            "non-reentrant passwd/group calls: {hits:?}"
+        );
+    }
+
     #[test]
     fn operator_label_is_anchored_on_the_real_uid() {
         let label = super::operator_label();
