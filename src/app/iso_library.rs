@@ -118,27 +118,24 @@ impl IsoEntry {
 /// an entry, mark it deprecated in `notes` instead, so older proxxx
 /// binaries can still resolve URLs they shipped with.
 ///
-/// **All entries are pinned against version-dated upstream
-/// manifests.** URLs include the build date / version explicitly so
-/// a future upstream re-publish (which would invalidate a `current/`
-/// hash) cannot break the pin. To bump an entry to a newer build:
-///
-///   1. Visit the parent index (e.g. `cloud-images.ubuntu.com/jammy/`)
-///      and pick a new dated subdirectory.
-///   2. Fetch `<dated>/SHA256SUMS` (or `SHA512SUMS` for Debian).
-///   3. Update both `url` and `checksum` here, in one commit.
-///
-/// Last pinned: 2026-04 against upstream manifests via `WebFetch`.
+/// Every entry is pinned to a dated build and to the checksum from that
+/// build's official manifest (SHA256SUMS, SHA512SUMS, CHECKSUM or the
+/// `.sha256` sidecar), never to a `current`/`latest` link. Mirrors
+/// delete old builds (4 of these 6 URLs answered 404 on 2026-10-22,
+/// #492), so `scripts/repin-cloudimg.py` re-pins this list and
+/// `cloudimg.rs` weekly from the manifests, and fails the workflow when
+/// a pinned URL stops answering. An end-of-life release is pinned to its
+/// distro's permanent archive. Edit the `url`, `version` and `checksum`
+/// lines only through that script, so a pin always comes from a manifest.
 pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "ubuntu-22.04-cloud",
         distro: "Ubuntu",
-        version: "22.04 LTS (Jammy) build 20260320",
+        version: "22.04 LTS (Jammy) build 20261020",
         arch: "amd64",
-        url: "https://cloud-images.ubuntu.com/jammy/20260320/jammy-server-cloudimg-amd64.img",
-        // Source: https://cloud-images.ubuntu.com/jammy/20260320/SHA256SUMS
+        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261020/ubuntu-22.04-server-cloudimg-amd64.img",
         checksum: Some(Checksum::Sha256(
-            "ea85b16f81b3f6aa53a1260912d3f991fc33e0e0fc1d73f0b8c9c96247e42fdb",
+            "2099e63da0b822ef8e05e3d596c1b402eaaae658fc08ab919cb8495bfcdc488b",
         )),
         content: "import",
         size_mib: 700,
@@ -147,12 +144,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "ubuntu-24.04-cloud",
         distro: "Ubuntu",
-        version: "24.04 LTS (Noble) build 20260323",
+        version: "24.04 LTS (Noble) build 20261017",
         arch: "amd64",
-        url: "https://cloud-images.ubuntu.com/noble/20260323/noble-server-cloudimg-amd64.img",
-        // Source: https://cloud-images.ubuntu.com/noble/20260323/SHA256SUMS
+        url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
         checksum: Some(Checksum::Sha256(
-            "6e7016f2c9f4d3c00f48789eb6b9043ba2172ccc1b6b1eaf3ed1e29dd3e52bb3",
+            "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
         )),
         content: "import",
         size_mib: 750,
@@ -161,13 +157,12 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "debian-12-cloud",
         distro: "Debian",
-        version: "12 (Bookworm) build 20260413-2447",
+        version: "12 (Bookworm) build 20261021-2638",
         arch: "amd64",
-        url: "https://cloud.debian.org/images/cloud/bookworm/20260413-2447/debian-12-genericcloud-amd64-20260413-2447.qcow2",
-        // Debian publishes ONLY SHA-512, never SHA-256. Source:
-        // https://cloud.debian.org/images/cloud/bookworm/20260413-2447/SHA512SUMS
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261021-2638/debian-12-genericcloud-amd64-20261021-2638.qcow2",
+        // Debian publishes ONLY SHA-512, never SHA-256.
         checksum: Some(Checksum::Sha512(
-            "db11b13c4efcc37828ffadae521d101e85079d349e1418074087bb7d306f11caccdc2b0b539d6fd50d623d40a898f83c6137268a048d7700397dc35b7dcbc927",
+            "9f181877006e8d9ca4f4554eba8729a829936f0f7d1db5e77f69b1ef0f6bc372b4d46f3dae39b10d84f9131496c2cc1d449264f26577fe934a79de5a5512a3dd",
         )),
         content: "import",
         size_mib: 350,
@@ -176,27 +171,24 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "fedora-41-cloud",
         distro: "Fedora",
-        version: "41",
+        version: "41 (Generic Base 1.4)",
         arch: "amd64",
-        url: "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2",
-        // Source: Fedora-Cloud-41-1.4-x86_64-CHECKSUM (sigul-signed
-        // upstream, GPG verifiable separately).
+        url: "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2",
         checksum: Some(Checksum::Sha256(
             "6205ae0c524b4d1816dbd3573ce29b5c44ed26c9fbc874fbe48c41c89dd0bac2",
         )),
         content: "import",
         size_mib: 470,
-        notes: "Fedora Cloud Base 41. Mirror redirects: Proxmox follows them.",
+        notes: "Fedora Cloud Base 41 (end of life), from the permanent Fedora archive.",
     },
     IsoEntry {
         id: "alpine-3.21-iso",
         distro: "Alpine",
-        version: "3.21.7",
+        version: "3.21.9",
         arch: "amd64",
-        url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.7-x86_64.iso",
-        // Source: alpine-virt-3.21.7-x86_64.iso.sha256 sibling.
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.9-x86_64.iso",
         checksum: Some(Checksum::Sha256(
-            "004568b74408e6110b253b46781edb4aa3aed35e247d96b2f290b2171bd0e4d1",
+            "1ceafa2ca068faf2925de977815681c182708f3c6cbfbad137f3ffc9324a03b4",
         )),
         content: "iso",
         size_mib: 60,
@@ -205,12 +197,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "rocky-9-cloud",
         distro: "Rocky Linux",
-        version: "9.7 build 20251123.2",
+        version: "9.8 build 20260525.0",
         arch: "amd64",
-        url: "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.7-20251123.2.x86_64.qcow2",
-        // Source: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/CHECKSUM
+        url: "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2",
         checksum: Some(Checksum::Sha256(
-            "15d81d3434b298142b2fdd8fb54aef2662684db5c082cc191c3c79762ed6360c",
+            "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8",
         )),
         content: "import",
         size_mib: 900,
@@ -307,6 +298,22 @@ mod tests {
                 e.is_pinned(),
                 "{} ships without a pinned checksum — refuse to release",
                 e.id
+            );
+        }
+    }
+
+    #[test]
+    fn urls_point_at_dated_builds_not_rotating_links() {
+        // A `current`/`latest` link changes content under a fixed URL, so
+        // a pinned checksum stops matching (same rule as cloudimg.rs).
+        for e in LIBRARY {
+            assert!(
+                !e.url.contains("/current/")
+                    && !e.url.contains("/latest/")
+                    && !e.url.contains(".latest."),
+                "{} uses a rotating link: {}",
+                e.id,
+                e.url
             );
         }
     }

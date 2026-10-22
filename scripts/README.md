@@ -81,25 +81,32 @@ NOT legitimate:
 - "Clippy is annoying" → fix the lint or change the policy in Cargo.toml.
 - "The cluster is flaky" → fix the flake; flakiness is a real signal.
 
-## `repin-cloudimg.py` — cloud-image registry freshness
+## `repin-cloudimg.py` — image registry freshness
 
-Separate from the gate. `cloud-img download` pins each entry to a
-checksum, which forces a dated/immutable upstream URL — so the registry
-in `src/cli/cloudimg.rs` goes stale when a distro ships a point release.
+Separate from the gate. `cloud-img download` (`src/cli/cloudimg.rs`) and
+`iso list` / `iso download` (`src/app/iso_library.rs`) pin each entry to a
+checksum, which forces a dated/immutable upstream URL, so both registries
+go stale when a distro ships a new build, and mirrors delete old builds
+(4 of 6 `iso_library.rs` URLs answered 404 on 2026-10-22, #492).
 
 `scripts/repin-cloudimg.py` re-derives each distro's latest dated build
-+ official checksum (Ubuntu/Fedora SHA-256, Debian/Alpine SHA-512) and
-patches the registry. Stdlib-only (urllib); no pip install.
++ official checksum (Ubuntu/Fedora/Rocky SHA-256, Debian SHA-512, Alpine
+per the sidecar it publishes) and patches both registries. An end-of-life
+release (Fedora 41) is pinned to the distro's permanent archive.
+Stdlib-only (urllib); no pip install.
 
 ```sh
-scripts/repin-cloudimg.py --dry-run   # report drift, write nothing
-scripts/repin-cloudimg.py             # patch src/cli/cloudimg.rs in place
+scripts/repin-cloudimg.py --dry-run     # report drift, write nothing
+scripts/repin-cloudimg.py               # patch both registries in place
+scripts/repin-cloudimg.py --check-urls  # check every pinned URL answers (exit 4 if not)
 ```
 
 `.github/workflows/cloudimg-repin.yml` runs it weekly (Mon 05:11 UTC),
-validates the patch with `cargo test --lib cloudimg`, and opens a bump
-PR on drift. It never auto-merges — re-pinning a SHA is supply-chain-
-sensitive, so a human reviews the diff.
+validates the patch with `cargo test --lib -- cloudimg iso_library`, opens
+a bump PR on drift, and fails the job when a pinned URL does not answer.
+It never auto-merges: re-pinning a SHA is supply-chain-sensitive, so a
+human reviews the diff. A PR opened by the workflow's token does not
+start CI on its own: close and reopen it (or push an empty commit).
 
 ## Disabling
 
