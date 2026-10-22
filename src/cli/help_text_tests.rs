@@ -8,22 +8,61 @@ fn cli() -> clap::Command {
     cmd
 }
 
-/// `init` had no description and `profiles --help` opened with the `init`
-/// text: the doc comment sat above the wrong variant. Top level only:
-/// several nested subcommands have no description yet.
+fn undescribed<'a>(cmd: &'a clap::Command, path: &mut Vec<&'a str>, out: &mut Vec<String>) {
+    for sub in cmd.get_subcommands() {
+        if sub.get_name() == "help" {
+            continue;
+        }
+        path.push(sub.get_name());
+        if sub.get_about().is_none() && sub.get_long_about().is_none() {
+            out.push(path.join(" "));
+        }
+        undescribed(sub, path, out);
+        path.pop();
+    }
+}
+
+/// Every subcommand at every level has a description (#494: 64 nested
+/// ones had none, so `--help` listed them blank). `init` lost its own and
+/// `profiles --help` opened with the `init` text when a doc comment sat
+/// above the wrong variant (#385).
 #[test]
-fn every_top_level_command_has_a_description() {
-    let cli = cli();
-    let missing: Vec<&str> = cli
-        .get_subcommands()
-        .filter(|s| s.get_name() != "help")
-        .filter(|s| s.get_about().is_none() && s.get_long_about().is_none())
-        .map(clap::Command::get_name)
-        .collect();
+fn every_subcommand_has_a_description() {
+    let mut missing = Vec::new();
+    undescribed(&cli(), &mut Vec::new(), &mut missing);
     assert!(
         missing.is_empty(),
-        "commands without a description: {missing:?}"
+        "subcommands without a description: {missing:?}"
     );
+}
+
+/// #494: arguments PVE 9.1 requires on these calls (each measured: a 400
+/// "property is missing and it is not optional") are required here too,
+/// and the metric-server `--comment`, which PVE does not accept at all,
+/// is gone.
+#[test]
+fn arguments_pve_requires_are_required() {
+    let cmd = super::args::usage_with_parent_positionals(cli());
+    // (command line, refused by the parser)
+    let cases = [
+        ("node-system pve1 dns set --dns1 1.1.1.1", true),
+        ("node-system pve1 dns set --search lan --dns1 1.1.1.1", false),
+        ("firewall-cluster alias update a --comment x", true),
+        ("firewall-cluster alias update a --cidr 10.0.0.1", false),
+        ("firewall-guest 100 alias update a --comment x", true),
+        ("firewall-guest 100 alias update a --cidr 10.0.0.1", false),
+        ("cluster-mapping usb update m --description x", true),
+        ("cluster-mapping usb update m --map node=pve1,id=1234:5678", false),
+        ("metric-servers update influx --disable true", true),
+        ("metric-servers update influx --server h --port 8086", false),
+        ("metric-servers create --id i --server-type influxdb --server h --port 8086 --comment x", true),
+        ("metric-servers create --id i --server-type influxdb --server h --port 8086", false),
+    ];
+    for (line, refused) in cases {
+        let argv = std::iter::once("proxxx").chain(line.split_whitespace());
+        let got = cmd.clone().try_get_matches_from(argv).is_err();
+        assert_eq!(got, refused, "`{line}`: refused={got}, expected {refused}");
+    }
 }
 
 #[test]

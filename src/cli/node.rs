@@ -122,10 +122,13 @@ pub enum NodeSystemCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeDnsCommand {
+    /// Show the node's DNS search domain and nameservers.
     Get,
+    /// Set the node's DNS search domain and nameservers. `--search` is
+    /// required: PVE requires it on every call.
     Set {
         #[arg(long)]
-        search: Option<String>,
+        search: String,
         #[arg(long)]
         dns1: Option<String>,
         #[arg(long)]
@@ -137,6 +140,7 @@ pub enum NodeDnsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeHostsCommand {
+    /// Show the node's `/etc/hosts` and its digest (for `set --digest`).
     Get,
     /// Replace the entire `/etc/hosts` content. PVE rejects with 412
     /// if `--digest` doesn't match the current file (atomic update);
@@ -156,7 +160,9 @@ pub enum NodeHostsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeTimeCommand {
+    /// Show the node's time and timezone.
     Get,
+    /// Set the node's timezone (the clock itself follows NTP).
     Set {
         /// IANA timezone name (e.g. `Europe/Rome`, `UTC`).
         #[arg(long)]
@@ -314,14 +320,10 @@ pub async fn execute_system(
                 dns2,
                 dns3,
             } => {
-                let mut params: Vec<(&str, String)> = vec![];
-                push_opt(&mut params, "search", search);
+                let mut params: Vec<(&str, String)> = vec![("search", search)];
                 push_opt(&mut params, "dns1", dns1);
                 push_opt(&mut params, "dns2", dns2);
                 push_opt(&mut params, "dns3", dns3);
-                if params.is_empty() {
-                    anyhow::bail!("set needs at least one field");
-                }
                 client.update_node_dns(node, &as_refs(&params)).await?;
                 Ok((serde_json::json!({"updated": true}), 0))
             }

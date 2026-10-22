@@ -183,10 +183,10 @@ pub enum MetricsCommand {
 /// via `--raw KEY=VAL`.
 #[derive(Debug, Subcommand)]
 pub enum MetricServersCommand {
+    /// List the external metric servers (`/cluster/metrics/server`).
     List,
-    Show {
-        id: String,
-    },
+    /// Show one metric server's configuration.
+    Show { id: String },
     /// Create an exporter. PVE routes per-id: POST /cluster/metrics/
     /// server/{id} with `type` + protocol-specific knobs in the body.
     Create {
@@ -202,8 +202,6 @@ pub enum MetricServersCommand {
         /// Server port (e.g. 8086 for `InfluxDB` OSS, 2003 for Graphite).
         #[arg(long)]
         port: u16,
-        #[arg(long)]
-        comment: Option<String>,
         /// influxdb: `udp` | `http` | `https`.
         #[arg(long)]
         influxdbproto: Option<String>,
@@ -225,19 +223,20 @@ pub enum MetricServersCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update a metric server. PVE requires `--server` and `--port` on every
+    /// update; the other fields are sent only when passed.
     Update {
         id: String,
         #[arg(long)]
-        server: Option<String>,
+        server: String,
         #[arg(long)]
-        port: Option<u16>,
+        port: u16,
         #[arg(long)]
         disable: Option<bool>,
         #[arg(long)]
-        comment: Option<String>,
-        #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a metric server. Requires `--yes`.
     Delete {
         id: String,
         #[arg(long)]
@@ -251,8 +250,11 @@ pub enum MetricServersCommand {
 #[derive(Debug, Subcommand)]
 pub enum NotificationsCommand {
     #[command(subcommand)]
+    /// Notification endpoints: where notifications are delivered (`sendmail`,
+    /// `smtp`, `gotify`, `webhook`).
     Endpoint(NotificationEndpointCommand),
     #[command(subcommand)]
+    /// Notification matchers: which events go to which endpoints.
     Matcher(NotificationMatcherCommand),
     /// List all valid delivery target names (endpoints + groups).
     Targets,
@@ -276,6 +278,7 @@ pub enum NotificationEndpointCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update an endpoint; only the flags passed are sent.
     Update {
         #[arg(long)]
         endpoint_type: String,
@@ -287,6 +290,7 @@ pub enum NotificationEndpointCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete an endpoint. Requires `--yes`.
     Delete {
         #[arg(long)]
         endpoint_type: String,
@@ -298,6 +302,7 @@ pub enum NotificationEndpointCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NotificationMatcherCommand {
+    /// List the notification matchers.
     List,
     /// Create a routing rule. `--target` is repeatable (each one is an
     /// endpoint or group name). Match clauses via `--match-field` /
@@ -324,6 +329,7 @@ pub enum NotificationMatcherCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update a matcher; only the flags passed are sent.
     Update {
         name: String,
         #[arg(long)]
@@ -343,6 +349,7 @@ pub enum NotificationMatcherCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a matcher. Requires `--yes`.
     Delete {
         name: String,
         #[arg(long)]
@@ -982,7 +989,6 @@ pub async fn execute_metric_servers(
             server_type,
             server,
             port,
-            comment,
             influxdbproto,
             proto,
             organization,
@@ -1002,7 +1008,6 @@ pub async fn execute_metric_servers(
                         t.push((k, s));
                     }
                 };
-            push_opt(&mut typed, "comment", comment);
             push_opt(&mut typed, "influxdbproto", influxdbproto);
             push_opt(&mut typed, "proto", proto);
             push_opt(&mut typed, "organization", organization);
@@ -1018,24 +1023,12 @@ pub async fn execute_metric_servers(
             server,
             port,
             disable,
-            comment,
             raw,
         } => {
-            let mut typed: Vec<(&str, String)> = vec![];
-            if let Some(s) = server {
-                typed.push(("server", s));
-            }
-            if let Some(p) = port {
-                typed.push(("port", p.to_string()));
-            }
+            let mut typed: Vec<(&str, String)> =
+                vec![("server", server), ("port", port.to_string())];
             if let Some(d) = disable {
                 typed.push(("disable", if d { "1" } else { "0" }.to_string()));
-            }
-            if let Some(c) = comment {
-                typed.push(("comment", c));
-            }
-            if typed.is_empty() && raw.is_empty() {
-                anyhow::bail!("update needs at least one field");
             }
             let owned = build_params(typed, &raw)?;
             client.update_metric_server(&id, &as_refs(&owned)).await?;

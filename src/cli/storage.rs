@@ -141,10 +141,10 @@ pub enum BackupJobsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum StorageDefsCommand {
+    /// List the storage definitions (`/storage`).
     List,
-    Show {
-        storage: String,
-    },
+    /// Show one storage definition.
+    Show { storage: String },
     /// Create a new storage. PVE validates type-specific required fields
     /// inline (e.g. `nfs` requires `--server` + `--export`; `pbs`
     /// requires `--server` + `--datastore`).
@@ -217,6 +217,8 @@ pub enum StorageDefsCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a storage definition. Requires `--yes`. PVE removes the
+    /// definition, not the data on the storage.
     Delete {
         storage: String,
         #[arg(long)]
@@ -231,8 +233,10 @@ pub enum StorageDefsCommand {
 #[derive(Debug, Subcommand)]
 pub enum AcmeCommand {
     #[command(subcommand)]
+    /// ACME accounts registered with a certificate authority.
     Account(AcmeAccountCommand),
     #[command(subcommand)]
+    /// ACME challenge plugins (DNS-01, or `standalone` HTTP-01).
     Plugin(AcmePluginCommand),
     /// Fetch the Terms-of-Service URL for the chosen ACME directory
     /// (defaults to PVE's default — usually Let's Encrypt prod).
@@ -248,10 +252,10 @@ pub enum AcmeCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AcmeAccountCommand {
+    /// List the ACME accounts.
     List,
-    Show {
-        name: String,
-    },
+    /// Show one ACME account.
+    Show { name: String },
     /// Register a new account with the ACME CA. Returns a UPID — the
     /// call is async (CA round-trip).
     Create {
@@ -293,10 +297,10 @@ pub enum AcmeAccountCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AcmePluginCommand {
+    /// List the ACME challenge plugins.
     List,
-    Show {
-        plugin_id: String,
-    },
+    /// Show one challenge plugin.
+    Show { plugin_id: String },
     /// Create a challenge plugin. DNS-01 needs `--api` + `--data`;
     /// HTTP-01 (`--plugin-type standalone`) is config-free.
     Create {
@@ -317,6 +321,7 @@ pub enum AcmePluginCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update a challenge plugin; only the flags passed are sent.
     Update {
         plugin_id: String,
         #[arg(long)]
@@ -330,6 +335,7 @@ pub enum AcmePluginCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a challenge plugin. Requires `--yes`.
     Delete {
         plugin_id: String,
         #[arg(long)]

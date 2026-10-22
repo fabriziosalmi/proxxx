@@ -40,18 +40,24 @@ pub enum FirewallScope {
 #[derive(Debug, Subcommand)]
 pub enum FirewallClusterCommand {
     #[command(subcommand)]
+    /// Cluster firewall aliases: named IPs or CIDRs to use in rules.
     Alias(FirewallAliasCommand),
     #[command(subcommand)]
+    /// Security groups: named bundles of firewall rules.
     Group(FirewallGroupCommand),
     #[command(subcommand)]
+    /// IP sets: named collections of CIDRs.
     Ipset(FirewallIpsetCommand),
     #[command(subcommand)]
+    /// The cluster-wide firewall options.
     Options(FirewallOptionsCommand),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum FirewallAliasCommand {
+    /// List the cluster firewall aliases.
     List,
+    /// Create an alias for an IP or CIDR.
     Create {
         #[arg(long)]
         name: String,
@@ -63,10 +69,12 @@ pub enum FirewallAliasCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Change an alias's CIDR, comment or name. `--cidr` is required: PVE
+    /// requires it on every update.
     Update {
         name: String,
         #[arg(long)]
-        cidr: Option<String>,
+        cidr: String,
         #[arg(long)]
         comment: Option<String>,
         /// Rename the alias atomically (PVE PUT param `rename`).
@@ -75,6 +83,7 @@ pub enum FirewallAliasCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete an alias. Requires `--yes`.
     Delete {
         name: String,
         #[arg(long)]
@@ -84,7 +93,9 @@ pub enum FirewallAliasCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum FirewallGroupCommand {
+    /// List the security groups.
     List,
+    /// Create an empty security group.
     Create {
         /// Group name (operator-chosen, e.g. `web-allow`).
         #[arg(long)]
@@ -94,6 +105,7 @@ pub enum FirewallGroupCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a security group. Requires `--yes`.
     Delete {
         group: String,
         #[arg(long)]
@@ -101,14 +113,14 @@ pub enum FirewallGroupCommand {
     },
     /// List the rules contained in a security group — same shape as
     /// `proxxx firewall --scope cluster`, but filtered to one group.
-    Rules {
-        group: String,
-    },
+    Rules { group: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum FirewallIpsetCommand {
+    /// List the IP sets.
     List,
+    /// Create an empty IP set.
     Create {
         #[arg(long)]
         name: String,
@@ -117,15 +129,15 @@ pub enum FirewallIpsetCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete an IP set. Requires `--yes`.
     Delete {
         name: String,
         #[arg(long)]
         yes: bool,
     },
     /// List the CIDRs inside an ipset.
-    Cidrs {
-        name: String,
-    },
+    Cidrs { name: String },
+    /// Add a CIDR to an IP set; `--nomatch` makes it an exception.
     AddCidr {
         name: String,
         #[arg(long)]
@@ -139,6 +151,7 @@ pub enum FirewallIpsetCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Remove a CIDR from an IP set. Requires `--yes`.
     RemoveCidr {
         name: String,
         cidr: String,
@@ -179,14 +192,18 @@ pub enum FirewallOptionsCommand {
 #[derive(Debug, Subcommand)]
 pub enum FirewallGuestCommand {
     #[command(subcommand)]
+    /// The guest's firewall aliases: named IPs or CIDRs to use in its rules.
     Alias(GuestFirewallAliasCommand),
     #[command(subcommand)]
+    /// The guest's firewall options.
     Options(GuestFirewallOptionsCommand),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum GuestFirewallAliasCommand {
+    /// List the guest's firewall aliases.
     List,
+    /// Create an alias for an IP or CIDR in the guest's firewall.
     Create {
         #[arg(long)]
         name: String,
@@ -197,10 +214,12 @@ pub enum GuestFirewallAliasCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Change an alias's CIDR, comment or name. `--cidr` is required: PVE
+    /// requires it on every update.
     Update {
         name: String,
         #[arg(long)]
-        cidr: Option<String>,
+        cidr: String,
         #[arg(long)]
         comment: Option<String>,
         #[arg(long)]
@@ -208,6 +227,7 @@ pub enum GuestFirewallAliasCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete an alias. Requires `--yes`.
     Delete {
         name: String,
         #[arg(long)]
@@ -217,6 +237,7 @@ pub enum GuestFirewallAliasCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum GuestFirewallOptionsCommand {
+    /// Read the guest's firewall options.
     Get,
     /// Update per-guest firewall options. Refuses no-op calls.
     Set {
@@ -256,13 +277,16 @@ pub enum GuestFirewallOptionsCommand {
 #[derive(Debug, Subcommand)]
 pub enum ClusterMappingCommand {
     #[command(subcommand)]
+    /// PCI device mappings: one name for the same device on several nodes.
     Pci(ClusterMappingPciCommand),
     #[command(subcommand)]
+    /// USB device mappings: one name for the same device on several nodes.
     Usb(ClusterMappingUsbCommand),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ClusterMappingPciCommand {
+    /// List the PCI mappings.
     List,
     /// Create a new PCI mapping. The `--map` arg accepts the wire
     /// format PVE expects, e.g.
@@ -282,6 +306,8 @@ pub enum ClusterMappingPciCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update a PCI mapping. Each `--map` is one node's device; when given,
+    /// they replace the mapping's node list.
     Update {
         id: String,
         #[arg(long)]
@@ -293,6 +319,7 @@ pub enum ClusterMappingPciCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a PCI mapping. Requires `--yes`.
     Delete {
         id: String,
         #[arg(long)]
@@ -302,7 +329,9 @@ pub enum ClusterMappingPciCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ClusterMappingUsbCommand {
+    /// List the USB mappings.
     List,
+    /// Create a USB mapping. Repeat `--map` once per node.
     Create {
         #[arg(long)]
         id: String,
@@ -314,15 +343,18 @@ pub enum ClusterMappingUsbCommand {
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Update a USB mapping. `--map` is required (PVE requires the node list
+    /// on every update) and replaces the mapping's node list.
     Update {
         id: String,
         #[arg(long)]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(long, required = true)]
         map: Vec<String>,
         #[arg(long)]
         raw: Vec<String>,
     },
+    /// Delete a USB mapping. Requires `--yes`.
     Delete {
         id: String,
         #[arg(long)]
@@ -400,61 +432,53 @@ pub async fn execute_firewall_cluster(
     }
 
     match action {
-        FirewallClusterCommand::Alias(cmd) => {
-            match cmd {
-                FirewallAliasCommand::List => {
-                    let aliases = client.list_cluster_firewall_aliases().await?;
-                    Ok((serde_json::to_value(aliases)?, 0))
-                }
-                FirewallAliasCommand::Create {
-                    name,
-                    cidr,
-                    comment,
-                    raw,
-                } => {
-                    let mut typed: Vec<(&str, String)> = vec![("name", name), ("cidr", cidr)];
-                    if let Some(c) = comment {
-                        typed.push(("comment", c));
-                    }
-                    let owned = build_params(typed, &raw)?;
-                    client
-                        .create_cluster_firewall_alias(&as_refs(&owned))
-                        .await?;
-                    Ok((serde_json::json!({"created": true}), 0))
-                }
-                FirewallAliasCommand::Update {
-                    name,
-                    cidr,
-                    comment,
-                    rename,
-                    raw,
-                } => {
-                    let mut typed: Vec<(&str, String)> = vec![];
-                    if let Some(c) = cidr {
-                        typed.push(("cidr", c));
-                    }
-                    if let Some(c) = comment {
-                        typed.push(("comment", c));
-                    }
-                    if let Some(r) = rename {
-                        typed.push(("rename", r));
-                    }
-                    if typed.is_empty() && raw.is_empty() {
-                        anyhow::bail!("update needs at least one field (--cidr, --comment, --rename, or --raw)");
-                    }
-                    let owned = build_params(typed, &raw)?;
-                    client
-                        .update_cluster_firewall_alias(&name, &as_refs(&owned))
-                        .await?;
-                    Ok((serde_json::json!({"updated": name}), 0))
-                }
-                FirewallAliasCommand::Delete { name, yes } => {
-                    crate::cli::common::require_yes(yes, "firewall alias delete")?;
-                    client.delete_cluster_firewall_alias(&name).await?;
-                    Ok((serde_json::json!({"deleted": name}), 0))
-                }
+        FirewallClusterCommand::Alias(cmd) => match cmd {
+            FirewallAliasCommand::List => {
+                let aliases = client.list_cluster_firewall_aliases().await?;
+                Ok((serde_json::to_value(aliases)?, 0))
             }
-        }
+            FirewallAliasCommand::Create {
+                name,
+                cidr,
+                comment,
+                raw,
+            } => {
+                let mut typed: Vec<(&str, String)> = vec![("name", name), ("cidr", cidr)];
+                if let Some(c) = comment {
+                    typed.push(("comment", c));
+                }
+                let owned = build_params(typed, &raw)?;
+                client
+                    .create_cluster_firewall_alias(&as_refs(&owned))
+                    .await?;
+                Ok((serde_json::json!({"created": true}), 0))
+            }
+            FirewallAliasCommand::Update {
+                name,
+                cidr,
+                comment,
+                rename,
+                raw,
+            } => {
+                let mut typed: Vec<(&str, String)> = vec![("cidr", cidr)];
+                if let Some(c) = comment {
+                    typed.push(("comment", c));
+                }
+                if let Some(r) = rename {
+                    typed.push(("rename", r));
+                }
+                let owned = build_params(typed, &raw)?;
+                client
+                    .update_cluster_firewall_alias(&name, &as_refs(&owned))
+                    .await?;
+                Ok((serde_json::json!({"updated": name}), 0))
+            }
+            FirewallAliasCommand::Delete { name, yes } => {
+                crate::cli::common::require_yes(yes, "firewall alias delete")?;
+                client.delete_cluster_firewall_alias(&name).await?;
+                Ok((serde_json::json!({"deleted": name}), 0))
+            }
+        },
         FirewallClusterCommand::Group(cmd) => match cmd {
             FirewallGroupCommand::List => {
                 let groups = client.list_cluster_firewall_groups().await?;
@@ -642,18 +666,12 @@ pub async fn execute_firewall_guest(
                 rename,
                 raw,
             } => {
-                let mut typed: Vec<(&str, String)> = vec![];
-                if let Some(c) = cidr {
-                    typed.push(("cidr", c));
-                }
+                let mut typed: Vec<(&str, String)> = vec![("cidr", cidr)];
                 if let Some(c) = comment {
                     typed.push(("comment", c));
                 }
                 if let Some(r) = rename {
                     typed.push(("rename", r));
-                }
-                if typed.is_empty() && raw.is_empty() {
-                    anyhow::bail!("update needs at least one field");
                 }
                 let owned = build_params(typed, &raw)?;
                 client
@@ -859,9 +877,6 @@ pub async fn execute_cluster_mapping(
                     typed.push(("description", d));
                 }
                 push_map(&mut typed, map);
-                if typed.is_empty() && raw.is_empty() {
-                    anyhow::bail!("update needs at least one field");
-                }
                 let owned = build_params(typed, &raw)?;
                 client
                     .update_cluster_mapping_usb(&id, &as_refs(&owned))

@@ -62,6 +62,7 @@ pub enum PoolCommand {
 /// of less-common knobs (crs, fencing, u2f schema).
 #[derive(Debug, Subcommand)]
 pub enum ClusterConfigCommand {
+    /// Show the cluster-wide options (`/cluster/options`).
     Get,
     /// Update one or more cluster-wide options. Refuses no-op calls.
     Set {
@@ -99,10 +100,13 @@ pub enum ClusterConfigCommand {
 #[derive(Debug, Subcommand)]
 pub enum ClusterBootstrapCommand {
     #[command(subcommand)]
+    /// Corosync cluster membership.
     Nodes(CorosyncNodesCommand),
     #[command(subcommand)]
+    /// Join a node to an existing cluster.
     Join(ClusterJoinCommand),
     #[command(subcommand)]
+    /// The corosync quorum device (`QDevice`).
     Qdevice(ClusterQdeviceCommand),
     /// Inspect corosync totem transport config (read-only — totem
     /// changes go through `/etc/pve/corosync.conf` editing).
@@ -111,6 +115,7 @@ pub enum ClusterBootstrapCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum CorosyncNodesCommand {
+    /// List the corosync cluster nodes.
     List,
     /// Add a node to corosync membership. Optional knobs let you pin
     /// the nodeid + ring addresses + vote count instead of letting
