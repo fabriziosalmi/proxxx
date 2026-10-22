@@ -44,6 +44,13 @@ fi
 : "${PROXXX_E2E_PVE_TOKEN:?env PROXXX_E2E_PVE_TOKEN not set (root@pam token id + secret, e.g. 'proxxx=00000000-...')}"
 : "${PROXXX_E2E_NODE:?env PROXXX_E2E_NODE not set (target node name, e.g. pve1)}"
 
+# The probes run the binary on a private config built from the same URL and
+# token as the curl calls, never on the caller's own config (#479).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
+live_normalize_token || exit 1
+live_isolate || exit 1
+
 URL="$PROXXX_E2E_PVE_URL"
 NODE="$PROXXX_E2E_NODE"
 VMID="${PROXXX_E2E_MUTATION_VMID:-9999}"
@@ -76,7 +83,7 @@ probe() {
     } | tee -a "$LOG"
 
     local out
-    out=$(timeout 60 "$BIN" "$@" 2>&1)
+    out=$(run_timeout 60 "$BIN" "$@" 2>&1)
     local rc=$?
 
     echo "$out" >> "$LOG"
@@ -213,6 +220,7 @@ cleanup() {
     log "Log:    $LOG"
     log "Errors: $ERR"
     log "═══════════════════════════════════════════════════════════"
+    live_cleanup
 }
 trap cleanup EXIT
 

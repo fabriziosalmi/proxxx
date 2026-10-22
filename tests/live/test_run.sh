@@ -13,11 +13,14 @@ LOG_DIR="${LOG_DIR:-$SCRIPT_DIR}"
 LOG="$LOG_DIR/test_run.log"
 ERR="$LOG_DIR/test_run_errors.log"
 
-# proxxx on macOS reads its config from
-#   ~/Library/Application Support/dev.proxxx.proxxx/config.toml
-# (per `directories::ProjectDirs::from("dev","proxxx","proxxx")`).
-# We assume the caller has already written it pointing at the test
-# cluster (see this file in /tmp/config.toml.bak for the snapshot).
+# The binary never reads the caller's own config (#479): lib.sh builds a
+# private one from PROXXX_E2E_PVE_URL / PROXXX_E2E_PVE_TOKEN (env.local).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
+live_load_env
+live_normalize_token || exit 1
+live_isolate || exit 1
+trap live_cleanup EXIT
 
 : > "$LOG"
 : > "$ERR"
@@ -35,7 +38,7 @@ probe() {
     } | tee -a "$LOG"
 
     local out
-    out=$(timeout 30 "$BIN" "$@" 2>&1)
+    out=$(run_timeout 30 "$BIN" "$@" 2>&1)
     local rc=$?
 
     echo "$out" >> "$LOG"
@@ -61,7 +64,7 @@ echo "Target: PVE cluster + PBS (configured via env.local)"
 echo "═══════════════════════════════════════════════════════════" | tee -a "$LOG"
 
 # Discover the actual node names from the cluster (don't assume).
-NODES=$(timeout 10 "$BIN" --format json ls nodes 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(n['node'] for n in d))" 2>/dev/null)
+NODES=$(run_timeout 10 "$BIN" --format json ls nodes 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(n['node'] for n in d))" 2>/dev/null)
 echo "Discovered nodes: $NODES" | tee -a "$LOG"
 
 # ── Phase 1: read-only inventory (table) ──
@@ -120,7 +123,10 @@ probe "search root --limit 5" search root --limit 5
 
 # ── Phase 9: read-only patch / alerts ──
 probe "patch plan" patch plan
-probe "alerts test --route ntfy:proxxx-test" alerts test --route "ntfy:proxxx-test" --severity warning || true
+# Publishes to the public https://ntfy.sh/<topic>: opt-in only.
+if [[ -n "${PROXXX_E2E_NTFY_TOPIC:-}" ]]; then
+    probe "alerts test --route ntfy:$PROXXX_E2E_NTFY_TOPIC" alerts test --route "ntfy:$PROXXX_E2E_NTFY_TOPIC" --severity warning || true
+fi
 
 # ── Phase 10: format consistency (json/table/plain — yaml NOT supported) ──
 probe "ls guests --format plain" --format plain ls guests
