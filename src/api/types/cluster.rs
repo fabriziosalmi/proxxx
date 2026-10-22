@@ -30,6 +30,93 @@ pub struct ClusterResource {
     pub tags: String,
     pub template: u8,
     pub plugintype: String,
+    /// Guest config lock (`backup`, `migrate`, ...); empty when none.
+    pub lock: String,
+    /// HA service state for an HA-managed guest; empty otherwise.
+    pub hastate: String,
+    /// Guest network bytes received / sent since start.
+    pub netin: u64,
+    pub netout: u64,
+}
+
+impl ClusterResource {
+    /// The guest this `qemu` / `lxc` entry describes, `None` for any other
+    /// type. `/cluster/resources` carries every `Guest` field the TUI and
+    /// the guest lookups read (`maxcpu` is the guest's CPU count); its
+    /// status comes from pvestatd and trails the node's own view by a few
+    /// seconds (measured 3-5 s on PVE 9.1.1, #493).
+    #[must_use]
+    pub fn to_guest(&self) -> Option<super::Guest> {
+        use super::{Guest, GuestStatus, GuestType};
+        let guest_type = match self.resource_type.as_str() {
+            "qemu" => GuestType::Qemu,
+            "lxc" => GuestType::Lxc,
+            _ => return None,
+        };
+        Some(Guest {
+            vmid: self.vmid,
+            name: self.name.clone(),
+            status: match self.status.as_str() {
+                "running" => GuestStatus::Running,
+                "stopped" => GuestStatus::Stopped,
+                "paused" => GuestStatus::Paused,
+                "suspended" => GuestStatus::Suspended,
+                _ => GuestStatus::Unknown,
+            },
+            guest_type,
+            node: self.node.clone(),
+            cpu: self.cpu,
+            cpus: self.maxcpu,
+            mem: self.mem,
+            maxmem: self.maxmem,
+            disk: self.disk,
+            maxdisk: self.maxdisk,
+            uptime: self.uptime,
+            tags: self.tags.clone(),
+            lock: self.lock.clone(),
+            hastate: self.hastate.clone(),
+            template: self.template != 0,
+            netin: self.netin,
+            netout: self.netout,
+        })
+    }
+}
+
+#[cfg(test)]
+mod to_guest_tests {
+    use super::ClusterResource;
+    use crate::api::types::{GuestStatus, GuestType};
+
+    /// #493: the fields the safety checks read (lock, HA state) and the
+    /// traffic counters survive the conversion.
+    #[test]
+    fn a_guest_entry_keeps_every_field_the_tui_reads() {
+        let r: ClusterResource = serde_json::from_value(serde_json::json!({
+            "id": "lxc/7777", "type": "lxc", "node": "pve1", "vmid": 7777,
+            "name": "ct", "status": "running", "cpu": 0.5, "maxcpu": 2,
+            "mem": 1, "maxmem": 2, "disk": 3, "maxdisk": 4, "uptime": 5,
+            "tags": "a;b", "template": 0, "lock": "backup", "hastate": "started",
+            "netin": 6, "netout": 7
+        }))
+        .unwrap();
+        let g = r.to_guest().expect("an lxc entry is a guest");
+        assert_eq!(
+            (g.vmid, g.guest_type, g.status),
+            (7777, GuestType::Lxc, GuestStatus::Running)
+        );
+        assert_eq!((g.cpus, g.netin, g.netout), (2, 6, 7));
+        assert_eq!((g.lock.as_str(), g.hastate.as_str()), ("backup", "started"));
+        assert!(g.is_ha_managed());
+    }
+
+    #[test]
+    fn other_entries_are_not_guests() {
+        let storage = ClusterResource {
+            resource_type: "storage".into(),
+            ..ClusterResource::default()
+        };
+        assert!(storage.to_guest().is_none());
+    }
 }
 
 /// `GET /cluster/options` — global cluster config. Many fields; the

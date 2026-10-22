@@ -731,6 +731,45 @@ fn a_failed_node_keeps_its_last_known_guests_marked_stale() {
     assert!(state.guests_stale_nodes.is_empty());
 }
 
+/// #493: guests now come from `/cluster/resources`, which also lists the
+/// guests of an offline node (status unknown). For that node the
+/// last-known entries win, without duplicates; on a first load, with
+/// nothing known yet, the reported entries are shown.
+#[test]
+fn an_offline_node_reported_by_cluster_resources_keeps_its_known_guests() {
+    let mut state = AppState::new();
+    // First load with pve2 already offline: nothing known, so the
+    // reported (unknown-status) entry is shown and marked stale.
+    let mut unknown = running_qemu(300, "on-offline", "pve2");
+    unknown.status = proxxx::api::types::GuestStatus::Unknown;
+    loaded(
+        &mut state,
+        vec![running_qemu(100, "a", "pve1"), unknown.clone()],
+        &["pve2"],
+    );
+    assert_eq!(vmids(&state), vec![100, 300]);
+    assert!(state.guests_stale_nodes.contains("pve2"));
+
+    // pve2 back, then offline again: its last-known (running) entry wins
+    // over the unknown one, and appears once.
+    loaded(
+        &mut state,
+        vec![
+            running_qemu(100, "a", "pve1"),
+            running_qemu(300, "on-offline", "pve2"),
+        ],
+        &[],
+    );
+    loaded(
+        &mut state,
+        vec![running_qemu(100, "a", "pve1"), unknown],
+        &["pve2"],
+    );
+    assert_eq!(vmids(&state), vec![100, 300]);
+    let g = state.guests.iter().find(|g| g.vmid == 300).unwrap();
+    assert_eq!(g.status, proxxx::api::types::GuestStatus::Running);
+}
+
 /// A guest that is gone from a node that answered is gone; only a failed
 /// node's guests are kept.
 #[test]
