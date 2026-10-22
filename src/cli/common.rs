@@ -120,51 +120,23 @@ async fn find_guest_via_cluster_resources<G: GuestLookupGateway + ?Sized>(
     client: &G,
     vmid: u32,
 ) -> Result<Option<LocatedGuest>> {
-    use crate::api::types::{Guest, GuestStatus, GuestType};
-
     let resources = client.cluster_vm_resources().await?;
     let Some(r) = resources.into_iter().find(|r| r.vmid == vmid) else {
         return Ok(None);
     };
-    let guest_type = match r.resource_type.as_str() {
-        "lxc" => GuestType::Lxc,
-        "qemu" => GuestType::Qemu,
-        other => {
-            tracing::debug!("cluster/resources returned vmid {vmid} with type {other:?}");
-            return Ok(None);
-        }
+    let Some(guest) = r.to_guest() else {
+        tracing::debug!(
+            "cluster/resources returned vmid {vmid} with type {:?}",
+            r.resource_type
+        );
+        return Ok(None);
     };
     let raw_status = if r.status.is_empty() {
         "unknown".to_string()
     } else {
-        r.status.clone()
+        r.status
     };
-    Ok(Some(LocatedGuest {
-        guest: Guest {
-            vmid: r.vmid,
-            name: r.name,
-            status: match r.status.as_str() {
-                "running" => GuestStatus::Running,
-                "stopped" => GuestStatus::Stopped,
-                "paused" => GuestStatus::Paused,
-                "suspended" => GuestStatus::Suspended,
-                _ => GuestStatus::Unknown,
-            },
-            guest_type,
-            node: r.node,
-            cpu: r.cpu,
-            cpus: r.maxcpu,
-            mem: r.mem,
-            maxmem: r.maxmem,
-            disk: r.disk,
-            maxdisk: r.maxdisk,
-            uptime: r.uptime,
-            tags: r.tags,
-            template: r.template != 0,
-            ..Guest::default()
-        },
-        raw_status,
-    }))
+    Ok(Some(LocatedGuest { guest, raw_status }))
 }
 
 pub async fn find_guest_full(

@@ -1027,13 +1027,44 @@ fn cycle_is_complete(state: &AppState, storage_partial: bool) -> bool {
     !storage_partial && state.guests_stale_nodes.is_empty()
 }
 
+/// Every guest of the cluster from one `/cluster/resources` call (#493),
+/// or `None` when that call fails and the nodes have to be walked.
+async fn cluster_guests(client: &Arc<PxClient>) -> Option<Vec<Guest>> {
+    match client.get_cluster_resources(Some("vm")).await {
+        Ok(resources) => Some(
+            resources
+                .iter()
+                .filter_map(crate::api::types::ClusterResource::to_guest)
+                .collect(),
+        ),
+        Err(e) => {
+            warn!("cluster/resources failed ({e:#}); walking the nodes for guests");
+            None
+        }
+    }
+}
+
 /// Fetch all data from Proxmox and send to controller
 async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
     // Nodes
     match client.get_nodes().await {
         Ok(nodes) => {
-            let node_names: Vec<String> = nodes.iter().map(|n| n.node.clone()).collect();
+            // #493: a refresh used to cost 3 requests per node (qemu, lxc
+            // and storage lists), every node included, offline or not:
+            // 3N+3 against a 10/s limiter and a 5 s cycle saturated around
+            // 16 nodes. Guests now come from one `/cluster/resources` call
+            // (status trails the node's view by a few seconds; the safety
+            // checks before a mutation read the node itself), and storage
+            // only from online nodes, the only source of an exact `avail`.
+            let (online, offline): (Vec<_>, Vec<_>) = nodes
+                .iter()
+                .partition(|n| matches!(n.status, crate::api::types::NodeStatus::Online));
+            let online: Vec<String> = online.into_iter().map(|n| n.node.clone()).collect();
+            let offline: Vec<String> = offline.into_iter().map(|n| n.node.clone()).collect();
             let _ = tx.send(DataMsg::Nodes(nodes)).await;
+
+            let cluster_guests = cluster_guests(client).await;
+            let walk_guests = cluster_guests.is_none();
 
             let mut join_set = tokio::task::JoinSet::new();
 
@@ -1046,28 +1077,36 @@ async fn fetch_all(client: &Arc<PxClient>, tx: &mpsc::Sender<DataMsg>) {
             const MAX_INFLIGHT_NODES: usize = 16;
             let sem = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_NODES));
 
-            for node_name in node_names {
+            for node_name in online {
                 let client_cloned = Arc::clone(client);
                 let permit_source = Arc::clone(&sem);
                 join_set.spawn(async move {
                     let _permit = permit_source.acquire_owned().await;
-                    let guests = client_cloned.get_guests(&node_name).await;
+                    let guests = if walk_guests {
+                        Some(client_cloned.get_guests(&node_name).await)
+                    } else {
+                        None
+                    };
                     let storage = client_cloned.get_storage_pools(&node_name).await;
                     (node_name, guests, storage)
                 });
             }
 
-            let mut all_guests = Vec::new();
+            let mut all_guests = cluster_guests.unwrap_or_default();
             let mut all_storage = Vec::new();
             let mut guest_errors: Vec<String> = Vec::new();
-            let mut failed_nodes: Vec<String> = Vec::new();
-            let mut storage_partial = false;
+            // An offline node cannot be asked for its guests or storage:
+            // the reducer keeps its last-known guests, marked stale (#378),
+            // and its storage pools are missing from this cycle.
+            let mut failed_nodes: Vec<String> = offline.clone();
+            let mut storage_partial = !offline.is_empty();
 
             while let Some(res) = join_set.join_next().await {
                 if let Ok((node_name, guests_res, storage_res)) = res {
                     match guests_res {
-                        Ok(guests) => all_guests.extend(guests),
-                        Err(e) => {
+                        None => {}
+                        Some(Ok(guests)) => all_guests.extend(guests),
+                        Some(Err(e)) => {
                             warn!("Failed to fetch guests from {node_name}: {e}");
                             // Classify the error so the TUI can hint at the cause.
                             let msg = if e.to_string().contains("403")
@@ -2683,5 +2722,169 @@ mod cache_save_tests {
         assert!(!cycle_is_complete(&state, true), "storage of a node failed");
         state.guests_stale_nodes.insert("pve2".into());
         assert!(!cycle_is_complete(&state, false), "guests of a node failed");
+    }
+}
+
+#[cfg(test)]
+mod refresh_cost_tests {
+    use super::{fetch_all, DataMsg};
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client(server: &MockServer) -> Arc<crate::api::PxClient> {
+        let cfg = crate::config::ProfileConfig {
+            url: server.uri(),
+            user: "root@pam".into(),
+            auth: "token".into(),
+            token_id: Some("test".into()),
+            token_secret: None,
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            tls_pin_mode: None,
+            read_only: false,
+            rate_limit: Some(100),
+            policies: None,
+            telegram: None,
+            ssh: None,
+            pbs: None,
+            alerts: None,
+            mcp_token: None,
+            reconcile: None,
+            profile_name: None,
+        };
+        Arc::new(
+            crate::api::PxClient::new(cfg, Some("fake-secret"))
+                .await
+                .expect("client builds"),
+        )
+    }
+
+    fn data(v: &serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": v }))
+    }
+
+    /// Two online nodes and one offline. `expect` counts are the assertion.
+    async fn cluster(server: &MockServer, resources_ok: bool, per_node_guests: u64) {
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(data(&serde_json::json!([
+                {"node": "pve1", "status": "online"},
+                {"node": "pve2", "status": "online"},
+                {"node": "pve3", "status": "offline"}
+            ])))
+            .mount(server)
+            .await;
+        let resources = Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .and(query_param("type", "vm"));
+        if resources_ok {
+            resources
+                .respond_with(data(&serde_json::json!([
+                    {"id": "qemu/100", "type": "qemu", "node": "pve1", "vmid": 100, "status": "running", "maxcpu": 2},
+                    {"id": "lxc/200", "type": "lxc", "node": "pve2", "vmid": 200, "status": "stopped"},
+                    {"id": "qemu/300", "type": "qemu", "node": "pve3", "vmid": 300, "status": "unknown"}
+                ])))
+                .expect(1)
+                .mount(server)
+                .await;
+        } else {
+            resources
+                .respond_with(ResponseTemplate::new(501))
+                .expect(1)
+                .mount(server)
+                .await;
+        }
+        for n in ["pve1", "pve2"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api2/json/nodes/{n}/storage")))
+                .respond_with(data(&serde_json::json!([
+                    {"storage": "local", "type": "dir", "total": 10, "used": 4, "avail": 5, "active": 1, "content": "iso"}
+                ])))
+                .expect(1)
+                .mount(server)
+                .await;
+            for kind in ["qemu", "lxc"] {
+                Mock::given(method("GET"))
+                    .and(path(format!("/api2/json/nodes/{n}/{kind}")))
+                    .respond_with(data(&serde_json::json!([])))
+                    .expect(per_node_guests)
+                    .mount(server)
+                    .await;
+            }
+        }
+        // The offline node is never asked.
+        for p in ["storage", "qemu", "lxc"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api2/json/nodes/pve3/{p}")))
+                .respond_with(ResponseTemplate::new(595))
+                .expect(0)
+                .mount(server)
+                .await;
+        }
+        for p in ["/api2/json/cluster/tasks", "/api2/json/cluster/status"] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(data(&serde_json::json!([])))
+                .mount(server)
+                .await;
+        }
+    }
+
+    async fn run(server: &MockServer) -> (Vec<crate::api::types::Guest>, Vec<String>, bool, usize) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        fetch_all(&client(server).await, &tx).await;
+        drop(tx);
+        let (mut guests, mut failed, mut partial, mut pools) = (Vec::new(), Vec::new(), false, 0);
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                DataMsg::Guests {
+                    guests: g,
+                    failed_nodes,
+                } => {
+                    guests = g;
+                    failed = failed_nodes;
+                }
+                DataMsg::Storage {
+                    storage,
+                    partial: p,
+                } => {
+                    pools = storage.len();
+                    partial = p;
+                }
+                _ => {}
+            }
+        }
+        (guests, failed, partial, pools)
+    }
+
+    /// #493: one `/cluster/resources` call for the guests, storage from the
+    /// online nodes only, no per-node guest lists, nothing sent to the
+    /// offline node.
+    #[tokio::test]
+    async fn a_refresh_reads_guests_once_and_skips_offline_nodes() {
+        let server = MockServer::start().await;
+        cluster(&server, true, 0).await;
+        let (guests, failed, partial, pools) = run(&server).await;
+        let mut vmids: Vec<u32> = guests.iter().map(|g| g.vmid).collect();
+        vmids.sort_unstable();
+        assert_eq!(vmids, vec![100, 200, 300]);
+        assert_eq!(failed, vec!["pve3".to_string()]);
+        assert!(partial, "pve3's storage is missing from this cycle");
+        assert_eq!(pools, 2);
+        server.verify().await;
+    }
+
+    /// Without `/cluster/resources` the online nodes are walked as before.
+    #[tokio::test]
+    async fn without_cluster_resources_the_online_nodes_are_walked() {
+        let server = MockServer::start().await;
+        cluster(&server, false, 1).await;
+        let (guests, failed, _, pools) = run(&server).await;
+        assert!(guests.is_empty());
+        assert_eq!(failed, vec!["pve3".to_string()]);
+        assert_eq!(pools, 2);
+        server.verify().await;
     }
 }

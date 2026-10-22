@@ -914,14 +914,21 @@ pub fn update(state: &mut AppState, action: Action) -> Option<SideEffect> {
         } => {
             // #378: a node whose fetch failed keeps its last-known guests,
             // marked stale, instead of vanishing until the next good cycle.
+            // #493: guests of an offline node can also arrive in `guests`
+            // (from `/cluster/resources`, status unknown). For such a node
+            // the last-known entries win, since they carry a real state;
+            // the reported ones are used only when none are known yet.
             let failed: std::collections::BTreeSet<String> = failed_nodes.into_iter().collect();
-            guests.extend(
-                state
-                    .guests
-                    .iter()
-                    .filter(|g| failed.contains(&g.node))
-                    .cloned(),
-            );
+            let known: Vec<Guest> = state
+                .guests
+                .iter()
+                .filter(|g| failed.contains(&g.node))
+                .cloned()
+                .collect();
+            let known_nodes: std::collections::BTreeSet<String> =
+                known.iter().map(|g| g.node.clone()).collect();
+            guests.retain(|g| !known_nodes.contains(&g.node));
+            guests.extend(known);
             state.guests_stale_nodes = failed;
             // SPOF 5.1 (Category 5 audit): emit a forensic trail when
             // a guest's tag set changes between snapshots. proxxx can't
