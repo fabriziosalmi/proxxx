@@ -16,6 +16,11 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every subcommand has a description in `--help` (#494).** 64 nested ones had none (for example `firewall-cluster alias list`, `acme plugin show`, `node-system dns get`), so their parent's help listed them blank. A test now checks every level.
+- **Arguments PVE requires are required by the CLI, and a flag PVE does not accept is gone (#494).** Measured on PVE 9.1.1, each call below failed with a 400 "property is missing and it is not optional" unless the argument was given: `node-system dns set` now requires `--search`, `firewall-cluster alias update` and `firewall-guest alias update` require `--cidr`, `cluster-mapping usb update` requires `--map`, and `metric-servers update` requires `--server` and `--port`. `metric-servers create` and `update` no longer offer `--comment`, which PVE's metric-server schema does not have. An invocation that worked before still works.
+
 ## [0.16.0] - 2026-10-22
 
 Headline: **the 2026-10-18 audit milestone, closed.** Hints, help and
