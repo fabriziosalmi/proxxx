@@ -754,6 +754,82 @@ impl PendingStore {
 }
 
 #[cfg(test)]
+mod concurrency_tests {
+    //! #294: the approval store under genuinely overlapping callbacks. The
+    //! quorum and single-execution guarantees rest on `process_callback_at`
+    //! reading and updating the request inside one `BEGIN IMMEDIATE`
+    //! transaction; these tests race it from several threads at once.
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    const APPROVERS: i64 = 8;
+    const ROUNDS: usize = 25;
+
+    /// One round: `APPROVERS` distinct approvers press "approve" at the same
+    /// instant. `shared` = one store instance for all (one process);
+    /// otherwise each opens its own connection to the same file, as the
+    /// HITL daemon and the TUI do from separate processes, so only
+    /// `SQLite`'s locking stands between them.
+    async fn race(require: u8, shared: bool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hitl_pending.db");
+        let first = Arc::new(PendingStore::open_at(&path).expect("open"));
+        let req = first
+            .insert(&NewPendingRequest::new("delete", Some(100), require))
+            .expect("insert");
+        let barrier = Arc::new(Barrier::new(APPROVERS as usize));
+        let mut tasks = Vec::new();
+        for approver in 1..=APPROVERS {
+            let store = if shared {
+                Arc::clone(&first)
+            } else {
+                Arc::new(PendingStore::open_at(&path).expect("open"))
+            };
+            let barrier = Arc::clone(&barrier);
+            let id = req.id.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                store.process_callback(&id, CallbackDecision::Approve, approver)
+            }));
+        }
+        let (mut approved, mut awaiting, mut handled) = (0, 0, 0);
+        for t in tasks {
+            match t
+                .await
+                .expect("join")
+                .expect("no store error under contention")
+            {
+                StoreOutcome::Approved { .. } => approved += 1,
+                StoreOutcome::AwaitingApprovals { .. } => awaiting += 1,
+                StoreOutcome::AlreadyHandled { .. } => handled += 1,
+                other => panic!("unexpected outcome {other:?}"),
+            }
+        }
+        let need = usize::from(require.max(1));
+        assert_eq!(approved, 1, "exactly one approval may authorise execution");
+        assert_eq!(
+            awaiting,
+            need - 1,
+            "one vote short of quorum per earlier approver"
+        );
+        assert_eq!(handled, APPROVERS as usize - need);
+        let after = first.get(&req.id).expect("get").expect("row");
+        assert_eq!(after.status, RequestStatus::Approved);
+        assert_eq!(after.approvers.len(), need, "{:?}", after.approvers);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_approvals_admit_exactly_one_execution() {
+        for _ in 0..ROUNDS {
+            for require in [1, 2] {
+                race(require, true).await;
+                race(require, false).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

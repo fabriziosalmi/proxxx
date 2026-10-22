@@ -2876,6 +2876,59 @@ mod refresh_cost_tests {
         server.verify().await;
     }
 
+    /// #294: the per-refresh fan-out never has more than
+    /// `MAX_INFLIGHT_NODES` (16) storage requests in flight, on a
+    /// multi-threaded runtime. 33 nodes whose storage answers after 300 ms
+    /// need three waves at a ceiling of 16 (at least 900 ms); a ceiling of
+    /// 17 would need two, no ceiling one. The semaphore guarantees the
+    /// lower bound, so the check cannot flake on a slow machine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_refresh_fan_out_keeps_its_ceiling_on_a_multi_threaded_runtime() {
+        const NODES: usize = 33;
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+        let server = MockServer::start().await;
+        let nodes: Vec<serde_json::Value> = (0..NODES)
+            .map(|i| serde_json::json!({"node": format!("n{i}"), "status": "online"}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(data(&serde_json::Value::Array(nodes)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .respond_with(data(&serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/api2/json/nodes/n\d+/storage$",
+            ))
+            .respond_with(data(&serde_json::json!([])).set_delay(DELAY))
+            .expect(NODES as u64)
+            .mount(&server)
+            .await;
+        for p in ["/api2/json/cluster/tasks", "/api2/json/cluster/status"] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(data(&serde_json::json!([])))
+                .mount(&server)
+                .await;
+        }
+        let client = client(&server).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let started = std::time::Instant::now();
+        fetch_all(&client, &tx).await;
+        let elapsed = started.elapsed();
+        drop(tx);
+        while rx.recv().await.is_some() {}
+        assert!(
+            elapsed >= DELAY * 3,
+            "33 storage requests finished in {elapsed:?}: more than 16 were in flight at once"
+        );
+        server.verify().await;
+    }
+
     /// Without `/cluster/resources` the online nodes are walked as before.
     #[tokio::test]
     async fn without_cluster_resources_the_online_nodes_are_walked() {
