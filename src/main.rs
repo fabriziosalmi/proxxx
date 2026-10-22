@@ -77,9 +77,10 @@ fn version_string(commit: Option<&str>) -> String {
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn main() -> Result<()> {
     // #363: positional identifiers refuse "" before any request.
-    let matches =
-        proxxx::cli::args::reject_empty_positionals(Cli::command().version(VERSION.as_str()))
-            .get_matches();
+    let matches = proxxx::cli::args::usage_with_parent_positionals(
+        proxxx::cli::args::reject_empty_positionals(Cli::command().version(VERSION.as_str())),
+    )
+    .get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // #362: the global `--format json` selects JSON for commands with their
     // own output flag, unless that flag was given on the command line.

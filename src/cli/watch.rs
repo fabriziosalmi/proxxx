@@ -46,6 +46,11 @@ async fn watch_until(
         ('=', raw_value.as_str())
     };
 
+    // Validate the whole request before the first poll: an unsupported
+    // target, key or value used to surface only after a sleep, or never,
+    // so `-u status=banana` waited out the full timeout (audit #385).
+    validate_condition(&target, &key, comparator, value_str)?;
+
     let mut met = false;
     tracing::info!("Watching {} until {}={}", target, key, raw_value);
     let deadline = Instant::now() + Duration::from_secs(timeout);
@@ -79,6 +84,64 @@ async fn watch_until(
         serde_json::json!({"status": "condition_met", "target": target, "condition": until}),
         0,
     ))
+}
+
+/// Guest states `status=` can wait for: what `check_guest_condition`
+/// compares against.
+const GUEST_STATES: &[&str] = &["running", "stopped", "paused", "suspended", "unknown"];
+
+/// Refuse a target, key or value that `watch --until` can never match.
+fn validate_condition(target: &str, key: &str, comparator: char, value: &str) -> Result<()> {
+    let vmid = target.strip_prefix("vm-").unwrap_or(target);
+    if !vmid.is_empty() && vmid.chars().all(|c| c.is_ascii_digit()) {
+        if key != "status" {
+            anyhow::bail!("unsupported condition key for a guest: {key} (use status=<state>)");
+        }
+        if comparator != '=' || !GUEST_STATES.contains(&value) {
+            anyhow::bail!(
+                "unsupported guest state {value:?}: use status={}",
+                GUEST_STATES.join("|")
+            );
+        }
+        return Ok(());
+    }
+    if target.starts_with("storage-") {
+        if key != "usage" {
+            anyhow::bail!("unsupported condition key for storage: {key} (use usage=<N%, usage=>N% or usage=N%)");
+        }
+        value
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .map_err(|_| anyhow::anyhow!("usage threshold {value:?} is not a number"))?;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unsupported target {target:?}: use vm-<id>, <id>, storage-<id> or storage-<id>@<node>"
+    )
+}
+
+/// `--since` as seconds: a number with an optional unit `s`, `m`, `h`,
+/// `d` or `w` (a bare number is seconds). Anything else is an error; `1d`
+/// used to fall through to a silent default of 3600 s (audit #385).
+fn parse_since(since: &str) -> Result<u64> {
+    let since = since.trim();
+    let (digits, unit) = match since.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&since[..i], c.to_ascii_lowercase()),
+        _ => (since, 's'),
+    };
+    let factor = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
+        'w' => 604_800,
+        _ => anyhow::bail!("--since {since:?}: unknown unit {unit:?} (use s, m, h, d or w)"),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--since {since:?} is not a duration like 30m, 6h or 1d"))?;
+    n.checked_mul(factor)
+        .ok_or_else(|| anyhow::anyhow!("--since {since:?} is too large"))
 }
 
 async fn check_guest_condition(
@@ -167,13 +230,7 @@ fn watch_since(profile_label: &str, since: &str) -> Result<(Value, i32)> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let seconds = if since.ends_with('h') {
-        since.trim_end_matches('h').parse::<u64>().unwrap_or(1) * 3600
-    } else if since.ends_with('m') {
-        since.trim_end_matches('m').parse::<u64>().unwrap_or(30) * 60
-    } else {
-        since.parse::<u64>().unwrap_or(3600)
-    };
+    let seconds = parse_since(since)?;
 
     let past = now.saturating_sub(seconds);
     let state_past = crate::app::cache::load_state_at(profile_label, past)?;
@@ -268,5 +325,33 @@ mod storage_target_tests {
         assert!(select_storage_row(vec![], "storage-x").is_err());
         let one = vec![row("local", "pve1", 10, false)];
         assert!(select_storage_row(one, "storage-local@pve9").is_err());
+    }
+}
+
+#[cfg(test)]
+mod condition_tests {
+    use super::{parse_since, validate_condition};
+
+    #[test]
+    fn since_takes_every_unit_and_refuses_what_it_cannot_read() {
+        assert_eq!(parse_since("1d").unwrap(), 86_400);
+        assert_eq!(parse_since("30m").unwrap(), 1_800);
+        assert_eq!(parse_since("6h").unwrap(), 21_600);
+        assert_eq!(parse_since("2w").unwrap(), 1_209_600);
+        assert_eq!(parse_since("90").unwrap(), 90);
+        assert!(parse_since("1y").is_err());
+        assert!(parse_since("soon").is_err());
+        assert!(parse_since("").is_err());
+    }
+
+    #[test]
+    fn a_condition_that_can_never_match_is_refused_up_front() {
+        assert!(validate_condition("vm-100", "status", '=', "running").is_ok());
+        assert!(validate_condition("100", "status", '=', "stopped").is_ok());
+        assert!(validate_condition("vm-100", "status", '=', "banana").is_err());
+        assert!(validate_condition("vm-100", "usage", '>', "80").is_err());
+        assert!(validate_condition("storage-local", "usage", '>', "80%").is_ok());
+        assert!(validate_condition("storage-local", "usage", '>', "lots").is_err());
+        assert!(validate_condition("UPID:pve1:0001:task", "status", '=', "running").is_err());
     }
 }

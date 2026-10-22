@@ -83,7 +83,12 @@ pub enum NodeSystemCommand {
         #[arg(long)]
         lastentries: Option<u32>,
     },
-    /// Tail `/var/log/syslog` (line-numbered for paging).
+    /// Page through the node's syslog, oldest line first.
+    ///
+    /// Without `--start` or `--since` PVE starts at the first line since
+    /// boot, not at the end (measured on PVE 9.1.1, audit #385). Lines
+    /// are numbered for paging. For the newest lines use
+    /// `node-system <node> journal --lastentries <n>`.
     Syslog {
         /// 1-indexed start cursor — pass back the last `n` from the
         /// previous response to paginate forward.

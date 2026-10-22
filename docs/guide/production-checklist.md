@@ -125,7 +125,7 @@ and exit. This is intentional — don't `chmod 644` to "fix" it.
 ```bash
 proxxx ls nodes
 proxxx ls guests --format json | jq '.[] | {vmid, name, status}'
-proxxx perms <user>
+proxxx perms <user> --node <node>
 ```
 
 ## 3. Configure HITL (if any operator runs destructive ops)
@@ -299,7 +299,7 @@ strict_host_key_checking = "tofu"   # default; pinning happens on first connect
 ### `[ ]` Verify the round-trip
 
 ```bash
-proxxx perms <user>            # exercises the same path
+proxxx perms <user> --node <node>   # exercises the same path
 # → table of effective ACLs; if you see the table, SSH works.
 ```
 

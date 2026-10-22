@@ -47,7 +47,7 @@ pub struct ExplainEntry {
     /// hints here — those live in `fixes`.
     pub cause: &'static str,
     /// Numbered fixes in priority order. Each is a short imperative
-    /// sentence ("Re-run `proxxx auth login`."). Concrete enough
+    /// sentence ("Re-run `proxxx init --interactive`."). Concrete enough
     /// that an operator (or LLM agent) can act on it without further
     /// research.
     pub fixes: &'static [&'static str],
@@ -74,14 +74,14 @@ pub const ENTRIES: &[ExplainEntry] = &[
         title: "Proxmox rejected our credentials (401)",
         cause: "PVE returned HTTP 401. Common causes: API token revoked or expired, password changed since proxxx was configured, PAM ticket expired after a long sleep/suspend, or wrong realm (`@pam` vs `@pve`).",
         fixes: &[
-            "Re-run `proxxx auth login` to refresh the ticket.",
+            "Re-run `proxxx init --interactive` to write a fresh token or password into the profile; it probes the credentials against the cluster before saving.",
             "Check the token in the PVE web UI (Datacenter → API Tokens) — make sure it exists, isn't expired, and has the privileges your operations need.",
             "Verify the user/realm in `config.toml` matches the token's owner: `user = \"root@pam\"` not `\"root@pve\"`.",
             "If using `auth = \"token\"`, confirm `token_id` matches the token name exactly (case-sensitive).",
         ],
         commands: &[
-            "proxxx auth show              # check what proxxx thinks the auth is",
-            "proxxx auth login             # interactive re-auth",
+            "proxxx doctor                 # config, connectivity and auth in one pass",
+            "proxxx init --interactive     # rewrite the credentials, probed before saving",
             "curl -k https://<pve>:8006/api2/json/access/ticket  # raw probe",
         ],
         references: &[
@@ -197,11 +197,11 @@ pub const ENTRIES: &[ExplainEntry] = &[
         fixes: &[
             "Check the PVE version: `proxxx doctor` reports it. If you're on a new major (e.g. 9.x post-9.1), some endpoints changed shape.",
             "Open a proxxx issue with the failing endpoint path and PVE version — schema drift is fixable in the model layer.",
-            "As a workaround, query the raw API: `proxxx api <method> <path>`.",
+            "As a workaround, read the raw API on a node with `pvesh get <path> --output-format json`.",
         ],
         commands: &[
             "proxxx doctor                                  # PVE version + reachability",
-            "proxxx api GET /nodes/<node>/status            # raw bypass of the typed model",
+            "pvesh get /nodes/<node>/status --output-format json  # on a node: raw bypass of the typed model",
         ],
         references: &[],
     },
@@ -286,8 +286,7 @@ pub const ENTRIES: &[ExplainEntry] = &[
             "If the risk is NOT acceptable, fix the underlying state first — e.g. drain the guest's connections, evacuate the node, schedule a maintenance window.",
         ],
         commands: &[
-            "proxxx preflight <op> <vmid>         # show the risk assessment without acting",
-            "proxxx exec <vmid> -- ss -tln        # see what's listening before stopping",
+            "proxxx exec <vmid> -- ss -tln        # QEMU with guest agent: see what's listening before stopping",
         ],
         references: &["docs/reference/exit-codes.md"],
     },
@@ -477,9 +476,129 @@ fn wrap_indent(text: &str, continuation_indent: &str) -> String {
     out
 }
 
+/// The backticked spans of `text`.
+#[cfg(test)]
+pub(crate) fn backticked(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every `proxxx <command> [<subcommand>]` cited in `texts` that the clap
+/// tree does not know, as `"`proxxx x` in: <text>"` lines. Shared by the
+/// tests that keep hints and help from pointing at commands that do not
+/// exist (audit #385).
+#[cfg(test)]
+pub(crate) fn missing_cited_commands(texts: &[String]) -> Vec<String> {
+    use clap::Subcommand as _;
+    let cli = crate::cli::Command::augment_subcommands(clap::Command::new("proxxx"));
+    // Global flags live on the binary's `Cli`, which the library does
+    // not see; these are the ones it defines.
+    const GLOBAL_FLAGS: &[&str] = &[
+        "--profile",
+        "--format",
+        "--token-secret",
+        "--token-secret-file",
+        "--secure",
+    ];
+    let mut bad = Vec::new();
+    for text in texts {
+        for (i, _) in text.match_indices("proxxx ") {
+            // Skip the crate name inside a path or a word.
+            if text[..i].ends_with(|c: char| c.is_alphanumeric() || c == '/' || c == '-') {
+                continue;
+            }
+            let mut words = text[i + "proxxx ".len()..]
+                .split(|c: char| c.is_whitespace() || c == '`' || c == ',' || c == ';')
+                .filter(|w| !w.is_empty());
+            let Some(first) = words.next() else { continue };
+            if first.starts_with('-') {
+                if !GLOBAL_FLAGS.contains(&first.split('=').next().unwrap_or(first)) {
+                    bad.push(format!("`proxxx {first}` in: {text}"));
+                }
+                continue;
+            }
+            if first.starts_with('<') || first.starts_with('[') {
+                continue;
+            }
+            let Some(sub) = cli.find_subcommand(first) else {
+                bad.push(format!("`proxxx {first}` in: {text}"));
+                continue;
+            };
+            if sub.has_subcommands() {
+                if let Some(second) = words.next() {
+                    let placeholder = second.starts_with(['<', '-', '[']);
+                    let positional = sub.get_positionals().next().is_some();
+                    if !placeholder && !positional && sub.find_subcommand(second).is_none() {
+                        bad.push(format!("`proxxx {first} {second}` in: {text}"));
+                    }
+                }
+            }
+        }
+    }
+    bad
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `proxxx <command> [<subcommand>]` cited in a fix, a command
+    /// line or an `ApiError` hint, checked against the real clap tree.
+    /// `proxxx auth login`, `proxxx api GET` and `proxxx -vvv` were cited
+    /// and do not exist (audit #385).
+    #[test]
+    fn every_cited_proxxx_command_exists() {
+        // Prose mentions the crate by name ("proxxx was configured"); only
+        // backticked spans there are commands. `commands` lines are
+        // command lines whole.
+        let mut texts: Vec<String> = Vec::new();
+        for e in ENTRIES {
+            for prose in e.fixes.iter().chain(std::iter::once(&e.cause)) {
+                texts.extend(backticked(prose));
+            }
+            texts.extend(e.commands.iter().map(|s| (*s).to_string()));
+        }
+        let api = crate::api::ApiError::Other {
+            path: String::new(),
+            status: 500,
+            body: String::new(),
+        };
+        let parse = crate::api::ApiError::Parse {
+            path: String::new(),
+            source: serde_json::from_str::<u8>("x").unwrap_err(),
+        };
+        for err in [
+            crate::api::ApiError::Unauthorized(String::new()),
+            crate::api::ApiError::Forbidden(String::new()),
+            crate::api::ApiError::Forbidden("Permission check failed (user != root@pam)".into()),
+            crate::api::ApiError::NotFound(String::new()),
+            crate::api::ApiError::RateLimited(String::new()),
+            crate::api::ApiError::RateLimited("may still have executed".into()),
+            crate::api::ApiError::StorageHang(String::new()),
+            crate::api::ApiError::Transport(String::new()),
+            crate::api::ApiError::Transport("may still have executed".into()),
+            crate::api::ApiError::PayloadTooLarge(String::new()),
+            parse,
+            api,
+            crate::api::ApiError::Other {
+                path: String::new(),
+                status: 500,
+                body: "snapshot 'x' does not exist".into(),
+            },
+        ] {
+            texts.extend(backticked(err.actionable_hint()));
+        }
+
+        let bad = missing_cited_commands(&texts);
+        assert!(
+            bad.is_empty(),
+            "commands that do not exist:\n{}",
+            bad.join("\n")
+        );
+    }
 
     #[test]
     fn every_entry_has_required_fields() {

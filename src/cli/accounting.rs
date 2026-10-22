@@ -211,6 +211,37 @@ pub fn integrate_rrd(points: &[RrdPoint]) -> WindowedTotals {
     t
 }
 
+/// Label of the row that collects guests with no pool, or no tag.
+const UNASSIGNED: &str = "(none)";
+
+/// The groups a guest counts towards, or `None` to leave it out. A guest
+/// with no pool or no tag goes to [`UNASSIGNED`] under
+/// `--include-unassigned`; tags used `(no-tag)` while pools used
+/// `(none)` (audit #385).
+fn group_keys(
+    group_by: GroupBy,
+    vmid_to_pool: &std::collections::HashMap<u32, String>,
+    g: &crate::api::types::Guest,
+    include_unassigned: bool,
+) -> Option<Vec<String>> {
+    let keys: Vec<String> = match group_by {
+        GroupBy::Pool => vmid_to_pool.get(&g.vmid).cloned().into_iter().collect(),
+        GroupBy::Node => vec![g.node.clone()],
+        GroupBy::Tag => g
+            .tags
+            .split([';', ','])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    };
+    match (keys.is_empty(), include_unassigned) {
+        (false, _) => Some(keys),
+        (true, true) => Some(vec![UNASSIGNED.to_string()]),
+        (true, false) => None,
+    }
+}
+
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn execute_accounting(
     client: &Arc<PxClient>,
@@ -272,31 +303,9 @@ pub async fn execute_accounting(
 
     let mut groups: BTreeMap<String, GroupTotals> = BTreeMap::new();
     for g in &all_guests {
-        let group_keys: Vec<String> = match args.group_by {
-            GroupBy::Pool => match vmid_to_pool.get(&g.vmid) {
-                Some(p) => vec![p.clone()],
-                None if args.include_unassigned => vec!["(none)".into()],
-                None => continue,
-            },
-            GroupBy::Node => vec![g.node.clone()],
-            GroupBy::Tag => {
-                let tags: Vec<String> = g
-                    .tags
-                    .split([';', ','])
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                if tags.is_empty() {
-                    if args.include_unassigned {
-                        vec!["(no-tag)".into()]
-                    } else {
-                        continue;
-                    }
-                } else {
-                    tags
-                }
-            }
+        let Some(group_keys) = group_keys(args.group_by, &vmid_to_pool, g, args.include_unassigned)
+        else {
+            continue;
         };
         for key in group_keys {
             let entry = groups.entry(key.clone()).or_insert(GroupTotals {
@@ -597,5 +606,38 @@ mod tests {
         assert!((a.net_out_gib - 8.0).abs() < 1e-9);
         assert!((a.disk_read_gib - 10.0).abs() < 1e-9);
         assert!((a.disk_write_gib - 12.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod group_key_tests {
+    use super::{group_keys, GroupBy, UNASSIGNED};
+    use crate::api::types::Guest;
+
+    #[test]
+    fn a_guest_without_pool_or_tag_lands_in_the_same_unassigned_row() {
+        let pools = std::collections::HashMap::from([(100, "prod".to_string())]);
+        let bare = Guest {
+            vmid: 200,
+            node: "pve1".into(),
+            ..Guest::default()
+        };
+        let none = Some(vec![UNASSIGNED.to_string()]);
+        assert_eq!(group_keys(GroupBy::Pool, &pools, &bare, true), none);
+        assert_eq!(group_keys(GroupBy::Tag, &pools, &bare, true), none);
+        assert_eq!(group_keys(GroupBy::Tag, &pools, &bare, false), None);
+        let tagged = Guest {
+            vmid: 100,
+            tags: "web;db".into(),
+            ..Guest::default()
+        };
+        assert_eq!(
+            group_keys(GroupBy::Tag, &pools, &tagged, false),
+            Some(vec!["web".to_string(), "db".to_string()])
+        );
+        assert_eq!(
+            group_keys(GroupBy::Pool, &pools, &tagged, false),
+            Some(vec!["prod".to_string()])
+        );
     }
 }

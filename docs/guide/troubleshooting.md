@@ -103,7 +103,7 @@ The token's ACL doesn't grant the operation.
 
 - Read errors → token needs `Sys.Audit` on the relevant path.
 - Write errors → `VM.Allocate`, `VM.Config.Disk`, etc.
-- Token list of effective perms: `proxxx perms <user>`.
+- Token list of effective perms: `proxxx perms <user> --node <node>`.
 
 If you hit 403 on a lifecycle op (`start`/`stop`/`restart`) but
 the user is admin in the web UI, you probably created the token
