@@ -23,6 +23,7 @@ SemVer contract:
 
 ### Tests and tooling
 
+- **CONTRIBUTING states a surface freeze (#295).** No new gateway method group or declarative state family lands until line coverage meets its floor (#298), the family is under its size ceiling (#293) and someone outside the repository asked for it; until those numbers exist the freeze holds. The README non-goals link to it.
 - **The HITL approval store and the TUI refresh fan-out are tested under real concurrency (#294).** Eight approvers race `process_callback` on one request, through one shared store and through one store each on the same file (as the daemon and the TUI do), for a quorum of 1 and of 2: exactly one call authorises execution. Splitting the read and the update into two transactions makes two calls approve the same request, and the test fails. A second test holds the refresh's 16-request ceiling on a multi-threaded runtime (a ceiling of 17 fails it). CONTRIBUTING now says which code needs such a test.
 
 ## [0.16.0] - 2026-10-22

@@ -224,6 +224,24 @@ land):
 
 The full list lives in `README.md` → "Honest non-goals".
 
+### Surface freeze
+
+No new resource family lands: no new group of `ProxmoxGateway` methods
+and no new declarative state family. The freeze lifts for one family at
+a time, when all three of these hold:
+
+1. Line coverage is at or above the floor checked in as `.coverage-floor`
+   (#298).
+2. The gateway family it would join is under its size ceiling (#293).
+3. A named person or project outside this repository has asked for it in
+   an issue.
+
+Until the floor (#298) and the ceilings (#293) exist, conditions 1 and 2
+cannot be met, so the freeze holds. A request that does not meet them is
+labelled `frozen: awaiting-demand` and stays open: that label is the
+default answer, not the exception. Fixes, tests, documentation, and
+changes inside an existing family are not affected.
+
 ## Questions?
 
 Open a discussion on GitHub or an issue. For security findings,
