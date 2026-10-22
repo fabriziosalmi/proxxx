@@ -583,6 +583,28 @@ pub async fn run(
         }
     });
 
+    // ── Queue writer ────────────────────────────────────
+    // Persists the latest queue snapshot off the event loop. A watch
+    // channel keeps only the newest snapshot, and the sequence check in
+    // `save_queue_snapshot` drops one older than what is already on disk.
+    let (queue_snapshot_tx, mut queue_snapshot_rx) = tokio::sync::watch::channel::<
+        Option<(u64, Vec<crate::app::cache::PersistedQueueEntry>)>,
+    >(None);
+    let writer_label = profile_label.clone();
+    let queue_writer = tokio::spawn(async move {
+        while queue_snapshot_rx.changed().await.is_ok() {
+            let snapshot = queue_snapshot_rx.borrow_and_update().clone();
+            if let Some((seq, entries)) = snapshot {
+                if let Err(e) =
+                    crate::app::cache::save_queue_snapshot_async(writer_label.clone(), entries, seq)
+                        .await
+                {
+                    warn!("queue persistence write failed: {e:#}");
+                }
+            }
+        }
+    });
+
     // ── Event Loop (UI events) ──────────────────────────
     let mut events = event::spawn_event_loop(Duration::from_millis(200));
 
@@ -623,28 +645,21 @@ pub async fn run(
             }
         }
 
-        // Architectural review #2: flush queue to SQLite if it changed
-        // since the last tick. Done before render so the on-disk state
-        // is always at-least-as-fresh-as what's drawn. Best-effort —
-        // a transient SQLite error is logged but doesn't kill the loop.
-        //
-        // Phase 12 audit fix: route through `save_queue_async` so the
-        // SQLite write happens on `spawn_blocking` instead of pinning
-        // this runtime worker for up to `busy_timeout` (5000 ms) under
-        // WAL-checkpoint contention. Pre-fix, a contended write here
-        // would stall every keypress and every API tick for the same
-        // 5-second window.
+        // Architectural review #2: persist the queue if it changed since
+        // the last tick. The snapshot goes to `queue_writer`, which writes
+        // it on the blocking pool; this loop does not wait for the write
+        // (audit #383: awaiting it held every keypress for up to the 5 s
+        // `busy_timeout` under WAL contention). Best-effort: a transient
+        // SQLite error is logged by the writer and the loop carries on.
+        // The durability that matters, the write-ahead `Running` state
+        // before `ExecuteQueue` dispatches, is saved synchronously there.
         if state.queue_dirty {
             let entries: Vec<crate::app::cache::PersistedQueueEntry> = state
                 .op_queue
                 .iter()
                 .filter_map(super::app::queue::QueuedOp::to_persisted)
                 .collect();
-            if let Err(e) =
-                crate::app::cache::save_queue_async(profile_label.clone(), entries).await
-            {
-                warn!("queue persistence write failed: {e:#}");
-            }
+            queue_snapshot_tx.send_replace(Some((crate::app::cache::next_queue_seq(), entries)));
             state.queue_dirty = false;
         }
 
@@ -979,6 +994,20 @@ pub async fn run(
             Err(e) if e.is_cancelled() => { /* expected */ }
             Err(e) => warn!("HITL poller task ended unexpectedly: {e:#}"),
         }
+    }
+    // Hand the queue writer the final queue if it changed after the last
+    // loop iteration, then close the channel and wait for the write.
+    if state.queue_dirty {
+        let entries: Vec<crate::app::cache::PersistedQueueEntry> = state
+            .op_queue
+            .iter()
+            .filter_map(super::app::queue::QueuedOp::to_persisted)
+            .collect();
+        queue_snapshot_tx.send_replace(Some((crate::app::cache::next_queue_seq(), entries)));
+    }
+    drop(queue_snapshot_tx);
+    if let Err(e) = queue_writer.await {
+        warn!("queue writer task ended unexpectedly: {e:#}");
     }
 
     // ── Terminal Teardown ────────────────────────────────
@@ -1800,8 +1829,12 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                 .iter()
                 .filter_map(super::app::queue::QueuedOp::to_persisted)
                 .collect();
-            if let Err(e) =
-                crate::app::cache::save_queue_async(profile_label.to_owned(), entries).await
+            if let Err(e) = crate::app::cache::save_queue_snapshot_async(
+                profile_label.to_owned(),
+                entries,
+                crate::app::cache::next_queue_seq(),
+            )
+            .await
             {
                 // Fail CLOSED: if we can't durably record intent-to-dispatch, do
                 // NOT dispatch — a silent double-execute risk is worse than not
@@ -1854,20 +1887,24 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                         // batch to take 30s of preflight before anything
                         // executes. CLI uses `assess_deep` for the full
                         // picture; TUI traded depth for snappy execution.
+                        //
+                        // One `/cluster/resources` lookup plus the owning
+                        // node's guest list, not a walk of every node per
+                        // op; a failed lookup is reported as itself rather
+                        // than as "Node not found" (audit #383).
                         let mut target_node = None;
                         let mut g_type = crate::api::types::GuestType::Qemu;
                         let mut full_guest: Option<crate::api::types::Guest> = None;
-                        if let Ok(nodes) = client_cloned.get_nodes().await {
-                            for n in nodes {
-                                if let Ok(guests) = client_cloned.get_guests(&n.node).await {
-                                    if let Some(g) = guests.iter().find(|g| g.vmid == vmid) {
-                                        target_node = Some(n.node.clone());
-                                        g_type = g.guest_type;
-                                        full_guest = Some(g.clone());
-                                        break;
-                                    }
-                                }
+                        let mut lookup_error: Option<String> = None;
+                        match crate::cli::common::find_guest_full_with(client_cloned.as_ref(), vmid)
+                            .await
+                        {
+                            Ok(g) => {
+                                target_node = Some(g.node.clone());
+                                g_type = g.guest_type;
+                                full_guest = Some(g);
                             }
+                            Err(e) => lookup_error = Some(format!("{e:#}")),
                         }
 
                         // BREAK-GLASS: when the queued op carries
@@ -2059,7 +2096,9 @@ pub async fn dispatch_side_effect<G: ProxmoxGateway + Send + Sync + 'static>(
                             let _ = tx_cloned
                                 .send(DataMsg::QueueOpStatusChanged(
                                     id,
-                                    crate::app::queue::OpStatus::Error("Node not found".into()),
+                                    crate::app::queue::OpStatus::Error(
+                                        lookup_error.unwrap_or_else(|| "Node not found".into()),
+                                    ),
                                 ))
                                 .await;
                         }

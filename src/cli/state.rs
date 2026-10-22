@@ -43,10 +43,11 @@ pub enum StateCommand {
     /// `firewall-cluster`, `notifications`, `all` (every supported
     /// family). HA groups land per the ladder in epic #74.
     ///
-    /// The resulting document is byte-stable across runs against an
-    /// unchanged cluster — every collection is sorted by its identity
-    /// field on the way out — so a `git diff` after a re-export only
-    /// shows actual cluster drift, never serialisation noise.
+    /// Every collection is sorted by its identity field on the way
+    /// out, so two exports of an unchanged cluster differ only in
+    /// `meta.exported_at`, the time of the export: a `git diff` after a
+    /// re-export shows that one line plus actual cluster drift, never
+    /// serialisation noise.
     ///
     /// Examples:
     ///   proxxx state export                                 # default: pools, TOML to stdout

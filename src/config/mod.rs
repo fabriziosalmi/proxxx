@@ -1200,6 +1200,36 @@ pub fn validate_ssh_destination(user: &str, host: &str) -> std::result::Result<(
 }
 
 #[cfg(test)]
+mod ssh_host_spec_tests {
+    use super::parse_ssh_host_spec;
+
+    #[test]
+    fn a_bare_ipv6_address_is_a_host_not_a_host_and_port() {
+        // `rsplit_once(':')` used to read `fe80::22` as host `fe80:` and
+        // port 22 (audit #383).
+        assert_eq!(parse_ssh_host_spec("fe80::22"), ("fe80::22".into(), 22));
+        assert_eq!(
+            parse_ssh_host_spec("2001:db8::1"),
+            ("2001:db8::1".into(), 22)
+        );
+    }
+
+    #[test]
+    fn bracketed_ipv6_names_and_ipv4_take_an_optional_port() {
+        assert_eq!(
+            parse_ssh_host_spec("[fe80::1]:2222"),
+            ("fe80::1".into(), 2222)
+        );
+        assert_eq!(parse_ssh_host_spec("[fe80::1]"), ("fe80::1".into(), 22));
+        assert_eq!(
+            parse_ssh_host_spec("pve1.lab:2200"),
+            ("pve1.lab".into(), 2200)
+        );
+        assert_eq!(parse_ssh_host_spec("10.0.0.5"), ("10.0.0.5".into(), 22));
+    }
+}
+
+#[cfg(test)]
 mod ssh_validation_tests {
     use super::validate_ssh_destination;
 

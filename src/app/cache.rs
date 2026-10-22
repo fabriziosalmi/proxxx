@@ -475,6 +475,59 @@ pub async fn save_queue_async(
         .map_err(|e| anyhow::anyhow!("save_queue spawn_blocking join error: {e}"))?
 }
 
+/// Sequence of the last queue snapshot written by [`save_queue_snapshot`].
+static QUEUE_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+/// Source of queue snapshot sequence numbers.
+static QUEUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sequence number for a queue snapshot taken now. Take it on the task
+/// that owns the queue, at the moment the snapshot is built, so the
+/// numbers follow the order of the queue's states.
+#[must_use]
+pub fn next_queue_seq() -> u64 {
+    QUEUE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Write a queue snapshot unless a newer one has already been written;
+/// returns whether it wrote. The TUI saves the queue from a background
+/// writer so a contended `SQLite` write no longer blocks key handling
+/// (audit #383), while `ExecuteQueue` still saves its write-ahead
+/// `Running` state synchronously. Without the sequence check, an older
+/// snapshot finishing after the write-ahead one would put the op back to
+/// `Pending` on disk, and a crash would re-dispatch it.
+///
+/// # Errors
+/// When the database cannot be opened or written.
+pub fn save_queue_snapshot(
+    profile_label: &str,
+    entries: &[PersistedQueueEntry],
+    seq: u64,
+) -> anyhow::Result<bool> {
+    let mut written = QUEUE_WRITTEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seq <= *written {
+        return Ok(false);
+    }
+    save_queue(profile_label, entries)?;
+    *written = seq;
+    Ok(true)
+}
+
+/// [`save_queue_snapshot`] on the blocking pool.
+///
+/// # Errors
+/// As [`save_queue_snapshot`], or when the blocking task panics.
+pub async fn save_queue_snapshot_async(
+    profile_label: String,
+    entries: Vec<PersistedQueueEntry>,
+    seq: u64,
+) -> anyhow::Result<bool> {
+    tokio::task::spawn_blocking(move || save_queue_snapshot(&profile_label, &entries, seq))
+        .await
+        .map_err(|e| anyhow::anyhow!("save_queue spawn_blocking join error: {e}"))?
+}
+
 /// Replace the persisted queue with the given entries (full overwrite).
 /// Cheap with WAL on a few-dozen-row table; called on every queue mutation.
 pub fn save_queue(profile_label: &str, entries: &[PersistedQueueEntry]) -> anyhow::Result<()> {
@@ -1035,6 +1088,41 @@ mod concurrency_tests {
 
     fn cleanup_profile(profile: &str) {
         let path = get_db_path(profile);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn an_older_queue_snapshot_never_overwrites_a_newer_one() {
+        let profile = format!("queue-snapshot-order-{}", std::process::id());
+        let entry = |id: &str, status| PersistedQueueEntry {
+            id: id.into(),
+            description: String::new(),
+            diff: String::new(),
+            status,
+            op: PersistedOp::RestartGuest { vmid: 200 },
+            created_at_secs: 1,
+        };
+        let older = super::next_queue_seq();
+        let newer = super::next_queue_seq();
+        // The write-ahead Running snapshot lands first ...
+        assert!(super::save_queue_snapshot(
+            &profile,
+            &[entry("op", PersistedOpStatus::Running)],
+            newer
+        )
+        .unwrap());
+        // ... and the background writer's older Pending snapshot after it.
+        assert!(!super::save_queue_snapshot(
+            &profile,
+            &[entry("op", PersistedOpStatus::Pending)],
+            older
+        )
+        .unwrap());
+        let loaded = load_queue(&profile).unwrap();
+        assert!(matches!(loaded[0].status, PersistedOpStatus::Running));
+        let path = get_db_path(&profile);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));

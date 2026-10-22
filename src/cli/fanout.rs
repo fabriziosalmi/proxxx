@@ -92,37 +92,19 @@ pub async fn fanout_ls(kind: FanoutKind, cli_secret: Option<&str>) -> Result<Vec
     }
 
     let cli_secret_owned = cli_secret.map(str::to_owned);
-    let handles: Vec<_> = profiles
-        .into_iter()
-        .map(|profile| {
-            let cli_secret = cli_secret_owned.clone();
-            tokio::spawn(async move {
-                let rows = match query_one_profile(&profile, kind, cli_secret.as_deref()).await {
-                    Ok(rows) => rows,
-                    Err(e) => vec![ProfileRow {
-                        profile: profile.clone(),
-                        payload: ProfileRowPayload::Error {
-                            error: format!("{e:#}"),
-                        },
-                    }],
-                };
-                rows
-            })
-        })
-        .collect();
+    let joined = join_per_profile(profiles, move |profile| {
+        let cli_secret = cli_secret_owned.clone();
+        async move { query_one_profile(&profile, kind, cli_secret.as_deref()).await }
+    })
+    .await;
 
     let mut all_rows: Vec<ProfileRow> = Vec::new();
-    for h in handles {
-        // `join` itself could fail if the task panicked. Convert that
-        // into an error row so the operator still sees all other rows
-        // alongside the panic row (the caller exits 1 on any error row).
-        match h.await {
+    for (profile, result) in joined {
+        match result {
             Ok(rows) => all_rows.extend(rows),
-            Err(e) => all_rows.push(ProfileRow {
-                profile: "(unknown — task panicked)".into(),
-                payload: ProfileRowPayload::Error {
-                    error: format!("task join: {e}"),
-                },
+            Err(error) => all_rows.push(ProfileRow {
+                profile,
+                payload: ProfileRowPayload::Error { error },
             }),
         }
     }
@@ -144,38 +126,58 @@ pub async fn fanout_find_vmid(vmid: u32, cli_secret: Option<&str>) -> Result<Vec
     }
 
     let cli_secret_owned = cli_secret.map(str::to_owned);
-    let handles: Vec<_> = profiles
-        .into_iter()
-        .map(|profile| {
-            let cli_secret = cli_secret_owned.clone();
-            tokio::spawn(async move {
-                let res = find_one_profile(&profile, vmid, cli_secret.as_deref()).await;
-                (profile, res)
-            })
-        })
-        .collect();
+    let joined = join_per_profile(profiles, move |profile| {
+        let cli_secret = cli_secret_owned.clone();
+        async move { find_one_profile(&profile, vmid, cli_secret.as_deref()).await }
+    })
+    .await;
 
     let mut rows: Vec<ProfileRow> = Vec::new();
-    for h in handles {
-        match h.await {
-            Ok((_, Ok(Some(row)))) => rows.push(row),
-            Ok((_, Ok(None))) => {} // VMID not in this profile — silent
-            Ok((profile, Err(e))) => rows.push(ProfileRow {
+    for (profile, result) in joined {
+        match result {
+            Ok(Some(row)) => rows.push(row),
+            Ok(None) => {} // VMID not in this profile — silent
+            Err(error) => rows.push(ProfileRow {
                 profile,
-                payload: ProfileRowPayload::Error {
-                    error: format!("{e:#}"),
-                },
-            }),
-            Err(e) => rows.push(ProfileRow {
-                profile: "(unknown — task panicked)".into(),
-                payload: ProfileRowPayload::Error {
-                    error: format!("task join: {e}"),
-                },
+                payload: ProfileRowPayload::Error { error },
             }),
         }
     }
     rows.sort_by(|a, b| a.profile.cmp(&b.profile));
     Ok(rows)
+}
+
+/// Run `query` for every profile concurrently and pair each outcome with
+/// its profile name. A query error and a panicked task both come back as
+/// `Err(message)` under the profile they belong to; the panic used to be
+/// reported under "(unknown — task panicked)", which hid which cluster
+/// failed (audit #383).
+async fn join_per_profile<T, F, Fut>(
+    profiles: Vec<String>,
+    query: F,
+) -> Vec<(String, std::result::Result<T, String>)>
+where
+    T: Send + 'static,
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+{
+    let handles: Vec<_> = profiles
+        .into_iter()
+        .map(|profile| {
+            let task = tokio::spawn(query(profile.clone()));
+            (profile, task)
+        })
+        .collect();
+    let mut out = Vec::with_capacity(handles.len());
+    for (profile, task) in handles {
+        let result = match task.await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(format!("{e:#}")),
+            Err(e) => Err(format!("task join: {e}")),
+        };
+        out.push((profile, result));
+    }
+    out
 }
 
 async fn query_one_profile(
@@ -238,6 +240,22 @@ async fn find_one_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicked_profile_query_is_reported_under_its_profile() {
+        let joined = join_per_profile(vec!["lab".into(), "prod".into()], |profile| async move {
+            assert!(profile != "prod", "simulated panic in the prod query");
+            Ok(profile.len())
+        })
+        .await;
+        assert_eq!(joined[0], ("lab".to_string(), Ok(3)));
+        assert_eq!(joined[1].0, "prod");
+        let err = joined[1].1.as_ref().unwrap_err();
+        assert!(
+            err.starts_with("task join:") && err.contains("panic"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn fanout_kind_recognises_known_resources() {

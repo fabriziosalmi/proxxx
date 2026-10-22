@@ -43,9 +43,36 @@ pub struct CastHeader {
     pub version: u32,
     pub width: u16,
     pub height: u16,
-    /// Unix epoch seconds when recording started.
+    /// Unix epoch seconds when recording started. Optional in the v2
+    /// spec: casts from other recorders often omit it (audit #383), so a
+    /// missing value reads as `0`.
+    #[serde(default)]
     pub timestamp: u64,
+    /// Optional in the v2 spec; a missing title reads as empty.
+    #[serde(default)]
     pub title: String,
+}
+
+/// One-line description of a cast for the replay banner. Falls back to
+/// the file name and to "unknown time" for the optional header fields.
+fn replay_banner(header: &CastHeader, path: &Path) -> String {
+    let title = if header.title.is_empty() {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    } else {
+        header.title.clone()
+    };
+    let recorded = if header.timestamp == 0 {
+        "recorded at an unknown time".to_string()
+    } else {
+        format!("recorded {} epoch s", header.timestamp)
+    };
+    format!(
+        "▶ replaying {title} ({}×{}, {recorded})",
+        header.width, header.height
+    )
 }
 
 /// Streaming writer for an asciicast v2 file. One per session;
@@ -185,10 +212,7 @@ pub async fn replay_cast(path: &Path, speed: f64) -> Result<()> {
             path.display(),
         );
     }
-    eprintln!(
-        "▶ replaying {} ({}×{}, recorded {} epoch s)",
-        header.title, header.width, header.height, header.timestamp
-    );
+    eprintln!("{}", replay_banner(&header, path));
 
     let mut stdout = tokio::io::stdout();
     let mut prev_t = 0_f64;
@@ -302,6 +326,19 @@ mod tests {
         assert_eq!(lines.len(), 2);
         let _: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         let _: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    }
+
+    #[test]
+    fn a_header_without_the_optional_title_and_timestamp_parses() {
+        // Minimal valid v2 header: only version, width and height are
+        // required by the spec.
+        let header: CastHeader =
+            serde_json::from_str(r#"{"version": 2, "width": 80, "height": 24}"#).unwrap();
+        assert_eq!((header.width, header.height), (80, 24));
+        assert_eq!(
+            replay_banner(&header, Path::new("/tmp/demo.cast")),
+            "▶ replaying demo.cast (80×24, recorded at an unknown time)"
+        );
     }
 
     #[test]

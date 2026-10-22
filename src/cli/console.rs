@@ -445,7 +445,8 @@ async fn qga_resolve_guest(
             pick_first_routable_ipv4_lxc(&interfaces).ok_or_else(|| {
                 anyhow::anyhow!(
                     "LXC vmid {vmid} has no routable IPv4 \
-                     (interfaces query returned only empty / loopback / link-local entries)"
+                     (interfaces query returned only empty / loopback / link-local entries; \
+                     a stopped container reports no interfaces)"
                 )
             })?
         }

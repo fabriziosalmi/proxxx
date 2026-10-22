@@ -194,17 +194,16 @@ pub fn parse_inspect_output(stdout: &str, report: &mut GpuInspectReport) {
             continue;
         }
         match section {
-            "IOMMU" if !trimmed.is_empty() && trimmed.to_lowercase().contains("iommu") => {
-                report.iommu_enabled = true;
-                if report.iommu_evidence.is_empty() {
-                    report.iommu_evidence = trimmed.chars().take(80).collect();
-                }
+            // dmesg lines are evidence only: "DMAR: IOMMU disabled" and
+            // "iommu: Default domain type" also mention the IOMMU, so a
+            // match proves nothing about it being on (audit #383). The
+            // group count below decides.
+            "IOMMU" if !trimmed.is_empty() && report.iommu_evidence.is_empty() => {
+                report.iommu_evidence = trimmed.chars().take(80).collect();
             }
             "IOMMU_GROUPS" if let Ok(n) = trimmed.parse::<u32>() => {
                 report.iommu_group_count = n;
-                if n > 0 {
-                    report.iommu_enabled = true;
-                }
+                report.iommu_enabled = n > 0;
             }
             "VFIO" if trimmed.starts_with("vfio") => {
                 report.vfio_loaded = true;
@@ -228,33 +227,35 @@ pub fn parse_inspect_output(stdout: &str, report: &mut GpuInspectReport) {
     }
 }
 
-/// Parse one `lspci -nnk` device header line.
+/// Parse one `lspci -nnk` device header line:
+/// `01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GP106 [GeForce GTX 1060] [10de:1c03] (rev a1)`.
 fn parse_lspci_line(line: &str) -> Option<PciDevice> {
-    let mut parts = line.splitn(3, ' ');
-    let address = parts.next()?.to_string();
+    let (address, rest) = line.split_once(' ')?;
     if !address.contains(':') || !address.contains('.') {
         return None;
     }
-    let _ = parts.next()?; // class name (e.g. "VGA compatible controller")
-    let rest = parts.next()?;
-    // Find the LAST `[XXXX:YYYY]` vendor:device pair (the first
-    // bracket holds the class code, which we want to skip).
-    let (vendor, device) = match (rest.rfind('['), rest.rfind(']')) {
-        (Some(s), Some(e)) if e > s => {
-            let pair = &rest[s + 1..e];
-            if let Some((v, d)) = pair.split_once(':') {
-                (v.to_string(), d.to_string())
-            } else {
-                (String::new(), String::new())
-            }
-        }
-        _ => (String::new(), String::new()),
-    };
+    // The class name runs up to the class-code bracket; it is several
+    // words ("VGA compatible controller"), so it cannot be taken as one
+    // whitespace-separated token (audit #383).
+    let class = rest.split(" [").next().unwrap_or("").trim().to_string();
+    // The vendor:device pair is the last bracket holding `xxxx:yyyy` in
+    // hex; the device name may carry brackets of its own.
+    let (vendor, device) = rest
+        .match_indices('[')
+        .filter_map(|(start, _)| {
+            let inner = &rest[start + 1..];
+            let pair = &inner[..inner.find(']')?];
+            let (v, d) = pair.split_once(':')?;
+            let is_id = |s: &str| s.len() == 4 && s.bytes().all(|b| b.is_ascii_hexdigit());
+            (is_id(v) && is_id(d)).then(|| (v.to_string(), d.to_string()))
+        })
+        .next_back()
+        .unwrap_or_default();
     Some(PciDevice {
-        address,
+        address: address.to_string(),
         vendor,
         device,
-        class: rest.split('[').next().unwrap_or("").trim().to_string(),
+        class,
         driver: String::new(),
     })
 }
@@ -272,6 +273,45 @@ mod tests {
         // class-code [0300] comes first; we use rfind to skip it).
         assert_eq!(d.vendor, "10de");
         assert_eq!(d.device, "1b06");
+        assert_eq!(d.class, "VGA compatible controller");
+    }
+
+    #[test]
+    fn parse_lspci_line_keeps_the_whole_class_and_skips_bracketed_names() {
+        let line = "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GP106 \
+                    [GeForce GTX 1060 6GB] [10de:1c03] (rev a1)";
+        let d = parse_lspci_line(line).unwrap();
+        assert_eq!(d.class, "VGA compatible controller");
+        assert_eq!((d.vendor.as_str(), d.device.as_str()), ("10de", "1c03"));
+    }
+
+    fn empty_report() -> GpuInspectReport {
+        GpuInspectReport {
+            node: "n".into(),
+            iommu_enabled: false,
+            iommu_evidence: String::new(),
+            iommu_group_count: 0,
+            vfio_loaded: false,
+            devices: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_dmesg_line_mentioning_the_iommu_does_not_enable_it_without_groups() {
+        let probe = "== IOMMU ==
+[    0.000000] DMAR: IOMMU disabled
+[    0.412000] iommu: Default domain type: Translated
+== IOMMU_GROUPS ==
+0
+== VFIO ==
+none
+== LSPCI ==
+";
+        let mut r = empty_report();
+        parse_inspect_output(probe, &mut r);
+        assert!(!r.iommu_enabled, "0 groups must report IOMMU off");
+        assert_eq!(r.iommu_group_count, 0);
+        assert_eq!(r.iommu_evidence, "[    0.000000] DMAR: IOMMU disabled");
     }
 
     #[test]

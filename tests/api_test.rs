@@ -6511,6 +6511,167 @@ mod fast_guest_lookup {
     }
 }
 
+/// Audit #383: the gateway's `find_guest` (used by `find`, MCP and the
+/// HITL daemon) walks online nodes only, so a guest on an offline node
+/// came back `Ok(None)` and `find` exited 5 ("already gone").
+mod find_guest_offline_node {
+    use proxxx::api::ProxmoxGateway;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::mock_client as client;
+
+    async fn cluster(server: &MockServer, resources: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"node": "pve1", "status": "online"},
+                         {"node": "pve3", "status": "offline"}]
+            })))
+            .mount(server)
+            .await;
+        for kind in ["qemu", "lxc"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api2/json/nodes/pve1/{kind}")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})),
+                )
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api2/json/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": resources})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_guest_on_an_offline_node_is_an_error_not_missing() {
+        let server = MockServer::start().await;
+        cluster(
+            &server,
+            serde_json::json!([{"id": "qemu/300", "type": "qemu", "node": "pve3",
+                                "vmid": 300, "status": "unknown"}]),
+        )
+        .await;
+        let err = client(&server)
+            .await
+            .find_guest(300)
+            .await
+            .expect_err("a guest on an offline node must not read as missing");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pve3") && msg.contains("offline"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_vmid_unknown_to_the_cluster_is_still_not_found() {
+        let server = MockServer::start().await;
+        cluster(&server, serde_json::json!([])).await;
+        let found = client(&server)
+            .await
+            .find_guest(300)
+            .await
+            .expect("lookup succeeds");
+        assert!(found.is_none());
+    }
+}
+
+/// Audit #383: PVE answers a request for a node it cannot route with the
+/// same 500 "hostname lookup failed" for a typo and for an offline member.
+mod unresolved_node {
+    use proxxx::api::{ApiError, ProxmoxGateway};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::mock_client as client;
+
+    async fn lookup_fails_for(server: &MockServer, node: &str) {
+        // Verbatim PVE 9.1 body, measured on the lab for both cases.
+        Mock::given(method("GET"))
+            .and(path(format!("/api2/json/nodes/{node}/qemu")))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "message": format!("hostname lookup '{node}' failed - failed to get address info for: {node}: Name or service not known\n"),
+                "data": null
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"node": "pve1", "status": "online"},
+                         {"node": "pve3", "status": "offline"}]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn api_error(e: &anyhow::Error) -> &ApiError {
+        e.downcast_ref::<ApiError>().expect("typed ApiError")
+    }
+
+    #[tokio::test]
+    async fn a_name_outside_the_cluster_is_not_found() {
+        let server = MockServer::start().await;
+        lookup_fails_for(&server, "nosuch").await;
+        let err = client(&server)
+            .await
+            .get_guests("nosuch")
+            .await
+            .unwrap_err();
+        assert_eq!(api_error(&err).exit_code(), 5, "{err:#}");
+        assert!(
+            format!("{err:#}").contains("node nosuch is not a member"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_member_is_reported_offline_not_missing() {
+        let server = MockServer::start().await;
+        lookup_fails_for(&server, "pve3").await;
+        let err = client(&server).await.get_guests("pve3").await.unwrap_err();
+        assert_eq!(api_error(&err).exit_code(), 1, "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("node pve3 is a cluster member but offline"),
+            "{msg}"
+        );
+        assert!(msg.contains("hostname lookup 'pve3' failed"), "{msg}");
+    }
+}
+
+/// Audit #383: PVE answers `/lxc/{vmid}/interfaces` for a stopped
+/// container with `{"data": null}` (measured on PVE 9.1.1).
+mod lxc_interfaces_stopped {
+    use proxxx::api::ProxmoxGateway;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::mock_client as client;
+
+    #[tokio::test]
+    async fn a_stopped_container_has_no_interfaces_rather_than_a_parse_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api2/json/nodes/pve1/lxc/7777/interfaces"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": null})),
+            )
+            .mount(&server)
+            .await;
+        let ifaces = client(&server)
+            .await
+            .list_lxc_interfaces("pve1", 7777)
+            .await
+            .expect("null is an empty list");
+        assert!(ifaces.is_empty());
+    }
+}
+
 mod issue_348_no_retry_mutations {
     use std::time::Duration;
 

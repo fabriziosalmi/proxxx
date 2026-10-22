@@ -160,7 +160,8 @@ pub async fn execute(
             Ok((repos, 0))
         }
         PatchCommand::Changelog { node, package } => {
-            let log = client.node_apt_changelog(&node, &package).await?;
+            let log =
+                check_apt_changelog(&package, client.node_apt_changelog(&node, &package).await?)?;
             // Plain-text changelog wrapped in a `{"changelog": "..."}`
             // envelope so JSON consumers stay sane (vs returning a
             // bare string which `--format json` would emit unquoted).
@@ -170,5 +171,64 @@ pub async fn execute(
             let pkgs = client.node_apt_versions(&node).await?;
             Ok((serde_json::to_value(pkgs)?, 0))
         }
+    }
+}
+
+/// PVE answers `GET /apt/changelog` with HTTP 200 even when apt failed,
+/// putting apt's stderr in `data` and ending it with `RC: <code>`. A
+/// non-zero code is a failure, not a changelog (audit #383): an unknown
+/// package is `NotFound` (exit 5), any other apt failure is an error
+/// carrying apt's own message.
+fn check_apt_changelog(package: &str, text: String) -> Result<String> {
+    let rc = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.trim().strip_prefix("RC: "))
+        .and_then(|code| code.trim().parse::<i32>().ok());
+    match rc {
+        Some(code) if code != 0 => {
+            let message: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("RC: "))
+                .collect();
+            let message = message.join("; ");
+            if text.contains("Unable to locate package") || text.contains("No packages found") {
+                Err(crate::api::ApiError::NotFound(format!(
+                    "package {package} is not known to apt on this node ({message})"
+                ))
+                .into())
+            } else {
+                anyhow::bail!("apt changelog for {package} failed with RC {code}: {message}")
+            }
+        }
+        _ => Ok(text),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_apt_changelog;
+
+    #[test]
+    fn an_unknown_package_is_not_found_instead_of_a_changelog() {
+        // Verbatim `data` from PVE 9.1 for `?name=nosuchpkg`.
+        let raw = "E: Unable to locate package nosuchpkg\nE: No packages found\nRC: 100";
+        let err = check_apt_changelog("nosuchpkg", raw.into()).unwrap_err();
+        let api = err
+            .downcast_ref::<crate::api::ApiError>()
+            .expect("typed ApiError");
+        assert_eq!(api.exit_code(), 5, "{err}");
+        assert!(err.to_string().contains("nosuchpkg"), "{err}");
+    }
+
+    #[test]
+    fn another_apt_failure_is_an_error_and_a_changelog_passes_through() {
+        let err = check_apt_changelog("bash", "E: Failed to fetch\nRC: 1".into()).unwrap_err();
+        assert!(err.downcast_ref::<crate::api::ApiError>().is_none());
+        assert!(err.to_string().contains("RC 1"), "{err}");
+
+        let log = "bash (5.2.37-2) unstable; urgency=medium\n\n  * Bump standards version.\n";
+        assert_eq!(check_apt_changelog("bash", log.into()).unwrap(), log);
     }
 }

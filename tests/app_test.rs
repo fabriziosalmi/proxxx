@@ -1270,7 +1270,11 @@ mod tests {
             }
             _ => panic!("action variant mismatch after roundtrip"),
         }
-        assert!(matches!(restored.status, OpStatus::Running));
+        // A Running op comes back interrupted, outcome unknown (#383).
+        assert_eq!(
+            restored.status,
+            OpStatus::Error(proxxx::app::queue::INTERRUPTED.into())
+        );
     }
 
     #[test]
