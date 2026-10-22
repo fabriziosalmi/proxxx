@@ -114,7 +114,7 @@ shell-out is hardened.
 | Surface | Mitigation | Pinned at |
 | :--- | :--- | :--- |
 | `pveum user permissions <userid>` | `shell_quote(userid)` wraps in single quotes with `'\''` escape; an empty-string input gets the explicit `''` form so bash word-splitting doesn't drop the argument. 4 proptests prove round-trip safety + bare-path correctness + determinism + no-metachars-bare | [src/cli/access.rs](src/cli/access.rs) `mod shell_quote_proptests` |
-| SSH | system `ssh` via `Command` (separate argv tokens, no shell). For russh-based remote-viewer / serial console: `hardened_algorithms()` whitelists curve25519-sha256 + ChaCha20-Poly1305 + AES-256-GCM + HMAC-SHA-512/256-ETM + Ed25519. RSA / DH-G14 / AES-CTR / HMAC-SHA1 all dropped (Terrapin / CVE-2023-48795 strict-kex markers preserved) | [src/ssh/session.rs](src/ssh/session.rs) |
+| SSH | system `ssh` via `Command` (separate argv tokens, no shell). For russh-based remote-viewer / serial console: `hardened_algorithms()` whitelists curve25519-sha256 + ChaCha20-Poly1305 + AES-256-GCM + HMAC-SHA-512/256-ETM + Ed25519. RSA / DH-G14 / AES-CTR / HMAC-SHA1 all dropped (Terrapin / CVE-2023-48795 strict-kex markers preserved). A client key below the NIST minimum through 2030 (RSA under 2048 bits, DSA) is refused before connecting (#485) | [src/ssh/session.rs](src/ssh/session.rs) |
 | `remote-viewer` (SPICE) | Spawned with arg `<temp.vv path>`, no shell. `.vv` file written via `O_EXCL` + 128-bit random suffix + mode 0600 verified post-write; symlink-attack rejection | [src/handoff/spice.rs](src/handoff/spice.rs) |
 
 ### 7. Filesystem

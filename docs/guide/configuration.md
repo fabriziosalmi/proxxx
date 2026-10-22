@@ -353,7 +353,7 @@ For `proxxx ssh <vmid>`, `proxxx perms`, `proxxx gpu inspect`, `proxxx logs tail
 
 ```toml
 [ssh]
-key_path = "~/.ssh/proxxx_homelab"           # ed25519/RSA private key (~ expanded against $HOME)
+key_path = "~/.ssh/proxxx_homelab"           # Ed25519, ECDSA or RSA >= 2048 bits (~ expanded against $HOME)
 user     = "root"                            # optional, defaults to "root"
 
 [ssh.hosts]
@@ -378,7 +378,9 @@ For node-level SSH (`proxxx perms`, `proxxx gpu inspect`, `proxxx logs tail`, `p
 Both `key_path` (at `[ssh]` and `[ssh.guests."<vmid>"]`) and `known_hosts`
 accept a leading `~` or `~/...` (expanded via `util::path::expand_tilde`,
 shared with `token_secret_file` and `proxxx doctor`). SSH uses publickey
-only — no agent. If your key is encrypted, set `PROXXX_SSH_KEY_PASSPHRASE`
+only — no agent. An RSA key must have at least 2048 bits and a DSA key is
+refused (the NIST minimum through 2030); proxxx says so before it connects.
+Ed25519 is recommended. If your key is encrypted, set `PROXXX_SSH_KEY_PASSPHRASE`
 (or unlock it in the TUI prompt). The `known_hosts` file is TOFU on first
 connect with a warning log.
 
