@@ -85,23 +85,29 @@ bad()   { log "  [FAIL ] $*"; FAIL=$((FAIL + 1)); }
 
 # Retry a proxxx invocation up to 5× on TRANSIENT transport errors (the nested
 # test cluster occasionally drops the first TLS/connection). Sets RETRY_OUT to
-# the captured output and returns the command's own exit code. A non-transport
+# the captured stdout + stderr (RETRY_STDOUT: stdout alone) and returns the command's own exit code. A non-transport
 # non-zero exit (drift=2, preflight-refuse=6) is returned immediately — those are
 # real results, not flakes.
 RETRY_OUT=""
+RETRY_STDOUT=""
 retry() {
-    local attempt out rc
+    local attempt out stdout rc errf
+    errf="$(mktemp)"
     for attempt in 1 2 3 4 5; do
-        out="$("$@" 2>&1)"
+        # stdout alone is the command's output (a state export is TOML);
+        # tracing writes INFO lines to stderr, so they must not end up in it.
+        stdout="$("$@" 2>"$errf")"
         rc=$?
+        out="$stdout"$'\n'"$(cat "$errf")"
         if echo "$out" | grep -qiE 'transport error|error sending request|connection (closed|reset|refused)|timed out|operation timed out'; then
             sleep 2
             continue
         fi
-        RETRY_OUT="$out"
-        return "$rc"
+        break
     done
+    rm -f "$errf"
     RETRY_OUT="$out"
+    RETRY_STDOUT="$stdout"
     return "$rc"
 }
 
@@ -148,7 +154,7 @@ if [[ $rc -ne 0 ]]; then
     log "$RETRY_OUT"
     exit 1
 fi
-printf '%s\n' "$RETRY_OUT" > "$BASELINE"
+printf '%s\n' "$RETRY_STDOUT" > "$BASELINE"
 # Self-check: live MUST be in sync with its OWN fresh export. If not, the export
 # was incomplete (a transient flake) — bail rather than run a bogus
 # "delete everything" diff that auto-converge would (correctly) Severe-refuse.

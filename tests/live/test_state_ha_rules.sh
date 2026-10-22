@@ -135,6 +135,7 @@ log "[setup] capturing live baseline + composing declared TOML"
 log "        (no raw-API HA-resource pre-registration — v0.7.3 state family handles it)"
 "$BIN" state export --resource all > "$BASELINE"
 cp "$BASELINE" "$DECL"
+drop_empty_families "$DECL" ha_resources ha_rules
 cat >> "$DECL" <<EOF
 
 # HA resources first (state apply respects family ordering: resources

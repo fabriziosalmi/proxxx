@@ -82,6 +82,19 @@ live_cleanup() {
     return 0
 }
 
+# drop_empty_families FILE FAMILY...: remove `FAMILY = []` lines from a
+# `state export` (which writes empty families that way since #371) before
+# the script appends `[[FAMILY]]` tables; TOML refuses a key defined twice.
+drop_empty_families() {
+    local file="$1"; shift
+    local fam tmp
+    for fam in "$@"; do
+        tmp="$(mktemp)"
+        grep -v -x "$fam = \[\]" "$file" > "$tmp"
+        mv "$tmp" "$file"
+    done
+}
+
 # run_timeout SECS CMD [ARGS...]: run CMD with a time limit. macOS ships no
 # `timeout`; use coreutils' `gtimeout` when present, else a perl alarm (exit
 # 142 on expiry instead of 124).
