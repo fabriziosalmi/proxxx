@@ -38,6 +38,8 @@
 //! that it closes. Most tests close 1–2 lines; the bulk-op test
 //! closes 1 standalone line.
 
+mod common;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -60,19 +62,49 @@ struct RbacEnv {
 
 impl RbacEnv {
     fn load() -> Option<Self> {
-        if std::env::var("PROXXX_E2E_RBAC_ENABLE").as_deref() != Ok("1") {
-            eprintln!("[rbac-live] PROXXX_E2E_RBAC_ENABLE != 1 — skipping");
+        const FLAG: &str = "PROXXX_E2E_RBAC_ENABLE";
+        if std::env::var(FLAG).as_deref() != Ok("1") {
+            eprintln!("[rbac-live] {FLAG} != 1 — skipping");
             return None;
         }
-        let api_url = std::env::var("PROXXX_E2E_API_URL").ok()?;
-        let owned_vmid: u32 = std::env::var("PROXXX_E2E_OWNED_VMID").ok()?.parse().ok()?;
-        let blind_vmid: u32 = std::env::var("PROXXX_E2E_BLIND_VMID")
-            .ok()
+        let var = |name: &str| common::e2e_var(name, None);
+        let api_url = common::e2e_var("PROXXX_E2E_API_URL", Some("PROXXX_E2E_PVE_URL"));
+        let owned_vmid = var("PROXXX_E2E_OWNED_VMID").and_then(|s| s.parse::<u32>().ok());
+        let operator_secret = var("PROXXX_E2E_TOKEN_OPERATOR");
+        let auditor_secret = var("PROXXX_E2E_TOKEN_AUDITOR");
+        let blind_secret = var("PROXXX_E2E_TOKEN_BLIND");
+        let missing: Vec<&str> = [
+            (
+                "PROXXX_E2E_API_URL (or PROXXX_E2E_PVE_URL)",
+                api_url.is_none(),
+            ),
+            ("PROXXX_E2E_OWNED_VMID, a number", owned_vmid.is_none()),
+            ("PROXXX_E2E_TOKEN_OPERATOR", operator_secret.is_none()),
+            ("PROXXX_E2E_TOKEN_AUDITOR", auditor_secret.is_none()),
+            ("PROXXX_E2E_TOKEN_BLIND", blind_secret.is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, absent)| absent.then_some(name))
+        .collect();
+        let (
+            Some(api_url),
+            Some(owned_vmid),
+            Some(operator_secret),
+            Some(auditor_secret),
+            Some(blind_secret),
+        ) = (
+            api_url,
+            owned_vmid,
+            operator_secret,
+            auditor_secret,
+            blind_secret,
+        )
+        else {
+            common::e2e_incomplete(FLAG, &missing)
+        };
+        let blind_vmid: u32 = var("PROXXX_E2E_BLIND_VMID")
             .and_then(|s| s.parse().ok())
             .unwrap_or(9999);
-        let operator_secret = std::env::var("PROXXX_E2E_TOKEN_OPERATOR").ok()?;
-        let auditor_secret = std::env::var("PROXXX_E2E_TOKEN_AUDITOR").ok()?;
-        let blind_secret = std::env::var("PROXXX_E2E_TOKEN_BLIND").ok()?;
         Some(Self {
             api_url,
             owned_vmid,

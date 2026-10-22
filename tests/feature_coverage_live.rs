@@ -47,6 +47,8 @@
 //!   any contributor can opt into. Those live in the gate's
 //!   `test_mutation.sh` against transient VMIDs.
 
+mod common;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -54,51 +56,65 @@ use proxxx::api::types::GuestType;
 use proxxx::api::{ProxmoxGateway, PxClient};
 use proxxx::config::ProfileConfig;
 
-/// Env loader — `None` if the suite is disabled or env is incomplete.
-/// Disabled by default; opt-in via `PROXXX_E2E_FEATURE_COVERAGE_ENABLE=1`.
+/// Env loader — `None` when the suite is disabled (opt-in via
+/// `PROXXX_E2E_FEATURE_COVERAGE_ENABLE=1`); an enabled suite with an
+/// incomplete env fails instead of skipping (#480).
 #[derive(Debug, Clone)]
 struct CoverageEnv {
     api_url: String,
-    token: String, // `tokenid=secret`
+    user: String,
+    token_id: String,
+    secret: String,
     node: String,
     qga_vmid: u32,
 }
 
 impl CoverageEnv {
     fn load() -> Option<Self> {
-        if std::env::var("PROXXX_E2E_FEATURE_COVERAGE_ENABLE").as_deref() != Ok("1") {
-            eprintln!("[coverage-live] PROXXX_E2E_FEATURE_COVERAGE_ENABLE != 1 — skipping");
+        const FLAG: &str = "PROXXX_E2E_FEATURE_COVERAGE_ENABLE";
+        if std::env::var(FLAG).as_deref() != Ok("1") {
+            eprintln!("[coverage-live] {FLAG} != 1 — skipping");
             return None;
         }
-        let api_url = std::env::var("PROXXX_E2E_API_URL").ok()?;
-        let token = std::env::var("PROXXX_E2E_TOKEN").ok()?;
-        let node = std::env::var("PROXXX_E2E_NODE").ok()?;
+        let api_url = common::e2e_var("PROXXX_E2E_API_URL", Some("PROXXX_E2E_PVE_URL"));
+        let token = common::e2e_token();
+        let node = common::e2e_var("PROXXX_E2E_NODE", None);
+        let mut missing = Vec::new();
+        if api_url.is_none() {
+            missing.push("PROXXX_E2E_API_URL (or PROXXX_E2E_PVE_URL)");
+        }
+        if token.is_none() {
+            missing.push("PROXXX_E2E_TOKEN (or PROXXX_E2E_PVE_TOKEN), `[user!]id=secret`");
+        }
+        if node.is_none() {
+            missing.push("PROXXX_E2E_NODE");
+        }
+        let (Some(api_url), Some((user, token_id, secret)), Some(node)) = (api_url, token, node)
+        else {
+            common::e2e_incomplete(FLAG, &missing)
+        };
         let qga_vmid: u32 = std::env::var("PROXXX_E2E_QGA_VMID")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8888);
         Some(Self {
             api_url,
-            token,
+            user,
+            token_id,
+            secret,
             node,
             qga_vmid,
         })
     }
 
-    /// Build a token-auth client from env. The `tokenid` part of the
-    /// `tokenid=secret` env value is the token ID; the trailing part
-    /// after `=` is the secret. We pass the secret to `cli_secret`
-    /// (resolver priority #1).
+    /// Build a token-auth client from env. The secret goes to
+    /// `cli_secret` (resolver priority #1).
     async fn client(&self) -> Result<Arc<PxClient>> {
-        let (tok_id, secret) = self
-            .token
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("PROXXX_E2E_TOKEN must be `tokenid=secret`"))?;
         let cfg = ProfileConfig {
             url: self.api_url.clone(),
-            user: "root@pam".into(),
+            user: self.user.clone(),
             auth: "token".into(),
-            token_id: Some(tok_id.to_string()),
+            token_id: Some(self.token_id.clone()),
             token_secret: None,
             token_secret_file: None,
             password: None,
@@ -115,7 +131,9 @@ impl CoverageEnv {
             reconcile: None,
             profile_name: None,
         };
-        Ok(Arc::new(PxClient::new(cfg, Some(secret)).await?))
+        Ok(Arc::new(
+            PxClient::new(cfg, Some(self.secret.as_str())).await?,
+        ))
     }
 }
 
