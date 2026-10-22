@@ -767,6 +767,16 @@ pub async fn execute_snapshot(
     ))
 }
 
+/// Refusal for a `qga` command aimed at a container. It used to suggest
+/// `proxxx exec`, which is QEMU only too (audit #385).
+fn qga_on_lxc_message(vmid: u32, node: &str) -> String {
+    format!(
+        "qga commands require QEMU — vmid {vmid} is an LXC, which has no guest agent. \
+         `proxxx ct interfaces {vmid}` lists its network interfaces; \
+         `proxxx serial {vmid} --node {node}` or `proxxx ssh {vmid}` opens a shell in it"
+    )
+}
+
 /// QEMU Guest Agent file ops + network introspection. Auto-discovers
 /// the VMID's node and guest type, then bails clearly if the guest is
 /// LXC (no QGA on the container side). Emits a `truncated` warning on
@@ -782,10 +792,7 @@ pub async fn execute_qga(
 
     let (node, gt) = find_guest(client, vmid).await?;
     if !matches!(gt, GuestType::Qemu) {
-        anyhow::bail!(
-            "qga commands require QEMU — vmid {vmid} is an LXC \
-             (no guest-agent surface; use `proxxx exec` or SSH instead)"
-        );
+        anyhow::bail!("{}", qga_on_lxc_message(vmid, &node));
     }
 
     match action {
@@ -815,5 +822,17 @@ pub async fn execute_qga(
                 .await?;
             Ok((serde_json::json!({"vmid": vmid, "interfaces": ifaces}), 0))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_lxc_refusal_points_at_commands_that_work_on_a_container() {
+        let msg = super::qga_on_lxc_message(7777, "pve1");
+        assert!(!msg.contains("proxxx exec"), "{msg}");
+        let missing =
+            crate::cli::explain::missing_cited_commands(&crate::cli::explain::backticked(&msg));
+        assert!(missing.is_empty(), "{missing:?}");
     }
 }

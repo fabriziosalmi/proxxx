@@ -303,14 +303,59 @@ pub async fn execute_pool(
     }
 }
 
+/// `cluster-resources --kind` (audit #385). PVE 9 filters server-side only
+/// on `vm`, `storage`, `node` and `sdn` (measured: `type=pool` and
+/// `type=network` are refused with a 400), while the unfiltered list also
+/// carries `pool` and `network` entries; those two are filtered here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ResourceKind {
+    /// QEMU VMs and LXC containers.
+    Vm,
+    Storage,
+    Node,
+    Sdn,
+    Pool,
+    Network,
+}
+
+impl ResourceKind {
+    /// The `type` filter PVE accepts for this kind, if it accepts one.
+    const fn server_filter(self) -> Option<&'static str> {
+        match self {
+            Self::Vm => Some("vm"),
+            Self::Storage => Some("storage"),
+            Self::Node => Some("node"),
+            Self::Sdn => Some("sdn"),
+            Self::Pool | Self::Network => None,
+        }
+    }
+
+    /// Whether an entry whose `type` is `resource_type` is of this kind.
+    fn matches(self, resource_type: &str) -> bool {
+        match self {
+            Self::Vm => matches!(resource_type, "qemu" | "lxc"),
+            Self::Storage => resource_type == "storage",
+            Self::Node => resource_type == "node",
+            Self::Sdn => resource_type == "sdn",
+            Self::Pool => resource_type == "pool",
+            Self::Network => resource_type == "network",
+        }
+    }
+}
+
 /// `proxxx cluster-resources [--kind ...]` — dump the single-shot
 /// cluster-wide resource list. The PVE web UI's main dashboard query.
 pub async fn execute_resources(
     client: &Arc<crate::api::PxClient>,
-    kind: Option<String>,
+    kind: Option<ResourceKind>,
 ) -> Result<(Value, i32)> {
     use crate::api::ProxmoxGateway;
-    let resources = client.get_cluster_resources(kind.as_deref()).await?;
+    let mut resources = client
+        .get_cluster_resources(kind.and_then(ResourceKind::server_filter))
+        .await?;
+    if let Some(kind) = kind {
+        resources.retain(|r| kind.matches(&r.resource_type));
+    }
     Ok((
         serde_json::json!({"count": resources.len(), "resources": resources}),
         0,
@@ -585,5 +630,24 @@ pub async fn execute_bootstrap(
             let totem = client.get_cluster_totem().await?;
             Ok((totem, 0))
         }
+    }
+}
+
+#[cfg(test)]
+mod resource_kind_tests {
+    use super::ResourceKind;
+
+    #[test]
+    fn pool_and_network_are_filtered_locally_and_the_rest_by_pve() {
+        assert_eq!(ResourceKind::Pool.server_filter(), None);
+        assert_eq!(ResourceKind::Network.server_filter(), None);
+        assert_eq!(ResourceKind::Vm.server_filter(), Some("vm"));
+        let types = ["qemu", "lxc", "storage", "node", "network", "pool", "sdn"];
+        let kept = |k: ResourceKind| -> Vec<&str> {
+            types.iter().copied().filter(|t| k.matches(t)).collect()
+        };
+        assert_eq!(kept(ResourceKind::Vm), ["qemu", "lxc"]);
+        assert_eq!(kept(ResourceKind::Network), ["network"]);
+        assert_eq!(kept(ResourceKind::Pool), ["pool"]);
     }
 }

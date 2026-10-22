@@ -111,53 +111,134 @@ pub fn safe_text(s: &str) -> String {
         .join("\n")
 }
 
-/// `--format table`: a TSV-like table for arrays of objects (header from the
-/// first object's keys), pretty JSON for an object, the bare value otherwise.
+/// `--format table` (audit #385: objects and nested objects used to come
+/// out as pretty or compact JSON):
+/// - an array of objects is a TSV table whose columns are the union of
+///   the rows' keys; a nested object expands into `key.sub` columns, and
+///   the `data` envelope of `--all-profiles` / `find` rows into its own
+///   keys;
+/// - an object is `KEY<TAB>VALUE` rows, followed by one table per field
+///   that holds an array of objects;
+/// - anything else is printed bare.
 fn render_table(data: &Value) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
     match data {
-        Value::Array(items) => {
+        Value::Array(items) => rows_table(items),
+        Value::Object(map) => object_table(map),
+        other => format!("{}\n", table_cell(&cell_text(other))),
+    }
+}
+
+/// A value as cell text: strings bare, `null` as `-`, an array of scalars
+/// comma-joined, anything else compact JSON.
+fn cell_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "-".to_string(),
+        Value::Array(items) if items.iter().all(|i| !i.is_object() && !i.is_array()) => {
             if items.is_empty() {
-                out.push_str("(no results)\n");
-                return out;
+                "-".to_string()
+            } else {
+                items.iter().map(cell_text).collect::<Vec<_>>().join(",")
             }
-            // Extract headers from first item
-            if let Some(Value::Object(first)) = items.first() {
-                let headers: Vec<&str> = first.keys().map(String::as_str).collect();
-                let header_row: Vec<String> = headers
-                    .iter()
-                    .map(|h| table_cell(&h.to_uppercase()))
-                    .collect();
-                out.push_str(&header_row.join("\t"));
-                out.push('\n');
-                for item in items {
-                    if let Value::Object(obj) = item {
-                        let row: Vec<String> = headers
-                            .iter()
-                            .map(|h| match obj.get(*h) {
-                                Some(Value::String(s)) => table_cell(s),
-                                Some(Value::Null) | None => "-".to_string(),
-                                Some(other) => table_cell(&other.to_string()),
-                            })
-                            .collect();
-                        out.push_str(&row.join("\t"));
-                        out.push('\n');
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Envelope keys whose object is the row itself (fanout rows carry the
+/// payload under `data`).
+const ENVELOPE_KEYS: &[&str] = &["data"];
+
+fn rows_table(items: &[Value]) -> String {
+    if items.is_empty() {
+        return "(no results)\n".to_string();
+    }
+    if !items.iter().any(Value::is_object) {
+        let mut out = String::new();
+        for i in items {
+            out.push_str(&table_cell(&cell_text(i)));
+            out.push('\n');
+        }
+        return out;
+    }
+    // Columns as (header, path), sorted by header; the union over rows,
+    // so an error row first does not hide the data columns.
+    let mut columns: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for item in items.iter().filter_map(Value::as_object) {
+        for (key, value) in item {
+            match value {
+                Value::Object(inner) if !inner.is_empty() => {
+                    for sub in inner.keys() {
+                        let header =
+                            if ENVELOPE_KEYS.contains(&key.as_str()) && !item.contains_key(sub) {
+                                sub.clone()
+                            } else {
+                                format!("{key}.{sub}")
+                            };
+                        columns.insert(header, vec![key.clone(), sub.clone()]);
                     }
+                }
+                _ => {
+                    columns.insert(key.clone(), vec![key.clone()]);
                 }
             }
         }
-        Value::Object(_) => {
-            let _ = writeln!(
-                out,
-                "{}",
-                safe_text(&serde_json::to_string_pretty(data).unwrap_or_default())
-            );
-        }
-        other => {
-            let _ = writeln!(out, "{}", safe_text(&other.to_string()));
+    }
+    let mut out = String::new();
+    let header: Vec<String> = columns
+        .keys()
+        .map(|h| table_cell(&h.to_uppercase()))
+        .collect();
+    out.push_str(&header.join("\t"));
+    out.push('\n');
+    for item in items.iter().filter_map(Value::as_object) {
+        let row: Vec<String> = columns
+            .values()
+            .map(|path| {
+                let mut v = item.get(&path[0]);
+                if let Some(sub) = path.get(1) {
+                    v = v.and_then(|o| o.get(sub));
+                }
+                v.map_or_else(|| "-".to_string(), |v| table_cell(&cell_text(v)))
+            })
+            .collect();
+        out.push_str(&row.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+fn object_table(map: &serde_json::Map<String, Value>) -> String {
+    let mut out = String::from("KEY\tVALUE\n");
+    let mut sections = String::new();
+    for (key, value) in map {
+        match value {
+            Value::Array(items) if items.iter().any(Value::is_object) => {
+                sections.push('\n');
+                sections.push_str(&table_cell(&key.to_uppercase()));
+                sections.push('\n');
+                sections.push_str(&rows_table(items));
+            }
+            Value::Object(inner) if !inner.is_empty() => {
+                for (sub, v) in inner {
+                    out.push_str(&format!(
+                        "{}\t{}\n",
+                        table_cell(&format!("{key}.{sub}")),
+                        table_cell(&cell_text(v))
+                    ));
+                }
+            }
+            other => {
+                out.push_str(&format!(
+                    "{}\t{}\n",
+                    table_cell(key),
+                    table_cell(&cell_text(other))
+                ));
+            }
         }
     }
+    out.push_str(&sections);
     out
 }
 
@@ -256,15 +337,48 @@ mod terminal_safety_tests {
         let obj = json!({"comment": format!("x{C1_CSI}\u{7f}y"), "id": 1});
         let table = render_table(&obj);
         assert_no_controls(&table);
-        assert!(
-            table.lines().count() > 1,
-            "pretty JSON keeps its lines: {table:?}"
-        );
+        assert!(table.lines().count() > 1, "one line per key: {table:?}");
         assert!(table.contains("x2Jy"), "{table:?}");
 
         let plain = render_plain(&json!([obj, "z\u{9d}0;t\u{9c}"]));
         assert_no_controls(&plain);
         assert_eq!(plain.lines().count(), 2, "{plain:?}");
+    }
+
+    #[test]
+    fn an_object_is_key_value_rows_with_a_table_per_array_of_objects() {
+        let preview = json!({
+            "failed_node": "pve1",
+            "previews": [
+                {"sid": "vm:100", "current_node": "pve1",
+                 "outcome": {"kind": "relocate", "target": "pve2"}},
+                {"sid": "vm:101", "current_node": "pve2",
+                 "outcome": {"kind": "not_affected"}}
+            ]
+        });
+        assert_eq!(
+            render_table(&preview),
+            "KEY\tVALUE\nfailed_node\tpve1\n\nPREVIEWS\n\
+             CURRENT_NODE\tOUTCOME.KIND\tOUTCOME.TARGET\tSID\n\
+             pve1\trelocate\tpve2\tvm:100\n\
+             pve2\tnot_affected\t-\tvm:101\n"
+        );
+    }
+
+    #[test]
+    fn fanout_rows_spread_their_data_into_columns() {
+        // `find` / `ls --all-profiles` rows: the payload sits under `data`,
+        // an unreachable profile has `error` instead.
+        let rows = json!([
+            {"profile": "down", "error": "connection refused"},
+            {"profile": "lab", "data": {"vmid": 100, "node": "pve1", "tags": ["a", "b"]}}
+        ]);
+        assert_eq!(
+            render_table(&rows),
+            "ERROR\tNODE\tPROFILE\tTAGS\tVMID\n\
+             connection refused\t-\tdown\t-\t-\n\
+             -\tpve1\tlab\ta,b\t100\n"
+        );
     }
 
     #[test]

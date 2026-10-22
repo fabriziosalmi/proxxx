@@ -259,10 +259,18 @@ impl ApiError {
                  or verify $PROXXX_TOKEN_SECRET matches the live secret in PVE \
                  (`pveum user token list <user>`)"
             }
+            // PVE reserves some endpoints (`/cluster/backup-info`, ...) to
+            // the root@pam user itself and refuses every API token, even
+            // root@pam's, whatever the ACL says (measured on PVE 9.1.1).
+            Self::Forbidden(msg) if msg.contains("user != root@pam") => {
+                "PVE reserves this endpoint to the root@pam user itself: every API token \
+                 is refused, root@pam's included, whatever the ACL grants; use a profile \
+                 that logs in as root@pam with a password"
+            }
             Self::Forbidden(_) => {
                 "token is valid but lacks the privilege for this op — inspect the ACL with \
                  `proxxx access acl` and grant the needed role on the affected path; \
-                 `proxxx perms <user>` shows effective rights"
+                 `proxxx perms <user> --node <node>` shows effective rights"
             }
             Self::NotFound(_) => {
                 "the resource doesn't exist on the cluster — it may have been deleted, \
@@ -298,18 +306,26 @@ impl ApiError {
             }
             Self::Parse { .. } => {
                 "proxxx couldn't parse a PVE response as the expected JSON shape — likely \
-                 schema drift between proxxx and your PVE version; capture the failing \
-                 request via `proxxx -vvv` and file a bug with the `proxxx pve-version` output"
+                 schema drift between proxxx and your PVE version; re-run with \
+                 `RUST_LOG=proxxx=debug` to log the failing request and file a bug with \
+                 the `proxxx pve-version` output"
             }
             Self::PayloadTooLarge(_) => {
                 "PVE response exceeded proxxx's 32 MiB cap — proxxx refuses to parse \
                  partial JSON; this typically means a node is emitting garbage (broken \
                  upstream, hostile proxy, or a runaway log endpoint)"
             }
+            // PVE answers a missing guest config, snapshot or storage with a
+            // 500 "... does not exist", not a 404 (audit #385).
+            Self::Other { body, .. } if body.contains("does not exist") => {
+                "PVE says the object does not exist — it may have been deleted or renamed, \
+                 or the vmid/snapshot/storage name is wrong (`proxxx ls guests` and \
+                 `proxxx ls storage` enumerate guests and storage)"
+            }
             Self::Other { .. } => {
-                "PVE returned a status code outside proxxx's categorised set — see the \
-                 `Other { status: ... }` field for the raw HTTP code; check PVE's \
-                 journal on the affected node for context"
+                "PVE refused the request; the error above carries its HTTP status and \
+                 PVE's own message. Check the pveproxy and pvedaemon journal on the \
+                 affected node (`journalctl -u pveproxy -u pvedaemon`) for context"
             }
         }
     }
@@ -340,6 +356,32 @@ pub fn extract_hint(err: &anyhow::Error) -> Option<&'static str> {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    /// Audit #385: a root-only endpoint refuses every token whatever the
+    /// ACL (message measured on PVE 9.1.1), and PVE reports a missing
+    /// object as a 500 "does not exist", not a 404.
+    #[test]
+    fn root_only_and_does_not_exist_get_their_own_hints() {
+        let root_only = ApiError::Forbidden(
+            "/cluster/backup-info: Permission check failed (user != root@pam)".into(),
+        );
+        assert!(root_only.actionable_hint().contains("root@pam user itself"));
+        assert!(!root_only.actionable_hint().contains("access acl"));
+        let acl = ApiError::Forbidden("/nodes/pve1/qemu: Permission check failed".into());
+        assert!(acl.actionable_hint().contains("perms <user> --node <node>"));
+        let gone = ApiError::Other {
+            path: "/nodes/pve1/qemu/999/config".into(),
+            status: 500,
+            body: "Configuration file 'nodes/pve1/qemu-server/999.conf' does not exist".into(),
+        };
+        assert!(gone.actionable_hint().contains("does not exist"));
+        let other = ApiError::Other {
+            path: String::new(),
+            status: 500,
+            body: "boom".into(),
+        };
+        assert!(!other.actionable_hint().contains("Other {"));
+    }
 
     #[test]
     fn from_status_categorizes_canonical_codes() {

@@ -733,6 +733,53 @@ pub async fn execute_alerts(
     }
 }
 
+/// Extract one optional metric from an RRD point. Used for both the
+/// sparkline render path AND the summary stats.
+fn extract(p: &crate::api::types::RrdPoint, field: MetricField) -> Option<f64> {
+    match field {
+        MetricField::Cpu => p.cpu,
+        // For node, `mem` is often absent; PVE returns memused
+        // instead. Fall back so a `--field mem` request on a node
+        // doesn't render an all-gap sparkline.
+        MetricField::Mem => p.mem.or(p.memused),
+        MetricField::Diskread => p.diskread,
+        MetricField::Diskwrite => p.diskwrite,
+        MetricField::Netin => p.netin,
+        MetricField::Netout => p.netout,
+        MetricField::Loadavg => p.loadavg,
+        MetricField::Iowait => p.iowait,
+        // Storage: `used`. Guest: `disk`. Node: the root filesystem
+        // (`rootused` / `roottotal`, measured on PVE 9.1.1), which the
+        // node help promises and which used to come back all null.
+        MetricField::Used => p.used.or(p.disk).or(p.rootused),
+        MetricField::Total => p.total.or(p.maxdisk).or(p.roottotal),
+    }
+}
+
+/// Refuse a node-only field for a guest: PVE's guest RRD has no
+/// `loadavg` or `iowait`, so the series was all nulls with exit 0
+/// (audit #385).
+fn guest_field_applies(field: MetricField) -> Result<()> {
+    if matches!(field, MetricField::Loadavg | MetricField::Iowait) {
+        anyhow::bail!(
+            "--field {} exists only for nodes (`metrics node <node>`); a guest RRD has no such series",
+            format!("{field:?}").to_lowercase()
+        );
+    }
+    Ok(())
+}
+
+/// "VM 100 on pve1" / "LXC 200 on pve1", from the guest's real type. PVE
+/// serves a guest's RRD under either type's path, so `metrics vm` on a
+/// container returned its data labelled "VM" (audit #385).
+fn guest_label(vmid: u32, gt: crate::api::types::GuestType, node: &str) -> String {
+    let kind = match gt {
+        crate::api::types::GuestType::Qemu => "VM",
+        crate::api::types::GuestType::Lxc => "LXC",
+    };
+    format!("{kind} {vmid} on {node}")
+}
+
 /// Hill 3b — time-series metrics CLI. Default emits a Unicode block
 /// sparkline + min/max/avg over the chosen field; `--format json`
 /// short-circuits and returns the raw rrddata. Auto-discovers the
@@ -742,7 +789,7 @@ pub async fn execute_metrics(
     client: &Arc<crate::api::PxClient>,
     action: MetricsCommand,
 ) -> Result<(Value, i32)> {
-    use crate::api::types::{GuestType, RrdPoint};
+    use crate::api::types::GuestType;
     use crate::api::ProxmoxGateway;
 
     // RrdPng returns a server-side filename — different shape from the
@@ -775,27 +822,6 @@ pub async fn execute_metrics(
         return Ok((serde_json::json!({"status": "exited"}), 0));
     }
 
-    // Helper: extract one optional metric from each point. Used for
-    // both the sparkline render path AND the summary stats.
-    fn extract(p: &RrdPoint, field: MetricField) -> Option<f64> {
-        match field {
-            MetricField::Cpu => p.cpu,
-            // For node, `mem` is often absent; PVE returns memused
-            // instead. Fall back so a `--field mem` request on a node
-            // doesn't render an all-gap sparkline.
-            MetricField::Mem => p.mem.or(p.memused),
-            MetricField::Diskread => p.diskread,
-            MetricField::Diskwrite => p.diskwrite,
-            MetricField::Netin => p.netin,
-            MetricField::Netout => p.netout,
-            MetricField::Loadavg => p.loadavg,
-            MetricField::Iowait => p.iowait,
-            // Storage: `used`. Guest: `disk`. Try both.
-            MetricField::Used => p.used.or(p.disk),
-            MetricField::Total => p.total.or(p.maxdisk),
-        }
-    }
-
     // Auto-find owning node when caller omits --node for guests.
     async fn find_node_for_vmid(
         client: &Arc<crate::api::PxClient>,
@@ -812,20 +838,15 @@ pub async fn execute_metrics(
             timeframe,
             cf,
         } => {
-            let (node_name, _) = match node {
+            guest_field_applies(field)?;
+            let (node_name, gt) = match node {
                 Some(n) => (n, GuestType::Qemu),
                 None => find_node_for_vmid(client, vmid).await?,
             };
             let pts = client
-                .get_guest_rrddata(
-                    &node_name,
-                    vmid,
-                    GuestType::Qemu,
-                    timeframe.into(),
-                    cf.into(),
-                )
+                .get_guest_rrddata(&node_name, vmid, gt, timeframe.into(), cf.into())
                 .await?;
-            (format!("VM {vmid} on {node_name}"), pts, field)
+            (guest_label(vmid, gt, &node_name), pts, field)
         }
         MetricsCommand::Ct {
             vmid,
@@ -834,20 +855,15 @@ pub async fn execute_metrics(
             timeframe,
             cf,
         } => {
-            let (node_name, _) = match node {
+            guest_field_applies(field)?;
+            let (node_name, gt) = match node {
                 Some(n) => (n, GuestType::Lxc),
                 None => find_node_for_vmid(client, vmid).await?,
             };
             let pts = client
-                .get_guest_rrddata(
-                    &node_name,
-                    vmid,
-                    GuestType::Lxc,
-                    timeframe.into(),
-                    cf.into(),
-                )
+                .get_guest_rrddata(&node_name, vmid, gt, timeframe.into(), cf.into())
                 .await?;
-            (format!("LXC {vmid} on {node_name}"), pts, field)
+            (guest_label(vmid, gt, &node_name), pts, field)
         }
         MetricsCommand::Node {
             node,
@@ -855,6 +871,12 @@ pub async fn execute_metrics(
             timeframe,
             cf,
         } => {
+            if matches!(field, MetricField::Diskread | MetricField::Diskwrite) {
+                anyhow::bail!(
+                    "the node RRD has no disk read/write series (PVE 9.1.1); --field {} would be empty",
+                    format!("{field:?}").to_lowercase()
+                );
+            }
             let pts = client
                 .get_node_rrddata(&node, timeframe.into(), cf.into())
                 .await?;
@@ -867,6 +889,12 @@ pub async fn execute_metrics(
             timeframe,
             cf,
         } => {
+            if !matches!(field, MetricField::Used | MetricField::Total) {
+                anyhow::bail!(
+                    "storage RRD carries only `used` and `total`; --field {} would be empty",
+                    format!("{field:?}").to_lowercase()
+                );
+            }
             let pts = client
                 .get_storage_rrddata(&node, &storage, timeframe.into(), cf.into())
                 .await?;
@@ -1395,5 +1423,37 @@ pub async fn execute_replication(
             let status = client.list_replication_status(&node).await?;
             Ok((serde_json::to_value(status)?, 0))
         }
+    }
+}
+
+#[cfg(test)]
+mod metrics_label_tests {
+    use super::{extract, guest_field_applies, guest_label, MetricField};
+    use crate::api::types::GuestType;
+
+    #[test]
+    fn a_guest_is_labelled_by_its_real_type_and_node_only_fields_are_refused() {
+        assert_eq!(
+            guest_label(7777, GuestType::Lxc, "pve1"),
+            "LXC 7777 on pve1"
+        );
+        assert_eq!(
+            guest_label(8888, GuestType::Qemu, "pve1"),
+            "VM 8888 on pve1"
+        );
+        assert!(guest_field_applies(MetricField::Loadavg).is_err());
+        assert!(guest_field_applies(MetricField::Iowait).is_err());
+        assert!(guest_field_applies(MetricField::Cpu).is_ok());
+    }
+
+    #[test]
+    fn node_used_and_total_read_the_root_filesystem() {
+        let p = crate::api::types::RrdPoint {
+            rootused: Some(5.0),
+            roottotal: Some(10.0),
+            ..Default::default()
+        };
+        assert_eq!(extract(&p, MetricField::Used), Some(5.0));
+        assert_eq!(extract(&p, MetricField::Total), Some(10.0));
     }
 }

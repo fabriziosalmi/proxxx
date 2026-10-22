@@ -57,6 +57,8 @@ mod cli_secret_scope_tests {
 }
 
 #[cfg(test)]
+mod help_text_tests;
+#[cfg(test)]
 mod yes_gate_net;
 
 pub use audit_cmd::AuditAction;
@@ -66,6 +68,25 @@ use common::{
     enforce_preflight, execute_batch_op_with_policy, find_guest, find_guest_full,
     wait_and_classify, BatchOp,
 };
+
+/// `proxxx feature --feature`: the values PVE's `/feature` endpoint takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GuestFeature {
+    Snapshot,
+    Clone,
+    Copy,
+}
+
+impl GuestFeature {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Clone => "clone",
+            Self::Copy => "copy",
+        }
+    }
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -368,16 +389,17 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Pre-flight capability check on a guest. PVE features:
-    /// `snapshot`, `clone`, `copy`, `migrate`, `replicate`. Returns
-    /// `{has_feature, nodes}` — `nodes` is the list of cluster nodes
-    /// the guest could be migrated to without losing the feature.
+    /// Pre-flight capability check on a guest: can it be snapshotted,
+    /// cloned or copied with its current storage? Returns
+    /// `{has_feature, nodes}`; for a QEMU VM, `nodes` lists the cluster
+    /// nodes where the feature is available (PVE omits it for LXC).
     Feature {
         /// Guest VMID — auto-resolves to its node and guest type.
         vmid: u32,
-        /// Feature to check (e.g. `snapshot`).
-        #[arg(long)]
-        feature: String,
+        /// Feature to check. PVE 9 accepts only these three (measured:
+        /// `migrate` and `replicate` are refused, audit #385).
+        #[arg(long, value_enum)]
+        feature: GuestFeature,
     },
     /// LXC template catalog (≈ `pveam`). `list` = available templates;
     /// `download` = pull one to a node's storage. Distinct from
@@ -487,15 +509,18 @@ pub enum Command {
     },
     /// Watch for cluster changes or wait for a condition
     Watch {
-        /// Watch changes since a given time (e.g. 1h, 30m)
+        /// Show guest changes since a time ago, from the local state
+        /// cache: a number with unit s, m, h, d or w (e.g. 30m, 6h, 1d).
         #[arg(long)]
         since: Option<String>,
 
-        /// Target to watch (e.g., vm-100, task UPID, storage pool)
+        /// Target to watch: vm-<id> (or a bare <id>), storage-<id>, or
+        /// storage-<id>@<node> for a node-local storage.
         #[arg(long, short)]
         target: Option<String>,
 
-        /// Wait until condition is met (e.g. status=running, usage=<70%, usage=>80%)
+        /// Wait until condition is met: status=running|stopped|paused|suspended
+        /// for a guest, usage=<70%, usage=>80% or usage=75% for storage.
         #[arg(long, short)]
         until: Option<String>,
 
@@ -658,12 +683,11 @@ pub enum Command {
         action: cluster::PoolCommand,
     },
     /// Single-shot cluster-wide resource list — nodes, guests, storages,
-    /// sdn objects, pools — flattened. PVE web-UI's main dashboard
-    /// query. Use `--kind` to filter (vm | storage | node | sdn | pool);
-    /// omit for everything.
+    /// sdn objects, pools, networks — flattened. PVE web-UI's main
+    /// dashboard query. Use `--kind` to keep one kind; omit for everything.
     ClusterResources {
-        #[arg(long)]
-        kind: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<cluster::ResourceKind>,
     },
     /// `GET /version` — PVE API version + git rev. Use for compat
     /// gating before invoking PVE-version-dependent endpoints.
@@ -852,6 +876,9 @@ pub enum Command {
         #[arg(long, default_value_t = true)]
         json: bool,
     },
+    /// List named profiles defined in config.toml ([profiles.NAME] sections).
+    /// Use `--profile NAME` to select one when starting the TUI or CLI.
+    Profiles,
     /// Bootstrap a `config.toml` at the OS-default proxxx config
     /// directory (e.g. `~/.config/proxxx/config.toml` on Linux,
     /// `~/Library/Application Support/dev.proxxx.proxxx/config.toml`
@@ -870,9 +897,6 @@ pub enum Command {
     /// Both refuse to overwrite an existing config unless `--force`
     /// is passed (template-only path); the interactive flow offers
     /// backup-or-cancel instead.
-    /// List named profiles defined in config.toml ([profiles.NAME] sections).
-    /// Use `--profile NAME` to select one when starting the TUI or CLI.
-    Profiles,
     Init {
         /// Overwrite any existing config.toml at the target path.
         /// Without this flag, `init` refuses to clobber prior state.
@@ -1581,14 +1605,23 @@ pub async fn execute(
 
     // MCP introspection commands don't need a Proxmox connection
     if let Command::Mcp {
-        action: McpCommand::Tools { checksum, .. },
+        action: McpCommand::Tools { json, checksum },
     } = &cmd
     {
-        if *checksum {
-            let hash = crate::mcp::tools::registry_checksum();
-            return Ok((serde_json::json!({"checksum": hash}), 0));
+        let value = if *checksum {
+            serde_json::json!({"checksum": crate::mcp::tools::registry_checksum()})
+        } else {
+            crate::mcp::tools::registry_json()
+        };
+        // `--json` (also set by the global `--format json`) prints the
+        // document as is; it used to be ignored, so the output followed
+        // `--format` and came wrapped in an array (audit #385).
+        if *json {
+            // raw-output: the registry is a JSON document; escaping it would change the data
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            return Ok((Value::Null, 0));
         }
-        return Ok((crate::mcp::tools::registry_json(), 0));
+        return Ok((value, 0));
     }
 
     // `version` is the only command that doesn't need a live PVE
@@ -1596,8 +1629,18 @@ pub async fn execute(
     // building PxClient so users without a configured profile can still
     // run `proxxx version --json` (CI scripts, container health probes,
     // README badge generators).
-    if matches!(cmd, Command::Version { .. }) {
-        return Ok((build_version_payload(), 0));
+    if let Command::Version { json } = &cmd {
+        let payload = build_version_payload();
+        // `version` is JSON only. Under `--format table` it relied on the
+        // table renderer printing objects as pretty JSON; objects are now
+        // key/value rows (#385), so it prints its JSON itself there. Every
+        // other format goes through the usual pipeline, unchanged.
+        if *json && matches!(format, crate::util::format::OutputFormat::Table) {
+            // raw-output: the version document is JSON; escaping it would change the data
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok((Value::Null, 0));
+        }
+        return Ok((payload, 0));
     }
 
     // First-run UX: `proxxx init` MUST work on a fresh machine that
@@ -2063,8 +2106,9 @@ pub async fn execute(
             Ok((serde_json::json!({"stopped": upid, "node": node}), 0))
         }
         Command::Feature { vmid, feature } => {
+            let feature = feature.as_str();
             let (node, gt) = find_guest(&client, vmid).await?;
-            let res = client.get_guest_feature(&node, vmid, gt, &feature).await?;
+            let res = client.get_guest_feature(&node, vmid, gt, feature).await?;
             Ok((
                 serde_json::json!({
                     "vmid": vmid,
@@ -2520,12 +2564,35 @@ async fn execute_search(
     let nodes = client.get_nodes().await?;
     let all_guests = client.get_all_guests().await?;
     let all_storage = client.get_all_storage_pools().await?;
+    let results = search_rows(&nodes, &all_guests, &all_storage, query, limit);
+    Ok((serde_json::Value::Array(results), 0))
+}
+
+/// The `search` matches. Each row is matched on, and reports, the same
+/// lowercase `status` and `type` strings `ls` prints; the haystack used
+/// to hold `{:?}` names and the guest type as a number, so `search 0`
+/// matched every QEMU VM (audit #385).
+fn search_rows(
+    nodes: &[crate::api::types::Node],
+    guests: &[crate::api::types::Guest],
+    storage: &[crate::api::types::StoragePool],
+    query: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    fn label<T: serde::Serialize>(v: &T) -> String {
+        serde_json::to_value(v)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
     let q_lower = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
-    for g in &all_guests {
+    for g in guests {
+        let status = label(&g.status);
+        let kind = g.guest_type.as_str();
         let hay = format!(
-            "{} {} {} {:?} {} {}",
-            g.vmid, g.name, g.tags, g.status, g.node, g.guest_type as u8
+            "{} {} {} {} {} {}",
+            g.vmid, g.name, g.tags, status, g.node, kind
         )
         .to_lowercase();
         if hay.contains(&q_lower) {
@@ -2534,23 +2601,24 @@ async fn execute_search(
                 "vmid": g.vmid,
                 "name": g.name,
                 "node": g.node,
-                "status": format!("{:?}", g.status),
-                "type": format!("{:?}", g.guest_type),
+                "status": status,
+                "type": kind,
                 "tags": g.tags,
             }));
         }
     }
-    for n in &nodes {
-        let hay = format!("{} {:?}", n.node, n.status).to_lowercase();
+    for n in nodes {
+        let status = label(&n.status);
+        let hay = format!("{} {}", n.node, status).to_lowercase();
         if hay.contains(&q_lower) {
             results.push(serde_json::json!({
                 "kind": "node",
                 "name": n.node,
-                "status": format!("{:?}", n.status),
+                "status": status,
             }));
         }
     }
-    for s in &all_storage {
+    for s in storage {
         let hay = format!("{} {} {}", s.storage, s.storage_type, s.content).to_lowercase();
         if hay.contains(&q_lower) {
             results.push(serde_json::json!({
@@ -2561,7 +2629,7 @@ async fn execute_search(
         }
     }
     results.truncate(limit);
-    Ok((serde_json::Value::Array(results), 0))
+    results
 }
 
 /// Bug #6 fix: implement `proxxx delete <vmid>...` (was missing entirely).

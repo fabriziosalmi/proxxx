@@ -43,13 +43,13 @@ within a major version.
 | `proxxx ls nodes`              | Cluster nodes with CPU / RAM / uptime / status |
 | `proxxx ls guests`             | All VMs and LXCs across the cluster |
 | `proxxx ls storage`            | Storage pools, type, used / available |
-| `proxxx cluster-resources [--kind ...]` | Single-shot cluster-wide flat list (web-UI dashboard query) |
+| `proxxx cluster-resources [--kind vm\|storage\|node\|sdn\|pool\|network]` | Single-shot cluster-wide flat list (web-UI dashboard query) |
 | `proxxx pve-version`           | PVE API version + git rev (compat-gating) |
 | `proxxx tasks [--node N]`      | Recent tasks, newest first; `--node` filters per-node |
 | `proxxx cluster-log [--max N]` | Cluster event log (login/quorum/task lifecycle) |
 | `proxxx config <vmid>`         | Current Proxmox config for a guest |
 | `proxxx search <query>`        | Fuzzy search across nodes, guests, storage |
-| `proxxx feature <vmid> --feature X` | Pre-flight cap check (`snapshot`/`clone`/`migrate`/...) |
+| `proxxx feature <vmid> --feature snapshot\|clone\|copy` | Pre-flight cap check: can the guest be snapshotted, cloned or copied |
 | `proxxx ha groups`             | HA groups (PVE-version-tolerant) |
 | `proxxx ha groups-legacy`      | Legacy `/cluster/ha/groups` path (PVE 8 only) |
 | `proxxx ha resources`          | Resources managed by HA |
@@ -61,7 +61,7 @@ within a major version.
 | `proxxx hw pci --node N`       | PCI device inventory |
 | `proxxx hw usb --node N`       | USB device inventory |
 | `proxxx hw conflicts --node N` | PCI passthrough conflict detector |
-| `proxxx perms <user>`          | Effective permissions (SSH-shellout to `pveum`) |
+| `proxxx perms <user> --node <node>` | Effective permissions (SSH-shellout to `pveum`) |
 | `proxxx access permissions [--userid X] [--path Y]` | API-side permissions tree, no SSH dep |
 | `proxxx access acl`            | ACL entries |
 | `proxxx access users`          | User list |
@@ -168,7 +168,7 @@ within a major version.
 | `dns {get,set}`        | Resolver config (search domain + up to 3 nameservers) |
 | `hosts {get,set}`      | `/etc/hosts` content (digest-guarded atomic replace) |
 | `journal [--since EPOCH] [--until EPOCH] [--lastentries N]` | Systemd journal (times are UNIX epoch seconds; filter by unit with `syslog --service`) |
-| `syslog [...]`         | Tail `/var/log/syslog` (line-numbered for paging) |
+| `syslog [...]`         | Page through the syslog, oldest line first (line-numbered; `--start`, `--since`); for the newest lines use `journal --lastentries N` |
 | `time {get,set}`       | NTP / timezone (clock itself is NTP-driven) |
 | `wol`                  | Wake-on-LAN magic packet via cluster network |
 | `subscription {get,set,refresh,delete}` | Subscription key management |

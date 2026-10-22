@@ -20,6 +20,58 @@ pub fn reject_empty_positionals(cmd: Command) -> Command {
         .mut_subcommands(reject_empty_positionals)
 }
 
+/// Give every subcommand a `Usage:` line that parses. clap writes a
+/// parent's required positionals into its child's usage (`qga <VMID>
+/// net`) but builds the grandchild's from the child's plain name, so
+/// `firewall-guest <VMID> alias list` printed as `firewall-guest alias
+/// list` (audit #385). clap recomputes names while parsing, so the fix is
+/// an `override_usage`, set only where an ancestor above the parent has
+/// required positionals.
+#[must_use]
+pub fn usage_with_parent_positionals(cmd: Command) -> Command {
+    let root = cmd.get_name().to_string();
+    let mut built = cmd.bin_name(root.clone());
+    built.build();
+    let prefix = with_positionals(&built, &root);
+    built.mut_subcommands(|sub| fix_usage(sub, &prefix, false))
+}
+
+/// `path` followed by the `<NAME>` of each required positional of `cmd`.
+fn with_positionals(cmd: &Command, path: &str) -> String {
+    let mut out = path.to_string();
+    for arg in cmd.get_positionals().filter(|a| a.is_required_set()) {
+        let name = arg
+            .get_value_names()
+            .and_then(|v| v.first())
+            .map_or_else(|| arg.get_id().as_str().to_uppercase(), ToString::to_string);
+        out.push_str(&format!(" <{name}>"));
+    }
+    out
+}
+
+/// `prefix` is the full path to `sub`'s parent with every ancestor's
+/// required positionals; `lossy` says whether clap's own path for `sub`
+/// has lost some of them.
+fn fix_usage(sub: Command, prefix: &str, lossy: bool) -> Command {
+    let name = sub.get_name().to_string();
+    let path = format!("{prefix} {name}");
+    let mut sub = sub;
+    if lossy {
+        // clap's rendering of this command's own arguments, after its
+        // (incomplete) path.
+        let rendered = sub.clone().render_usage().to_string();
+        let marker = format!(" {name}");
+        if let Some(i) = rendered.rfind(&marker) {
+            let tail = &rendered[i + marker.len()..];
+            sub = sub.override_usage(format!("{path}{tail}"));
+        }
+    }
+    let child_prefix = with_positionals(&sub, &path);
+    // A child's clap path keeps this command's positionals but none above.
+    let child_lossy = lossy || prefix.contains(" <");
+    sub.mut_subcommands(|c| fix_usage(c, &child_prefix, child_lossy))
+}
+
 fn non_empty_if_positional_string(arg: Arg) -> Arg {
     let is_string =
         arg.get_value_parser().type_id() == clap::builder::ValueParser::string().type_id();
@@ -33,6 +85,25 @@ fn non_empty_if_positional_string(arg: Arg) -> Arg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nested_usage_line_carries_every_ancestor_positional() {
+        let cmd = usage_with_parent_positionals(
+            Command::new("t").subcommand(
+                Command::new("fw")
+                    .arg(Arg::new("vmid").required(true))
+                    .subcommand(Command::new("alias").subcommand(Command::new("list"))),
+            ),
+        );
+        let err = cmd
+            .try_get_matches_from(["t", "fw", "100", "alias", "list", "--help"])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(
+            err.to_string().contains("Usage: t fw <VMID> alias list"),
+            "{err}"
+        );
+    }
 
     fn cmd() -> Command {
         reject_empty_positionals(
