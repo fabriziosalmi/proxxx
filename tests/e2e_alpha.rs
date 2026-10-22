@@ -224,6 +224,25 @@ async fn alpha_full_crud_lifecycle() {
     )
     .await
     .expect("snapshot listed");
+    // PVE lists the snapshot before the task releases the guest's `snapshot`
+    // lock, and the stop pre-flight refuses a locked guest (exit 6). Wait for
+    // the task itself, as step 4 of the header says.
+    let snap_task = poll_until(
+        "snapshot task finished",
+        Duration::from_mins(1),
+        Duration::from_millis(500),
+        || async {
+            let t = client.get_task_status(&env.node, &snap_upid).await?;
+            Ok(t.is_done().then_some(t))
+        },
+    )
+    .await
+    .expect("snapshot task finishes");
+    assert!(
+        snap_task.is_success(),
+        "snapshot task ended with {:?}",
+        snap_task.exitstatus
+    );
 
     // Step 5 — `proxxx stop <vmid> --force` via the CLI.
     eprintln!("[alpha] step 5: proxxx stop --force {}", env.vmid);
