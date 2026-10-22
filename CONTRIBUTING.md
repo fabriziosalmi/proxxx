@@ -142,6 +142,32 @@ Notes: <anything you saw that the harness didn't catch>
 - **No `unwrap` in production paths**. `cargo clippy` enforces.
   Tests are relaxed via `cfg_attr(test, allow(...))`.
 
+### Fuzzing
+
+`fuzz/` holds cargo-fuzz targets for the code that reads untrusted
+input. Each asserts an invariant, not only the absence of a panic:
+
+| Target | Invariant |
+| :--- | :--- |
+| `mcp_shape` | A value an MCP `Name` or `Upid` parameter accepts is one path segment: no separator, no relative segment, no control character. |
+| `sanitize` | `sanitize_display` and `safe_text` leave no C0 (except TAB), DEL or C1 control, drop nothing else, and are idempotent; `truncate_ellipsis` stays within its bound. |
+| `guest_specs` | `--ipconfig`, `--net` and `--disk` values parse without panicking, and print/parse is stable. |
+| `api_json` | Deserializing PVE responses into the API types never panics. |
+
+They need a nightly toolchain and cargo-fuzz (`.github/workflows/fuzz.yml`
+pins both and runs them weekly and on PRs that touch `fuzz/`):
+
+```sh
+cargo +stable install --locked --version 0.12.0 cargo-fuzz
+cd fuzz
+cargo +nightly-2026-10-15 fuzz run --dev -s none sanitize -- -max_total_time=60
+```
+
+Use the dev profile: a release build of the proxxx lib with coverage
+instrumentation needs more than 6 GB for one `rustc`. A crashing input
+lands in `fuzz/artifacts/<target>/`; turn it into a regular test before
+fixing the bug.
+
 ## Pull requests
 
 - Branch from `main`, name like `feat/<short>` / `fix/<short>` /
