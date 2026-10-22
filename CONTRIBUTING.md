@@ -141,6 +141,18 @@ Notes: <anything you saw that the harness didn't catch>
   class of risk; otherwise document why an existing variant covers it.
 - **No `unwrap` in production paths**. `cargo clippy` enforces.
   Tests are relaxed via `cfg_attr(test, allow(...))`.
+- **Concurrent code gets a concurrent test.** A bare `#[tokio::test]`
+  runs on one thread and cannot observe a race. Code that several
+  callers reach at once (the HITL approval store, the audit chain, the
+  TUI queue writer, any `JoinSet`/`Semaphore` fan-out, anything shared
+  between the CLI, TUI, MCP and daemon processes) needs a
+  `#[tokio::test(flavor = "multi_thread")]` (or `std::thread`) test whose
+  callers overlap for real, behind a `Barrier`, and whose assertion fails
+  when the protection is removed (break it once to check). Run it a few
+  dozen times in Linux too: fsync and scheduling differ from macOS, and
+  the audit key race (#482) reproduced only there. Examples:
+  `hitl::pending::concurrency_tests`, the fan-out test in
+  `tui::refresh_cost_tests` (#294).
 
 ### Fuzzing
 

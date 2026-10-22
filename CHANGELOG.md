@@ -21,6 +21,10 @@ SemVer contract:
 - **Every subcommand has a description in `--help` (#494).** 64 nested ones had none (for example `firewall-cluster alias list`, `acme plugin show`, `node-system dns get`), so their parent's help listed them blank. A test now checks every level.
 - **Arguments PVE requires are required by the CLI, and a flag PVE does not accept is gone (#494).** Measured on PVE 9.1.1, each call below failed with a 400 "property is missing and it is not optional" unless the argument was given: `node-system dns set` now requires `--search`, `firewall-cluster alias update` and `firewall-guest alias update` require `--cidr`, `cluster-mapping usb update` requires `--map`, and `metric-servers update` requires `--server` and `--port`. `metric-servers create` and `update` no longer offer `--comment`, which PVE's metric-server schema does not have. An invocation that worked before still works.
 
+### Tests and tooling
+
+- **The HITL approval store and the TUI refresh fan-out are tested under real concurrency (#294).** Eight approvers race `process_callback` on one request, through one shared store and through one store each on the same file (as the daemon and the TUI do), for a quorum of 1 and of 2: exactly one call authorises execution. Splitting the read and the update into two transactions makes two calls approve the same request, and the test fails. A second test holds the refresh's 16-request ceiling on a multi-threaded runtime (a ceiling of 17 fails it). CONTRIBUTING now says which code needs such a test.
+
 ## [0.16.0] - 2026-10-22
 
 Headline: **the 2026-10-18 audit milestone, closed.** Hints, help and
