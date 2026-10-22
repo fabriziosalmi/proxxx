@@ -111,7 +111,11 @@ trap live_cleanup EXIT
 URL="$PROXXX_E2E_PVE_URL"
 NODE="$PROXXX_E2E_NODE"
 LXC_VMID=9999
-QEMU_VMID="${PROXXX_E2E_QEMU_VMID:-8888}"
+# The demo VM is an existing, prepared guest. It has its own variable:
+# PROXXX_E2E_QEMU_VMID is the VM test_mutation.sh creates and destroys
+# (9998 in env.local.example), so sharing it pointed the demo at a VM
+# that does not exist (#489).
+QEMU_VMID="${PROXXX_E2E_DEMO_VMID:-8888}"
 LXC_TEMPLATE="${PROXXX_E2E_LXC_TEMPLATE:-local:vztmpl/alpine-3.22-default_20250617_amd64.tar.xz}"
 LXC_STORAGE="${PROXXX_E2E_LXC_STORAGE:-local-lvm}"
 TOKEN_HEADER="Authorization: PVEAPIToken=root@pam!${PROXXX_E2E_PVE_TOKEN}"
@@ -201,7 +205,7 @@ print('MISSING')
     if [[ "$resp" == "MISSING" ]]; then
         fail "QEMU $QEMU_VMID not found in the cluster"
         info "  the demo expects a pre-prepared QEMU VM (defaulting to vmid 8888)"
-        info "  set PROXXX_E2E_QEMU_VMID in env.local to point at your demo VM"
+        info "  set PROXXX_E2E_DEMO_VMID in env.local to point at your demo VM"
         return 1
     fi
     local kind status node name
