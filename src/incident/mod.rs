@@ -302,10 +302,14 @@ fn login_name_for_uid_with(uid: u32, capacity: usize) -> Option<String> {
         if rc != 0 || result.is_null() {
             return None;
         }
-        // SAFETY: a zero return with a non-null `result` means libc
-        // filled `pwd` (which `result` points at); its `pw_name` is NULL
-        // or a NUL-terminated string inside `buf`, still alive here.
-        let name = unsafe { (*result).pw_name };
+        // SAFETY: a zero return with a non-null `result` means libc found
+        // the entry and filled `pwd` (POSIX: `result` then points at
+        // `pwd`), so it is initialised. `result` itself is only compared
+        // with null, never dereferenced.
+        let pwd = unsafe { pwd.assume_init() };
+        // `pw_name` is NULL or a NUL-terminated string inside `buf`, which
+        // is still alive here.
+        let name = pwd.pw_name;
         if name.is_null() {
             return None;
         }
