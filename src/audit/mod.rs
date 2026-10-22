@@ -121,21 +121,7 @@ impl AuditLogger {
         let key = if key_path.exists() {
             read_existing_key(key_path)?
         } else {
-            let existing_primary_rows: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM audit_log WHERE key_id = ?1",
-                    params![PRIMARY_KEY_ID],
-                    |r| r.get(0),
-                )
-                .context("count rows signed with the primary key")?;
-            anyhow::ensure!(
-                existing_primary_rows == 0,
-                "audit key at {} was missing while {} already contains {existing_primary_rows} \
-                 row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
-                key_path.display(),
-                path.display()
-            );
-            create_key_once(key_path)?
+            first_use_key(&conn, path, key_path)?
         };
         Ok(Self {
             conn,
@@ -150,8 +136,8 @@ impl AuditLogger {
     /// `BEGIN IMMEDIATE` transaction (`#368`): `SQLite` admits a single
     /// writer, so two loggers on the same database (the daemon and a CLI
     /// process, or two CLI processes) can no longer chain onto the same
-    /// predecessor. A writer that cannot get the lock within the 5 s busy
-    /// timeout, or that cannot read the previous MAC, fails instead of
+    /// predecessor. A writer that cannot get the lock within the busy
+    /// timeout ([`AUDIT_BUSY_TIMEOUT`]), or that cannot read the previous MAC, fails instead of
     /// starting a fresh segment. Because the write-ahead record is
     /// fail-closed (`#344`), that failure refuses the mutation it was
     /// guarding, which is the intended outcome.
@@ -528,6 +514,36 @@ fn migrate_key_id(conn: &Connection) -> Result<()> {
 /// investigation would need, so in practice the key was permanent for
 /// the life of the log.
 pub const PRIMARY_KEY_ID: &str = "primary";
+
+/// The key for an opener that found no key file: create it, unless rows
+/// signed with the primary key already exist.
+///
+/// Rows can also appear because another opener won the creation race while
+/// this one waited for the database lock. Every writer publishes its key with
+/// `hard_link` before its first row, so rows next to a key that exists now
+/// mean this opener lost that race and uses the winner's key. Rows with no
+/// key at all are refused: starting a new key would fork the chain.
+fn first_use_key(conn: &Connection, db_path: &Path, key_path: &Path) -> Result<Vec<u8>> {
+    let existing_primary_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE key_id = ?1",
+            params![PRIMARY_KEY_ID],
+            |r| r.get(0),
+        )
+        .context("count rows signed with the primary key")?;
+    if existing_primary_rows == 0 {
+        return create_key_once(key_path);
+    }
+    if key_path.exists() {
+        return read_existing_key(key_path);
+    }
+    anyhow::bail!(
+        "audit key at {} was missing while {} already contains {existing_primary_rows} \
+         row(s) signed with `{PRIMARY_KEY_ID}` — refusing to start a forged chain",
+        key_path.display(),
+        db_path.display()
+    )
+}
 
 fn load_or_create_key(path: &Path) -> Result<Vec<u8>> {
     if path.exists() {
@@ -1865,7 +1881,7 @@ mod key_rotation_tests {
 /// rotation is all-or-nothing. Every test uses its own temp directory.
 #[cfg(test)]
 mod chain_transaction_tests {
-    use super::{AuditLogger, PRIMARY_KEY_ID};
+    use super::{first_use_key, AuditLogger, PRIMARY_KEY_ID};
     use rusqlite::Connection;
 
     /// `#468`: every audit connection waits 30 s for a busy lock.
@@ -1935,6 +1951,46 @@ mod chain_transaction_tests {
                 "run {run}: concurrent appends must chain one after the other"
             );
         }
+    }
+
+    /// An opener that saw no key, then waited for the database lock while
+    /// another opener created the key and signed rows with it, uses that key.
+    /// CI hit this on the v0.15.0 release run (#482): the loser counted 120 rows and
+    /// refused with "refusing to start a forged chain".
+    #[test]
+    fn an_opener_that_lost_the_key_race_uses_the_winners_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (db, key) = (dir.path().join("audit.db"), dir.path().join("audit.key"));
+        let mut winner = AuditLogger::open_in(dir.path()).expect("winner");
+        for i in 0..3 {
+            winner
+                .log(&format!("w{i}"), "u", None, None, None, "ok")
+                .expect("log");
+        }
+        // The loser's `key_path.exists()` said no before the winner ran; it
+        // resumes at the row count.
+        let conn = Connection::open(&db).expect("loser connection");
+        let got = first_use_key(&conn, &db, &key).expect("the winner's key");
+        assert_eq!(got, std::fs::read(&key).expect("key"));
+    }
+
+    /// Rows signed with the primary key and no key file: still refused.
+    #[test]
+    fn rows_without_their_key_are_still_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+        lg.log("a", "u", None, None, None, "ok").expect("log");
+        drop(lg);
+        std::fs::remove_file(dir.path().join("audit.key")).expect("rm key");
+        let err = AuditLogger::open_in(dir.path()).err().expect("refused");
+        assert!(
+            format!("{err:#}").contains("refusing to start a forged chain"),
+            "{err:#}"
+        );
+        assert!(
+            !dir.path().join("audit.key").exists(),
+            "no new key is created"
+        );
     }
 
     /// First use with several processes at once on a FRESH directory: every
