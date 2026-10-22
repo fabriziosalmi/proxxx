@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 401
 expression: dump
 ---
  ISO / cloud-image library
@@ -9,17 +8,17 @@ expression: dump
 ┌ library ───────────────────────────────────────┐┌ details ───────────────────────────────────────┐
 │ubuntu-22.04-cloud      Ubuntu        22.04 LTS ││id:        ubuntu-22.04-cloud                   │
 │ubuntu-24.04-cloud      Ubuntu        24.04 LTS ││distro:    Ubuntu 22.04 LTS (Jammy) build       │
-│debian-12-cloud         Debian        12 (Bookwo││20260320                                        │
-│fedora-41-cloud         Fedora        41        ││arch:      amd64                                │
-│alpine-3.21-iso         Alpine        3.21.7    ││content:   import                               │
-│rocky-9-cloud           Rocky Linux   9.7 build ││size:      ~700 MiB                             │
+│debian-12-cloud         Debian        12 (Bookwo││20261020                                        │
+│fedora-41-cloud         Fedora        41 (Generi││arch:      amd64                                │
+│alpine-3.21-iso         Alpine        3.21.9    ││content:   import                               │
+│rocky-9-cloud           Rocky Linux   9.8 build ││size:      ~700 MiB                             │
 │                                                ││                                                │
 │                                                ││url:                                            │
-│                                                ││https://cloud-images.ubuntu.com/jammy/20260320/j│
-│                                                ││ammy-server-cloudimg-amd64.img                  │
+│                                                ││https://cloud-images.ubuntu.com/releases/jammy/r│
+│                                                ││elease-20261020/ubuntu-22.04-server-cloudimg-amd│
+│                                                ││64.img                                          │
 │                                                ││                                                │
 │                                                ││sha256:                                         │
-│                                                ││ea85b16f81b3f6aa53a1260912d3f991fc33e0e0fc1d73f0│
-│                                                ││b8c9c96247e42fdb                                │
-│                                                ││                                                │
+│                                                ││2099e63da0b822ef8e05e3d596c1b402eaaae658fc08ab91│
+│                                                ││9cb8495bfcdc488b                                │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘

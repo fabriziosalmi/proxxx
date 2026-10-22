@@ -1,48 +1,67 @@
 #!/usr/bin/env python3
-"""Re-pin the cloud-image registry in src/cli/cloudimg.rs to each distro's
-latest dated/immutable build + its official checksum.
+"""Re-pin the two image registries to each distro's latest dated/immutable
+build + its official checksum, and check that every pinned URL still
+answers.
+
+Registries
+----------
+  - src/cli/cloudimg.rs     `CloudImg` entries  (`proxxx cloud-img download`)
+  - src/app/iso_library.rs  `IsoEntry` entries  (`proxxx iso list/download`)
 
 Why this exists
 ---------------
-`cloud-img download` pins every entry to a SHA so PVE verifies the
-download server-side. A pinned SHA requires an *immutable* URL (a dated
-build dir, never a `current`/`latest` symlink). That means the registry
-goes stale when a distro ships a new point release — this script is the
-automation that keeps it fresh (run weekly by
-`.github/workflows/cloudimg-repin.yml`, which opens a bump PR on change).
+Both registries pin every entry to a checksum so PVE verifies the download
+server-side. A pinned checksum requires an *immutable* URL (a dated build
+dir, never a `current`/`latest` symlink), so the registries go stale when a
+distro ships a new build, and some mirrors delete old builds outright:
+iso_library.rs, which this script did not cover, had 4 of 6 URLs answering
+404 on 2026-10-22 (#492). `.github/workflows/cloudimg-repin.yml` runs this
+weekly, opens a bump PR on change, and fails when a pinned URL is dead.
 
 Discovery is per-distro because each publishes differently:
-  - Ubuntu : releases/noble/release-YYYYMMDD/  + SHA256SUMS
-  - Debian : images/cloud/trixie/YYYYMMDD-NNNN/ + SHA512SUMS (no sha256)
-  - Alpine : v3.20/releases/cloud/ generic_…-r0.qcow2 + .qcow2.sha512
-  - Fedora : releases/41/Cloud/x86_64/images/ + …-CHECKSUM (sha256)
+  - Ubuntu : releases/<codename>/release-YYYYMMDD/ + SHA256SUMS (kept since GA)
+  - Debian : images/cloud/<codename>/YYYYMMDD-NNNN/ + SHA512SUMS (no sha256)
+  - Alpine : v3.N/releases/cloud/ generic_…-r0.qcow2 + .qcow2.sha512, or
+             v3.N/releases/x86_64/ alpine-virt-3.N.P-x86_64.iso + .iso.sha256
+  - Fedora : an end-of-life release is pinned to the permanent archive
+             (archives.fedoraproject.org); the mirror network drops it
+  - Rocky  : pub/rocky/<major>/images/x86_64/ + CHECKSUM (sha256)
 
 Stdlib only (urllib) — runs in CI with no pip install.
 
 Usage:
-  scripts/repin-cloudimg.py            # patch cloudimg.rs in place
-  scripts/repin-cloudimg.py --dry-run  # print what would change, touch nothing
+  scripts/repin-cloudimg.py              # patch both registries in place
+  scripts/repin-cloudimg.py --dry-run    # print what would change, touch nothing
+  scripts/repin-cloudimg.py --check-urls # only check every pinned URL answers
 Exit codes: 0 = ok (changed or not), 2 = a distro probe failed (stale
-entry left untouched, loud warning), 3 = (--dry-run only) drift found.
+entry left untouched, loud warning), 3 = (--dry-run only) drift found,
+4 = (--check-urls) a pinned URL does not answer.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import sys
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-REGISTRY_FILE = Path(__file__).resolve().parent.parent / "src" / "cli" / "cloudimg.rs"
+ROOT = Path(__file__).resolve().parent.parent
+CLOUDIMG_FILE = ROOT / "src" / "cli" / "cloudimg.rs"
+ISO_LIBRARY_FILE = ROOT / "src" / "app" / "iso_library.rs"
 HTTP_TIMEOUT = 30
-UA = {"User-Agent": "proxxx-repin-cloudimg/1.0 (+https://github.com/fabriziosalmi/proxxx)"}
+UA = {
+    "User-Agent": "proxxx-repin-cloudimg/1.1 (+https://github.com/fabriziosalmi/proxxx)"
+}
 
 
 def fetch(url: str) -> str:
     req = urllib.request.Request(url, headers=UA)
-    # https only, official hosts — the URL comes from the pinned registry.
+    # https only, official hosts — the URL comes from this file.
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
@@ -50,6 +69,17 @@ def fetch(url: str) -> str:
 def hrefs(index_html: str) -> list[str]:
     """Extract href targets from an autoindex HTML page."""
     return re.findall(r'href="([^"]+)"', index_html)
+
+
+@dataclass(frozen=True)
+class Build:
+    """A discovered build: where it is, its official checksum, and the
+    build tag the registry's version label is made from."""
+
+    url: str
+    checksum: str
+    checksum_algorithm: str
+    tag: str
 
 
 @dataclass
@@ -62,75 +92,87 @@ class Pin:
     version: str
 
 
-# ── Per-distro discovery ────────────────────────────────────────────────
+# ── Per-distro discovery (cached: two entries may share one build) ─────
 
 
-def discover_ubuntu() -> Pin:
-    base = "https://cloud-images.ubuntu.com/releases/noble/"
+@functools.cache
+def ubuntu(codename: str, number: str) -> Build:
+    base = f"https://cloud-images.ubuntu.com/releases/{codename}/"
     dirs = sorted(
         m.group(1)
         for h in hrefs(fetch(base))
         if (m := re.fullmatch(r"(release-\d{8})/", h))
     )
     if not dirs:
-        raise RuntimeError("ubuntu: no release-YYYYMMDD dirs found")
+        raise RuntimeError(f"ubuntu {codename}: no release-YYYYMMDD dirs found")
     latest = dirs[-1]
-    fname = "ubuntu-24.04-server-cloudimg-amd64.img"
-    sums = fetch(f"{base}{latest}/SHA256SUMS")
-    checksum = _sum_for(sums, fname, hexlen=64)
-    return Pin(
-        url=f"{base}{latest}/{fname}",
-        checksum=checksum,
-        checksum_algorithm="sha256",
-        version=f"24.04 LTS (noble, build {latest.removeprefix('release-')})",
+    fname = f"ubuntu-{number}-server-cloudimg-amd64.img"
+    checksum = _sum_for(fetch(f"{base}{latest}/SHA256SUMS"), fname, hexlen=64)
+    return Build(
+        f"{base}{latest}/{fname}", checksum, "sha256", latest.removeprefix("release-")
     )
 
 
-def discover_debian() -> Pin:
-    base = "https://cloud.debian.org/images/cloud/trixie/"
+@functools.cache
+def debian(codename: str, number: str) -> Build:
+    base = f"https://cloud.debian.org/images/cloud/{codename}/"
     dirs = sorted(
         m.group(1)
         for h in hrefs(fetch(base))
         if (m := re.fullmatch(r"(\d{8}-\d+)/", h))
     )
     if not dirs:
-        raise RuntimeError("debian: no YYYYMMDD-NNNN dirs found")
+        raise RuntimeError(f"debian {codename}: no YYYYMMDD-NNNN dirs found")
     latest = dirs[-1]
-    fname = f"debian-13-genericcloud-amd64-{latest}.qcow2"
-    sums = fetch(f"{base}{latest}/SHA512SUMS")
-    checksum = _sum_for(sums, fname, hexlen=128)
-    return Pin(
-        url=f"{base}{latest}/{fname}",
-        checksum=checksum,
-        checksum_algorithm="sha512",
-        version=f"13 (trixie) genericcloud, build {latest}",
+    fname = f"debian-{number}-genericcloud-amd64-{latest}.qcow2"
+    checksum = _sum_for(fetch(f"{base}{latest}/SHA512SUMS"), fname, hexlen=128)
+    return Build(f"{base}{latest}/{fname}", checksum, "sha512", latest)
+
+
+@functools.cache
+def alpine_cloud(branch: str) -> Build:
+    base = f"https://dl-cdn.alpinelinux.org/alpine/v{branch}/releases/cloud/"
+    pat = re.compile(
+        rf"generic_alpine-{re.escape(branch)}\.(\d+)-x86_64-bios-cloudinit-r0\.qcow2"
     )
-
-
-def discover_alpine() -> Pin:
-    base = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/"
-    pat = re.compile(r"generic_alpine-3\.20\.(\d+)-x86_64-bios-cloudinit-r0\.qcow2")
     patches = sorted(
         {int(m.group(1)) for h in hrefs(fetch(base)) if (m := pat.fullmatch(h))}
     )
     if not patches:
-        raise RuntimeError("alpine: no generic_alpine 3.20.N qcow2 found")
-    fname = f"generic_alpine-3.20.{patches[-1]}-x86_64-bios-cloudinit-r0.qcow2"
-    # Alpine publishes a per-file .sha512 sidecar; no .sha256.
-    sidecar = fetch(f"{base}{fname}.sha512").strip()
-    checksum = sidecar.split()[0]
+        raise RuntimeError(f"alpine {branch}: no generic cloud qcow2 found")
+    fname = f"generic_alpine-{branch}.{patches[-1]}-x86_64-bios-cloudinit-r0.qcow2"
+    # Alpine publishes a per-file .sha512 sidecar for cloud images.
+    checksum = fetch(f"{base}{fname}.sha512").strip().split()[0]
     _validate_hex(checksum, 128, f"alpine {fname}")
-    return Pin(
-        url=f"{base}{fname}",
-        checksum=checksum,
-        checksum_algorithm="sha512",
-        version=f"3.20.{patches[-1]} generic (bios cloudinit)",
+    return Build(f"{base}{fname}", checksum, "sha512", str(patches[-1]))
+
+
+@functools.cache
+def alpine_virt_iso(branch: str) -> Build:
+    base = f"https://dl-cdn.alpinelinux.org/alpine/v{branch}/releases/x86_64/"
+    pat = re.compile(rf"alpine-virt-{re.escape(branch)}\.(\d+)-x86_64\.iso")
+    patches = sorted(
+        {int(m.group(1)) for h in hrefs(fetch(base)) if (m := pat.fullmatch(h))}
     )
+    if not patches:
+        raise RuntimeError(f"alpine {branch}: no virt ISO found")
+    fname = f"alpine-virt-{branch}.{patches[-1]}-x86_64.iso"
+    checksum = _sum_for(fetch(f"{base}{fname}.sha256"), fname, hexlen=64)
+    return Build(f"{base}{fname}", checksum, "sha256", str(patches[-1]))
 
 
-def discover_fedora() -> Pin:
-    base = "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/"
-    pat = re.compile(r"Fedora-Cloud-Base-Generic-41-(\d+)\.(\d+)\.x86_64\.qcow2")
+@functools.cache
+def fedora_archived(release: str) -> Build:
+    # An end-of-life release leaves the mirror network (some mirrors
+    # answered 404 for 41 on 2026-10-22, others 200); the archive keeps it
+    # for good.
+    base = (
+        "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/"
+        f"{release}/Cloud/x86_64/images/"
+    )
+    pat = re.compile(
+        rf"Fedora-Cloud-Base-Generic-{release}-(\d+)\.(\d+)\.x86_64\.qcow2"
+    )
     builds = sorted(
         {
             (int(m.group(1)), int(m.group(2)))
@@ -139,16 +181,37 @@ def discover_fedora() -> Pin:
         }
     )
     if not builds:
-        raise RuntimeError("fedora: no Generic Base 41 qcow2 found")
+        raise RuntimeError(f"fedora {release}: no Generic Base qcow2 in the archive")
     n, m = builds[-1]
-    fname = f"Fedora-Cloud-Base-Generic-41-{n}.{m}.x86_64.qcow2"
-    checksum_file = fetch(f"{base}Fedora-Cloud-41-{n}.{m}-x86_64-CHECKSUM")
-    checksum = _fedora_sum_for(checksum_file, fname)
-    return Pin(
-        url=f"{base}{fname}",
-        checksum=checksum,
-        checksum_algorithm="sha256",
-        version=f"41 cloud (Generic Base {n}.{m})",
+    fname = f"Fedora-Cloud-Base-Generic-{release}-{n}.{m}.x86_64.qcow2"
+    checksum = _tagged_sum_for(
+        fetch(f"{base}Fedora-Cloud-{release}-{n}.{m}-x86_64-CHECKSUM"), fname
+    )
+    return Build(f"{base}{fname}", checksum, "sha256", f"{n}.{m}")
+
+
+@functools.cache
+def rocky(major: str) -> Build:
+    base = f"https://dl.rockylinux.org/pub/rocky/{major}/images/x86_64/"
+    pat = re.compile(
+        rf"Rocky-{major}-GenericCloud-Base-({major}\.\d+)-(\d{{8}}\.\d+)\.x86_64\.qcow2"
+    )
+    builds = sorted(
+        {
+            (tuple(int(x) for x in m.group(1).split(".")), m.group(2), m.group(0))
+            for h in hrefs(fetch(base))
+            if (m := pat.fullmatch(h))
+        }
+    )
+    if not builds:
+        raise RuntimeError(f"rocky {major}: no GenericCloud-Base qcow2 found")
+    version, build, fname = builds[-1]
+    checksum = _tagged_sum_for(fetch(f"{base}CHECKSUM"), fname)
+    return Build(
+        f"{base}{fname}",
+        checksum,
+        "sha256",
+        f"{'.'.join(map(str, version))} build {build}",
     )
 
 
@@ -165,11 +228,11 @@ def _sum_for(sums: str, fname: str, *, hexlen: int) -> str:
     raise RuntimeError(f"checksum for {fname} not found in SUMS file")
 
 
-def _fedora_sum_for(checksum_file: str, fname: str) -> str:
-    """Fedora CHECKSUM lines: `SHA256 (fname) = <hex>`."""
+def _tagged_sum_for(checksum_file: str, fname: str) -> str:
+    """Fedora / Rocky CHECKSUM lines: `SHA256 (fname) = <hex>`."""
     m = re.search(rf"SHA256 \({re.escape(fname)}\) = ([0-9a-f]{{64}})", checksum_file)
     if not m:
-        raise RuntimeError(f"fedora SHA256 for {fname} not found")
+        raise RuntimeError(f"SHA256 for {fname} not found in CHECKSUM")
     return m.group(1)
 
 
@@ -180,88 +243,243 @@ def _validate_hex(value: str, length: int, what: str) -> None:
         raise RuntimeError(f"{what}: refusing all-zero placeholder checksum")
 
 
-# ── Rust-source patching ────────────────────────────────────────────────
+# ── Registry entries: id → (discovery, version label) ───────────────────
 
-# Map registry `id:` → discovery fn. Keying on the stable id (never the
-# rotating filename) keeps the patch anchored even as URLs change.
-DISCOVERERS = {
-    "ubuntu-24.04-noble-amd64": discover_ubuntu,
-    "debian-13-trixie-amd64": discover_debian,
-    "alpine-3.20-virt-x86_64": discover_alpine,
-    "fedora-41-cloud-x86_64": discover_fedora,
+Entry = tuple[Callable[[], Build], Callable[[str], str]]
+
+# Keyed on the stable id (never the rotating filename), so the patch stays
+# anchored as URLs change.
+CLOUDIMG_ENTRIES: dict[str, Entry] = {
+    "ubuntu-24.04-noble-amd64": (
+        lambda: ubuntu("noble", "24.04"),
+        lambda t: f"24.04 LTS (noble, build {t})",
+    ),
+    "debian-13-trixie-amd64": (
+        lambda: debian("trixie", "13"),
+        lambda t: f"13 (trixie) genericcloud, build {t}",
+    ),
+    "alpine-3.20-virt-x86_64": (
+        lambda: alpine_cloud("3.20"),
+        lambda t: f"3.20.{t} generic (bios cloudinit)",
+    ),
+    "fedora-41-cloud-x86_64": (
+        lambda: fedora_archived("41"),
+        lambda t: f"41 cloud (Generic Base {t})",
+    ),
+}
+
+ISO_LIBRARY_ENTRIES: dict[str, Entry] = {
+    "ubuntu-22.04-cloud": (
+        lambda: ubuntu("jammy", "22.04"),
+        lambda t: f"22.04 LTS (Jammy) build {t}",
+    ),
+    "ubuntu-24.04-cloud": (
+        lambda: ubuntu("noble", "24.04"),
+        lambda t: f"24.04 LTS (Noble) build {t}",
+    ),
+    "debian-12-cloud": (
+        lambda: debian("bookworm", "12"),
+        lambda t: f"12 (Bookworm) build {t}",
+    ),
+    "fedora-41-cloud": (
+        lambda: fedora_archived("41"),
+        lambda t: f"41 (Generic Base {t})",
+    ),
+    "alpine-3.21-iso": (
+        lambda: alpine_virt_iso("3.21"),
+        lambda t: f"3.21.{t}",
+    ),
+    "rocky-9-cloud": (
+        lambda: rocky("9"),
+        lambda t: t,
+    ),
 }
 
 
-def patch_entry(block: str, pin: Pin) -> str:
-    """Replace the url/checksum/checksum_algorithm/version fields inside a
-    single `CloudImg { … }` entry block. Each field is a `key: "value",`
-    line; we rewrite only the value, preserving indentation + commas."""
-
-    def repl(field: str, value: str, text: str) -> str:
-        pat = re.compile(rf'(?m)^(\s*{field}: ")[^"]*(",)\s*$')
-        new, n = pat.subn(rf"\g<1>{value}\g<2>", text)
-        if n != 1:
-            raise RuntimeError(f"expected exactly one `{field}:` line, found {n}")
-        return new
-
-    block = repl("url", pin.url, block)
-    block = repl("checksum", pin.checksum, block)
-    block = repl("checksum_algorithm", pin.checksum_algorithm, block)
-    block = repl("version", pin.version, block)
-    return block
+# ── Rust-source patching ────────────────────────────────────────────────
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dry-run", action="store_true", help="report drift; write nothing")
-    args = ap.parse_args()
+def _replace_string_field(field: str, value: str, text: str) -> str:
+    """Rewrite the value of the single `field: "…",` line in `text`."""
+    pat = re.compile(rf'(?m)^(\s*{field}: ")[^"]*(",)\s*$')
+    new, n = pat.subn(lambda m: f"{m.group(1)}{value}{m.group(2)}", text)
+    if n != 1:
+        raise RuntimeError(f"expected exactly one `{field}:` line, found {n}")
+    return new
 
-    src = REGISTRY_FILE.read_text()
-    out = src
-    failures: list[str] = []
-    changes: list[str] = []
 
-    for entry_id, discover in DISCOVERERS.items():
-        # Slice this entry's block. A `CloudImg { … }` body contains no
-        # braces, so `[^{}]*` can't cross into a neighbouring entry —
-        # which keeps the match anchored on the brace that actually
-        # precedes THIS id (a plain `.*?` would match the first
-        # `CloudImg {` in the file and skip ahead to any id).
-        m = re.search(
-            rf'(CloudImg \{{[^{{}}]*?id: "{re.escape(entry_id)}"[^{{}}]*?\}},)',
-            out,
-            re.DOTALL,
+def patch_cloudimg(block: str, pin: Pin) -> str:
+    """`CloudImg` keeps url / checksum / checksum_algorithm / version as
+    plain string fields."""
+    block = _replace_string_field("url", pin.url, block)
+    block = _replace_string_field("checksum", pin.checksum, block)
+    block = _replace_string_field("checksum_algorithm", pin.checksum_algorithm, block)
+    return _replace_string_field("version", pin.version, block)
+
+
+def patch_iso_entry(block: str, pin: Pin) -> str:
+    """`IsoEntry` carries the algorithm in the checksum's type:
+    `checksum: Some(Checksum::Sha256(\\n "<hex>",\\n )),` (rustfmt layout)."""
+    block = _replace_string_field("url", pin.url, block)
+    block = _replace_string_field("version", pin.version, block)
+    variant = {"sha256": "Sha256", "sha512": "Sha512"}[pin.checksum_algorithm]
+    pat = re.compile(
+        r'(?m)^(?P<indent>\s*)checksum: Some\(Checksum::Sha(?:256|512)\(\s*"[0-9a-f]*",?\s*\)\),[ \t]*$'
+    )
+
+    def repl(m: re.Match[str]) -> str:
+        i = m.group("indent")
+        return (
+            f'{i}checksum: Some(Checksum::{variant}(\n{i}    "{pin.checksum}",\n{i})),'
         )
+
+    new, n = pat.subn(repl, block)
+    if n != 1:
+        raise RuntimeError(
+            f"expected exactly one `checksum: Some(Checksum::…)` field, found {n}"
+        )
+    return new
+
+
+@dataclass
+class Registry:
+    path: Path
+    struct: str
+    entries: dict[str, Entry]
+    patch: Callable[[str, Pin], str]
+
+
+REGISTRIES = [
+    Registry(CLOUDIMG_FILE, "CloudImg", CLOUDIMG_ENTRIES, patch_cloudimg),
+    Registry(ISO_LIBRARY_FILE, "IsoEntry", ISO_LIBRARY_ENTRIES, patch_iso_entry),
+]
+
+
+def entry_block(src: str, struct: str, entry_id: str) -> re.Match[str] | None:
+    # An entry body contains no braces, so `[^{}]*` cannot cross into a
+    # neighbouring entry; that keeps the match anchored on the brace that
+    # actually precedes THIS id.
+    return re.search(
+        rf'({struct} \{{[^{{}}]*?id: "{re.escape(entry_id)}"[^{{}}]*?\}},)',
+        src,
+        re.DOTALL,
+    )
+
+
+def repin(registry: Registry, failures: list[str], changes: list[str]) -> str:
+    src = registry.path.read_text()
+    out = src
+    for entry_id, (discover, label) in registry.entries.items():
+        m = entry_block(out, registry.struct, entry_id)
         if not m:
-            failures.append(f"{entry_id}: entry block not found in registry")
+            failures.append(
+                f"{entry_id}: entry block not found in {registry.path.name}"
+            )
             continue
-        block = m.group(1)
         try:
-            pin = discover()
+            build = discover()
         except Exception as e:  # noqa: BLE001 — one distro's outage must not nuke others
             failures.append(f"{entry_id}: probe failed: {e}")
             continue
-        new_block = patch_entry(block, pin)
+        pin = Pin(build.url, build.checksum, build.checksum_algorithm, label(build.tag))
+        block = m.group(1)
+        new_block = registry.patch(block, pin)
         if new_block != block:
-            changes.append(f"{entry_id} → {pin.checksum_algorithm}:{pin.checksum[:12]}…  {pin.url}")
+            changes.append(
+                f"{registry.path.name} {entry_id} → {pin.checksum_algorithm}:{pin.checksum[:12]}…  {pin.url}"
+            )
             out = out[: m.start(1)] + new_block + out[m.end(1) :]
+    return out
+
+
+# ── Liveness ────────────────────────────────────────────────────────────
+
+
+def pinned_urls() -> list[tuple[str, str, str]]:
+    """(file, id, url) for every entry of both registries."""
+    rows = []
+    for registry in REGISTRIES:
+        src = registry.path.read_text()
+        for m in re.finditer(
+            rf'{registry.struct} \{{[^{{}}]*?id: "([^"]+)"[^{{}}]*?url: "([^"]+)"',
+            src,
+            re.DOTALL,
+        ):
+            rows.append((registry.path.name, m.group(1), m.group(2)))
+    return rows
+
+
+def url_answers(url: str) -> str | None:
+    """None when the URL serves the file (one byte asked for), else why not.
+    GET with a Range rather than HEAD: some mirrors answer HEAD differently."""
+    req = urllib.request.Request(url, headers={**UA, "Range": "bytes=0-0"})
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return None if resp.status in (200, 206) else f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code}"
+    except Exception as e:  # noqa: BLE001 — report any transport failure
+        return str(e)
+
+
+def check_urls() -> int:
+    dead = []
+    for file, entry_id, url in pinned_urls():
+        why = url_answers(url)
+        print(
+            f"{'ok  ' if why is None else 'DEAD'}  {file} {entry_id}  {url}"
+            + (f"  ({why})" if why else "")
+        )
+        if why is not None:
+            dead.append(entry_id)
+    if dead:
+        print(
+            f"\n{len(dead)} pinned URL(s) do not answer: {', '.join(dead)}",
+            file=sys.stderr,
+        )
+        return 4
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="report drift; write nothing"
+    )
+    ap.add_argument(
+        "--check-urls", action="store_true", help="only check every pinned URL answers"
+    )
+    args = ap.parse_args()
+
+    if args.check_urls:
+        return check_urls()
+
+    failures: list[str] = []
+    changes: list[str] = []
+    outputs = [
+        (registry, repin(registry, failures, changes)) for registry in REGISTRIES
+    ]
 
     for f in failures:
         print(f"WARN  {f}", file=sys.stderr)
 
     if not changes:
-        print("cloud-img registry already current — no changes.")
+        print("image registries already current — no changes.")
         return 2 if failures else 0
 
-    print("cloud-img registry drift:")
+    print("image registry drift:")
     for c in changes:
         print(f"  {c}")
 
     if args.dry_run:
         return 3
 
-    REGISTRY_FILE.write_text(out)
-    print(f"\nPatched {REGISTRY_FILE}.")
+    for registry, out in outputs:
+        if out != registry.path.read_text():
+            registry.path.write_text(out)
+            print(f"Patched {registry.path}.")
     # A probe failure mid-run is non-fatal (other entries still repinned),
     # but surface it so the workflow can flag the PR for human attention.
     return 2 if failures else 0

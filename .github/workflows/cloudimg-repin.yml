@@ -55,7 +55,7 @@ jobs:
             echo "$summary"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
-          if git diff --quiet -- src/cli/cloudimg.rs; then
+          if git diff --quiet -- src/cli/cloudimg.rs src/app/iso_library.rs; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -70,11 +70,21 @@ jobs:
 
       - name: Validate the patched registry
         if: steps.repin.outputs.changed == 'true'
-        # The cloudimg unit tests enforce: checksum length matches the
-        # declared algorithm, lowercase hex, NOT all-zero, and no
-        # rotating-symlink URLs. If the fetched data is malformed, this
+        # The cloudimg and iso_library unit tests enforce: checksum length
+        # matches the declared algorithm, lowercase hex, NOT all-zero, and
+        # no rotating-symlink URLs. If the fetched data is malformed, this
         # fails BEFORE a PR is opened.
-        run: cargo test --locked --release --lib cloudimg
+        run: cargo test --locked --release --lib -- cloudimg iso_library
+
+      - name: Refresh the ISO library view snapshot
+        if: steps.repin.outputs.changed == 'true'
+        # The TUI snapshot of the ISO library shows the pinned versions,
+        # URLs and checksums, so every re-pin changes it (#492). Rewrite
+        # it here so the bump PR carries the new rendering for review
+        # instead of failing CI on a stale snapshot.
+        env:
+          INSTA_UPDATE: always
+        run: cargo test --locked --release --test tui_snapshot iso_library_view
 
       - name: Open / update bump PR
         if: steps.repin.outputs.changed == 'true'
@@ -88,7 +98,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
-          git add src/cli/cloudimg.rs
+          git add src/cli/cloudimg.rs src/app/iso_library.rs \
+            tests/snapshots/tui_snapshot__iso_library_view_empty_state.snap
           git commit -m "chore(cloud-img): re-pin registry to latest upstream builds
 
           Automated by .github/workflows/cloudimg-repin.yml.
@@ -108,3 +119,12 @@ jobs:
               --title "chore(cloud-img): re-pin registry to latest upstream builds" \
               --body "$body"
           fi
+
+      - name: Every pinned URL still answers
+        # Mirrors delete old builds; an entry the re-pin could not move
+        # (probe failure, or a bump PR not merged yet) rots silently
+        # otherwise. 4 of 6 iso_library.rs URLs were dead on 2026-10-22
+        # (#492). Checks the registries as patched in this run, and fails
+        # the job so the failure reaches the repository's notifications.
+        if: always()
+        run: python3 scripts/repin-cloudimg.py --check-urls
