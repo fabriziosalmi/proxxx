@@ -54,31 +54,13 @@ async fn beta_destructive_without_yes_refuses() {
     };
     let client = env.build_client().await.expect("PxClient");
 
-    // Beta-1 mutates NOTHING — the delete refuses client-side, before any API
-    // call. So we don't need PROXXX_E2E_VMID to persist (Alpha creates+deletes
-    // it) — we just need SOME existing guest to (a) aim the refused delete at
-    // and (b) witness "unchanged before/after". Discover one; this makes the
-    // test self-contained and immune to Alpha's ephemeral-VMID lifecycle.
-    let guests = client
-        .get_guests(&env.node)
-        .await
-        .expect("list guests on the test node");
-    let Some(target) = guests.first() else {
-        eprintln!(
-            "[beta-1] no guest on node {} — skipping (nothing to witness)",
-            env.node
-        );
-        return;
-    };
-    let vmid = target.vmid;
-
-    // Snapshot status BEFORE — we'll compare after the CLI invocation
-    // to prove no mutation happened.
-    let before = client
-        .get_guest_status(&env.node, vmid)
-        .await
-        .expect("status of the witness guest");
-
+    // Beta-1 mutates nothing: the delete is refused client-side, before any
+    // API call. Aim it at the mutation VMID (#480), never at another guest
+    // on the node: if the --yes guard ever regressed, the guest at risk is
+    // the one the suite creates and deletes anyway. It may or may not exist
+    // right now (Alpha creates and deletes it); either state must survive.
+    let vmid = env.vmid;
+    let before = client.get_guest_status(&env.node, vmid).await.ok();
     // Run `proxxx delete <vmid>` WITHOUT --yes. The CLI's hard-coded
     // refusal at `cli/mod.rs:610` should bail with a non-zero exit
     // code BEFORE any HTTP request lands at PVE.
@@ -94,15 +76,13 @@ async fn beta_destructive_without_yes_refuses() {
          stdout={stdout}; stderr={stderr}"
     );
 
-    // Verify state is unchanged. status == before.status, vmid is
-    // still observable, no mid-flight lock error.
-    let after = client
-        .get_guest_status(&env.node, vmid)
-        .await
-        .expect("witness guest must still be observable");
+    // Verify state is unchanged: same status if the guest existed, still
+    // absent if it did not.
+    let after = client.get_guest_status(&env.node, vmid).await.ok();
     assert_eq!(
-        before.status, after.status,
-        "guest status changed after a refused destructive op — \
+        before.map(|g| g.status),
+        after.map(|g| g.status),
+        "guest {vmid} changed after a refused destructive op — \
          CLI bypassed its own --yes guard"
     );
 }
@@ -136,16 +116,13 @@ async fn beta_bad_token_surfaces_401_cleanly() {
     // go through run_proxxx — wire the same synthesized config so the CLI has a
     // profile to authenticate against. PROXXX_TOKEN_SECRET (env) overrides the
     // config's token, so the connection is attempted with the WRONG secret → the
-    // 401 we assert on (not "Config not found"). Respect a caller-set config.
+    // 401 we assert on (not "Config not found"). The wrong secret is set after
+    // e2e_cli_env, which would otherwise pass the real one.
     let mut cmd = std::process::Command::new(bin);
-    cmd.args(["ls", "guests", "--format", "json"])
-        .env("PROXXX_TOKEN_SECRET", "this-is-deliberately-wrong-xxxxxxxx")
+    cmd.args(["ls", "guests", "--format", "json"]);
+    common::e2e_cli_env(&mut cmd);
+    cmd.env("PROXXX_TOKEN_SECRET", "this-is-deliberately-wrong-xxxxxxxx")
         .env("PROXXX_PASSWORD", "this-is-deliberately-wrong-xxxxxxxx");
-    if std::env::var_os("PROXXX_CONFIG").is_none() {
-        if let Some(cfg) = common::e2e_cli_config_path() {
-            cmd.env("PROXXX_CONFIG", cfg);
-        }
-    }
     let out = cmd.output().expect("spawn proxxx with bad creds");
     let elapsed = started.elapsed();
 

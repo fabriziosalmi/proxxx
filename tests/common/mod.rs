@@ -59,9 +59,47 @@ use proxxx::api::{ProxmoxGateway, PxClient};
 
 // ── Env gate ────────────────────────────────────────────
 
+/// An E2E variable under its cargo-suite name, else under the name the bash
+/// harness and `tests/live/env.local.example` use, so one env file drives
+/// both (#480). Empty values count as unset.
+pub fn e2e_var(name: &str, harness_name: Option<&str>) -> Option<String> {
+    std::iter::once(name)
+        .chain(harness_name)
+        .find_map(|n| std::env::var(n).ok().filter(|v| !v.trim().is_empty()))
+}
+
+/// The PVE API token as `(user, token_id, secret)`: `PROXXX_E2E_USER`,
+/// `PROXXX_E2E_TOKEN_ID` and `PROXXX_E2E_TOKEN_SECRET`, else
+/// `PROXXX_E2E_TOKEN` or the harness's `PROXXX_E2E_PVE_TOKEN` in the form
+/// `[user!]id=secret` (user `root@pam` when absent).
+pub fn e2e_token() -> Option<(String, String, String)> {
+    if let (Some(id), Some(secret)) = (
+        e2e_var("PROXXX_E2E_TOKEN_ID", None),
+        e2e_var("PROXXX_E2E_TOKEN_SECRET", None),
+    ) {
+        let user = e2e_var("PROXXX_E2E_USER", None).unwrap_or_else(|| "root@pam".into());
+        return Some((user, id, secret));
+    }
+    let raw = e2e_var("PROXXX_E2E_TOKEN", Some("PROXXX_E2E_PVE_TOKEN"))?;
+    let (user, rest) = raw.split_once('!').unwrap_or(("root@pam", raw.as_str()));
+    let (id, secret) = rest.split_once('=')?;
+    (!id.is_empty() && !secret.is_empty())
+        .then(|| (user.to_string(), id.to_string(), secret.to_string()))
+}
+
+/// A suite whose enable flag is set must not pass by skipping: name what is
+/// missing and fail (#480). Before this, an incomplete env returned early and
+/// the test reported "passed" without touching the cluster.
+pub fn e2e_incomplete(flag: &str, missing: &[&str]) -> ! {
+    panic!(
+        "{flag}=1 but the live env is incomplete; missing or invalid: {}. \
+         See tests/live/env.local.example, or unset {flag} to skip.",
+        missing.join(", ")
+    )
+}
+
 /// Read-only snapshot of the env contract. Constructed once per test
-/// via [`E2eEnv::load`]; failure to load means the test should
-/// silently skip.
+/// via [`E2eEnv::load`]: `None` skips only when the suite is not enabled.
 #[derive(Debug, Clone)]
 pub struct E2eEnv {
     pub api_url: String,
@@ -76,24 +114,39 @@ pub struct E2eEnv {
 }
 
 impl E2eEnv {
-    /// Returns `Some(env)` if every required variable is present and
-    /// `PROXXX_E2E_ENABLE=1`, else `None`. Call sites:
+    /// `None` when `PROXXX_E2E_ENABLE` is not `1` (the test skips). When it
+    /// is, every required variable must be present: an incomplete env fails
+    /// the test instead of skipping it (#480). Call sites:
     /// `let Some(env) = common::E2eEnv::load() else { return; };`
-    /// produces a cleanly-skipped test on dev machines.
     pub fn load() -> Option<Self> {
-        if std::env::var("PROXXX_E2E_ENABLE").as_deref() != Ok("1") {
-            eprintln!("[e2e] PROXXX_E2E_ENABLE != 1 — skipping");
+        const FLAG: &str = "PROXXX_E2E_ENABLE";
+        if std::env::var(FLAG).as_deref() != Ok("1") {
+            eprintln!("[e2e] {FLAG} != 1 — skipping");
             return None;
         }
-        let api_url = std::env::var("PROXXX_E2E_API_URL").ok()?;
-        let user = std::env::var("PROXXX_E2E_USER").ok()?;
-        let token_id = std::env::var("PROXXX_E2E_TOKEN_ID").ok()?;
-        let token_secret = std::env::var("PROXXX_E2E_TOKEN_SECRET").ok()?;
-        let node = std::env::var("PROXXX_E2E_NODE").ok()?;
-        let vmid: u32 = std::env::var("PROXXX_E2E_VMID").ok()?.parse().ok()?;
-        let template = std::env::var("PROXXX_E2E_TEMPLATE").ok();
-        let storage = std::env::var("PROXXX_E2E_STORAGE").ok();
-        let allow_delete = std::env::var("PROXXX_E2E_ALLOW_DELETE").as_deref() == Ok("1");
+        let api_url = e2e_var("PROXXX_E2E_API_URL", Some("PROXXX_E2E_PVE_URL"));
+        let token = e2e_token();
+        let node = e2e_var("PROXXX_E2E_NODE", None);
+        let vmid = e2e_var("PROXXX_E2E_VMID", Some("PROXXX_E2E_MUTATION_VMID"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let mut missing = Vec::new();
+        if api_url.is_none() {
+            missing.push("PROXXX_E2E_API_URL (or PROXXX_E2E_PVE_URL)");
+        }
+        if token.is_none() {
+            missing.push("PROXXX_E2E_TOKEN_ID + PROXXX_E2E_TOKEN_SECRET (or PROXXX_E2E_PVE_TOKEN)");
+        }
+        if node.is_none() {
+            missing.push("PROXXX_E2E_NODE");
+        }
+        if vmid.is_none() {
+            missing.push("PROXXX_E2E_VMID (or PROXXX_E2E_MUTATION_VMID), a number");
+        }
+        let (Some(api_url), Some((user, token_id, token_secret)), Some(node), Some(vmid)) =
+            (api_url, token, node, vmid)
+        else {
+            e2e_incomplete(FLAG, &missing)
+        };
         Some(Self {
             api_url,
             user,
@@ -101,9 +154,9 @@ impl E2eEnv {
             token_secret,
             node,
             vmid,
-            template,
-            storage,
-            allow_delete,
+            template: e2e_var("PROXXX_E2E_TEMPLATE", Some("PROXXX_E2E_LXC_TEMPLATE")),
+            storage: e2e_var("PROXXX_E2E_STORAGE", Some("PROXXX_E2E_LXC_STORAGE")),
+            allow_delete: std::env::var("PROXXX_E2E_ALLOW_DELETE").as_deref() == Ok("1"),
         })
     }
 
@@ -395,55 +448,81 @@ async fn cleanup_one(client: &Arc<PxClient>, r: &Resource) {
 
 // ── CLI binary contract runner ──────────────────────────
 
-/// Lazily synthesize a proxxx `config.toml` from the E2E env, written once per
-/// test process (0600). The CLI loads a config FILE (`PROXXX_CONFIG` or the
-/// default path) — it does NOT build a connection from `PROXXX_E2E_*` — so
-/// without this every `run_proxxx` subprocess call exits 3 ("Config not found").
-/// Returns `None` on a dev machine where the E2E token env isn't set.
+/// A directory private to this test process (0700), for the synthesized CLI
+/// config and the CLI's audit, log and cache directories.
+fn e2e_private_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("proxxx-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the E2E private dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .expect("narrow the E2E private dir");
+        }
+        dir
+    })
+}
+
+/// Lazily synthesize a proxxx `config.toml` from the E2E env, once per test
+/// process. The CLI loads a config FILE (`PROXXX_CONFIG` or the default path)
+/// and does not build a connection from `PROXXX_E2E_*`. The file holds no
+/// secret: [`e2e_cli_env`] passes it in `PROXXX_TOKEN_SECRET`. Returns `None`
+/// when the E2E URL or token is not set.
 pub fn e2e_cli_config_path() -> Option<&'static std::path::Path> {
     use std::sync::OnceLock;
     static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
-        let url = std::env::var("PROXXX_E2E_API_URL").ok()?;
-        let user = std::env::var("PROXXX_E2E_USER").ok()?;
-        let token_id = std::env::var("PROXXX_E2E_TOKEN_ID").ok()?;
-        let token_secret = std::env::var("PROXXX_E2E_TOKEN_SECRET").ok()?;
+        let url = e2e_var("PROXXX_E2E_API_URL", Some("PROXXX_E2E_PVE_URL"))?;
+        let (user, token_id, _) = e2e_token()?;
         let toml = format!(
             "url = \"{url}\"\nuser = \"{user}\"\nauth = \"token\"\n\
-             token_id = \"{token_id}\"\ntoken_secret = \"{token_secret}\"\nverify_tls = false\n"
+             token_id = \"{token_id}\"\nverify_tls = false\n"
         );
-        let dir = std::env::temp_dir().join("proxxx-e2e");
-        std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join("cli-config.toml");
+        let path = e2e_private_dir().join("cli-config.toml");
         std::fs::write(&path, toml).ok()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
         Some(path)
     })
     .as_deref()
 }
 
-/// Run the proxxx binary with the given args and return its
-/// `std::process::Output`. `CARGO_BIN_EXE_proxxx` is set by Cargo
-/// for integration tests, so the binary is always built before the
-/// test runs.
-///
-/// The subprocess gets `PROXXX_CONFIG` pointing at a config synthesized from the
-/// E2E env (see [`e2e_cli_config_path`]) so CLI calls are turnkey — unless the
-/// caller already pinned `PROXXX_CONFIG`, which is respected.
+/// Point a proxxx subprocess at the E2E cluster and nothing else: the
+/// synthesized config with the token secret in `PROXXX_TOKEN_SECRET`, and
+/// audit, log and cache directories private to this test process. A caller's
+/// `PROXXX_CONFIG` is ignored, so the CLI half of a test reaches the cluster
+/// the API half does (#479, #480). Without a complete E2E env the config path
+/// does not exist, and the CLI fails with a config error instead of reading
+/// the caller's default config. Set environment overrides after this call.
+pub fn e2e_cli_env(cmd: &mut std::process::Command) {
+    let dir = e2e_private_dir();
+    match (e2e_cli_config_path(), e2e_token()) {
+        (Some(cfg), Some((_, _, secret))) => {
+            cmd.env("PROXXX_CONFIG", cfg)
+                .env("PROXXX_TOKEN_SECRET", secret);
+        }
+        _ => {
+            cmd.env("PROXXX_CONFIG", dir.join("no-e2e-env.toml"))
+                .env_remove("PROXXX_TOKEN_SECRET");
+        }
+    }
+    cmd.env("PROXXX_AUDIT_DIR", dir.join("audit"))
+        .env("PROXXX_LOG_DIR", dir.join("log"))
+        .env("PROXXX_CACHE_DIR", dir.join("cache"))
+        .env_remove("PROXXX_PROFILE");
+}
+
+/// Run the proxxx binary with the given args against the E2E cluster (see
+/// [`e2e_cli_env`]) and return its `std::process::Output`.
+/// `CARGO_BIN_EXE_proxxx` is set by Cargo for integration tests, so the
+/// binary is always built before the test runs.
 pub fn run_proxxx(args: &[&str]) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_proxxx");
     eprintln!("[cli] {bin} {}", args.join(" "));
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args);
-    if std::env::var_os("PROXXX_CONFIG").is_none() {
-        if let Some(cfg) = e2e_cli_config_path() {
-            cmd.env("PROXXX_CONFIG", cfg);
-        }
-    }
+    e2e_cli_env(&mut cmd);
     cmd.output().expect("spawn proxxx binary")
 }
 

@@ -45,6 +45,8 @@
 //! diagnose-able from the script's "missing this env var" message
 //! rather than a russh handshake error mid-test.
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -61,20 +63,26 @@ struct SshEnv {
 
 impl SshEnv {
     fn load_or_skip() -> Option<Self> {
-        if std::env::var("PROXXX_E2E_SSH_ENABLE").as_deref() != Ok("1") {
-            eprintln!("[ssh-live] PROXXX_E2E_SSH_ENABLE != 1 — skipping");
+        const FLAG: &str = "PROXXX_E2E_SSH_ENABLE";
+        if std::env::var(FLAG).as_deref() != Ok("1") {
+            eprintln!("[ssh-live] {FLAG} != 1 — skipping");
             return None;
         }
-        let host = std::env::var("PROXXX_E2E_SSH_HOST").ok()?;
-        let user = std::env::var("PROXXX_E2E_SSH_USER").unwrap_or_else(|_| "root".to_string());
-        let key_path: PathBuf = std::env::var("PROXXX_E2E_SSH_KEY_PATH").ok()?.into();
-        if !key_path.exists() {
-            eprintln!(
-                "[ssh-live] PROXXX_E2E_SSH_KEY_PATH={} does not exist — skipping",
-                key_path.display()
-            );
-            return None;
+        let host = common::e2e_var("PROXXX_E2E_SSH_HOST", None);
+        let user = common::e2e_var("PROXXX_E2E_SSH_USER", None).unwrap_or_else(|| "root".into());
+        let key_path: Option<PathBuf> = common::e2e_var("PROXXX_E2E_SSH_KEY_PATH", None)
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
+        let mut missing = Vec::new();
+        if host.is_none() {
+            missing.push("PROXXX_E2E_SSH_HOST");
         }
+        if key_path.is_none() {
+            missing.push("PROXXX_E2E_SSH_KEY_PATH (an existing private key)");
+        }
+        let (Some(host), Some(key_path)) = (host, key_path) else {
+            common::e2e_incomplete(FLAG, &missing)
+        };
         // Per-process tmp known_hosts so the test never writes to the
         // operator's real proxxx known_hosts. PID-suffix avoids
         // collisions when multiple tests run in parallel (rare here —
