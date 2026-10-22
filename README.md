@@ -419,7 +419,7 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
 
 ## Honest non-goals
 
-Design boundaries — proxxx will not ship these.
+Design boundaries: proxxx will not ship these. The rate at which the surface grows is limited too: see `CONTRIBUTING.md` → Surface freeze.
 
 - **No GUI.** Proxmox already has a web UI; proxxx is for terminal users who want CLI / TUI / scripting parity.
 - **No frame rendering** for graphical SPICE or VNC. proxxx hands off to `remote-viewer` / `virt-viewer` (SPICE) or the system browser (noVNC). It never holds pixel buffers.
