@@ -880,11 +880,34 @@ impl ProxmoxGateway for HitlMockGateway {
     async fn delete_pool(&self, _: &str) -> Result<()> {
         anyhow::bail!("unused")
     }
+    /// Lists the mock's guests the way PVE does, so a lookup through
+    /// `/cluster/resources` (the TUI queue's, #383) sees the same cluster
+    /// as the per-node walk.
     async fn get_cluster_resources(
         &self,
-        _: Option<&str>,
+        kind: Option<&str>,
     ) -> Result<Vec<proxxx::api::types::ClusterResource>> {
-        Ok(vec![])
+        *self.lookup_calls.lock().unwrap() += 1;
+        if let Some(ref e) = self.fail_lookup_with {
+            anyhow::bail!("{e}");
+        }
+        if kind.is_some_and(|k| k != "vm") {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .guests_by_node
+            .values()
+            .flatten()
+            .map(|g| proxxx::api::types::ClusterResource {
+                id: format!("{}/{}", g.guest_type.as_str(), g.vmid),
+                resource_type: g.guest_type.as_str().to_string(),
+                node: g.node.clone(),
+                status: "running".to_string(),
+                vmid: g.vmid,
+                name: g.name.clone(),
+                ..Default::default()
+            })
+            .collect())
     }
     async fn get_api_version(&self) -> Result<proxxx::api::types::ApiVersion> {
         Ok(Default::default())

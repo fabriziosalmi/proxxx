@@ -66,24 +66,51 @@ pub fn execute_export(
     let logger = crate::audit::AuditLogger::open()?;
     let entries = logger.query(limit, since)?;
     if export_format == AuditExportFormat::Csv {
-        let mut csv = String::from("id,ts,action,user,vmid,node,result,chain_hmac\n");
-        for e in &entries {
-            csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{}\n",
-                e.id,
-                e.ts,
-                e.action,
-                e.user,
-                e.vmid.map(|v| v.to_string()).unwrap_or_default(),
-                e.node.as_deref().unwrap_or(""),
-                e.result,
-                e.chain_hmac,
-            ));
-        }
-        Ok((serde_json::json!({"csv": csv}), 0))
+        // raw-output: CSV for spreadsheets and scripts; the format pipeline would wrap it in JSON
+        print!("{}", entries_to_csv(&entries));
+        Ok((Value::Null, 0))
     } else {
         Ok((serde_json::to_value(&entries)?, 0))
     }
+}
+
+/// Render audit entries as RFC 4180 CSV: a header row, CRLF-free `\n`
+/// line ends, and any field holding a comma, quote, CR or LF quoted with
+/// its quotes doubled (audit #383: fields were written unquoted, so a
+/// comma in a result message shifted every later column).
+#[must_use]
+pub fn entries_to_csv(entries: &[crate::audit::AuditEntry]) -> String {
+    fn field(out: &mut String, value: &str) {
+        if value.contains([',', '"', '\r', '\n']) {
+            out.push('"');
+            out.push_str(&value.replace('"', "\"\""));
+            out.push('"');
+        } else {
+            out.push_str(value);
+        }
+    }
+    let mut csv = String::from("id,ts,action,user,vmid,node,result,chain_hmac\n");
+    for e in entries {
+        let vmid = e.vmid.map(|v| v.to_string()).unwrap_or_default();
+        let row = [
+            e.id.to_string(),
+            e.ts.clone(),
+            e.action.clone(),
+            e.user.clone(),
+            vmid,
+            e.node.clone().unwrap_or_default(),
+            e.result.clone(),
+            e.chain_hmac.clone(),
+        ];
+        for (i, value) in row.iter().enumerate() {
+            if i > 0 {
+                csv.push(',');
+            }
+            field(&mut csv, value);
+        }
+        csv.push('\n');
+    }
+    csv
 }
 
 pub fn execute_verify() -> Result<(Value, i32)> {
@@ -112,4 +139,42 @@ pub fn execute_rotate_key() -> Result<(Value, i32)> {
         }),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(result: &str, node: Option<&str>) -> crate::audit::AuditEntry {
+        crate::audit::AuditEntry {
+            id: 7,
+            ts: "2026-10-22T10:00:00Z".into(),
+            action: "vm_stop".into(),
+            user: "fab".into(),
+            vmid: Some(100),
+            node: node.map(Into::into),
+            params_json: None,
+            result: result.into(),
+            chain_hmac: "abc".into(),
+        }
+    }
+
+    #[test]
+    fn csv_quotes_fields_that_hold_separators_quotes_or_newlines() {
+        let csv = entries_to_csv(&[
+            entry("ok", Some("pve1")),
+            entry("error: 500, \"busy\"\nretry", None),
+        ]);
+        let lines: Vec<&str> = csv.split_inclusive('\n').collect();
+        assert_eq!(lines[0], "id,ts,action,user,vmid,node,result,chain_hmac\n");
+        assert_eq!(
+            lines[1],
+            "7,2026-10-22T10:00:00Z,vm_stop,fab,100,pve1,ok,abc\n"
+        );
+        // The second row spans two physical lines inside one quoted field.
+        assert_eq!(
+            &csv[lines[0].len() + lines[1].len()..],
+            "7,2026-10-22T10:00:00Z,vm_stop,fab,100,,\"error: 500, \"\"busy\"\"\nretry\",abc\n"
+        );
+    }
 }

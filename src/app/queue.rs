@@ -153,8 +153,13 @@ impl QueuedOp {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
+        // Two ops queued in the same microsecond (a bulk action) got the
+        // same id from the timestamp alone (audit #383); the per-process
+        // sequence number keeps them apart.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
-            id: now.as_micros().to_string(),
+            id: format!("{}-{seq}", now.as_micros()),
             action,
             description,
             diff,
@@ -342,7 +347,10 @@ impl QueuedOp {
         };
         let status = match entry.status {
             PersistedOpStatus::Pending => OpStatus::Pending,
-            PersistedOpStatus::Running => OpStatus::Running,
+            // The task's UPID is not persisted, so a restored Running op
+            // could never resolve and stayed Running forever (audit #383).
+            // Its outcome is unknown: say so, and where to look.
+            PersistedOpStatus::Running => OpStatus::Error(INTERRUPTED.to_string()),
             PersistedOpStatus::Success => OpStatus::Success,
             PersistedOpStatus::Error(s) => OpStatus::Error(s),
         };
@@ -362,6 +370,10 @@ impl QueuedOp {
         }
     }
 }
+
+/// Status of an op that was Running when the previous session ended.
+pub const INTERRUPTED: &str = "interrupted: proxxx exited while this op was running, \
+     so its outcome is unknown; check the PVE task log (`proxxx tasks`)";
 
 // ── SPOF 5.2 (Category 5 audit) — queue garbage collection ──
 //
@@ -461,6 +473,28 @@ pub fn garbage_collect(queue: &mut Vec<QueuedOp>, now_secs: u64) -> usize {
 #[cfg(test)]
 mod gc_tests {
     use super::*;
+
+    #[test]
+    fn ops_queued_back_to_back_get_distinct_ids() {
+        let state = AppState::default();
+        let ids: std::collections::HashSet<String> = (0..1000)
+            .map(|_| QueuedOp::new(Box::new(Action::StartGuest { vmid: 1 }), &state).id)
+            .collect();
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn an_op_restored_as_running_is_reported_interrupted() {
+        let op = QueuedOp::from_persisted(PersistedQueueEntry {
+            id: "1-0".into(),
+            description: "restart vmid 200".into(),
+            diff: String::new(),
+            status: PersistedOpStatus::Running,
+            op: PersistedOp::RestartGuest { vmid: 200 },
+            created_at_secs: 1_700_000_500,
+        });
+        assert_eq!(op.status, OpStatus::Error(INTERRUPTED.to_string()));
+    }
 
     fn op_with(id: &str, status: OpStatus, age_secs: u64, now: u64) -> QueuedOp {
         QueuedOp {

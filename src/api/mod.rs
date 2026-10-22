@@ -71,12 +71,40 @@ pub trait ProxmoxGateway: Send + Sync {
     /// the cluster. `Ok(None)` = genuinely not found; an Err means a node fetch
     /// failed — so callers don't mistake a transient failure for "not found"
     /// (which would mis-target or abort a mutation on the wrong/no node).
+    ///
+    /// Only online nodes can be asked for their guests, so a miss while a
+    /// node is offline is checked against `/cluster/resources`, which still
+    /// lists that node's guests: one found there is an error naming the
+    /// node, not `Ok(None)`. Reporting it missing made `find` exit 5, the
+    /// code a teardown script reads as "already gone" (audit #383).
     async fn find_guest(&self, vmid: u32) -> Result<Option<Guest>> {
-        Ok(self
-            .get_all_guests()
-            .await?
-            .into_iter()
-            .find(|g| g.vmid == vmid))
+        let mut offline = Vec::new();
+        for n in self.get_nodes().await? {
+            if matches!(n.status, crate::api::types::NodeStatus::Online) {
+                if let Some(g) = self
+                    .get_guests(&n.node)
+                    .await?
+                    .into_iter()
+                    .find(|g| g.vmid == vmid)
+                {
+                    return Ok(Some(g));
+                }
+            } else {
+                offline.push(n.node);
+            }
+        }
+        if offline.is_empty() {
+            return Ok(None);
+        }
+        let listed = self.get_cluster_resources(Some("vm")).await?;
+        if let Some(r) = listed.iter().find(|r| r.vmid == vmid) {
+            anyhow::bail!(
+                "guest {vmid} is on node {}, which is offline or unreachable; \
+                 it cannot be inspected until the node is back",
+                r.node
+            );
+        }
+        Ok(None)
     }
 
     async fn get_task_log(

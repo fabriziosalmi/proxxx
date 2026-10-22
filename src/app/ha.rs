@@ -30,6 +30,32 @@ pub fn online_nodes(entries: &[ClusterStatusEntry]) -> HashSet<String> {
         .collect()
 }
 
+/// Refuse a node name that is not a member of the cluster, so a typo in
+/// `ha preview --node` is a not-found error (exit 5) instead of a preview
+/// in which no resource is affected (audit #383).
+///
+/// # Errors
+/// [`crate::api::ApiError::NotFound`] when no `node` entry carries `name`.
+pub fn require_cluster_member(entries: &[ClusterStatusEntry], name: &str) -> anyhow::Result<()> {
+    if entries
+        .iter()
+        .any(|e| e.entry_type == "node" && e.name == name)
+    {
+        return Ok(());
+    }
+    let mut members: Vec<&str> = entries
+        .iter()
+        .filter(|e| e.entry_type == "node")
+        .map(|e| e.name.as_str())
+        .collect();
+    members.sort_unstable();
+    Err(crate::api::ApiError::NotFound(format!(
+        "node {name} is not a member of this cluster (members: {})",
+        members.join(", ")
+    ))
+    .into())
+}
+
 /// Outcome of a "what if this node fails?" preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailoverPreview {
@@ -179,6 +205,23 @@ mod tests {
             max_relocate: 1,
             comment: String::new(),
         }
+    }
+
+    #[test]
+    fn a_node_outside_the_cluster_is_not_found_and_an_offline_member_is_accepted() {
+        let entries: Vec<ClusterStatusEntry> = serde_json::from_value(serde_json::json!([
+            {"type": "cluster", "name": "lab", "quorate": 1, "nodes": 2},
+            {"type": "node", "name": "pve1", "online": 1},
+            {"type": "node", "name": "pve3", "online": 0}
+        ]))
+        .unwrap();
+        let err = require_cluster_member(&entries, "nosuch").unwrap_err();
+        let api = err.downcast_ref::<crate::api::ApiError>().expect("typed");
+        assert_eq!(api.exit_code(), 5);
+        assert!(err.to_string().contains("members: pve1, pve3"), "{err}");
+        assert!(require_cluster_member(&entries, "pve3").is_ok());
+        // The cluster summary entry is not a node.
+        assert!(require_cluster_member(&entries, "lab").is_err());
     }
 
     #[test]

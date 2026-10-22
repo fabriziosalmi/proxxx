@@ -598,6 +598,37 @@ impl PxClient {
 
     /// Rate-limited, auth-aware GET request with retry on transient failures.
     async fn get<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
+        match self.get_unrefined(path).await {
+            Ok(v) => Ok(v),
+            Err(e) => match e.downcast::<super::ApiError>() {
+                Ok(api) => Err(self.refine_node_lookup_error(api).await.into()),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// PVE answers a request under `/nodes/{node}/` that it cannot route
+    /// with HTTP 500 "hostname lookup '{node}' failed", the same answer for
+    /// a typo and for a cluster member that is offline (audit #383). Ask
+    /// `/nodes` which one it is: a name outside the cluster becomes
+    /// `NotFound` (exit 5), an offline member says so (exit 1), and
+    /// anything else, including a failed `/nodes` call, is left as it was.
+    async fn refine_node_lookup_error(&self, err: super::ApiError) -> super::ApiError {
+        if unresolved_node_name(&err).is_none() {
+            return err;
+        }
+        match self.get_unrefined::<ApiResponse<Vec<Node>>>("/nodes").await {
+            Ok(resp) => classify_unresolved_node(err, &resp.data),
+            Err(e) => {
+                debug!("could not list nodes to classify a hostname-lookup failure: {e:#}");
+                err
+            }
+        }
+    }
+
+    /// [`Self::get`] without [`Self::refine_node_lookup_error`], which itself
+    /// lists the nodes through here.
+    async fn get_unrefined<T: DeserializeOwned + Send + 'static>(&self, path: &str) -> Result<T> {
         let url = format!("{}/api2/json{}", self.base_url, path);
         debug!("GET {}", url);
 
@@ -709,13 +740,13 @@ impl PxClient {
             // TUI/CLI couldn't downcast 403s to a "permission denied"
             // banner the way GETs already could (audit closed
             // the GET path; this closes the rest).
-            return Err(super::ApiError::from_status_with_idempotency(
+            let err = super::ApiError::from_status_with_idempotency(
                 status,
                 path,
                 body,
                 RequestIdempotency::Mutation,
-            )
-            .into());
+            );
+            return Err(self.refine_node_lookup_error(err).await.into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
@@ -767,13 +798,13 @@ impl PxClient {
             audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
-            return Err(super::ApiError::from_status_with_idempotency(
+            let err = super::ApiError::from_status_with_idempotency(
                 status,
                 path,
                 body,
                 RequestIdempotency::Mutation,
-            )
-            .into());
+            );
+            return Err(self.refine_node_lookup_error(err).await.into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
@@ -814,13 +845,13 @@ impl PxClient {
             audit_ctx.record_outcome(&format!("error {}", status.as_u16()));
             let body = resp.text().await.unwrap_or_default();
             // Phase 7 — see POST helper above.
-            return Err(super::ApiError::from_status_with_idempotency(
+            let err = super::ApiError::from_status_with_idempotency(
                 status,
                 path,
                 body,
                 RequestIdempotency::Mutation,
-            )
-            .into());
+            );
+            return Err(self.refine_node_lookup_error(err).await.into());
         }
 
         audit_ctx.record_outcome(&format!("ok {}", status.as_u16()));
@@ -904,6 +935,70 @@ fn flatten_zfs_children(nodes: &[RawZfsNode], out: &mut Vec<crate::api::types::Z
         });
         flatten_zfs_children(&n.children, out);
     }
+}
+
+/// The node name in a PVE "hostname lookup '{node}' failed" 500 for a
+/// path under `/nodes/`, if `err` is one.
+fn unresolved_node_name(err: &super::ApiError) -> Option<String> {
+    let super::ApiError::Other {
+        path,
+        status: 500,
+        body,
+    } = err
+    else {
+        return None;
+    };
+    // Split rather than match a "/nodes/" literal: the endpoint-coverage
+    // test reads every string literal in this file as an API path.
+    let mut segments = path.split('/');
+    if segments.next() != Some("") || segments.next() != Some("nodes") || segments.next().is_none()
+    {
+        return None;
+    }
+    let rest = &body[body.find("hostname lookup '")? + "hostname lookup '".len()..];
+    let name = &rest[..rest.find('\'')?];
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// See [`PxClient::refine_node_lookup_error`]; `nodes` is `GET /nodes`.
+fn classify_unresolved_node(err: super::ApiError, nodes: &[Node]) -> super::ApiError {
+    let Some(name) = unresolved_node_name(&err) else {
+        return err;
+    };
+    let super::ApiError::Other { path, status, body } = err else {
+        return err;
+    };
+    match nodes.iter().find(|n| n.node == name) {
+        None => super::ApiError::NotFound(format!(
+            "{path}: node {name} is not a member of this cluster"
+        )),
+        Some(n) if !matches!(n.status, crate::api::types::NodeStatus::Online) => {
+            super::ApiError::Other {
+                body: format!(
+                    "node {name} is a cluster member but offline or unreachable ({})",
+                    pve_message(&body)
+                ),
+                path,
+                status,
+            }
+        }
+        Some(_) => super::ApiError::Other { path, status, body },
+    }
+}
+
+/// The `message` of a PVE error body, or the body itself when it is not
+/// the usual `{"message": ..., "data": null}` JSON.
+fn pve_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string())
+        .trim()
+        .to_string()
 }
 
 #[async_trait::async_trait]
@@ -2326,13 +2421,16 @@ impl ProxmoxGateway for PxClient {
         node: &str,
         vmid: u32,
     ) -> Result<Vec<crate::api::types::LxcInterface>> {
-        let resp: ApiResponse<Vec<crate::api::types::LxcInterface>> = self
+        // A stopped container has no runtime interfaces and PVE answers
+        // `{"data": null}`; that is an empty list, not schema drift
+        // (audit #383).
+        let resp: ApiResponse<Option<Vec<crate::api::types::LxcInterface>>> = self
             .get(&format!(
                 "/nodes/{node}/lxc/{vmid}/interfaces",
                 node = urlenc_segment(node)
             ))
             .await?;
-        Ok(resp.data)
+        Ok(resp.data.unwrap_or_default())
     }
 
     async fn dump_qemu_cloudinit(&self, node: &str, vmid: u32, kind: &str) -> Result<String> {

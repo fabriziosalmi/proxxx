@@ -146,7 +146,7 @@ proxxx novnc  100 --node pve1           # opens browser to web UI's noVNC
 
 # GitOps loop over 10 state families
 # (pools / ACL / storage / backup-jobs / firewall-cluster / notifications / ha-rules / ha-resources / mappings-pci / mappings-usb)
-proxxx state export > cluster.toml      # byte-stable TOML snapshot
+proxxx state export > cluster.toml      # sorted TOML snapshot
 proxxx state diff cluster.toml          # exit 2 if drift (CI-gateable)
 proxxx state apply cluster.toml --dry-run
 proxxx state apply cluster.toml --prune --interactive

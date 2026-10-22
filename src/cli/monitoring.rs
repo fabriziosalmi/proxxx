@@ -1326,6 +1326,7 @@ pub async fn execute_ha(
             let groups = client.list_ha_groups().await?;
             let resources = client.list_ha_resources().await?;
             let cluster = client.cluster_status().await?;
+            crate::app::ha::require_cluster_member(&cluster, &node)?;
             let online = crate::app::ha::online_nodes(&cluster);
             // To know each resource's CURRENT node, we look at all guests.
             let mut all_guests: std::collections::HashMap<u32, String> =

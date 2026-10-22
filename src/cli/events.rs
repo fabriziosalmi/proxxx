@@ -131,36 +131,47 @@ pub async fn execute_events(
                         }
                     };
 
-                for task in &current {
-                    match seen.get(&task.upid) {
-                        None => {
-                            // Task wasn't in the last snapshot.
-                            let elapsed = elapsed_secs(task);
-                            if task.endtime.is_none() {
-                                emit_event("START", task, None, is_json);
-                            } else {
-                                // Fast task: started and finished between polls.
-                                let label = outcome_label(task);
-                                emit_event(label, task, elapsed, is_json);
-                            }
-                        }
-                        Some(old) => {
-                            // Known task: emit if it just completed.
-                            if old.endtime.is_none() && task.endtime.is_some() {
-                                let elapsed =
-                                    task.endtime.map(|e| e.saturating_sub(task.starttime));
-                                let label = outcome_label(task);
-                                emit_event(label, task, elapsed, is_json);
-                            }
-                        }
-                    }
-                    seen.insert(task.upid.clone(), task.clone());
+                let (events, next) = poll_events(&seen, current);
+                for (label, task, elapsed) in &events {
+                    emit_event(label, task, *elapsed, is_json);
                 }
+                seen = next;
             }
 
             Ok((serde_json::json!({"status": "stream stopped"}), 0))
         }
     }
+}
+
+/// An event to emit: its label, the task, and the elapsed seconds.
+type TaskEvent = (&'static str, TaskInfo, Option<u64>);
+
+/// Compare one poll with the previous snapshot. Returns the events to
+/// emit (new tasks, and known tasks that just finished) and the next
+/// snapshot, which holds exactly the tasks of this poll: the task list
+/// is a sliding window, so a task that has left it does not come back,
+/// and keeping it would grow the map for as long as the stream runs
+/// (audit #383).
+fn poll_events(
+    seen: &HashMap<String, TaskInfo>,
+    current: Vec<TaskInfo>,
+) -> (Vec<TaskEvent>, HashMap<String, TaskInfo>) {
+    let mut events = Vec::new();
+    let mut next = HashMap::with_capacity(current.len());
+    for task in current {
+        match seen.get(&task.upid) {
+            None if task.endtime.is_none() => events.push(("START", task.clone(), None)),
+            // Fast task: started and finished between polls.
+            None => events.push((outcome_label(&task), task.clone(), elapsed_secs(&task))),
+            Some(old) if old.endtime.is_none() && task.endtime.is_some() => {
+                let elapsed = task.endtime.map(|e| e.saturating_sub(task.starttime));
+                events.push((outcome_label(&task), task.clone(), elapsed));
+            }
+            Some(_) => {}
+        }
+        next.insert(task.upid.clone(), task);
+    }
+    (events, next)
 }
 
 /// Fetch tasks, applying node/vmid/type filters.
@@ -269,4 +280,52 @@ const fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(upid: &str, endtime: Option<u64>) -> TaskInfo {
+        TaskInfo {
+            upid: upid.into(),
+            node: "pve1".into(),
+            starttime: 100,
+            endtime,
+            status: endtime.map(|_| "OK".into()),
+            ..TaskInfo::default()
+        }
+    }
+
+    #[test]
+    fn a_task_that_left_the_window_is_dropped_from_the_snapshot() {
+        let (_, seen) = poll_events(&HashMap::new(), vec![task("a", Some(110)), task("b", None)]);
+        assert_eq!(seen.len(), 2);
+        // `a` scrolled out of the task list; `b` finished.
+        let (events, seen) = poll_events(&seen, vec![task("b", Some(130))]);
+        assert_eq!(seen.keys().collect::<Vec<_>>(), vec!["b"]);
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|(k, t, e)| (*k, t.upid.as_str(), *e))
+            .collect();
+        assert_eq!(kinds, vec![("DONE", "b", Some(30))]);
+    }
+
+    #[test]
+    fn new_tasks_start_or_finish_and_known_finished_tasks_stay_quiet() {
+        let (_, seen) = poll_events(&HashMap::new(), vec![task("old", Some(110))]);
+        let (events, _) = poll_events(
+            &seen,
+            vec![
+                task("old", Some(110)),
+                task("run", None),
+                task("fast", Some(105)),
+            ],
+        );
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|(k, t, _)| (*k, t.upid.as_str()))
+            .collect();
+        assert_eq!(kinds, vec![("START", "run"), ("DONE", "fast")]);
+    }
 }

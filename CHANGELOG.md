@@ -20,6 +20,20 @@ SemVer contract:
 
 - **An SSH client key below the NIST minimum through 2030 is refused before proxxx connects (#485).** proxxx used any key the configuration named: a 1024-bit RSA key loaded and signed (measured). It now refuses an RSA key under 2048 bits and any DSA key, naming the file and pointing to `ssh-keygen -t ed25519`. Ed25519, ECDSA and RSA of 2048 bits or more are unchanged. **Breaking** for a setup that uses such a key. **Migration:** create an Ed25519 key (`ssh-keygen -t ed25519`), install its public key on the nodes and point `key_path` at it.
 
+### Fixed
+
+- **A node name outside the cluster is "not found" (exit 5), and an offline member says it is offline (#383).** PVE answers a request for a node it cannot route with the same HTTP 500 "hostname lookup failed" for a typo and for an offline member (measured on PVE 9.1.1), and proxxx passed it on with exit 1. proxxx now asks `/nodes` which one it is. `ha preview --node <name>` refuses a name that is not a member instead of printing a preview in which nothing is affected (it exited 0). **Breaking** for a script that tests the exit code: a mistyped `--node` now exits 5.
+- **`find`, MCP and the HITL daemon no longer report a guest on an offline node as missing (#383).** The lookup walked online nodes only, so such a guest came back "not found" and `find <vmid>` exited 5, the code a teardown script reads as "already gone". It is now an error naming the offline node (exit 1), as `docs/reference/exit-codes.md` already stated.
+- **`patch changelog --package <unknown>` fails with exit 5 (#383).** PVE returns apt's error text with HTTP 200 and a trailing `RC: 100`; proxxx printed it as the changelog and exited 0. Any other non-zero `RC` is an error with apt's message.
+- **`audit export --export-format csv` prints CSV (#383).** It printed a JSON object holding the CSV text, with fields unquoted, so a comma in a result message shifted the later columns. Fields are now quoted per RFC 4180. **Breaking** for a consumer that parsed the JSON wrapper: read the output as CSV.
+- **`ct interfaces` on a stopped container returns an empty list (#383).** PVE answers `{"data": null}` (measured), which proxxx reported as schema drift.
+- **`gpu-inspect` reports the IOMMU as enabled only when IOMMU groups exist (#383).** Any dmesg line mentioning the IOMMU counted, including "DMAR: IOMMU disabled". The PCI class name keeps its first word ("VGA compatible controller", not "compatible controller"), and the vendor:device pair is read from the last hex `[xxxx:yyyy]` bracket even when the device name has brackets.
+- **`play-cast` accepts asciicast v2 files without `title` or `timestamp` (#383).** Both are optional in the format.
+- **`events stream` no longer grows without bound (#383).** The map of seen tasks kept every task it had ever seen; it now holds the tasks of the latest poll.
+- **`ls <kind> --all-profiles` and `find <vmid>` report a panicked profile query under its profile name (#383),** instead of under a generic "unknown" label.
+- **TUI queue (#383):** ops queued in the same microsecond no longer share an id; an op that was running when proxxx exited comes back as "interrupted, outcome unknown" with a pointer to the task log, instead of staying Running forever (it was never re-dispatched, and still is not); a queued op finds its guest through `/cluster/resources` instead of walking every node, and reports a failed lookup as itself instead of "Node not found"; saving the queue no longer holds key handling while SQLite is busy.
+- **`state export` help no longer claims byte-stable output (#383).** Two exports of an unchanged cluster differ in `meta.exported_at`; the help, README and docs now say so.
+
 ## [0.15.0] - 2026-10-22
 
 Headline: **the second audit backlog, closed.** This release is mostly

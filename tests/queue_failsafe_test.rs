@@ -10,8 +10,8 @@
 //! The `op_queue` persists INTENT + status. On restart the queue is re-rendered
 //! (not auto-run) and only a user-triggered `ExecuteQueue` dispatches. The
 //! load-bearing safety property: `ExecuteQueue` dispatches ONLY `Pending` ops —
-//! so an op that was already dispatched (restored as `Running`) is NEVER
-//! re-executed. Combined with the write-ahead persist in `dispatch_side_effect`
+//! so an op that was already dispatched (saved as `Running`, restored as an
+//! "interrupted" error) is NEVER re-executed. Combined with the write-ahead persist in `dispatch_side_effect`
 //! (status → Running is durable before any PVE call), a crash cannot turn into
 //! a double-execute of a non-idempotent op (migrate / delete / move-disk).
 //!
@@ -105,19 +105,28 @@ fn re_executing_after_restore_is_a_noop_no_double_dispatch() {
 }
 
 #[test]
-fn persist_round_trip_preserves_running_status() {
-    // The restored status must survive persistence: a dispatched op that was
-    // saved as Running must NOT come back as Pending (which would make it
-    // re-dispatchable). This is what makes the property above hold across a
-    // real save → crash → load cycle.
+fn persist_round_trip_never_makes_a_dispatched_op_pending_again() {
+    // A dispatched op that was saved as Running must NOT come back as
+    // Pending (which would make it re-dispatchable). It comes back as an
+    // error saying its outcome is unknown: its UPID was never persisted, so
+    // a restored Running op could not resolve and stayed Running forever
+    // (audit #383). Either way `ExecuteQueue` skips it.
     let running = qop("x", OpStatus::Running);
     let persisted = running.to_persisted().expect("migrate op is persistable");
     let restored = QueuedOp::from_persisted(persisted);
     assert_eq!(
         restored.status,
-        OpStatus::Running,
-        "Running must round-trip as Running, never reset to Pending"
+        OpStatus::Error(proxxx::app::queue::INTERRUPTED.into()),
+        "a restored Running op is reported interrupted, never reset to Pending"
     );
+    let mut state = AppState::new();
+    state.op_queue = vec![restored];
+    if let Some(SideEffect::ExecuteQueue(ops)) = update(&mut state, Action::ExecuteQueue) {
+        assert!(
+            ops.is_empty(),
+            "an interrupted op must not be re-dispatched"
+        );
+    }
 
     // And the break-glass override must NOT survive a reload (safety default).
     let mut forced = qop("y", OpStatus::Pending);
