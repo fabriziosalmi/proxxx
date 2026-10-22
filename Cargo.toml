@@ -80,10 +80,10 @@ rusqlite = { version = "0.40.0", features = ["bundled"] }
 # SSH layer
 russh = "0.64"
 # `russh-keys` was folded back into `russh` proper in 0.60 — the
-# functionality lives at `russh::keys::*` now. Removing the separate
-# crate also drops the transitive `rsa 0.9.10` (Marvin Attack,
-# RUSTSEC-2023-0071) which the old russh-keys 0.46 → ssh-key 0.6
-# chain was pulling.
+# functionality lives at `russh::keys::*` now. That removed rsa 0.9.10,
+# but russh still pulls rsa 0.10.0-rc.18 (directly and through ssh-key)
+# for RSA user keys, and RUSTSEC-2023-0071 still applies: see
+# `.cargo/audit.toml` and `deny.toml` for the rationale.
 hex = "0.4"
 sha2 = "0.11"
 # Phase 17 audit fix: HMAC-SHA256 signing for HITL Telegram

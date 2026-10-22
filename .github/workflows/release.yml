@@ -54,11 +54,37 @@ jobs:
       contents: read
 
   # ──────────────────────────────────────────────────────────
+  # The tag names the version the binaries report (#384): a tag that
+  # does not match Cargo.toml would publish `proxxx-X` tarballs whose
+  # `--version` says Y.
+  # ──────────────────────────────────────────────────────────
+  version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare the tag with the crate version
+        run: |
+          set -euo pipefail
+          CRATE=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$CRATE" != "$TAG" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${CRATE}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches Cargo.toml ${CRATE}"
+
+  # ──────────────────────────────────────────────────────────
   # Build matrix — one job per target triple, parallel.
   # ──────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
-    needs: gate
+    needs: [gate, version]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -120,12 +146,25 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build release binary
+        # The commit goes into `--version` and the startup log line (#384);
+        # Cross.toml passes it into the cross container.
+        env:
+          PROXXX_BUILD_COMMIT: ${{ github.sha }}
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --locked --release --target ${{ matrix.target }}
           else
             cargo build --locked --release --target ${{ matrix.target }}
           fi
+
+      - name: Verify the binary names its commit
+        # The cross-built aarch64 binary cannot run on the x86 runner.
+        if: matrix.use_cross != true
+        run: |
+          set -e
+          OUT=$(target/${{ matrix.target }}/release/proxxx --version)
+          echo "$OUT"
+          echo "$OUT" | grep -q "commit ${GITHUB_SHA:0:12}"
 
       - name: Verify Linux binary is statically linked
         if: contains(matrix.target, 'linux-musl')
@@ -356,6 +395,21 @@ jobs:
           # round-trip needed to pin.
           ( cd dist && shasum -a 256 "proxxx-${VERSION}.cdx.json" > "proxxx-${VERSION}.cdx.json.sha256" )
 
+      - name: Install cosign (sigstore)
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign the SBOM with cosign (keyless via OIDC)
+        # Same keyless, transparency-logged signature as the tarballs
+        # (#384): an unsigned SBOM could be swapped for one that hides a
+        # dependency. `dist/*.cosign.bundle` below uploads the bundle.
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          cosign sign-blob --yes \
+            --bundle "dist/proxxx-${VERSION}.cdx.json.cosign.bundle" \
+            "dist/proxxx-${VERSION}.cdx.json"
+          ls -lh "dist/proxxx-${VERSION}.cdx.json.cosign.bundle"
+
       - name: Compose release notes
         # Pull the `[X.Y.Z]` section from CHANGELOG.md (the curated,
         # human-written notes for THIS tag), falling back to
@@ -461,7 +515,9 @@ jobs:
             echo "**3. CycloneDX SBOM** — \`proxxx-${VERSION}.cdx.json\` lists"
             echo "every dependency from \`Cargo.lock\` with name + version +"
             echo "checksum + license. Audit with \`cyclonedx-cli\`,"
-            echo "\`grype\`, \`trivy\`, or any SBOM-aware scanner:"
+            echo "\`grype\`, \`trivy\`, or any SBOM-aware scanner. It is signed like"
+            echo "the tarballs; verify it with the same command, using"
+            echo "\`proxxx-${VERSION}.cdx.json.cosign.bundle\`:"
             echo
             echo '```bash'
             echo "grype sbom:proxxx-${VERSION}.cdx.json"
