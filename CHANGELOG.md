@@ -16,6 +16,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **An SSH client key below the NIST minimum through 2030 is refused before proxxx connects (#485).** proxxx used any key the configuration named: a 1024-bit RSA key loaded and signed (measured). It now refuses an RSA key under 2048 bits and any DSA key, naming the file and pointing to `ssh-keygen -t ed25519`. Ed25519, ECDSA and RSA of 2048 bits or more are unchanged. **Breaking** for a setup that uses such a key. **Migration:** create an Ed25519 key (`ssh-keygen -t ed25519`), install its public key on the nodes and point `key_path` at it.
+
 ## [0.15.0] - 2026-10-22
 
 Headline: **the second audit backlog, closed.** This release is mostly

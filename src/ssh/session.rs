@@ -222,6 +222,7 @@ impl SshSession {
     ) -> Result<Self> {
         let key_pair = russh::keys::load_secret_key(key_path, passphrase)
             .with_context(|| format!("loading SSH key {}", key_path.display()))?;
+        check_client_key_strength(&key_pair, key_path)?;
 
         let config = Arc::new(Config {
             inactivity_timeout: Some(Duration::from_mins(5)),
@@ -318,6 +319,36 @@ impl SshSession {
     }
 }
 
+/// Smallest RSA modulus accepted for the client key: the NIST minimum for
+/// use through 2030 (SP 800-57 Part 1, 112-bit security).
+const MIN_RSA_KEY_BITS: u32 = 2048;
+
+/// Refuse a client key below the NIST minimum through 2030, before any
+/// connection: RSA under [`MIN_RSA_KEY_BITS`], and DSA, which OpenSSH fixes
+/// at 1024 bits. Ed25519 and ECDSA keys meet the minimum.
+fn check_client_key_strength(
+    key: &russh::keys::ssh_key::PrivateKey,
+    key_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(rsa) = key.key_data().rsa() {
+        let bits = rsa.key_size();
+        anyhow::ensure!(
+            bits >= MIN_RSA_KEY_BITS,
+            "SSH key {} is a {bits}-bit RSA key; proxxx needs at least {MIN_RSA_KEY_BITS} bits \
+             (the NIST minimum through 2030). Use an Ed25519 key (ssh-keygen -t ed25519) or \
+             RSA of {MIN_RSA_KEY_BITS} bits or more.",
+            key_path.display()
+        );
+    }
+    anyhow::ensure!(
+        key.algorithm() != Algorithm::Dsa,
+        "SSH key {} is a DSA key (1024 bits), below the NIST minimum through 2030. \
+         Use an Ed25519 key (ssh-keygen -t ed25519).",
+        key_path.display()
+    );
+    Ok(())
+}
+
 /// Phase 5.13 GAP 2 — explicit modern-only algorithm whitelist.
 ///
 /// `russh::Preferred::DEFAULT` already excludes SHA-1 MACs and includes
@@ -389,14 +420,81 @@ mod hardening_tests {
     use tokio::sync::RwLock;
 
     use super::{
-        hardened_algorithms, HostKey, HostKeyPolicy, HostKeyVerifier, KnownHosts, PolicyVerifier,
-        SshHandler, SshSession,
+        check_client_key_strength, hardened_algorithms, HostKey, HostKeyPolicy, HostKeyVerifier,
+        KnownHosts, PolicyVerifier, SshHandler, SshSession,
     };
     use crate::ssh::known_hosts::HostMatch;
 
     fn sample_private_key(seed_byte: u8) -> PrivateKey {
         let kp = Ed25519Keypair::from_seed(&[seed_byte; 32]);
         PrivateKey::from(kp)
+    }
+
+    /// An RSA key with a modulus of `bits` bits. Only the size matters to
+    /// `check_client_key_strength`, so the components are not a real key.
+    fn rsa_key_of_bits(bits: usize) -> PrivateKey {
+        use russh::keys::ssh_key::private::{RsaKeypair, RsaPrivateKey};
+        use russh::keys::ssh_key::public::RsaPublicKey;
+        use russh::keys::ssh_key::Mpint;
+        let n = vec![0xC5_u8; bits / 8];
+        let public = RsaPublicKey::new(
+            Mpint::from_positive_bytes(&[1, 0, 1]),
+            Mpint::from_positive_bytes(&n),
+        )
+        .expect("public");
+        let one = Mpint::from_positive_bytes(&[3]);
+        let private =
+            RsaPrivateKey::new(one.clone(), one.clone(), one.clone(), one).expect("private");
+        PrivateKey::from(RsaKeypair::new(public, private).expect("keypair"))
+    }
+
+    #[test]
+    fn client_keys_below_the_nist_2030_minimum_are_refused() {
+        let path = std::path::Path::new("/keys/id_test");
+        let err =
+            check_client_key_strength(&rsa_key_of_bits(1024), path).expect_err("RSA 1024 refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("/keys/id_test is a 1024-bit RSA key"), "{msg}");
+        assert!(msg.contains("ssh-keygen -t ed25519"), "{msg}");
+        check_client_key_strength(&rsa_key_of_bits(2048), path).expect("RSA 2048 accepted");
+        check_client_key_strength(&rsa_key_of_bits(4096), path).expect("RSA 4096 accepted");
+        check_client_key_strength(&sample_private_key(0x11), path).expect("Ed25519 accepted");
+    }
+
+    /// The check runs before the TCP connect: a 1024-bit key never reaches
+    /// the server.
+    #[tokio::test]
+    async fn a_short_rsa_key_is_refused_before_connecting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key_path = dir.path().join("id_rsa");
+        let pem = rsa_key_of_bits(1024)
+            .to_openssh(LineEnding::LF)
+            .expect("encode key");
+        std::fs::write(&key_path, pem.as_bytes()).expect("write key");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let known = Arc::new(RwLock::new(
+            KnownHosts::load(dir.path().join("known_hosts")).expect("known_hosts"),
+        ));
+        let verifier: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier {
+            policy: HostKeyPolicy::Strict,
+        });
+        let err = SshSession::connect(
+            "127.0.0.1".to_string(),
+            port,
+            "root".to_string(),
+            &key_path,
+            None,
+            known,
+            verifier,
+        )
+        .await
+        .err()
+        .expect("refused");
+        assert!(format!("{err:#}").contains("1024-bit RSA key"), "{err:#}");
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept()).await;
+        assert!(accepted.is_err(), "no TCP connection was made");
     }
 
     fn make_handler(policy: HostKeyPolicy, known: Arc<RwLock<KnownHosts>>) -> SshHandler {
