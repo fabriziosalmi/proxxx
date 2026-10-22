@@ -177,6 +177,11 @@ fixing the bug.
   the message format but reviewers will ask you to rewrite if it
   reads as a noise.
 - One concept per PR. Mixed concerns get split.
+- New functionality and bug fixes come with tests in the automated
+  suite: a unit, integration, wiremock or property test that fails
+  without the change (see [Writing tests](#writing-tests)). A PR
+  without a new test says why, for example a dependency bump or a
+  docs-only change.
 - Update `CHANGELOG.md` under `[Unreleased]` describing what changes
   for users.
 - If the change touches a row in `pre-commit/01-feature-coverage.md`,
