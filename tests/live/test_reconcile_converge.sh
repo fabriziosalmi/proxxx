@@ -25,8 +25,8 @@
 # own fresh export — a flaky/incomplete export would otherwise diff as "delete
 # everything" and (correctly) get Severe-refused, which is a false failure.
 #
-# RAII via trap EXIT — sweeps both test pools (idempotent, 404 fine) and restores
-# the operator's config.
+# RAII via trap EXIT — sweeps both test pools (idempotent, 404 fine) and removes
+# the private config lib.sh built.
 #
 # Required env (sourced from tests/live/env.local if present):
 #   PROXXX_E2E_PVE_URL    — https://192.168.0.122:8006   (pvetest / pve-test-1)
@@ -59,6 +59,13 @@ fi
 : "${PROXXX_E2E_PVE_URL:?env PROXXX_E2E_PVE_URL not set}"
 : "${PROXXX_E2E_PVE_TOKEN:?env PROXXX_E2E_PVE_TOKEN not set — format: tokenid=secret}"
 : "${PROXXX_E2E_NODE:?env PROXXX_E2E_NODE not set (target node name, e.g. pve-test-1)}"
+
+# The binary runs on a private config built from the same URL and token as
+# the curl calls; the caller's own config is never read or rewritten (#479).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
+live_normalize_token || exit 1
+live_isolate || exit 1
 
 URL="$PROXXX_E2E_PVE_URL"
 T_H="Authorization: PVEAPIToken=root@pam!$PROXXX_E2E_PVE_TOKEN"
@@ -101,15 +108,6 @@ retry() {
 # Raw-API mutation with curl-level retry on transient errors.
 api() { curl -ks --retry 3 --retry-all-errors --retry-delay 2 "$@"; }
 
-# Temporary config switch — force token auth for the duration of the test
-# (defensive fixture isolation, same rationale as test_state_ha_rules.sh).
-PROXXX_CONFIG_DIR="${PROXXX_CONFIG_DIR:-$HOME/Library/Application Support/dev.proxxx.proxxx}"
-if [[ ! -d "$PROXXX_CONFIG_DIR" ]]; then
-    PROXXX_CONFIG_DIR="$HOME/.config/proxxx"   # Linux ProjectDirs path
-fi
-ORIG_CFG="$PROXXX_CONFIG_DIR/config.toml"
-RESTORE_CFG=""
-
 cleanup() {
     log ""
     log "═══════════════════════════════════════════════════════════"
@@ -124,10 +122,7 @@ cleanup() {
         fi
         api -X DELETE "$URL/api2/json/pools/$p" -H "$T_H" >/dev/null 2>&1 || true
     done
-    if [[ -n "$RESTORE_CFG" && -f "$RESTORE_CFG" ]]; then
-        mv "$RESTORE_CFG" "$ORIG_CFG"
-        log "[cleanup] config.toml restored from backup"
-    fi
+    live_cleanup
     rm -rf "$WORKDIR"
     log ""
     log "═══════════════════════════════════════════════════════════"
@@ -135,23 +130,6 @@ cleanup() {
     log "═══════════════════════════════════════════════════════════"
 }
 trap cleanup EXIT
-
-if [[ -f "$ORIG_CFG" ]]; then
-    RESTORE_CFG="$ORIG_CFG.proxxx-e2e-backup"
-    cp "$ORIG_CFG" "$RESTORE_CFG"
-fi
-mkdir -p "$PROXXX_CONFIG_DIR"
-TOKEN_ID="${PROXXX_E2E_PVE_TOKEN%%=*}"
-TOKEN_SECRET="${PROXXX_E2E_PVE_TOKEN##*=}"
-cat > "$ORIG_CFG" <<EOF
-url = "$URL"
-user = "root@pam"
-auth = "token"
-token_id = "$TOKEN_ID"
-verify_tls = false
-EOF
-chmod 0600 "$ORIG_CFG"
-export PROXXX_TOKEN_SECRET="$TOKEN_SECRET"
 
 log "═══════════════════════════════════════════════════════════"
 log "proxxx reconcile converge e2e — $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -24,6 +24,10 @@ ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 BIN="${BIN:-$ROOT/target/release/proxxx}"
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR}"
 LOG="$LOG_DIR/test_fleet_readonly.log"
+# Read-only by design against every profile of the caller's own config, so no
+# live_isolate here; lib.sh only provides run_timeout (macOS has no `timeout`).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
 
 : > "$LOG"
 PASS=0
@@ -44,7 +48,7 @@ fi
 # ── 1. config has ≥2 named profiles (fleet's whole premise) ──
 # `proxxx profiles --format json` emits [{"profiles": ["a","b",...]}]; be
 # tolerant of either that shape or a bare list of profile names.
-PROFILE_COUNT=$(timeout 10 "$BIN" --format json profiles 2>/dev/null \
+PROFILE_COUNT=$(run_timeout 10 "$BIN" --format json profiles 2>/dev/null \
     | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -69,7 +73,7 @@ fi
 # This is the exact read path the fleet worker uses, just rendered as
 # rows instead of a TUI. Proves attribution + multi-cluster fan-out.
 for kind in nodes guests storage; do
-    OUT=$(timeout 30 "$BIN" --format json ls "$kind" --all-profiles 2>>"$LOG")
+    OUT=$(run_timeout 30 "$BIN" --format json ls "$kind" --all-profiles 2>>"$LOG")
     DISTINCT=$(echo "$OUT" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -90,7 +94,7 @@ done
 #       after a fleet fetch cycle (the TUI's first poll). A mutating bug
 #       would change a guest's status/count between the two reads.
 fingerprint() {
-    timeout 30 "$BIN" --format json ls guests --all-profiles 2>>"$LOG" | python3 -c "
+    run_timeout 30 "$BIN" --format json ls guests --all-profiles 2>>"$LOG" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 rows=[(r.get('profile'), (r.get('data') or {}).get('vmid'), (r.get('data') or {}).get('status'))

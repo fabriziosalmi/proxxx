@@ -24,7 +24,7 @@
 #      (HaRuleDelete on each rule).
 #   ⑦ state export → final ha_resources + ha_rules sections both absent.
 #
-# RAII via trap EXIT — restores the operator's config + sweeps any
+# RAII via trap EXIT — removes the private config lib.sh built + sweeps any
 # residual test artifacts on the cluster. Idempotent on a clean cluster.
 #
 # Required env (sourced from tests/live/env.local if present):
@@ -44,7 +44,7 @@
 # registered on cluster A via curl was genuinely unmanaged from
 # cluster B's perspective.
 #
-# The script STILL swaps to token auth temporarily — but as a defensive
+# The script still uses token auth (lib.sh's private config) — but as a defensive
 # fixture-isolation measure (a known-good auth flavor for the test), NOT
 # because PAM is broken. Operators running with PAM auth against this
 # same cluster + fixtures will see the same lifecycle pass.
@@ -72,6 +72,13 @@ fi
 : "${PROXXX_E2E_PVE_TOKEN:?env PROXXX_E2E_PVE_TOKEN not set — format: tokenid=secret}"
 : "${PROXXX_E2E_NODE:?env PROXXX_E2E_NODE not set (target node name, e.g. pve-test-1)}"
 
+# The binary runs on a private config built from the same URL and token as
+# the curl calls; the caller's own config is never read or rewritten (#479).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
+live_normalize_token || exit 1
+live_isolate || exit 1
+
 URL="$PROXXX_E2E_PVE_URL"
 NODE="$PROXXX_E2E_NODE"
 T_H="Authorization: PVEAPIToken=root@pam!$PROXXX_E2E_PVE_TOKEN"
@@ -92,15 +99,6 @@ log()   { echo "$@"; }
 ok()    { log "  [OK   ] $*"; PASS=$((PASS + 1)); }
 bad()   { log "  [FAIL ] $*"; FAIL=$((FAIL + 1)); }
 
-# Temporary config switch — force token auth for the duration of the
-# test (see auth note in the header). Backup + restore in cleanup.
-PROXXX_CONFIG_DIR="${PROXXX_CONFIG_DIR:-$HOME/Library/Application Support/dev.proxxx.proxxx}"
-if [[ ! -d "$PROXXX_CONFIG_DIR" ]]; then
-    PROXXX_CONFIG_DIR="$HOME/.config/proxxx"   # Linux ProjectDirs path
-fi
-ORIG_CFG="$PROXXX_CONFIG_DIR/config.toml"
-RESTORE_CFG=""
-
 cleanup() {
     log ""
     log "═══════════════════════════════════════════════════════════"
@@ -116,11 +114,7 @@ cleanup() {
     for sid in "$LXC_SID" "$VM_SID"; do
         curl -ks -X DELETE "$URL/api2/json/cluster/ha/resources/$sid" -H "$T_H" >/dev/null 2>&1 || true
     done
-    # Restore the operator's original config.
-    if [[ -n "$RESTORE_CFG" && -f "$RESTORE_CFG" ]]; then
-        mv "$RESTORE_CFG" "$ORIG_CFG"
-        log "[cleanup] config.toml restored from backup"
-    fi
+    live_cleanup
     rm -rf "$WORKDIR"
     log ""
     log "═══════════════════════════════════════════════════════════"
@@ -128,25 +122,6 @@ cleanup() {
     log "═══════════════════════════════════════════════════════════"
 }
 trap cleanup EXIT
-
-# Force token auth (see header — PAM auth fails on POST /cluster/ha/rules
-# with "unmanaged resource", token auth succeeds with identical params).
-if [[ -f "$ORIG_CFG" ]]; then
-    RESTORE_CFG="$ORIG_CFG.proxxx-e2e-backup"
-    cp "$ORIG_CFG" "$RESTORE_CFG"
-fi
-mkdir -p "$PROXXX_CONFIG_DIR"
-TOKEN_ID="${PROXXX_E2E_PVE_TOKEN%%=*}"
-TOKEN_SECRET="${PROXXX_E2E_PVE_TOKEN##*=}"
-cat > "$ORIG_CFG" <<EOF
-url = "$URL"
-user = "root@pam"
-auth = "token"
-token_id = "$TOKEN_ID"
-verify_tls = false
-EOF
-chmod 0600 "$ORIG_CFG"
-export PROXXX_TOKEN_SECRET="$TOKEN_SECRET"
 
 log "═══════════════════════════════════════════════════════════"
 log "proxxx HA-rules state mutation run — $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -11,6 +11,7 @@ integration tests in `tests/*.rs` — these talk to actual hardware.
 | `test_run.sh` | yes | Read-only probes — `ls nodes/guests/storage`, `replication`, `access`, `iso`, `search`, `patch plan`, format contracts. |
 | `test_mutation.sh` | yes | Full LXC lifecycle on VMID 9999: create → start → snapshot → stop → delete, with RAII `trap EXIT` teardown. |
 | `test_env.md` | **gitignored** | Free-form notes (cluster topology, manual-only steps). |
+| `lib.sh` | yes | Sourced by the scripts: loads the env file, accepts the token with or without `root@pam!`, gives the binary a private config built from the same URL and token as the curl calls (plus its own audit, log and cache directories), and provides `run_timeout` for macOS. |
 | `env.local` | **gitignored** | Cluster URL + PVE token for `test_mutation.sh`. **Sourced by the script; copy from `env.local.example` and fill.** |
 | `env.local.example` | yes | Template showing required env-var names. |
 | `*.log`, `*_errors.log`, `*_summary.md` | gitignored | Run artifacts; regenerated each invocation. |
@@ -19,6 +20,11 @@ integration tests in `tests/*.rs` — these talk to actual hardware.
 
 The scripts are location-independent — they resolve the repo root via
 `git rev-parse` and find the release binary at `target/release/proxxx`.
+The binary never reads your own proxxx config: `lib.sh` writes a private
+one from `PROXXX_E2E_PVE_URL` and `PROXXX_E2E_PVE_TOKEN`, so the probes
+reach the same cluster as the script's `curl` calls and your config file
+is never rewritten (#479). `test_fleet_readonly.sh` is the exception: it
+reads every profile of your config, read-only, by design.
 Run from any cwd:
 
 ```sh

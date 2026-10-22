@@ -100,6 +100,14 @@ fi
 : "${PROXXX_E2E_PVE_TOKEN:?env PROXXX_E2E_PVE_TOKEN not set}"
 : "${PROXXX_E2E_NODE:?env PROXXX_E2E_NODE not set}"
 
+# The binary runs on a private config built from the same URL and token as
+# the curl calls, never on the caller's own config (#479).
+# shellcheck source=tests/live/lib.sh
+. "$SCRIPT_DIR/lib.sh"
+live_normalize_token || exit 2
+live_isolate || exit 2
+trap live_cleanup EXIT
+
 URL="$PROXXX_E2E_PVE_URL"
 NODE="$PROXXX_E2E_NODE"
 LXC_VMID=9999
