@@ -19,6 +19,7 @@ SemVer contract:
 ### Security
 
 - **An SSH client key below the NIST minimum through 2030 is refused before proxxx connects (#485).** proxxx used any key the configuration named: a 1024-bit RSA key loaded and signed (measured). It now refuses an RSA key under 2048 bits and any DSA key, naming the file and pointing to `ssh-keygen -t ed25519`. Ed25519, ECDSA and RSA of 2048 bits or more are unchanged. **Breaking** for a setup that uses such a key. **Migration:** create an Ed25519 key (`ssh-keygen -t ed25519`), install its public key on the nodes and point `key_path` at it.
+- **The operator name in the audit log is looked up with the reentrant `getpwuid_r` (#476).** `getpwuid` returns a pointer into one static buffer shared by every thread, and the lookup runs from the audit hooks inside the multi-threaded runtime, so two concurrent lookups made the copy a data race (undefined behaviour) on the value sealed into the audit actor. The lookup now uses a buffer of its own, grown on `ERANGE`; a test keeps the non-reentrant passwd and group calls out of `src/`.
 
 ### Fixed
 
