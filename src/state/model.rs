@@ -20,6 +20,31 @@
 //! the PVE-side identifier as the first field, a `default` impl so
 //! empty fields don't bloat the TOML, and a stable serialise order
 //! enforced at the export layer.
+//!
+//! ```
+//! use proxxx::state::model::{ClusterState, CURRENT_STATE_SCHEMA};
+//!
+//! let state = ClusterState::from_toml_str(
+//!     r#"
+//! [meta]
+//! profile = "prod"
+//!
+//! [[pools]]
+//! poolid = "web"
+//! members = ["qemu/100", "lxc/200"]
+//! "#,
+//! )?;
+//! assert_eq!(state.pools[0].members, ["qemu/100", "lxc/200"]);
+//! assert_eq!(state.meta.as_ref().map(|m| m.schema_version), Some(CURRENT_STATE_SCHEMA));
+//! // Only the families the document mentions are reconciled.
+//! assert!(state.manages("pools"));
+//! assert!(!state.manages("storage"));
+//!
+//! // The same identity twice in one family is refused.
+//! let twice = "[[pools]]\npoolid = \"web\"\n[[pools]]\npoolid = \"web\"\n";
+//! assert!(ClusterState::from_toml_str(twice).is_err());
+//! # Ok::<(), anyhow::Error>(())
+//! ```
 
 use serde::{Deserialize, Serialize};
 

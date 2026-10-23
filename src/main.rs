@@ -586,4 +586,58 @@ mod tests {
         assert_eq!(super::version_string(Some("  ")), v);
         assert_eq!(super::version_string(None), v);
     }
+
+    fn collect_help(cmd: &clap::Command, path: &str, out: &mut String) {
+        out.push_str(&format!("===== {path} --help =====\n"));
+        out.push_str(&cmd.clone().render_long_help().to_string());
+        out.push('\n');
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            collect_help(sub, &format!("{path} {}", sub.get_name()), out);
+        }
+    }
+
+    /// #296: the `--help` of every command, built the way `main` builds
+    /// the parser. A renamed flag, a dropped subcommand or a changed
+    /// default shows up as a snapshot diff, so the documented CLI cannot
+    /// drift from the binary unnoticed. After an intended change, review
+    /// the diff and accept it with `cargo insta review` (or
+    /// `INSTA_UPDATE=always cargo test --bin proxxx`).
+    #[test]
+    fn every_command_help_matches_the_snapshot() {
+        let mut root = proxxx::cli::args::usage_with_parent_positionals(
+            proxxx::cli::args::reject_empty_positionals(Cli::command()),
+        );
+        root.build();
+        let mut out = String::new();
+        collect_help(&root, "proxxx", &mut out);
+        insta::assert_snapshot!("cli_help", out);
+    }
+
+    /// #296: every entry point in the process table of `ARCHITECTURE.md`
+    /// is a command line this parser accepts.
+    #[test]
+    fn the_process_table_names_real_commands() {
+        let doc = include_str!("../ARCHITECTURE.md");
+        let table = doc
+            .split("## Process model")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("process model section");
+        let mut checked = 0;
+        for row in table.lines().filter(|l| l.starts_with("| ")) {
+            let Some(cmd) = row.split('`').nth(1) else {
+                continue;
+            };
+            if !cmd.starts_with("proxxx") || cmd.contains('<') {
+                continue;
+            }
+            let parsed = Cli::try_parse_from(cmd.split_whitespace());
+            assert!(parsed.is_ok(), "`{cmd}` does not parse: {:?}", parsed.err());
+            checked += 1;
+        }
+        assert!(
+            checked >= 7,
+            "only {checked} commands found in the process table"
+        );
+    }
 }

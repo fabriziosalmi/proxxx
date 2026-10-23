@@ -132,8 +132,10 @@ The resolution order for PVE (`token_secret`, `password`), PBS (`pbs.token_secre
 When no secret can be resolved, the error lists every source consulted in order
 and why each did not yield a secret (without ever printing a secret value).
 
-Once loaded, secrets live in `Zeroizing<String>` — they are wiped from
-the heap on `Drop` . They are never written to logs.
+Once loaded, secrets are held as `SecretString`: its `Debug` prints
+`[REDACTED]`, it has no `Display`, and its heap allocation is wiped on
+`Drop`. The temporaries a secret passes through while the config loads
+are not wiped.
 
 ## TLS
 

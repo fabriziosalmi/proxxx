@@ -74,8 +74,9 @@ Out of scope (please do not report):
 If you're auditing the codebase, these mechanisms are intentional and
 documented in `docs/architecture/security.md`:
 
-- `Zeroizing<String>` for every secret (token, ticket, CSRF, password,
-  PBS token) — `Drop` overwrites the heap allocation.
+- `SecretString` (`src/util/secret.rs`) for every secret (token, ticket,
+  CSRF, password, PBS token): `Debug` prints `[REDACTED]`, there is no
+  `Display` or `Serialize`, and `Drop` overwrites the heap allocation.
 - `cargo clippy --deny unwrap_used --deny expect_used --deny panic
   --deny indexing_slicing` on every commit + CI.
 - 32 MiB body cap on every API response (no OOM via hostile JSON).

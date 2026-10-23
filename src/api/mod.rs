@@ -1,5 +1,50 @@
-// Proxmox API client — trait + types + implementation
-// Zero knowledge of TUI. Pure domain layer.
+//! Proxmox VE API client: the [`ProxmoxGateway`] trait, its HTTP
+//! implementation [`PxClient`], the typed [`ApiError`] and the response
+//! types in [`types`]. No knowledge of the TUI.
+//!
+//! Responses decode into the types in [`types`], and HTTP failures map to
+//! a typed [`ApiError`]:
+//!
+//! ```
+//! use proxxx::api::types::{Guest, GuestStatus, GuestType};
+//! use proxxx::api::ApiError;
+//!
+//! // One row of `GET /cluster/resources?type=vm`. Missing fields default.
+//! let guest: Guest = serde_json::from_value(serde_json::json!({
+//!     "vmid": 100, "name": "web", "status": "running",
+//!     "type": "qemu", "node": "pve1", "uptime": 42
+//! }))?;
+//! assert_eq!(guest.status, GuestStatus::Running);
+//! assert_eq!(guest.guest_type, GuestType::Qemu);
+//!
+//! let err = ApiError::from_status(
+//!     reqwest::StatusCode::NOT_FOUND,
+//!     "/nodes/pve1/qemu/999/status/current",
+//!     String::new(),
+//! );
+//! assert!(matches!(err, ApiError::NotFound(_)));
+//! # Ok::<(), serde_json::Error>(())
+//! ```
+//!
+//! Code written against the trait runs on a live cluster through
+//! [`PxClient`] and on a test double in tests (this example needs a
+//! cluster, so it is compiled but not run):
+//!
+//! ```no_run
+//! use proxxx::api::{ProxmoxGateway, PxClient};
+//!
+//! async fn running(gw: &dyn ProxmoxGateway) -> anyhow::Result<usize> {
+//!     let guests = gw.get_all_guests().await?;
+//!     Ok(guests.iter().filter(|g| g.status == proxxx::api::types::GuestStatus::Running).count())
+//! }
+//!
+//! # async fn demo() -> anyhow::Result<()> {
+//! let profile = proxxx::config::load_config(Some("lab"))?;
+//! let client = PxClient::new(profile, None).await?;
+//! println!("{} running", running(&client).await?);
+//! # Ok(())
+//! # }
+//! ```
 
 mod auth;
 mod client;
@@ -21,7 +66,8 @@ use async_trait::async_trait;
 use types::{Guest, Node, StoragePool, TaskLog};
 
 /// The core gateway trait. All Proxmox interactions go through this.
-/// Implemented by `PxClient` (production) and `MockGateway` (tests).
+/// Implemented by `PxClient` (production) and by test doubles such as
+/// `HitlMockGateway` in `tests/hitl_e2e.rs` and `MockApi` in `src/app/patch.rs`.
 #[async_trait]
 pub trait ProxmoxGateway: Send + Sync {
     // ── Read Operations ─────────────────────────────────

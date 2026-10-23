@@ -36,7 +36,7 @@ How did you confirm this works? Tick what applies and add specifics.
 
 - [ ] Touches the API client (`src/api/`) or mutation lifecycle
 - [ ] Touches HITL / approval gates (`src/hitl/`)
-- [ ] Touches secret handling (`src/config/`, anything `Zeroizing`)
+- [ ] Touches secret handling (`src/config/`, anything `SecretString`)
 - [ ] Adds a new dependency (justify in description; recheck `cargo audit`)
 - [ ] Changes a CLI flag or default behaviour (note in CHANGELOG breaking-changes section)
 - [ ] None of the above
