@@ -313,24 +313,80 @@ fn every_mutating_request_runs_the_gateway_gates_in_order() {
     );
 }
 
-/// The MCP column of the preflight row says "none".
+/// The MCP column and the execution check (#507): the MCP gate runs the
+/// deep preflight on the listed tools, and the HITL daemon runs `assess`
+/// on the live guest before an approved operation.
 #[test]
-fn mcp_and_hitl_run_no_risk_preflight() {
-    for dir in ["src/mcp", "src/hitl"] {
-        let mut files = Vec::new();
-        rust_files(&root().join(dir), &mut files);
-        for f in files {
-            let text = std::fs::read_to_string(&f).unwrap();
-            for (n, line) in code_lines(&text) {
-                assert!(
-                    !line.contains("preflight::"),
-                    "{}:{} calls preflight: update the table in ARCHITECTURE.md",
-                    rel(&f),
-                    n + 1
-                );
-            }
-        }
+fn mcp_and_the_hitl_daemon_run_the_risk_preflight() {
+    let dispatch = read("src/mcp/dispatch.rs");
+    let code = code_lines(&dispatch)
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        code.contains("assess_deep_with("),
+        "the MCP gate runs assess_deep"
+    );
+    for tool in [
+        "stop_guest",
+        "restart_guest",
+        "delete_guest",
+        "migrate_guest",
+    ] {
+        assert!(
+            code.contains(&format!("\"{tool}\" => Some(Op::")),
+            "the MCP preflight covers {tool}"
+        );
     }
+    let daemon = read("src/hitl/daemon.rs");
+    assert!(
+        code_lines(&daemon).any(|(_, l)| l.contains("crate::app::preflight::assess(")),
+        "the HITL daemon checks the live guest before executing"
+    );
+}
+
+/// The CLI approval cell: these five commands go through the policy
+/// path, which asks for Telegram approval on a matching policy.
+#[test]
+fn the_cli_queues_these_commands_for_approval() {
+    let cli = read("src/cli/mod.rs");
+    let lines: Vec<&str> = cli.lines().collect();
+    let mut ops = BTreeSet::new();
+    for (n, line) in code_lines(&cli) {
+        if !line.contains("execute_batch_op_with_policy(") {
+            continue;
+        }
+        let window = lines[n..(n + 4).min(lines.len())].join(" ");
+        let i = window.find("BatchOp::").expect("a BatchOp argument");
+        ops.insert(
+            window[i + 9..]
+                .chars()
+                .take_while(|c| is_ident_char(*c))
+                .collect::<String>(),
+        );
+    }
+    let want: BTreeSet<String> = ["Restart", "Resume", "Start", "Stop", "Suspend"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(ops, want);
+    let common = read("src/cli/common.rs");
+    assert!(common.contains("crate::hitl::policy::check_policies(policies, action_str"));
+}
+
+/// The TUI column: palette actions refuse a locked or HA-managed guest.
+#[test]
+fn tui_palette_actions_refuse_locked_and_ha_guests() {
+    let app = read("src/app.rs");
+    for op in ["stop", "restart", "delete", "snapshot"] {
+        assert!(
+            app.contains(&format!("guest_block_reason(state, vmid, \"{op}\")")),
+            "{op} is checked by guest_block_reason"
+        );
+    }
+    let block = &app[app.find("fn guest_block_reason").unwrap()..];
+    let body = &block[..block.find("\n}\n").unwrap()];
+    assert!(body.contains("is_locked()") && body.contains("is_ha_managed()"));
 }
 
 /// The CLI column: `assess_deep` on exactly these operations.

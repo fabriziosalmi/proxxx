@@ -322,6 +322,23 @@ pub async fn handle_callback_update(
         let exp_gt_str = exp_gt.as_str();
         match live {
             Some(g) if g.node == exp_node && g.guest_type == exp_gt => {
+                // #507: the approval was given for the action, not for the
+                // guest's state now. Refuse a Severe risk (lock, HA
+                // management, a running guest on delete) as the CLI does;
+                // an approver cannot pass `--allow-risk`.
+                if let Some(preflight) = op.preflight_op() {
+                    let risks = crate::app::preflight::assess(preflight, &g);
+                    if crate::app::preflight::max_level(&risks)
+                        == crate::app::preflight::RiskLevel::Severe
+                    {
+                        let err_str = format!(
+                            "preflight refused the {} at execution:\n{}",
+                            preflight.as_str(),
+                            crate::app::preflight::render_risks(&risks)
+                        );
+                        return Ok(fail_before_exec(err_str, source_vmid).await);
+                    }
+                }
                 Some((source_vmid, g.node, g.guest_type))
             }
             Some(g) => {
@@ -753,6 +770,29 @@ impl ApprovedOp {
             }
         }
         Ok(Self::McpCreateGuest(p))
+    }
+
+    /// The risk preflight that guards this operation, as the CLI runs it for
+    /// the same verb (#507). `None` for operations the CLI does not
+    /// preflight either (start, suspend, resume, snapshots, clone, create).
+    #[must_use]
+    pub const fn preflight_op(&self) -> Option<crate::app::preflight::Op> {
+        use crate::app::preflight::Op;
+        match self {
+            Self::CliStop(_) | Self::McpStopGuest(_) => Some(Op::Stop),
+            Self::CliRestart(_) | Self::McpRestartGuest(_) => Some(Op::Restart),
+            Self::McpDeleteGuest(_) => Some(Op::Delete),
+            Self::McpMigrateGuest(_) => Some(Op::Migrate),
+            Self::CliStart(_)
+            | Self::CliSuspend(_)
+            | Self::CliResume(_)
+            | Self::McpCreateSnapshot(_)
+            | Self::McpDeleteSnapshot(_)
+            | Self::McpSuspendGuest(_)
+            | Self::McpCloneGuest(_)
+            | Self::McpCreateGuest(_)
+            | Self::McpCloneWithCloudinit(_) => None,
+        }
     }
 
     /// Return the existing guest VMID that must exist and match `(request.node, request.guest_type)`

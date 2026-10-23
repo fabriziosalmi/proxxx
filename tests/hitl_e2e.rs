@@ -4321,6 +4321,157 @@ async fn mcp_delete_guest_policy_to_store_to_daemon_executes_once() {
     assert_eq!(stored_after.upid.as_deref(), Some("UPID:delete:500"));
 }
 
+fn policy_config(action: &str) -> proxxx::config::ProfileConfig {
+    toml::from_str(&format!(
+        r#"
+        url = "https://127.0.0.1:8006/"
+        user = "root@pam"
+        token_id = "test"
+        token_secret = "00000000-0000-0000-0000-000000000000"
+
+        [[policies]]
+        action = "{action}"
+        target = "*"
+        require = 1
+        channel = "telegram"
+        "#
+    ))
+    .expect("parse ProfileConfig")
+}
+
+async fn telegram_texts(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/sendMessage"))
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .collect()
+}
+
+/// #507: a destructive MCP tool gets the risk preflight the CLI runs for
+/// the same verb. A SEVERE risk (here a sticky lock) refuses before a
+/// request is recorded or anyone is asked.
+#[tokio::test]
+async fn an_mcp_delete_with_a_severe_risk_is_refused_before_approval() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let mut locked = guest(501, "vm-locked");
+    locked.lock = "backup".into();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", locked);
+
+    let resp = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw,
+        &policy_config("delete_guest"),
+        "delete_guest",
+        &serde_json::json!({ "guest_id": 501 }),
+        Some(&pending),
+        Some(&tg),
+    )
+    .await
+    .expect("handle_tool_call_with_store");
+
+    assert_eq!(resp["isError"], true, "{resp}");
+    let text = resp["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("SEVERE") && text.contains("backup"), "{text}");
+    assert_eq!(pending.total_count(), 0, "no request may be recorded");
+    assert!(
+        telegram_texts(&server).await.is_empty(),
+        "nobody may be asked"
+    );
+    assert!(gw.calls_for("delete_guest").is_empty());
+}
+
+/// #507: risks below SEVERE do not refuse; they reach the approver in the
+/// Telegram message, so the approval is given with them in view.
+#[tokio::test]
+async fn the_approval_message_carries_the_preflight_risks() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let mut tagged = guest(502, "vm-prod");
+    tagged.tags = "prod".into();
+    let gw = HitlMockGateway::new().with_node_and_guest("pve01", tagged);
+
+    let resp = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &gw,
+        &policy_config("delete_guest"),
+        "delete_guest",
+        &serde_json::json!({ "guest_id": 502 }),
+        Some(&pending),
+        Some(&tg),
+    )
+    .await
+    .expect("handle_tool_call_with_store");
+
+    let text = resp["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("Action intercepted by HITL policy"), "{text}");
+    assert_eq!(pending.total_count(), 1);
+    let sent = telegram_texts(&server).await;
+    assert_eq!(sent.len(), 1, "one approval request");
+    assert!(
+        sent[0].contains("Preflight") && sent[0].contains("WARN") && sent[0].contains("prod"),
+        "the approval message names the risk: {}",
+        sent[0]
+    );
+}
+
+/// #507: the approval covers the action, not the guest's state when it is
+/// executed. A guest that became HA-managed after a stop was requested is
+/// refused at execution, as `proxxx stop` would refuse it.
+#[tokio::test]
+async fn an_approved_stop_is_refused_when_the_guest_became_ha_managed() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+    let at_request = HitlMockGateway::new().with_node_and_guest("pve01", guest(503, "vm-ha"));
+
+    let resp = proxxx::mcp::dispatch::handle_tool_call_with_store(
+        &at_request,
+        &policy_config("stop_guest"),
+        "stop_guest",
+        &serde_json::json!({ "guest_id": 503 }),
+        Some(&pending),
+        Some(&tg),
+    )
+    .await
+    .expect("handle_tool_call_with_store");
+    let text = resp["content"][0]["text"].as_str().expect("text");
+    let txn_id = text
+        .rsplit("Transaction: ")
+        .next()
+        .expect("txn id")
+        .trim()
+        .to_string();
+
+    let mut ha = guest(503, "vm-ha");
+    ha.hastate = "started".into();
+    let at_approval = HitlMockGateway::new().with_node_and_guest("pve01", ha);
+    let data = signed(tg.hmac_key(), &format!("approve:{txn_id}"));
+    let out = handle_callback_update(
+        &update(1, callback_query("cb-ha-stop", &data)),
+        &pending,
+        &at_approval,
+        &tg,
+    )
+    .await
+    .expect("handle_callback_update");
+
+    match out {
+        CallbackOutcome::ExecuteFailed { ref error, .. } => {
+            assert!(error.contains("preflight refused the stop"), "{error}");
+            assert!(error.contains("HA"), "{error}");
+        }
+        other => panic!("expected ExecuteFailed, got {other:?}"),
+    }
+    assert!(at_approval.calls_for("stop_guest").is_empty());
+    assert!(at_approval.calls_for("shutdown_guest").is_empty());
+    let row = pending.get(&txn_id).expect("get").expect("row");
+    assert_eq!(row.status, proxxx::hitl::pending::RequestStatus::Failed);
+}
+
 /// #340 Test 3 — Guest binding (VMID reuse protection):
 /// - If an existing guest moved to another node or changed type (`qemu` -> `lxc`)
 ///   or disappeared between request time and approval time, the daemon marks the

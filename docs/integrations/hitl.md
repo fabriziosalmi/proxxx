@@ -92,41 +92,49 @@ and **Deny** buttons.
 
 ## How it works
 
+There are two paths. Which gates each caller runs is listed, and checked by a
+test, in the table in
+[`ARCHITECTURE.md`](https://github.com/fabriziosalmi/proxxx/blob/main/ARCHITECTURE.md#the-gates-and-which-caller-runs-which).
+
+**TUI (in process).** The approval is awaited by the TUI itself.
+
 ```
-TUI / CLI / MCP  ──→  enforce_preflight  ──→  check_hitl
-                                                  │
-                                                  ▼
-                                       policy match found?
-                                          │
-                                       ┌──┴──┐
-                                       no    yes
-                                       │     │
-                                       ▼     ▼
-                                  execute*   HitlCoordinator.register(txn_id)
-                                                                      │
-                                                                      ▼
-                                                Telegram::request_approval(...)
-                                                                      │
-                                                                      ▼
-                                                  long-poll getUpdates ──┐
-                                                                          │
-                                  (Approve / Deny callback arrives)       │
-                                                                          ▼
-                                            HitlCoordinator.resolve(txn_id, true|false)
-                                                                          │
-                                                                          ▼
-                                                       execute  OR  refuse
+action from the palette, or an operation from the queue
+  ─► check_hitl: does a policy match, or is --secure set?
+       no  ─► run it (a queued operation runs app::preflight::assess first)
+       yes ─► HitlCoordinator.register(txn_id) ─► Telegram request
+              ─► approved within 120 s: run it    denied or timed out: refuse
 ```
 
-> `*` **MCP diverges here — fail-closed.** On the MCP transport a *destructive*
-> tool with **no matching policy is REFUSED**, not executed: the transport is
-> network-reachable, so an unauthenticated caller must never reach a destructive
-> op. TUI / CLI keep the present-operator behaviour above (no policy → execute)
-> because a human is already at the keyboard. (v0.13.0)
+**CLI batch commands and MCP destructive tools.** The approval is awaited by
+`proxxx hitl serve`, through the pending store (`hitl_pending.db`).
+
+```
+CLI start / stop / restart / suspend / resume      MCP destructive tool
+  (stop and restart: assess_deep first;              │
+   SEVERE refuses unless --allow-risk)               │
+        │                                            │
+        └──────────────► policy match? ◄─────────────┘
+                           no:  CLI runs it; MCP refuses (fail-closed)
+                           yes: MCP stop / restart / delete / migrate run
+                                assess_deep; SEVERE refuses here, other risks
+                                go into the approval message
+                                ─► request stored ─► Telegram request
+                                   (the CLI exits 9)
+proxxx hitl serve, on Approve:
+  guest re-checked against the request ─► app::preflight::assess on the guest
+  as it is now (SEVERE refuses) ─► executed
+```
+
+> **MCP is fail-closed.** On the MCP transport a *destructive* tool with **no
+> matching policy is REFUSED**, not executed: the transport is
+> network-reachable, so an unauthenticated caller must never reach a
+> destructive op. TUI / CLI keep the present-operator behaviour (no policy:
+> execute) because a human is already at the keyboard. (v0.13.0)
 
 Internals:
 
-- **`HitlCoordinator`** holds a `HashMap<txn_id, oneshot::Sender<bool>>`.
+- **`HitlCoordinator`** (TUI) holds a `HashMap<txn_id, oneshot::Sender<bool>>`.
   Register before sending the Telegram request; resolve when the
   callback arrives.
 - **`run_hitl_poller`** is a single shared task that long-polls

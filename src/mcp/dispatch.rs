@@ -44,6 +44,49 @@ pub async fn handle_tool_call(
     handle_tool_call_with_store(client.as_ref(), config, name, args, None, None).await
 }
 
+/// The risk preflight a destructive tool gets: the one the CLI runs for
+/// the same verb (#507). Tools on no existing guest, or whose CLI
+/// counterpart runs none, have none.
+fn preflight_op_for_tool(name: &str) -> Option<crate::app::preflight::Op> {
+    use crate::app::preflight::Op;
+    match name {
+        "stop_guest" => Some(Op::Stop),
+        "restart_guest" => Some(Op::Restart),
+        "delete_guest" => Some(Op::Delete),
+        "migrate_guest" => Some(Op::Migrate),
+        _ => None,
+    }
+}
+
+/// `assess_deep` with the profile's PBS client when one is configured, so
+/// a delete's backup-recency check also sees PBS backups; a PBS client
+/// that cannot be built is reported as a skipped check, as on the CLI.
+async fn mcp_preflight(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    config: &ProfileConfig,
+    op: crate::app::preflight::Op,
+    guest: &crate::api::types::Guest,
+) -> Vec<(
+    crate::app::preflight::Risk,
+    crate::app::preflight::RiskLevel,
+)> {
+    use crate::app::preflight::{Risk, RiskLevel};
+    let (pbs, skipped) = match (op, config.pbs.as_ref()) {
+        (crate::app::preflight::Op::Delete, Some(cfg)) => {
+            match crate::pbs::PbsClient::new(cfg.clone(), None).await {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(format!("PBS client could not be built: {e:#}"))),
+            }
+        }
+        _ => (None, None),
+    };
+    let mut risks = crate::app::preflight::assess_deep_with(client, pbs.as_ref(), op, guest).await;
+    if let Some(reason) = skipped {
+        risks.push((Risk::DeepCheckSkipped { reason }, RiskLevel::Notice));
+    }
+    risks
+}
+
 /// Execute a single MCP tool call using an optional caller-supplied
 /// [`crate::hitl::pending::PendingStore`] (`#340`).
 ///
@@ -214,6 +257,7 @@ pub async fn handle_tool_call_with_store(
                     }
                 },
             };
+            let mut risk_note = String::new();
             let (resolved_node, resolved_gt) = if let Some(v) = guest_id_arg {
                 let g = match fetched_guest {
                     Some(g) => g,
@@ -226,6 +270,28 @@ pub async fn handle_tool_call_with_store(
                     anyhow::bail!(
                         "cannot record HITL request for guest {v}: guest has no resolved node"
                     );
+                }
+                // #507: the risk preflight the CLI runs for the same verb.
+                // A Severe risk refuses before anyone is asked; the others
+                // go into the approval message, so the approver decides
+                // with them. The HITL daemon checks again at execution.
+                if let Some(op) = preflight_op_for_tool(name) {
+                    let risks = mcp_preflight(client, config, op, &g).await;
+                    let rendered = crate::app::preflight::render_risks(&risks);
+                    if crate::app::preflight::max_level(&risks)
+                        == crate::app::preflight::RiskLevel::Severe
+                    {
+                        return Ok(json!({
+                            "content": [{"type": "text", "text": format!(
+                                "Refused: the risk preflight for '{name}' on guest {v} found a \
+                                 SEVERE risk, so no approval was requested:\n{rendered}"
+                            )}],
+                            "isError": true
+                        }));
+                    }
+                    if !rendered.is_empty() {
+                        risk_note = format!("\nPreflight:\n{rendered}");
+                    }
                 }
                 (g.node, g.guest_type)
             } else {
@@ -260,7 +326,7 @@ pub async fn handle_tool_call_with_store(
                 &opened_store
             };
             let txn_id = store.insert(&new_req)?.id;
-            let reason = format!("MCP requested action: {name}");
+            let reason = format!("MCP requested action: {name}{risk_note}");
             if let Err(e) = gateway
                 .request_approval(name, &target, &reason, &txn_id, policy.require)
                 .await

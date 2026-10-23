@@ -369,8 +369,8 @@ Pure Elm-pattern TUI over a typed REST client. The reducer is sync, total, and t
                           AppState mutation      Option<SideEffect>
                                                           │
                                                           ▼
-                                       enforce_preflight  →  check_hitl
-                                       (risk gate)           (Telegram round-trip)
+                                       check_hitl         →  preflight::assess
+                                       (Telegram round-trip)  (queued operations)
                                                           │
                                                           ▼
                                        ProxmoxGateway / PbsGateway / SshPool
