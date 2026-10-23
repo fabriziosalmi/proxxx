@@ -706,13 +706,19 @@ const fn effective_unmanned_prune(converge_prune: bool, cap: Option<u32>) -> boo
     converge_prune && cap.is_some()
 }
 
-/// True if an incident freeze is active for `profile`. Fails SAFE: if the freeze
-/// state can't be read, treat as frozen (skip the unmanned converge) rather than
-/// risk mutating during an incident.
+/// True if an incident freeze is active for `profile`: the global freeze or
+/// that profile's own, the same rule every mutation is refused by (#504: this
+/// read only the profile's lock, so a global freeze let the converge run and
+/// fail on every write). Fails SAFE: a lock that cannot be read counts as
+/// frozen (skip the unmanned converge) rather than risk mutating during an
+/// incident.
 fn is_frozen(profile: Option<&str>) -> bool {
-    crate::incident::current_state_for(profile)
-        .map(|state| state.is_some())
-        .unwrap_or(true)
+    let (global, own) = crate::incident::lock_paths_for(profile);
+    is_frozen_at(&global, own.as_deref())
+}
+
+fn is_frozen_at(global: &std::path::Path, own: Option<&std::path::Path>) -> bool {
+    crate::incident::check_not_frozen_paths(global, own).is_err()
 }
 
 /// Run one unmanned converge, fan the result out to logs + Telegram, then
@@ -887,6 +893,39 @@ async fn repersist_drift(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #504: the converge gate applies the mutation gate's rule. A global
+    /// freeze stops the converge of a named profile, a profile's own freeze
+    /// stops only that profile, and an unreadable lock counts as frozen.
+    #[test]
+    fn a_global_freeze_stops_the_converge_of_a_named_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = dir.path().join("freeze.lock");
+        let prod = dir.path().join("freeze.prod.lock");
+        let lab = dir.path().join("freeze.lab.lock");
+        assert!(!is_frozen_at(&global, Some(&prod)), "nothing frozen yet");
+
+        crate::incident::freeze_at(&global, "fleet-wide", None).expect("freeze");
+        assert!(
+            is_frozen_at(&global, Some(&prod)),
+            "global freeze, named profile"
+        );
+        assert!(is_frozen_at(&global, None), "global freeze, flat profile");
+        crate::incident::thaw_at(&global).expect("thaw");
+
+        crate::incident::freeze_at(&prod, "prod drill", None).expect("freeze prod");
+        assert!(is_frozen_at(&global, Some(&prod)));
+        assert!(
+            !is_frozen_at(&global, Some(&lab)),
+            "another profile is not frozen"
+        );
+
+        std::fs::write(&lab, "not toml [").expect("corrupt lock");
+        assert!(
+            is_frozen_at(&global, Some(&lab)),
+            "an unreadable lock counts as frozen"
+        );
+    }
 
     /// #373: the converge gate follows a SIGHUP reload: `read_only = true`
     /// skips, `auto_converge = false` disables, without restarting the loop.

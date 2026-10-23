@@ -24,10 +24,7 @@ additional_cargo_test_args = [
 # Mutants left out of the run: each entry says why it cannot change
 # behaviour or cannot be tested without touching the operator's real
 # config. A survivor not listed here is a missing assertion.
-#
-# Known survivor, deliberately not excluded: `current_state_for` returning
-# Ok(None). Its only caller, the daemon's converge gate, misses a global
-# freeze for a named profile (#504); the fix removes the function.
+
 exclude_re = [
     # Fallbacks for targets without a passwd database. They do not compile
     # on unix, where mutation testing runs.
@@ -46,7 +43,7 @@ exclude_re = [
     "replace < with <= in login_name_for_uid_with",
     "replace \\* with \\+ in login_name_for_uid_with",
     # The global-path wrapper read only by the MCP freeze notifier. The
-    # gate reads `current_state_for` / `current_state_at`, which are
+    # gates read `check_not_frozen_paths` / `current_state_at`, which are
     # tested; testing this wrapper in-process would need PROXXX_FREEZE_PATH
     # set, and tests must not change the process environment.
     "replace current_state -> Result<Option<FreezeState>> with Ok\\(None\\)",
