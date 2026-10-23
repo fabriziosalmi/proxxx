@@ -2599,6 +2599,36 @@ async fn legacy_unsigned_callback_is_refused_in_v0_1_22() {
     );
 }
 
+/// A tail that is not exactly 16 hex characters is refused as unsigned
+/// before the HMAC is computed, and the operator is told the button needs
+/// a newer daemon. A well-formed tag that does not match is a signature
+/// failure instead: the two answers point at different causes.
+#[tokio::test]
+async fn a_malformed_tag_is_refused_as_unsigned_before_the_signature_check() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let payload = "approve:0123456789abcdef";
+
+    for tail in ["abc", "0123456789abcdef0", "zzzzzzzzzzzzzzzz"] {
+        let data = format!("{payload}:{tail}");
+        let cb = callback_query("cb-malformed", &data);
+        assert_eq!(
+            proxxx::hitl::daemon::verify_callback(&tg, &cb),
+            Err(proxxx::hitl::daemon::CallbackRejection::Unsigned { data: data.clone() }),
+            "tail {tail:?}"
+        );
+    }
+
+    let good = signed(tg.hmac_key(), payload);
+    let flipped_last = if good.ends_with('0') { '1' } else { '0' };
+    let data = format!("{}{flipped_last}", &good[..good.len() - 1]);
+    let cb = callback_query("cb-forged", &data);
+    assert_eq!(
+        proxxx::hitl::daemon::verify_callback(&tg, &cb),
+        Err(proxxx::hitl::daemon::CallbackRejection::InvalidSignature { data }),
+    );
+}
+
 // ── Issues #336 + #337: Unified callback verification & TUI round-trip ──
 
 /// Issue #336: TUI round trip with a stub gateway — register a txn via the
@@ -4816,6 +4846,59 @@ async fn failed_tui_actions_are_reported_on_screen() {
         assert!(
             msg.contains(expected) && msg.contains("PVE said no"),
             "{msg}"
+        );
+    }
+}
+
+/// `#340` Decision 3, `#297`: a `create_guest` row whose recorded binding
+/// disagrees with its parameters on the node alone, or on the guest type
+/// alone, is refused before any gateway call. Either mismatch is enough.
+#[tokio::test]
+async fn create_guest_refuses_a_node_or_type_mismatch_on_its_own() {
+    let server = setup_telegram_mock().await;
+    let tg = fake_gateway(&server);
+    let (_dir, pending) = temp_pending_store();
+
+    let cases = [
+        ("pve02", "qemu", "expected pve01/qemu, found pve02/qemu"),
+        ("pve01", "lxc", "expected pve01/qemu, found pve01/lxc"),
+    ];
+    for (i, (node, kind, want)) in cases.into_iter().enumerate() {
+        let gw = HitlMockGateway::new();
+        let req = pending
+            .insert(
+                &proxxx::hitl::pending::NewPendingRequest::new("create_guest", Some(700), 1)
+                    .with_node("pve01")
+                    .with_guest_type(GuestType::Qemu)
+                    .with_params(serde_json::json!({
+                        "node": node,
+                        "type": kind,
+                        "vmid": 700,
+                        "name": "bound-vm",
+                        "template": "local:vztmpl/debian-12.tar.zst"
+                    })),
+            )
+            .expect("insert");
+        let data = signed(tg.hmac_key(), &format!("approve:{}", req.id));
+        let out = handle_callback_update(
+            &update(
+                10 + i64::try_from(i).expect("small"),
+                callback_query("cb-bind-mismatch", &data),
+            ),
+            &pending,
+            &gw,
+            &tg,
+        )
+        .await
+        .expect("handle");
+        let CallbackOutcome::ExecuteFailed { error, .. } = out else {
+            panic!("{node}/{kind}: a binding mismatch must fail, got {out:?}");
+        };
+        assert!(error.contains(want), "{node}/{kind}: {error}");
+        assert!(gw.all_calls().is_empty(), "{node}/{kind}: no gateway call");
+        assert_eq!(
+            pending.get(&req.id).unwrap().unwrap().status,
+            proxxx::hitl::pending::RequestStatus::Failed
         );
     }
 }

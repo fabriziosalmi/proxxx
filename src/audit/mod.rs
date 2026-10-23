@@ -948,10 +948,11 @@ pub fn rotate_key_at(db_path: &Path, primary: &Path) -> Result<String> {
     }
     crate::util::durable::sync_parent_dir(&dest)?;
 
-    // Evict cached loggers so subsequent writes pick up the new primary key.
+    // Evict the cached logger of this log so its next write picks up the new
+    // primary key. Loggers of other audit directories keep their entries.
     if let Some(mutex) = PROCESS_AUDIT_LOGGERS.get() {
         if let Ok(mut guard) = mutex.lock() {
-            guard.clear();
+            guard.remove(&(db_path.to_path_buf(), primary.to_path_buf()));
         }
     }
     info!(key_id = %key_id, "audit key rotated");
@@ -1051,28 +1052,16 @@ pub fn parse_pve_path(path: &str) -> (Option<String>, Option<u32>) {
     let segments: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
     let mut node = None;
     let mut vmid = None;
-    let mut i = 0;
-    while i < segments.len() {
-        if let Some(&seg) = segments.get(i) {
-            match seg {
-                "nodes" => {
-                    if let Some(&n) = segments.get(i + 1) {
-                        if !n.is_empty() {
-                            node = Some(n.to_string());
-                        }
-                    }
+    for pair in segments.windows(2) {
+        match pair {
+            ["nodes", n] => node = Some((*n).to_string()),
+            ["qemu" | "lxc", v] => {
+                if let Ok(parsed) = v.parse::<u32>() {
+                    vmid = Some(parsed);
                 }
-                "qemu" | "lxc" => {
-                    if let Some(&v) = segments.get(i + 1) {
-                        if let Ok(parsed) = v.parse::<u32>() {
-                            vmid = Some(parsed);
-                        }
-                    }
-                }
-                _ => {}
             }
+            _ => {}
         }
-        i += 1;
     }
     (node, vmid)
 }
@@ -1790,6 +1779,16 @@ mod key_rotation_tests {
             (Some("pve3".to_string()), None)
         );
         assert_eq!(super::parse_pve_path("/access/users"), (None, None));
+        // A keyword in the last segment has no value after it.
+        assert_eq!(super::parse_pve_path("/nodes"), (None, None));
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve1/qemu"),
+            (Some("pve1".to_string()), None)
+        );
+        assert_eq!(
+            super::parse_pve_path("/nodes/pve1/lxc/abc"),
+            (Some("pve1".to_string()), None)
+        );
     }
 
     #[test]
@@ -2147,5 +2146,209 @@ mod chain_transaction_tests {
             .verify()
             .expect("verify");
         assert_eq!((ok, broken), (5, 0));
+    }
+}
+
+/// Gaps found by mutation testing (`#297`): each test below fails under a
+/// mutant that the rest of the suite let through.
+#[cfg(test)]
+mod mutation_gap_tests {
+    use super::*;
+
+    /// The timestamp of every entry comes from this conversion, and nothing
+    /// else pinned it: leap days, the 100/400-year rules and the last second
+    /// of a day.
+    #[test]
+    fn unix_seconds_convert_to_the_utc_calendar() {
+        type Ymdhms = (u64, u64, u64, u64, u64, u64);
+        let cases: [(u64, Ymdhms); 9] = [
+            (0, (1970, 1, 1, 0, 0, 0)),
+            (31_536_000, (1971, 1, 1, 0, 0, 0)),
+            (978_307_200, (2001, 1, 1, 0, 0, 0)),
+            (951_782_400, (2000, 2, 29, 0, 0, 0)),
+            (1_234_567_890, (2009, 2, 13, 23, 31, 30)),
+            (1_709_251_199, (2024, 2, 29, 23, 59, 59)),
+            (4_102_444_799, (2099, 12, 31, 23, 59, 59)),
+            (4_107_542_399, (2100, 2, 28, 23, 59, 59)),
+            (4_107_542_400, (2100, 3, 1, 0, 0, 0)),
+        ];
+        for (secs, want) in cases {
+            assert_eq!(unix_to_ymdhms(secs), want, "{secs}");
+        }
+    }
+
+    /// An entry is stamped with the current time in `YYYY-MM-DDTHH:MM:SSZ`.
+    #[test]
+    fn an_entry_is_stamped_with_the_current_utc_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let before = now_unix_secs();
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+        lg.log("stamp", "u", None, None, None, "ok").expect("log");
+        let after = now_unix_secs();
+        let ts: String = lg
+            .conn
+            .query_row("SELECT ts FROM audit_log", [], |r| r.get(0))
+            .expect("ts");
+        let window: Vec<String> = (before..=after)
+            .map(|s| {
+                let (y, mo, d, h, m, s) = unix_to_ymdhms(s);
+                format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+            })
+            .collect();
+        assert!(window.contains(&ts), "ts {ts:?} not in {window:?}");
+        // `now_unix_secs` itself must be the wall clock, not a constant.
+        assert!(before > 1_700_000_000, "{before}");
+    }
+
+    /// `#281`: a row whose retired key file is gone cannot be checked and is
+    /// counted as a failure, while rows signed with the primary still verify.
+    #[test]
+    fn rows_whose_retired_key_is_gone_count_as_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.db");
+        let key = dir.path().join("audit.key");
+        {
+            let mut lg = AuditLogger::open_in(dir.path()).expect("open");
+            for i in 0..3 {
+                lg.log(&format!("before-{i}"), "u", None, None, None, "ok")
+                    .expect("log");
+            }
+        }
+        let key_id = rotate_key_at(&db, &key).expect("rotate");
+        let stamp: u64 = key_id
+            .strip_prefix("retired-")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("key id {key_id:?}"));
+        assert!(
+            now_unix_secs().abs_diff(stamp) < 60,
+            "the retired id records when the key was retired: {key_id}"
+        );
+        std::fs::remove_file(retired_key_path_for(&key, &key_id)).expect("rm retired");
+        let mut lg = AuditLogger::open_in(dir.path()).expect("reopen");
+        lg.log("after", "u", None, None, None, "ok").expect("log");
+        assert_eq!(lg.verify().expect("verify"), (1, 3));
+    }
+
+    /// `#173`: a legacy v1 row is still tamper-evident. Its MAC comes from
+    /// `compute_hmac`, so a constant MAC would let an edited row verify.
+    #[test]
+    fn an_edited_legacy_v1_row_fails_verification() {
+        let logger = AuditLogger::for_test();
+        let ts = "2024-01-01T00:00:00Z";
+        let v1_hmac = compute_hmac(&logger.key, "", ts, "delete", "100", "ok");
+        assert_eq!(v1_hmac.len(), 64, "{v1_hmac:?}");
+        logger
+            .conn
+            .execute(
+                "INSERT INTO audit_log
+                    (ts, action, user, vmid, node, params_json, result, chain_hmac, chain_version)
+                 VALUES (?1, 'delete', 'alice', 100, NULL, NULL, 'ok', ?2, 1)",
+                params![ts, v1_hmac],
+            )
+            .expect("insert v1");
+        assert_eq!(logger.verify().expect("verify"), (1, 0));
+        logger
+            .conn
+            .execute("UPDATE audit_log SET result = 'failed'", [])
+            .expect("tamper");
+        assert_eq!(logger.verify().expect("verify"), (0, 1));
+    }
+
+    /// A key replaced on disk is picked up by the next write through the
+    /// process cache instead of signing with the stale one.
+    #[test]
+    fn the_process_cache_follows_a_key_replaced_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        with_cached_logger_at(Some(dir.path()), |c| {
+            c.logger.log("first", "u", None, None, None, "ok")
+        })
+        .expect("first write");
+        let new_key = vec![7u8; 32];
+        let key_path = dir.path().join("audit.key");
+        std::fs::remove_file(&key_path).expect("rm key");
+        write_new_key_file(&key_path, &new_key).expect("new key");
+        let seen = with_cached_logger_at(Some(dir.path()), |c| Ok(c.logger.key.clone()))
+            .expect("second access");
+        assert_eq!(seen, new_key);
+    }
+
+    /// A database deleted on disk is recreated by the next write through the
+    /// process cache, not written into the unlinked file.
+    #[test]
+    fn the_process_cache_recreates_a_deleted_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.db");
+        with_cached_logger_at(Some(dir.path()), |c| {
+            c.logger.log("first", "u", None, None, None, "ok")
+        })
+        .expect("first write");
+        std::fs::remove_file(&db).expect("rm db");
+        with_cached_logger_at(Some(dir.path()), |c| {
+            c.logger.log("second", "u", None, None, None, "ok")
+        })
+        .expect("second write");
+        assert!(db.exists(), "the database must be recreated");
+        let rows: i64 = Connection::open(&db)
+            .expect("raw")
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
+
+    /// `#173`: a database written before the v2 chain has no
+    /// `chain_version` column. Opening it adds the column, its rows keep
+    /// verifying as v1, and new rows chain on as v2.
+    #[test]
+    fn a_pre_v2_database_is_migrated_and_keeps_verifying() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut key = vec![0u8; 32];
+        getrandom::fill(&mut key).expect("random key");
+        write_new_key_file(&dir.path().join("audit.key"), &key).expect("key");
+        let ts = "2024-01-01T00:00:00Z";
+        let v1 = compute_hmac(&key, "", ts, "delete", "100", "ok");
+        let raw = Connection::open(dir.path().join("audit.db")).expect("raw");
+        raw.execute_batch(
+            "CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL, action TEXT NOT NULL,
+                user TEXT NOT NULL DEFAULT '', vmid INTEGER, node TEXT,
+                params_json TEXT, result TEXT NOT NULL DEFAULT '',
+                chain_hmac TEXT NOT NULL
+            );",
+        )
+        .expect("old schema");
+        raw.execute(
+            "INSERT INTO audit_log (ts, action, user, vmid, result, chain_hmac)
+             VALUES (?1, 'delete', 'alice', 100, 'ok', ?2)",
+            params![ts, v1],
+        )
+        .expect("old row");
+        drop(raw);
+
+        let mut lg = AuditLogger::open_in(dir.path()).expect("open migrates");
+        lg.log("after", "u", None, None, None, "ok")
+            .expect("append");
+        assert_eq!(lg.verify().expect("verify"), (2, 0));
+        let versions: Vec<i64> = lg
+            .conn
+            .prepare("SELECT chain_version FROM audit_log ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(versions, vec![1, CHAIN_V2]);
+    }
+
+    /// A database path that cannot be created is an error, not a silent
+    /// fall-through to the "already exists" branch.
+    #[cfg(unix)]
+    #[test]
+    fn an_uncreatable_database_path_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("file");
+        let err = create_db_file_private(&file.join("audit.db")).expect_err("must fail");
+        assert!(format!("{err:#}").contains("create audit db"), "{err:#}");
     }
 }

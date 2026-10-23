@@ -224,12 +224,25 @@ pub fn operator_label() -> String {
 }
 
 fn operator_id() -> String {
-    let host = hostname_or_unknown();
     let uid = real_uid();
-    let resolved = login_name_for_uid(uid);
-    let claimed = std::env::var("USER").ok();
+    compose_operator_id(
+        login_name_for_uid(uid).as_deref(),
+        std::env::var("USER").ok().as_deref(),
+        uid,
+        &hostname_or_unknown(),
+    )
+}
 
-    let who = match (resolved.as_deref(), claimed.as_deref()) {
+/// The operator label from its parts: the passwd name of the real uid
+/// (`resolved`), the name the environment claims (`claimed`), the uid and
+/// the host.
+fn compose_operator_id(
+    resolved: Option<&str>,
+    claimed: Option<&str>,
+    uid: u32,
+    host: &str,
+) -> String {
+    let who = match (resolved, claimed) {
         // Resolved name and the environment agree — the ordinary case.
         (Some(r), Some(c)) if r == c => r.to_string(),
         // Disagreement, or no passwd entry: keep the uid, which is
@@ -250,11 +263,6 @@ fn real_uid() -> u32 {
     // touches no memory we own. It is one of the few genuinely
     // infallible syscalls.
     unsafe { libc::getuid() }
-}
-
-#[cfg(not(unix))]
-fn real_uid() -> u32 {
-    0
 }
 
 /// Resolve a uid to its login name via the passwd database.
@@ -299,7 +307,12 @@ fn login_name_for_uid_with(uid: u32, capacity: usize) -> Option<String> {
             buf.resize(grown, 0);
             continue;
         }
-        if rc != 0 || result.is_null() {
+        if rc != 0 {
+            return None;
+        }
+        // Not found. A separate test on purpose: joined to the line above
+        // with `||`, one wrong operator would read `pwd` uninitialised.
+        if result.is_null() {
             return None;
         }
         // SAFETY: a zero return with a non-null `result` means libc found
@@ -321,10 +334,22 @@ fn login_name_for_uid_with(uid: u32, capacity: usize) -> Option<String> {
     }
 }
 
+/// Fallbacks for targets without a passwd database. The release targets
+/// are unix (AR-5); these keep the crate building elsewhere and are left
+/// out of mutation testing, which runs on unix where they do not compile.
 #[cfg(not(unix))]
-fn login_name_for_uid(_uid: u32) -> Option<String> {
-    std::env::var("USERNAME").ok()
+mod portable {
+    pub(super) fn real_uid() -> u32 {
+        0
+    }
+
+    pub(super) fn login_name_for_uid(_uid: u32) -> Option<String> {
+        std::env::var("USERNAME").ok()
+    }
 }
+
+#[cfg(not(unix))]
+use portable::{login_name_for_uid, real_uid};
 
 fn hostname_or_unknown() -> String {
     // Avoid pulling in a hostname crate — `gethostname()` via libc
@@ -870,20 +895,6 @@ mod tests {
 
 #[cfg(test)]
 mod operator_identity_tests {
-    /// #256 — the audit actor must be anchored on the real uid, which
-    /// the caller cannot set, rather than on `$USER`, which it can.
-    ///
-    /// This test does not mutate the environment (it is process-global
-    /// and other tests in this binary run in parallel); it asserts the
-    /// structural property instead: whatever `$USER` says, the label
-    /// resolves from the passwd entry for our real uid, and a
-    /// disagreement is marked rather than believed.
-    /// Assertion messages here deliberately describe the SHAPE of the
-    /// label rather than interpolating it. A uid is not a credential,
-    /// but it is account-identifying, and `CodeQL`'s `rust/cleartext-logging`
-    /// is right that a test failure should not be the thing that prints
-    /// it into CI output. The structural description is what a reader
-    /// debugging a failure actually needs.
     /// #476: uid 0 is `root` on every unix proxxx supports; starting
     /// from a 1-byte buffer forces the `ERANGE` growth path.
     #[cfg(unix)]
@@ -959,6 +970,20 @@ mod operator_identity_tests {
         );
     }
 
+    /// #256 — the audit actor must be anchored on the real uid, which
+    /// the caller cannot set, rather than on `$USER`, which it can.
+    ///
+    /// This test does not mutate the environment (it is process-global
+    /// and other tests in this binary run in parallel); it asserts the
+    /// structural property instead: whatever `$USER` says, the label
+    /// resolves from the passwd entry for our real uid, and a
+    /// disagreement is marked rather than believed.
+    /// Assertion messages here deliberately describe the SHAPE of the
+    /// label rather than interpolating it. A uid is not a credential,
+    /// but it is account-identifying, and `CodeQL`'s `rust/cleartext-logging`
+    /// is right that a test failure should not be the thing that prints
+    /// it into CI output. The structural description is what a reader
+    /// debugging a failure actually needs.
     #[test]
     fn operator_label_is_anchored_on_the_real_uid() {
         let label = super::operator_label();
@@ -992,14 +1017,50 @@ mod operator_identity_tests {
         }
     }
 
-    /// The uid is real kernel state — it must not be affected by the
-    /// environment variable the old implementation trusted.
+    /// The uid is kernel state, checked against a second kernel source: the
+    /// owner of a file this process creates. (`#297`: the previous version
+    /// compared `real_uid()` with itself and could not fail.)
+    #[cfg(unix)]
     #[test]
-    fn real_uid_is_not_influenced_by_env() {
-        let before = super::real_uid();
-        // Reading is enough: we assert stability across a call that would
-        // have changed the old `$USER`-derived answer.
-        let after = super::real_uid();
-        assert_eq!(before, after, "getuid() must be stable");
+    fn real_uid_owns_the_files_this_process_creates() {
+        use std::os::unix::fs::MetadataExt as _;
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let owner = file.as_file().metadata().expect("stat").uid();
+        assert!(
+            super::real_uid() == owner,
+            "real_uid() must be the uid that owns a file this process creates"
+        );
+    }
+
+    /// `#297`: a uid with no passwd entry resolves to no name.
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_uid_has_no_login_name() {
+        assert_eq!(super::login_name_for_uid(3_999_999_999), None);
+        assert_eq!(super::login_name_for_uid_with(3_999_999_999, 1), None);
+    }
+
+    /// `#256`, `#297`: every combination of passwd name and `$USER` claim.
+    /// Fake names and uids only, so a failure prints nothing real.
+    #[test]
+    fn the_operator_label_believes_the_passwd_name_and_marks_a_claim() {
+        let cases = [
+            (Some("alice"), Some("alice"), "alice@h"),
+            (
+                Some("alice"),
+                Some("mallory"),
+                "alice(uid:4242;claimed:mallory)@h",
+            ),
+            (Some("alice"), None, "alice@h"),
+            (None, Some("mallory"), "uid:4242(claimed:mallory)@h"),
+            (None, None, "uid:4242@h"),
+        ];
+        for (resolved, claimed, want) in cases {
+            assert_eq!(
+                super::compose_operator_id(resolved, claimed, 4242, "h"),
+                want,
+                "{resolved:?} {claimed:?}"
+            );
+        }
     }
 }

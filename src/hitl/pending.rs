@@ -997,4 +997,113 @@ mod tests {
         assert_eq!(kept_recent.status, RequestStatus::Executed);
         assert_eq!(kept_recent.upid.as_deref(), Some("UPID:stop:105"));
     }
+
+    /// The retention window is seven days, in seconds. The test above
+    /// derives its times from `RETENTION_SECS` itself, so it would not
+    /// notice the constant changing; this one pins the literal boundary.
+    #[test]
+    fn terminal_rows_are_kept_for_exactly_seven_days() {
+        const SEVEN_DAYS: i64 = 604_800;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("hitl_pending.db");
+        let t0 = 1_700_000_000_i64;
+        let store = PendingStore::open_at_with_now(&db_path, t0).expect("open");
+        let row = store
+            .insert_at(&NewPendingRequest::new("stop", Some(101), 1), t0)
+            .expect("insert");
+        store
+            .process_callback_at(&row.id, CallbackDecision::Deny, 1, t0 + 1)
+            .expect("deny");
+        drop(store);
+
+        let at_boundary =
+            PendingStore::open_at_with_now(&db_path, t0 + SEVEN_DAYS).expect("reopen");
+        assert!(
+            at_boundary.get(&row.id).expect("get").is_some(),
+            "kept at 7 days"
+        );
+        drop(at_boundary);
+        let past = PendingStore::open_at_with_now(&db_path, t0 + SEVEN_DAYS + 1).expect("reopen");
+        assert!(
+            past.get(&row.id).expect("get").is_none(),
+            "pruned after 7 days"
+        );
+    }
+
+    #[test]
+    fn the_clock_reads_the_current_unix_time() {
+        // 2026-01-01T00:00:00Z and 2100-01-01T00:00:00Z.
+        let now = now_unix_secs();
+        assert!((1_767_225_600..4_102_444_800).contains(&now), "{now}");
+    }
+
+    #[test]
+    fn each_status_has_the_name_the_schema_stores() {
+        for (status, name) in [
+            (RequestStatus::Pending, "pending"),
+            (RequestStatus::Approved, "approved"),
+            (RequestStatus::Denied, "denied"),
+            (RequestStatus::Expired, "expired"),
+            (RequestStatus::Executed, "executed"),
+            (RequestStatus::Failed, "failed"),
+        ] {
+            assert_eq!(status.as_str(), name);
+            assert_eq!(status.to_string(), name);
+            assert_eq!(RequestStatus::parse(name).expect("parse"), status);
+        }
+    }
+
+    #[test]
+    fn total_count_counts_every_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PendingStore::open_at(dir.path().join("hitl_pending.db")).expect("open");
+        assert_eq!(store.total_count(), 0);
+        for vmid in [101, 102] {
+            store
+                .insert(&NewPendingRequest::new("stop", Some(vmid), 1))
+                .expect("insert");
+        }
+        assert_eq!(store.total_count(), 2);
+    }
+
+    /// A store created before the `upid` column existed gains it on open,
+    /// so recording the task id of an executed request still works.
+    #[test]
+    fn a_store_without_the_upid_column_is_migrated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("hitl_pending.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw");
+            conn.execute_batch(
+                "CREATE TABLE hitl_pending_requests (
+                    id             TEXT PRIMARY KEY,
+                    action         TEXT NOT NULL,
+                    vmid           INTEGER,
+                    node           TEXT,
+                    guest_type     TEXT,
+                    params_json    TEXT NOT NULL DEFAULT '{}',
+                    require        INTEGER NOT NULL,
+                    issued_at      INTEGER NOT NULL,
+                    expires_at     INTEGER NOT NULL,
+                    status         TEXT NOT NULL,
+                    approvers_json TEXT NOT NULL DEFAULT '[]',
+                    error          TEXT
+                );",
+            )
+            .expect("old schema");
+        }
+        let t0 = now_unix_secs();
+        let store = PendingStore::open_at_with_now(&db_path, t0).expect("open migrates");
+        let row = store
+            .insert_at(&NewPendingRequest::new("stop", Some(101), 1), t0)
+            .expect("insert");
+        store
+            .process_callback_at(&row.id, CallbackDecision::Approve, 1, t0 + 1)
+            .expect("approve");
+        store
+            .mark_executed(&row.id, "UPID:stop:101")
+            .expect("mark_executed");
+        let got = store.get(&row.id).expect("get").expect("row");
+        assert_eq!(got.upid.as_deref(), Some("UPID:stop:101"));
+    }
 }

@@ -1161,3 +1161,121 @@ mod callback_verify_tests {
         }
     }
 }
+
+/// Gaps found by mutation testing (`#297`): each test fails under a mutant
+/// that the rest of the suite let through.
+#[cfg(test)]
+mod mutation_gap_tests {
+    use super::*;
+    use crate::hitl::pending::{PendingRequest, RequestStatus};
+
+    fn request(action: &str, vmid: Option<u32>, params: &serde_json::Value) -> PendingRequest {
+        PendingRequest {
+            id: "0123456789abcdef".to_string(),
+            action: action.to_string(),
+            vmid,
+            node: Some("pve01".to_string()),
+            guest_type: None,
+            params_json: params.to_string(),
+            require: 1,
+            issued_at: 0,
+            expires_at: i64::MAX,
+            status: RequestStatus::Pending,
+            approvers: Vec::new(),
+            upid: None,
+            error: None,
+        }
+    }
+
+    /// The transaction id accepts exactly `[A-Za-z0-9_-]{1,64}`.
+    #[test]
+    fn callback_ids_are_limited_to_a_safe_charset_and_length() {
+        let longest = "a".repeat(64);
+        for id in ["op_1-a", "_", "-", longest.as_str()] {
+            let parsed = parse_callback_payload(&format!("approve:{id}"))
+                .unwrap_or_else(|e| panic!("{id:?} must parse: {e}"));
+            assert_eq!(parsed.txn_id, id);
+        }
+        let too_long = "a".repeat(65);
+        for id in [
+            "has space",
+            "a/b",
+            "a.b",
+            "caf\u{e9}",
+            "a\nb",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                parse_callback_payload(&format!("deny:{id}")),
+                Err(PayloadParseError::Invalid),
+                "{id:?}"
+            );
+        }
+    }
+
+    /// A CLI action needs a positive VMID; zero or none is refused at decode.
+    #[test]
+    fn cli_actions_refuse_a_missing_or_zero_vmid() {
+        for action in ["start", "stop", "restart", "suspend", "resume"] {
+            for vmid in [None, Some(0)] {
+                let err = ApprovedOp::decode(&request(action, vmid, &serde_json::json!({})))
+                    .expect_err("must refuse");
+                assert!(
+                    err.contains("missing positive vmid"),
+                    "{action} {vmid:?}: {err}"
+                );
+            }
+            assert!(
+                ApprovedOp::decode(&request(action, Some(100), &serde_json::json!({}))).is_ok(),
+                "{action} with vmid 100"
+            );
+        }
+    }
+
+    /// Only a positive explicit target VMID has to be free at execution time;
+    /// zero means "let Proxmox pick" and is never checked.
+    #[test]
+    fn only_a_positive_target_vmid_must_be_free() {
+        let create = |vmid: u32| serde_json::json!({"node": "pve01", "type": "qemu", "vmid": vmid});
+        let clone = |newid: u32| serde_json::json!({"guest_id": 100, "newid": newid});
+        for (action, vmid, params, want) in [
+            ("create_guest", None, create(0), None),
+            ("create_guest", None, create(300), Some(300)),
+            ("clone_guest", Some(100), clone(0), None),
+            ("clone_guest", Some(100), clone(200), Some(200)),
+            ("clone_with_cloudinit", Some(100), clone(0), None),
+            ("clone_with_cloudinit", Some(100), clone(201), Some(201)),
+        ] {
+            let req = request(action, vmid, &params);
+            let op = ApprovedOp::decode(&req).unwrap_or_else(|e| panic!("{action}: {e}"));
+            assert_eq!(op.free_target_vmid(&req), want, "{action} {params}");
+        }
+    }
+
+    /// Omitted parameters take their documented defaults.
+    #[test]
+    fn omitted_parameters_take_their_defaults() {
+        let stop: CliStopParams = serde_json::from_str("{}").expect("stop");
+        assert_eq!(stop, CliStopParams::default());
+        assert_eq!(stop.timeout_secs, 60);
+        assert!(!stop.force);
+        let migrate: McpMigrateGuestParams =
+            serde_json::from_str(r#"{"guest_id": 1, "target_node": "pve02"}"#).expect("migrate");
+        assert!(
+            migrate.online,
+            "a migration is online unless asked otherwise"
+        );
+    }
+
+    #[test]
+    fn payload_parse_errors_say_what_was_wrong() {
+        assert_eq!(
+            PayloadParseError::LegacyFormat.to_string(),
+            "legacy multi-segment callback format is no longer accepted"
+        );
+        assert_eq!(
+            PayloadParseError::Invalid.to_string(),
+            "invalid callback payload format"
+        );
+    }
+}

@@ -1,0 +1,65 @@
+# cargo-mutants configuration (#297). Run with `cargo mutants`; the
+# weekly workflow (.github/workflows/mutants.yml) uses the same file.
+#
+# Scope: the modules whose tests stand behind a refusal. Widen one module
+# at a time, and only once these report no unexplained survivor.
+examine_globs = ["src/hitl/**", "src/audit/**", "src/incident/**"]
+
+# The unit tests plus the integration suites that exercise these modules.
+# The full suite would multiply the run time for no additional kills.
+additional_cargo_test_args = [
+    "--lib",
+    "--test", "hitl_e2e",
+    "--test", "hitl_test",
+    "--test", "hitl_no_channel_e2e",
+    "--test", "mcp_security_e2e",
+    "--test", "audit_verify_e2e",
+    "--test", "api_test",
+    "--test", "resilience_chaos_e2e",
+    "--test", "daemon_components_e2e",
+    "--test", "doctor_pve9_e2e",
+    "--test", "incident_freeze_e2e",
+]
+
+# Mutants left out of the run: each entry says why it cannot change
+# behaviour or cannot be tested without touching the operator's real
+# config. A survivor not listed here is a missing assertion.
+#
+# Known survivor, deliberately not excluded: `current_state_for` returning
+# Ok(None). Its only caller, the daemon's converge gate, misses a global
+# freeze for a named profile (#504); the fix removes the function.
+exclude_re = [
+    # Fallbacks for targets without a passwd database. They do not compile
+    # on unix, where mutation testing runs.
+    "portable::",
+    # The mask decides whether to narrow a file that is already private.
+    # `|` or `^` make it always true, and narrowing a 0600 file to 0600 is
+    # a no-op.
+    "replace & with [|^] in create_db_file_private",
+    # Any other hard-link error then goes to `read_existing_key`, which
+    # fails on the missing file: the open is refused either way.
+    "match guard e.kind\\(\\) == std::io::ErrorKind::AlreadyExists with true in create_key_once",
+    # Buffer growth of the passwd lookup. These change how fast the buffer
+    # grows, or let it grow past the 1 MiB cap that no passwd entry
+    # reaches; the name returned is the same.
+    "replace && with \\|\\| in login_name_for_uid_with",
+    "replace < with <= in login_name_for_uid_with",
+    "replace \\* with \\+ in login_name_for_uid_with",
+    # The global-path wrapper read only by the MCP freeze notifier. The
+    # gate reads `current_state_for` / `current_state_at`, which are
+    # tested; testing this wrapper in-process would need PROXXX_FREEZE_PATH
+    # set, and tests must not change the process environment.
+    "replace current_state -> Result<Option<FreezeState>> with Ok\\(None\\)",
+    # Global-only wrappers with no caller: mutations go through
+    # `check_not_frozen_for` and the CLI thaws through `thaw_for`, both
+    # tested end to end in tests/incident_freeze_e2e.rs.
+    "replace check_not_frozen -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    "replace thaw -> Result<Option<FreezeState>> with Ok\\(None\\)",
+    # Resolves the key path in the operator's config directory, which tests
+    # must not touch; the load, replace and refuse logic is in
+    # `load_or_generate_hmac_key_at`, which is tested.
+    "replace load_or_generate_hmac_key -> ",
+    # Both operands compare the same 8 tag bytes (the constant-time helper
+    # and the plain slice comparison), so `&&` and `||` agree.
+    "replace && with \\|\\| in verify",
+]
