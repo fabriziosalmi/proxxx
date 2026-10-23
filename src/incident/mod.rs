@@ -372,12 +372,6 @@ pub fn current_state() -> Result<Option<FreezeState>> {
     current_state_at(&freeze_path())
 }
 
-/// Read the freeze state for a scope: `None` = the global lock,
-/// `Some(name)` = that profile's lock. Expired locks read as `None`.
-pub fn current_state_for(profile: Option<&str>) -> Result<Option<FreezeState>> {
-    current_state_at(&freeze_path_for(profile))
-}
-
 /// `current_state` with an explicit lock-file path. Tests use this
 /// form to avoid mutating process-global env vars in parallel.
 pub fn current_state_at(path: &std::path::Path) -> Result<Option<FreezeState>> {
@@ -418,15 +412,29 @@ pub fn check_not_frozen() -> Result<()> {
 /// single-cluster setup is fully covered by a global freeze). Freezing one
 /// profile never blocks another.
 pub fn check_not_frozen_for(profile: Option<&str>) -> Result<()> {
-    let global = freeze_path_for(None);
-    let prof = profile.map(|n| freeze_path_for(Some(n)));
+    let (global, prof) = lock_paths_for(profile);
     check_not_frozen_paths(&global, prof.as_deref())
+}
+
+/// The locks that govern `profile`: the global lock, plus that profile's
+/// own lock when it has a name. Every freeze check for a profile reads
+/// both (#504: the daemon's converge gate read only the profile's).
+#[must_use]
+pub fn lock_paths_for(profile: Option<&str>) -> (PathBuf, Option<PathBuf>) {
+    (
+        freeze_path_for(None),
+        profile.map(|n| freeze_path_for(Some(n))),
+    )
 }
 
 /// Combination check with explicit paths (the global lock, plus an optional
 /// per-profile lock). Tests use this to exercise scope isolation without
 /// touching process-global env vars.
-fn check_not_frozen_paths(
+///
+/// # Errors
+/// A [`FreezeRefusal`] when either lock is active, or an error when either
+/// exists and cannot be read (an unreadable lock counts as frozen).
+pub fn check_not_frozen_paths(
     global: &std::path::Path,
     profile: Option<&std::path::Path>,
 ) -> Result<()> {
