@@ -85,8 +85,13 @@ pub fn hmac_key_path() -> Result<PathBuf> {
 /// On platforms without `getrandom` support (none we target), this
 /// surfaces the error rather than falling back to a weaker source.
 pub fn load_or_generate_hmac_key() -> Result<Vec<u8>> {
-    let path = hmac_key_path()?;
-    match std::fs::read(&path) {
+    load_or_generate_hmac_key_at(&hmac_key_path()?)
+}
+
+/// [`load_or_generate_hmac_key`] with an explicit key path. Tests use this
+/// form so they never touch the operator's config directory.
+fn load_or_generate_hmac_key_at(path: &std::path::Path) -> Result<Vec<u8>> {
+    match std::fs::read(path) {
         Ok(bytes) if bytes.len() == KEY_BYTES => return Ok(bytes),
         Ok(other) => {
             tracing::warn!(
@@ -109,7 +114,7 @@ pub fn load_or_generate_hmac_key() -> Result<Vec<u8>> {
     // half-written or briefly world-readable key would let callbacks be
     // forged, and losing it to a power loss makes every callback signed
     // with it unverifiable.
-    crate::util::durable::write_private_atomic(&path, &key)
+    crate::util::durable::write_private_atomic(path, &key)
         .with_context(|| format!("writing HMAC key {}", path.display()))?;
     Ok(key.to_vec())
 }
@@ -304,5 +309,49 @@ mod tests {
                 deny_data.len()
             );
         }
+    }
+
+    #[test]
+    fn a_missing_key_is_generated_once_and_then_reused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("telegram_hmac.key");
+        let first = load_or_generate_hmac_key_at(&path).expect("generate");
+        assert_eq!(first.len(), KEY_BYTES);
+        assert_eq!(std::fs::read(&path).expect("persisted"), first);
+        let second = load_or_generate_hmac_key_at(&path).expect("reload");
+        assert_eq!(second, first, "an intact key is reused, not regenerated");
+    }
+
+    #[test]
+    fn a_key_of_the_wrong_length_is_replaced() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("telegram_hmac.key");
+        std::fs::write(&path, [7u8; 5]).expect("seed short key");
+        let key = load_or_generate_hmac_key_at(&path).expect("regenerate");
+        assert_eq!(key.len(), KEY_BYTES);
+        assert_ne!(key[..5], [7u8; 5]);
+        assert_eq!(std::fs::read(&path).expect("rewritten"), key);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_is_an_error_and_is_left_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("telegram_hmac.key");
+        std::fs::write(&path, [9u8; KEY_BYTES]).expect("seed key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if std::fs::read(&path).is_ok() {
+            // Running as root: permission bits do not stop the read.
+            return;
+        }
+        let err = load_or_generate_hmac_key_at(&path).expect_err("unreadable key");
+        assert!(format!("{err:#}").contains("reading HMAC key"), "{err:#}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            [9u8; KEY_BYTES],
+            "a key that could not be read must not be replaced: callbacks signed with it would stop verifying"
+        );
     }
 }

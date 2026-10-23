@@ -656,4 +656,96 @@ mod tests {
             "two probe gateways must generate distinct random 32-byte keys"
         );
     }
+
+    #[test]
+    fn every_markdown_v2_reserved_character_is_escaped() {
+        assert_eq!(
+            escape_markdown_v2(r"_*[]()~`>#+-=|{}.!\"),
+            r"\_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!\\"
+        );
+        assert_eq!(escape_markdown_v2("stop vm 100"), "stop vm 100");
+        assert_eq!(escape_markdown_v2("pve-1.lan"), r"pve\-1\.lan");
+    }
+
+    #[test]
+    fn the_verifier_reads_the_key_the_keyboard_was_signed_with() {
+        let key = vec![5u8; 32];
+        let gw = TelegramGateway::with_base_url_and_key(
+            "token",
+            "100".to_string(),
+            "http://127.0.0.1:1/bot".to_string(),
+            key.clone(),
+        );
+        assert_eq!(gw.hmac_key(), key.as_slice());
+        let kb = gw.build_approval_keyboard("0123456789abcdef");
+        let data = &kb.inline_keyboard[0][0].callback_data;
+        let (payload, tag) = data.rsplit_once(':').expect("signed data");
+        assert!(crate::hitl::hmac_key::verify(gw.hmac_key(), payload, tag));
+    }
+
+    /// The HTTP timeout of a long poll is the poll timeout plus a margin,
+    /// so a poll of 0 s still waits for a slow reply instead of failing.
+    #[tokio::test]
+    async fn a_long_poll_waits_past_its_poll_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bottoken/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": []}))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let gw = TelegramGateway::with_base_url(
+            "token",
+            "100".to_string(),
+            format!("{}/bot", server.uri()),
+        );
+        let updates = gw.poll_updates(0, 0).await.expect("poll within the margin");
+        assert!(updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn editing_a_message_fails_only_on_a_real_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (status, body, want_ok) in [
+            (200, r#"{"ok":true,"result":true}"#, true),
+            (
+                400,
+                r#"{"ok":false,"description":"Bad Request: message is not modified"}"#,
+                true,
+            ),
+            (
+                400,
+                r#"{"ok":false,"description":"Bad Request: message to edit not found"}"#,
+                false,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/bottoken/editMessageText"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+            let gw = TelegramGateway::with_base_url(
+                "token",
+                "100".to_string(),
+                format!("{}/bot", server.uri()),
+            );
+            let res = gw.edit_message_text(42, "done").await;
+            if want_ok {
+                assert!(res.is_ok(), "{status} {body}: {res:?}");
+            } else {
+                let err = format!("{:#}", res.expect_err("a real error"));
+                assert!(
+                    err.contains("400") && err.contains("message to edit not found"),
+                    "{err}"
+                );
+            }
+        }
+    }
 }

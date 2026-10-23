@@ -580,3 +580,135 @@ async fn write_ahead_verifies_full_chain_once_and_only_tail_link_across_2000_mut
         "catching a tampered tail row must use verify_tail(), not full verify()"
     );
 }
+
+/// `#344`, `#297`: a row edited in the MIDDLE of the chain refuses the next
+/// mutation, although the last link still verifies. Only the full walk run
+/// when the logger is opened can see this edit; the per-write tail check
+/// cannot. The single-row case above is caught by either check, so it did
+/// not prove the full walk decides.
+#[tokio::test]
+async fn an_edit_in_the_middle_of_the_chain_refuses_the_next_mutation() {
+    let _guard = AUDIT_TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    {
+        let mut logger = AuditLogger::open_in(dir.path()).expect("open");
+        for vmid in [100, 101, 102] {
+            logger
+                .log("delete", "alice", Some(vmid), Some("pve1"), None, "ok")
+                .expect("seed");
+        }
+    }
+    let conn = rusqlite::Connection::open(dir.path().join("audit.db")).unwrap();
+    conn.execute("UPDATE audit_log SET user = 'mallory' WHERE id = 1", [])
+        .unwrap();
+    drop(conn);
+    let reopened = AuditLogger::open_in(dir.path()).expect("reopen");
+    reopened
+        .verify_tail()
+        .expect("the last link is untouched and still verifies");
+    assert_eq!(reopened.verify().expect("verify"), (2, 1));
+    drop(reopened);
+
+    let server = MockServer::start().await;
+    let client = mock_client_with_profile(&server, Some("prod"), dir.path()).await;
+    let err = client
+        .start_guest("pve1", 100, GuestType::Qemu)
+        .await
+        .expect_err("a broken chain must refuse the mutation");
+    let refusal = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<AuditWriteRefusal>())
+        .expect("the error must be an AuditWriteRefusal");
+    assert!(refusal.reason.contains("tampered"), "{}", refusal.reason);
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "no request may reach the API after the refusal"
+    );
+}
+
+/// `#281`, `#297`: `audit rotate-key` reports the id the old key was
+/// archived under, and that id names the file it was archived to.
+#[test]
+fn rotate_key_reports_the_id_of_the_archived_key() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    {
+        let mut logger = AuditLogger::open_in(dir.path()).expect("open");
+        logger
+            .log("delete", "alice", Some(100), Some("pve1"), None, "ok")
+            .expect("seed");
+    }
+    let out = Command::new(proxxx_bin())
+        .args(["audit", "rotate-key", "--format", "json"])
+        .env("PROXXX_AUDIT_DIR", dir.path())
+        .env_remove("PROXXX_AUDIT_KEY")
+        .output()
+        .expect("run audit rotate-key");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let id = v[0]["retired_key_id"].as_str().expect("retired_key_id");
+    assert!(id.starts_with("retired-"), "{id}");
+    assert!(
+        dir.path().join(format!("audit.key.{id}")).exists(),
+        "the reported id must name the archived key file"
+    );
+}
+
+/// `#297`: the operator label that freezes and audit rows carry ends in the
+/// host from `HOSTNAME`, else `HOST`, else `unknown`. The variables are set
+/// on the child process only; the test process environment is untouched.
+#[test]
+fn the_operator_label_names_the_host_from_the_environment() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "url = \"https://127.0.0.1:9\"\nuser = \"root@pam\"\nauth = \"token\"\ntoken_id = \"test\"\nverify_tls = false\n",
+    )
+    .unwrap();
+
+    for (hostname, host, want) in [
+        (Some("host-a"), Some("host-b"), "@host-a"),
+        (None, Some("host-b"), "@host-b"),
+        (None, None, "@unknown"),
+    ] {
+        let freeze_dir = tempfile::tempdir_in(dir.path()).expect("freeze dir");
+        let mut cmd = Command::new(proxxx_bin());
+        cmd.args([
+            "--token-secret",
+            "fake-secret",
+            "--format",
+            "json",
+            "incident",
+            "freeze",
+            "--reason",
+            "operator label test",
+        ])
+        .env("PROXXX_CONFIG", &cfg_path)
+        .env("PROXXX_FREEZE_PATH", freeze_dir.path().join("freeze.lock"))
+        .env("PROXXX_AUDIT_DIR", dir.path().join("audit"))
+        .env_remove("PROXXX_AUDIT_KEY")
+        .env_remove("HOSTNAME")
+        .env_remove("HOST");
+        if let Some(h) = hostname {
+            cmd.env("HOSTNAME", h);
+        }
+        if let Some(h) = host {
+            cmd.env("HOST", h);
+        }
+        let out = cmd.output().expect("run incident freeze");
+        assert!(
+            out.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        let operator = v[0]["operator"].as_str().expect("operator");
+        assert!(operator.ends_with(want), "{operator} must end with {want}");
+    }
+}
