@@ -242,6 +242,29 @@ labelled `frozen: awaiting-demand` and stays open: that label is the
 default answer, not the exception. Fixes, tests, documentation, and
 changes inside an existing family are not affected.
 
+### Documentation claims need a test
+
+A claim about behaviour or structure, in any Markdown page or doc
+comment, either has a test that fails when the claim stops being true,
+or it is not written. A claim that describes a goal rather than the code
+says so ("intended", "planned"). Removing a claim that has no test is
+always acceptable.
+
+What already holds this:
+
+- The `--help` of every command is snapshotted
+  (`src/snapshots/proxxx__tests__cli_help.snap`). A renamed flag or a
+  removed subcommand fails the test; review and accept an intended change
+  with `cargo insta review` (or `INSTA_UPDATE=always cargo test --bin
+  proxxx`, then read the diff before committing it).
+- The supported library surface (`api`, `config`, `app::preflight`,
+  `state::model`) carries doctests that `cargo test` runs.
+- The structural claims in `ARCHITECTURE.md` are checked by
+  `tests/architecture_claims.rs`.
+
+A pull request that changes documented behaviour updates the
+documentation and the test that holds it in the same change.
+
 ## Questions?
 
 Open a discussion on GitHub or an issue. For security findings,

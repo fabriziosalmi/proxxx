@@ -23,6 +23,24 @@
 //!     `/cluster/ha/resources` instead).
 //!
 //! `assess(op, guest)` returns the per-risk level for the chosen op.
+//!
+//! ```
+//! use proxxx::api::types::{Guest, GuestStatus};
+//! use proxxx::app::preflight::{assess, max_level, Op, Risk, RiskLevel};
+//!
+//! let guest = Guest {
+//!     vmid: 100,
+//!     status: GuestStatus::Running,
+//!     uptime: 3_600,
+//!     ..Guest::default()
+//! };
+//!
+//! // Deleting a running guest is severe; stopping it is only a warning.
+//! let delete = assess(Op::Delete, &guest);
+//! assert!(delete.contains(&(Risk::Running { uptime_secs: 3_600 }, RiskLevel::Severe)));
+//! assert_eq!(max_level(&delete), RiskLevel::Severe);
+//! assert_eq!(max_level(&assess(Op::Stop, &guest)), RiskLevel::Warning);
+//! ```
 
 use crate::api::types::Guest;
 

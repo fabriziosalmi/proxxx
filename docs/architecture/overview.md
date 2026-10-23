@@ -67,7 +67,7 @@ src/
 ├── api/                 ; PVE REST client + typed errors + types
 │   ├── client.rs        ;   PxClient (reqwest + governor + 32 MiB cap)
 │   ├── error.rs         ;   ApiError closed enum 
-│   ├── auth.rs          ;   Token / ticket / Zeroizing<String> 
+│   ├── auth.rs          ;   Token / ticket / SecretString 
 │   ├── mod.rs           ;   ProxmoxGateway trait
 │   └── types/           ;   ~3100 LOC of serde-typed PVE responses,
 │                        ;   split across 16 submodules (cluster, ha,
@@ -135,7 +135,7 @@ See [Error handling](/architecture/error-handling).
 Defense in depth across:
 
 - TLS verification (per-profile, mirrors into WS client)
-- Secret zeroization (`Zeroizing<String>` everywhere)
+- Secret zeroization (`SecretString`, which wraps `Zeroizing<String>`)
 - Closed MCP tool registry (compile-time fixed)
 - Pre-flight risk gate (V27.x)
 - HITL approval round-trip (Telegram, deny-on-timeout)

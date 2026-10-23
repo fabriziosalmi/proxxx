@@ -1,3 +1,32 @@
+//! Profile configuration: the TOML schema ([`ProfileConfig`] and its
+//! nested structs), named profiles, and secret resolution.
+//!
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! let dir = tempfile::tempdir()?;
+//! let path = dir.path().join("config.toml");
+//! std::fs::write(
+//!     &path,
+//!     r#"
+//! default = "lab"
+//!
+//! [profiles.lab]
+//! url = "https://pve-lab.example:8006"
+//! user = "root@pam"
+//! token_id = "ops"
+//! "#,
+//! )?;
+//!
+//! let lab = proxxx::config::load_config_from_path(&path, None)?;
+//! assert_eq!(lab.url, "https://pve-lab.example:8006");
+//! assert!(lab.verify_tls, "TLS is verified unless a profile turns it off");
+//!
+//! // A profile the file does not define is an error, not a default.
+//! assert!(proxxx::config::load_config_from_path(&path, Some("prod")).is_err());
+//! # Ok(())
+//! # }
+//! ```
+
 pub mod watcher;
 pub use watcher::ConfigHandle;
 

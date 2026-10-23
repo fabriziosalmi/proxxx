@@ -6,213 +6,144 @@
 > **Length budget**: one page. For depth on any single subsystem,
 > follow the file links — every module has a top-of-file `//!`
 > block that explains itself.
+>
+> **Every structural claim here is checked** by
+> `tests/architecture_claims.rs` (names, paths, gate order, I/O rules)
+> and by the `main.rs` tests (the commands in the process table parse).
+> A claim that cannot be checked does not belong on this page.
 
 ## What proxxx is
 
-A single Rust binary that exposes **three callers** over **one
-state machine**: a CLI (scriptable, JSON-friendly), a TUI
-(interactive, ratatui), and an MCP server (LLM agents). Talks to
-Proxmox VE and Proxmox Backup Server over REST + SSH + WebSocket.
-No agent on the cluster.
+A single Rust binary with **three callers**: a CLI (scriptable,
+JSON-friendly), a TUI (interactive, ratatui), and an MCP server (LLM
+agents). It talks to Proxmox VE and Proxmox Backup Server over REST, SSH
+and WebSocket. No agent runs on the cluster.
 
-## The three callers, one set of gates
+## The gates, and which caller runs which
 
-```
-        ┌───────┐         ┌───────────┐          ┌───────────┐
-        │  CLI  │         │   TUI     │          │   MCP     │
-        │ (clap)│         │ (ratatui) │          │ (stdio +  │
-        │       │         │           │          │  HTTP)    │
-        └───┬───┘         └─────┬─────┘          └─────┬─────┘
-            │           Action / SideEffect bus        │
-            │            ┌──────┴──────┐               │
-            │            │ app.rs      │               │
-            │            │ reducer     │  TUI only     │
-            │            │ (pure, sync)│               │
-            │            └──────┬──────┘               │
-            │                   │                      │
-            └───────────────────┼──────────────────────┘
-                                │
-                    ┌───────────┴────────────┐
-                    │  the shared gates      │
-                    │  preflight → policy    │
-                    │  → gateway → audit     │
-                    └────────────────────────┘
-```
+Two layers. The **gateway layer** is shared by construction; the
+**caller layer** is not, and differs per caller.
 
-All three callers go through the same:
-* `api::ProxmoxGateway` trait (network I/O), and inside its `post`/`put`/
-  `delete` helpers the read-only guard and the incident-freeze check —
-  so all 234 methods inherit them and a new one cannot skip them
-* `app::preflight::assess()` (11-variant risk gate)
-* `hitl::policy` (Telegram approval gate)
-* `audit::AuditLogger` (HMAC-chain mutation log)
+**Gateway layer: every mutation, every caller.** Every mutating HTTP
+request `PxClient` sends is built in one of four places in
+`src/api/client.rs`: the private helpers `post`, `put` and `delete`, and
+the streaming storage upload. Each runs, in this order and before the
+request leaves the process:
 
-**The reducer is TUI-only.** `app.rs` holds a genuinely pure
-Action × AppState → AppState + SideEffect state machine (2059 lines,
-zero `.await`), but `AppState` is referenced only by `src/tui/`: the CLI
-and MCP paths are imperative and reach the gates directly. An earlier
-version of this document showed all three callers behind the reducer,
-which sent contributors looking for a bus that was not there — corrected
-per the 2026-09-09 audit (#282).
+1. `PxClient::guard_read_only`: refuses when the profile is `read_only`.
+2. `incident::check_not_frozen_for`: refuses during an incident freeze
+   (global, or of this profile).
+3. `audit::MutationAuditCtx::write_ahead_at`: the write-ahead entry in
+   the HMAC-chained audit log; refuses (exit 8) when it cannot be
+   written. The outcome is recorded after the response.
 
-Same gates apply to every mutation, regardless of which caller
-initiated it. There is no "skip the risk gate for MCP" path.
+A new gateway method that mutates through the helpers cannot skip them,
+and the test fails on a mutating request built anywhere else in
+`src/api` without them.
+
+**Caller layer: risk preflight and human approval.**
+
+| | CLI | TUI | MCP |
+| :--- | :--- | :--- | :--- |
+| Risk preflight (`app::preflight`) | `assess_deep` on stop, restart, delete, migrate, disk move and disk resize; a Severe risk refuses (exit 6) unless `--allow-risk` | `assess` (no deep checks) on operations run from the operation queue; actions from the command palette run none | none |
+| Human approval (`hitl`) | none: with `--secure`, destructive commands are refused (exit 8) | `hitl::policy::check_policies` plus `--secure`: Telegram approval before the side effect runs | every destructive tool needs a matching policy and is queued for Telegram approval; `proxxx hitl serve` executes it after approval |
+
+The differences in the caller layer are the current state, not a
+design goal; closing them is tracked in #507.
 
 ## Module map (`src/`)
 
 | Module | Responsibility | Sync / Async |
 | :--- | :--- | :--- |
-| [`api/`](src/api/) | PVE REST client. rustls, cookie store, retry, typed `ApiError`, per-profile TOFU pin | async |
+| [`api/`](src/api/) | PVE REST client: `ProxmoxGateway` trait, `PxClient`, typed `ApiError`, retry, per-profile TLS pin | async |
 | [`pbs/`](src/pbs/) | PBS REST client + restore handoff to `proxmox-backup-client` | async |
-| [`wsterm/`](src/wsterm/) | Termproxy WebSocket (serial console). Frame size capped, custom rustls verifier when `verify_tls=false` | async |
-| [`ssh/`](src/ssh/) | russh-based PTY pool. Hardened algorithm whitelist (Terrapin-safe) | async |
-| [`access/`](src/access/) | `pveum` shell-out + parser for effective permissions. `shell_quote` defends injection | sync (parser), async (shellout) |
-| [`config/`](src/config/) | TOML profile loader + secret resolution (env → file → inline → keychain). Watcher for SIGHUP reload | sync (load), async (watch) |
-| [`audit/`](src/audit/) | Append-only SQLite audit log with HMAC-SHA256 chain | sync |
-| [`app.rs`](src/app.rs) | **Pure state**: the TUI reducer, `Action × AppState → AppState + SideEffect`. Zero I/O, zero `.await` — testable end-to-end without a cluster | sync |
-| [`app/`](src/app/) | Risk and planning helpers used by every caller: preflight (11 risk variants), snaptree builder, cache, HA preview, batch policy. `preflight`, `patch` and `cache` DO perform gateway I/O (#282 — this row previously claimed the whole module was zero-I/O, which was true only of `app.rs`) | mixed |
-| [`alerts/`](src/alerts/) | Alert daemon: engine (predicates over cluster snapshots) + dedup + notifier (slack/discord/telegram/webhook) | async |
-| [`hitl/`](src/hitl/) | Telegram daemon: long-poll, callback HMAC, replay-rejection, deny-on-timeout | async |
-| [`mcp/`](src/mcp/) | MCP server: stdio JSON-RPC + Streamable HTTP. Compile-time tool registry, SHA-256 pinned | async |
-| [`metrics/`](src/metrics/) | Prometheus exporter (cardinality-bounded labels) | async |
-| [`tui/`](src/tui/) | ratatui render loop + views + widgets + event loop | sync (renderer), async (events) |
-| [`cli/`](src/cli/) | clap dispatch. Per-domain handlers (vm, ct, access, audit, doctor, events, …) | async |
-| [`handoff/`](src/handoff/) | SPICE `.vv` file + noVNC URL launcher + remote-viewer spawn | sync |
-| [`util/`](src/util/) | sanitize (ANSI), format (output dispatch), shutdown (signal), spawn_traced, panic_hook (flight recorder), sparkline | sync |
+| [`wsterm/`](src/wsterm/) | Termproxy WebSocket (serial console), with frame and message size caps | async |
+| [`ssh/`](src/ssh/) | russh-based sessions and PTY | async |
+| [`access/`](src/access/) | parser for effective permissions (`pveum` output) | sync |
+| [`config/`](src/config/) | TOML profiles, secret resolution, live reload (`config::watcher`) | sync (load), async (watch) |
+| [`audit/`](src/audit/) | append-only SQLite audit log with an HMAC-SHA256 chain | sync |
+| [`incident/`](src/incident/) | freeze lock (`incident freeze` / `thaw`) | sync |
+| [`app.rs`](src/app.rs) | the TUI reducer: `Action × AppState → AppState + SideEffect`; no `.await` and no file, network or process I/O | sync |
+| [`app/`](src/app/) | helpers: preflight, snaptree, cache, HA preview, queue, search. `preflight`, `patch` and `cache` do I/O | mixed |
+| [`alerts/`](src/alerts/) | alert engine, dedup and notifiers | async |
+| [`hitl/`](src/hitl/) | Telegram approvals: signed callbacks, pending store, execution after approval | async |
+| [`mcp/`](src/mcp/) | MCP server: stdio JSON-RPC and Streamable HTTP, tool registry in `mcp::tools` | async |
+| [`metrics/`](src/metrics/) | Prometheus exporter | async |
+| [`tui/`](src/tui/) | ratatui render loop, views, widgets, event loop | sync (render), async (events) |
+| [`cli/`](src/cli/) | clap dispatch and per-domain handlers | async |
+| [`handoff/`](src/handoff/) | SPICE `.vv` file, noVNC URL, `remote-viewer` launch | sync |
+| [`util/`](src/util/) | sanitize, output format, shutdown, panic hook, durable writes | sync |
 
-## Data flow — three representative paths
+`AppState` is used only by the TUI: `src/tui/`, `src/app.rs` and the
+reducer helpers `src/app/queue.rs` and `src/app/search.rs`. The CLI and
+MCP paths are imperative and reach the gates directly.
 
-### CLI mutation: `proxxx delete 100 --yes`
+## Data flow: deleting guest 100
 
-```
-argv ─► clap ─► cli::execute_delete
-              │
-              ├─► find_guest(client, vmid=100) ── REST /cluster/resources
-              │      (one request; falls back to a per-node walk only
-              │       when that endpoint is unavailable — #276)
-              │
-              ├─► assess_deep(client, pbs, Op::Delete, &guest)
-              │      └─ 11 risk variants checked; if SEVERE without
-              │         --allow-risk → PreflightRefusal (exit 6)
-              │
-              ├─► hitl::policy::match_or_request_approval()
-              │      └─ if destructive + secure_mode: Telegram round-trip,
-              │         deny-on-timeout 120s
-              │
-              ├─► client.delete_guest(node, vmid)  ── REST DELETE
-              │
-              ├─► audit::AuditLogger::log("delete", user, Some(100), ...)
-              │
-              └─► JSON to stdout, exit 0 / typed exit code on Err
-```
-
-### TUI keystroke: 'd' on a guest row
+### CLI: `proxxx delete 100 --yes`
 
 ```
-crossterm event ─► tui::event::Event::Key ─► tui::reducer
-                                                 │
-                                                 ├─► Action::PromptDelete(vmid)
-                                                 │       │
-                                                 │       └─ AppState gains
-                                                 │          PendingDelete { vmid }
-                                                 │       
-                                                 └─► tui::view::overlay
-                                                         renders modal
-                                                         "Confirm delete?"
-on 'y':
-                              ─► Action::ConfirmDelete(vmid)
-                                       │
-                                       └─► SideEffect::EnqueueDelete
-                                                │
-                                                └─ async worker takes the
-                                                   SideEffect off the queue,
-                                                   then runs the SAME chain
-                                                   as the CLI path above:
-                                                   preflight → HITL → API → audit
+main ─► cli::execute
+          ├─ enforce_cli_secure_mode        (--secure: refuse, exit 8)
+          ├─ cli::common::find_guest_full    (GET /cluster/resources)
+          ├─ cli::common::enforce_preflight_with_notes
+          │     └─ app::preflight::assess_deep   (Severe: exit 6)
+          └─ execute_delete ─► PxClient::delete_guest
+                                 ├─ GET status/current (must be stopped)
+                                 └─ PxClient::delete   (gateway layer)
 ```
 
-### MCP tool call: `tools/call` `delete_guest({"guest_id":100})`
+### TUI: `d` on a guest row
 
 ```
-stdio JSON line ─► RpcRequest deserialize (16 MiB cap)
-                     │
-                     ├─ method == "tools/call"
-                     │      params.name == "delete_guest"
-                     │      params.arguments == {"guest_id": 100}
-                     │
-                     └─► dispatch::handle_tool_call(client, config, ...)
-                                │
-                                ├─► tools/* registry lookup
-                                │      ├─ ParamType check (Int / Bool / Str)
-                                │      └─ destructive flag = true
-                                │
-                                ├─► hitl gate (same as CLI path)
-                                │
-                                ├─► tokio::time::timeout(timeout_secs,
-                                │      delete_guest_impl(...))
-                                │      └─ DoS guard: -32001 on timeout
-                                │
-                                ├─► audit log (same writer)
-                                │
-                                └─► JSON-RPC result envelope
+tui::event::map_key ─► Action::EnqueueBatchOperation([DeleteGuest])
+app::update          ─► app::queue::QueuedOp in AppState.op_queue
+'C' in the queue     ─► Action::ExecuteQueue ─► SideEffect::ExecuteQueue
+tui dispatch_side_effect
+          ├─ queue snapshot saved first (refuses to run if it cannot be)
+          ├─ HITL check per operation (policy / --secure)
+          ├─ app::preflight::assess          (Severe: operation fails)
+          └─ PxClient::delete_guest ─► PxClient::delete (gateway layer)
+```
+
+### MCP: `tools/call delete_guest {"guest_id": 100}`
+
+```
+stdin line (16 MiB cap, mcp::server::MAX_RPC_LINE_BYTES)
+  ─► mcp::server::RpcRequest ─► mcp::dispatch::dispatch_rpc
+       └─ tokio::time::timeout(tool budget) ─► mcp::dispatch::handle_tool_call
+            ├─ registry lookup + parameter type checks
+            └─ destructive: hitl::policy::check_policies
+                 ├─ no policy: refused
+                 └─ policy: pending request stored, Telegram approval sent,
+                            result "intercepted", nothing deleted yet
+proxxx hitl serve, on approval:
+  hitl::daemon::handle_callback_update ─► guest re-checked against the request
+  ─► mcp::dispatch::exec_delete_guest ─► PxClient::delete_guest (gateway layer)
 ```
 
 ## Process model
 
-| Daemon | Entry point | Lifecycle | State |
-| :--- | :--- | :--- | :--- |
-| One-shot CLI | `proxxx <verb>` | exec → tokio runtime → block_on → exit | in-memory only; audit log persisted |
-| TUI loop | `proxxx` (no args) | exec → tokio runtime → ratatui loop → quit | in-memory `AppState`; SQLite cache persisted |
-| Alerts daemon | `proxxx alerts watch` | long-running; SIGHUP reload, SIGINT graceful shutdown | dedup state in cache schema v2 |
-| HITL daemon | `proxxx hitl serve` | long-running Telegram long-poll | session-local approval map; HMAC key on disk |
-| MCP stdio | `proxxx mcp serve` | spawned by LLM client; one process per session | stateless beyond the underlying PVE client |
-| MCP HTTP | `proxxx mcp serve-http --port 8080` | long-running axum server | stateless |
-| Prometheus exporter | `proxxx metrics serve` | long-running axum server; scrapes PVE on every pull | stateless |
+| Process | Entry point | Lifecycle |
+| :--- | :--- | :--- |
+| One-shot CLI | `proxxx <command>` | runs one command and exits |
+| TUI | `proxxx` (no command) | interactive until quit |
+| Background daemon | `proxxx daemon serve` | long-running: alerts, HITL listener and schedule tick in one process |
+| Alerts watcher | `proxxx alerts watch` | long-running |
+| HITL listener | `proxxx hitl serve` | long-running Telegram long-poll |
+| MCP stdio | `proxxx mcp serve` | one process per client session |
+| MCP HTTP | `proxxx mcp serve-http --port 8080` | long-running HTTP server |
+| Prometheus exporter | `proxxx metrics serve` | long-running HTTP server |
 
-All processes share the **same binary** — the dispatch in
-[src/main.rs](src/main.rs) routes by `cli.command` to the relevant
-entry point; the TUI run-loop is the default.
-
-## Reducer + side effect bus
-
-The TUI uses an **Elm-style reducer**: state evolution is
-`AppState × Action → AppState × Vec<SideEffect>`. Pure functions only;
-the runtime drains side effects asynchronously and feeds results back
-in as new Actions.
-
-```
-                ┌─────────────────┐
-                │   AppState      │
-                │   (pure data)   │
-                └────────┬────────┘
-                         │
-   Event ─► Action ──► reducer ──► (AppState', [SideEffect])
-                                          │
-                                          ▼
-                                  async worker pool
-                                          │
-                                  REST / SSH / WS / SQLite
-                                          │
-                                          ▼
-                                  ResultEvent ─► Action ─► (loop)
-```
-
-This is what makes proxxx **testable without a cluster**: the
-reducer is pure; the only thing that touches the network is the
-`ProxmoxGateway` trait, which can be mock-implemented (see
-`tests/api_test.rs` for the wiremock harness).
+All of them are the same binary; `src/main.rs` routes by command, and
+no command means the TUI.
 
 ## Build profiles
 
-| Profile | Flags | Use |
-| :--- | :--- | :--- |
-| `dev` | default | local iteration |
-| `release` | `lto = true`, `codegen-units = 1`, `strip = true`, `opt-level = "z"` | size-optimised distribution (~6 MiB stripped) — single static musl binary for Linux x86_64 / aarch64; dynamic glibc for macOS aarch64 |
-| `bench` | inherits `release` | criterion (`cargo bench`) |
-| `test` | dev + `proptest` | full unit + integration + proptest runs |
-
-The strict CI gate (`scripts/gate.sh`) builds in `release` so the
-test surface matches the shipped binary's optimisation level.
+`[profile.release]` in `Cargo.toml`: `lto = true`, `codegen-units = 1`,
+`strip = true`, `opt-level = "z"`. `scripts/gate.sh` runs clippy and the
+test suite with `--release`, so the gate tests the optimisation level
+that ships.
 
 ## Cross-references
 
@@ -225,7 +156,7 @@ test surface matches the shipped binary's optimisation level.
 
 ## Non-goals
 
-proxxx does **not**:
+These are stated intent, not checked behaviour. proxxx does **not**:
 
 * render graphical SPICE / VNC frames (hands off to `remote-viewer`
   / system browser)

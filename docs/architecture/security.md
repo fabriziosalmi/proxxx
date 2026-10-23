@@ -6,7 +6,7 @@ response to a specific audit finding and is tracked in
 
 | Surface | Mechanism | Vector |
 | :--- | :--- | :---: |
-| Secret heap residue | `Zeroizing<String>` everywhere |  |
+| Secret heap residue | `SecretString` for every credential |  |
 | Keychain access (macOS only) | Security.framework (`apple-native`) via `spawn_blocking` (no runtime stall) | V12 |
 | Shell injection | `shell_quote` + 3-layer defence in `pveum` shell-out | V3 |
 | TOCTOU on temp files | `tempfile` 0600 + O_EXCL + 128-bit random suffix | V2 |
@@ -26,9 +26,10 @@ Plus the human-facing gates:
 | MCP fail-closed | Destructive tool with no matching `[[policies]]` entry → typed refusal, never reaches PVE |
 | MCP HTTP bind | Non-loopback bind refused unless `mcp_token` is set (`--insecure-bind` to override) |
 
-## Zeroizing&lt;String&gt; everywhere 
+## `SecretString` for every credential
 
-Every secret — token, ticket, CSRF, password, PBS token — lives in
+Every secret — token, ticket, CSRF, password, PBS token, Telegram bot
+token — is a `SecretString` (`src/util/secret.rs`), which wraps
 `Zeroizing<String>`:
 
 ```rust
@@ -37,20 +38,26 @@ pub enum AuthMethod {
     Token {
         user: String,
         token_id: String,
-        token_secret: Zeroizing<String>,
+        token_secret: SecretString,
     },
     Password {
-        ticket: Zeroizing<String>,
-        csrf_token: Zeroizing<String>,
+        ticket: SecretString,
+        csrf_token: SecretString,
+        expires_at: std::time::Instant,
     },
 }
 ```
 
-On `Drop`, the `Zeroize` trait overwrites the heap allocation with
-zeros. A core dump or swap-out after the secret has been released
-cannot leak the credential.
+- `Debug` prints `[REDACTED]`, and there is no `Display` or `Serialize`,
+  so a secret cannot reach a log line or a state export by accident.
+- On `Drop` the wrapped heap allocation is overwritten with zeros.
 
-The cost is a single `memset` on Drop. Hot path is unchanged.
+What this does not cover: the temporaries a secret passes through
+before it is wrapped (the `std::env::var` result, the config file text,
+the TOML parse tree) are not wiped. The guarantees are pinned by
+`tests/secret_redaction_test.rs`, including
+`statically_pinned_zeroize_on_drop`, which stops compiling if the inner
+storage loses `ZeroizeOnDrop`.
 
 ## TOCTOU-safe SPICE handoff (V2)
 
