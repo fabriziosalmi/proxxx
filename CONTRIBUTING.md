@@ -105,6 +105,21 @@ carries style and warning findings that are real but not worth blocking
 on today, and a gate that is red by default is a gate people learn to
 ignore.
 
+### Coverage ratchet (CI)
+
+The CI coverage job measures line coverage with `cargo llvm-cov` and
+checks it against `.coverage-floor` with `scripts/coverage-ratchet.py`
+(#298). The floor is the last measured value minus 0.5pp.
+
+- **Coverage fell below the floor:** the job fails and lists the files
+  whose uncovered lines grew. Add tests for them, or remove the untested
+  code.
+- **Coverage rose by more than 0.5pp:** the job fails and asks you to
+  raise the floor in the same pull request. The run's `coverage-lcov`
+  artifact holds the new file as `lcov.info.coverage-floor`; commit it as
+  `.coverage-floor`. Do not write the floor from a local run: coverage
+  measured on macOS differs from the Linux CI value.
+
 ## Live-cluster verification
 
 The single most useful thing a contributor can do is run a change
@@ -236,7 +251,7 @@ a time, when all three of these hold:
 3. A named person or project outside this repository has asked for it in
    an issue.
 
-Until the floor (#298) and the ceilings (#293) exist, conditions 1 and 2
+The floor exists since #298. Until the ceilings (#293) exist, condition 2
 cannot be met, so the freeze holds. A request that does not meet them is
 labelled `frozen: awaiting-demand` and stays open: that label is the
 default answer, not the exception. Fixes, tests, documentation, and

@@ -152,13 +152,16 @@ jobs:
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
-    # Audit #275: nothing measured which code the ~1250 tests execute, so
-    # the distribution of that effort was chosen by judgement and could
-    # not be checked. Deliberately NO threshold: the value is the
-    # per-file view of which modules the suite never enters, which is the
-    # input needed to decide where the next test belongs. A threshold set
-    # below current reality would never bite, and one set above it would
-    # block unrelated work.
+    # Audit #275: nothing measured which code the tests execute, so the
+    # distribution of that effort was chosen by judgement and could not be
+    # checked. The per-file summary is the input for deciding where the
+    # next test belongs.
+    #
+    # #298: the measurement is also a ratchet. `.coverage-floor` holds the
+    # last measured line coverage minus a 0.5pp tolerance, so it never
+    # blocks unrelated work and only stops a drop; a pull request that
+    # raises coverage raises the floor with it. The failure names the
+    # files whose uncovered lines grew.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -181,11 +184,20 @@ jobs:
       - name: Summary
         run: cargo llvm-cov report --summary-only | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Ratchet
+        run: python3 scripts/coverage-ratchet.py check lcov.info
+
       - name: Upload report
+        # Also on a ratchet failure: when coverage rose, the artifact
+        # carries the new `.coverage-floor` to commit.
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-lcov
-          path: lcov.info
+          path: |
+            lcov.info
+            lcov.info.coverage-floor
+          if-no-files-found: warn
 
   audit:
     name: Supply-chain audit
