@@ -16,6 +16,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **`ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385).** Before 0.4.4 its constant-time mask generation could compile to a branch, and its `u128` comparisons branched on 32-bit targets. It is in the build graph through russh (rsa and elliptic-curve via `crypto-bigint`), the code that signs with the SSH client key. Lockfile-only; `cargo audit` reports it on the old lockfile and passes on the new one.
+
 ### Fixed
 
 - **Every subcommand has a description in `--help` (#494).** 64 nested ones had none (for example `firewall-cluster alias list`, `acme plugin show`, `node-system dns get`), so their parent's help listed them blank. A test now checks every level.
