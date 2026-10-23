@@ -2301,7 +2301,8 @@ mod mutation_gap_tests {
     #[test]
     fn a_pre_v2_database_is_migrated_and_keeps_verifying() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let key = vec![9u8; 32];
+        let mut key = vec![0u8; 32];
+        getrandom::fill(&mut key).expect("random key");
         write_new_key_file(&dir.path().join("audit.key"), &key).expect("key");
         let ts = "2024-01-01T00:00:00Z";
         let v1 = compute_hmac(&key, "", ts, "delete", "100", "ok");

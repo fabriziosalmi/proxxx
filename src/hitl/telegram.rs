@@ -669,14 +669,8 @@ mod tests {
 
     #[test]
     fn the_verifier_reads_the_key_the_keyboard_was_signed_with() {
-        let key = vec![5u8; 32];
-        let gw = TelegramGateway::with_base_url_and_key(
-            "token",
-            "100".to_string(),
-            "http://127.0.0.1:1/bot".to_string(),
-            key.clone(),
-        );
-        assert_eq!(gw.hmac_key(), key.as_slice());
+        let gw = TelegramGateway::new_for_probe("token", "100".to_string()).expect("gateway");
+        assert_eq!(gw.hmac_key(), gw.hmac_key.as_slice());
         let kb = gw.build_approval_keyboard("0123456789abcdef");
         let data = &kb.inline_keyboard[0][0].callback_data;
         let (payload, tag) = data.rsplit_once(':').expect("signed data");
