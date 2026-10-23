@@ -18,6 +18,7 @@ SemVer contract:
 
 ### Security
 
+- **Approved MCP operations get the risk preflight the CLI runs, at request and again at execution (#507).** `stop_guest`, `restart_guest`, `delete_guest` and `migrate_guest` ran no risk preflight: an approver saw the action and the target only, and an approved stop of an HA-managed guest was executed (the HA manager then started it again). Now the MCP gate runs `assess_deep` before asking: a SEVERE risk (a lock, HA management on stop or delete, a running guest on delete) refuses the call and nobody is asked, and the other risks are added to the Telegram approval message. When `proxxx hitl serve` executes an approved stop, restart, delete or migrate (from MCP or from a CLI batch command), it checks the guest as it is then and refuses a SEVERE risk. **Migration:** an MCP client that relied on stopping an HA-managed guest gets a refusal; change the HA state first, as `proxxx stop` already required. `ARCHITECTURE.md` now also says that CLI start, stop, restart, suspend and resume do go through Telegram approval when a policy matches (its table said "none").
 - **`ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385).** Before 0.4.4 its constant-time mask generation could compile to a branch, and its `u128` comparisons branched on 32-bit targets. It is in the build graph through russh (rsa and elliptic-curve via `crypto-bigint`), the code that signs with the SSH client key. Lockfile-only; `cargo audit` reports it on the old lockfile and passes on the new one.
 
 ### Fixed

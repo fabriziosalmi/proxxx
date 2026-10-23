@@ -45,11 +45,13 @@ and the test fails on a mutating request built anywhere else in
 
 | | CLI | TUI | MCP |
 | :--- | :--- | :--- | :--- |
-| Risk preflight (`app::preflight`) | `assess_deep` on stop, restart, delete, migrate, disk move and disk resize; a Severe risk refuses (exit 6) unless `--allow-risk` | `assess` (no deep checks) on operations run from the operation queue; actions from the command palette run none | none |
-| Human approval (`hitl`) | none: with `--secure`, destructive commands are refused (exit 8) | `hitl::policy::check_policies` plus `--secure`: Telegram approval before the side effect runs | every destructive tool needs a matching policy and is queued for Telegram approval; `proxxx hitl serve` executes it after approval |
+| Risk preflight (`app::preflight`) | `assess_deep` on stop, restart, delete, migrate, disk move and disk resize; a Severe risk refuses (exit 6) unless `--allow-risk` | `assess` (no deep checks) on operations run from the operation queue; a Severe risk fails the operation. Actions from the command palette run no preflight, but stop, restart, delete and snapshot refuse a locked or HA-managed guest (`guest_block_reason`) | `assess_deep` on stop, restart, delete and migrate when the approval is requested: a Severe risk refuses and nobody is asked; the other risks are added to the approval message |
+| Human approval (`hitl`) | start, stop, restart, suspend and resume with a matching policy are queued for Telegram approval and run by `proxxx hitl serve`; with `--secure`, destructive commands are refused (exit 8) | `hitl::policy::check_policies` plus `--secure`: Telegram approval before the side effect runs | every destructive tool needs a matching policy and is queued for Telegram approval; `proxxx hitl serve` executes it after approval |
 
-The differences in the caller layer are the current state, not a
-design goal; closing them is tracked in #507.
+An approved operation is checked again when `proxxx hitl serve` runs it:
+for stop, restart, delete and migrate, `app::preflight::assess` on the
+guest as it is then refuses a Severe risk (an approver cannot pass
+`--allow-risk`).
 
 ## Module map (`src/`)
 
@@ -115,10 +117,13 @@ stdin line (16 MiB cap, mcp::server::MAX_RPC_LINE_BYTES)
             ├─ registry lookup + parameter type checks
             └─ destructive: hitl::policy::check_policies
                  ├─ no policy: refused
-                 └─ policy: pending request stored, Telegram approval sent,
-                            result "intercepted", nothing deleted yet
+                 └─ policy: app::preflight::assess_deep_with
+                      ├─ Severe: refused, nobody asked
+                      └─ otherwise: pending request stored, Telegram approval
+                                    sent with the risks, result "intercepted"
 proxxx hitl serve, on approval:
   hitl::daemon::handle_callback_update ─► guest re-checked against the request
+  ─► app::preflight::assess on the live guest (Severe: refused)
   ─► mcp::dispatch::exec_delete_guest ─► PxClient::delete_guest (gateway layer)
 ```
 

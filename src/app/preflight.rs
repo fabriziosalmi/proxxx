@@ -295,15 +295,26 @@ pub fn parse_listening_ports(output: &str) -> Vec<u16> {
 ///
 /// Skipped entirely for LXC (no agent) and stopped guests (no
 /// listening sockets).
-#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 pub async fn assess_deep(
     client: &crate::api::PxClient,
     pbs: Option<&crate::pbs::PbsClient>,
     op: Op,
     guest: &Guest,
 ) -> Vec<(Risk, RiskLevel)> {
+    assess_deep_with(client, pbs, op, guest).await
+}
+
+/// [`assess_deep`] over any [`crate::api::ProxmoxGateway`], for callers
+/// that hold the trait rather than a `PxClient` (the MCP dispatcher and
+/// the HITL daemon, #507).
+#[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
+pub async fn assess_deep_with(
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
+    pbs: Option<&crate::pbs::PbsClient>,
+    op: Op,
+    guest: &Guest,
+) -> Vec<(Risk, RiskLevel)> {
     use crate::api::types::{GuestStatus, GuestType};
-    use crate::api::ProxmoxGateway;
     let mut risks = assess(op, guest);
 
     // Delete-only deep checks: snapshot history loss + backup recency.
@@ -526,11 +537,10 @@ pub(crate) fn combine_backup_age(a: Option<u32>, b: Option<u32>) -> Option<u32> 
 }
 
 pub(crate) async fn find_recent_backup(
-    client: &crate::api::PxClient,
+    client: &(dyn crate::api::ProxmoxGateway + Send + Sync),
     node: &str,
     vmid: u32,
 ) -> Result<Option<u32>, anyhow::Error> {
-    use crate::api::ProxmoxGateway;
     let storages = client.get_storage_pools(node).await?;
     let backup_storages: Vec<&str> = storages
         .iter()
@@ -697,6 +707,17 @@ pub fn max_level(risks: &[(Risk, RiskLevel)]) -> RiskLevel {
         .map(|(_, l)| *l)
         .max()
         .unwrap_or(RiskLevel::Notice)
+}
+
+/// The risks as `[LEVEL] description` lines, the form the CLI prints and
+/// the HITL approval message carries (#507).
+#[must_use]
+pub fn render_risks(risks: &[(Risk, RiskLevel)]) -> String {
+    risks
+        .iter()
+        .map(|(risk, level)| format!("[{}] {}", level.as_str(), risk.describe()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
