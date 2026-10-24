@@ -175,12 +175,6 @@ proxxx version --json                   # build + capability metadata.
 
 The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → inline TOML → 0600 file → macOS Keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
 
-<p align="center">
-  <img src="assets/demo.svg" alt="proxxx animated demo — a destructive command is typed, refused by the pre-flight risk gate, then approved via Telegram HITL and executed" width="820">
-  <br>
-  <em>A destructive op typed at the CLI — refused by the pre-flight risk gate, held for a Telegram HITL approval, then executed. Nothing reaches PVE without an explicit human yes. Every line verbatim from a live Proxmox VE 9.1 cluster.</em>
-</p>
-
 ## Daily-driver TUI
 
 Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command palette (`:`), quick-open palette (`Ctrl+K`). 18 views over the same Elm-pattern reducer:

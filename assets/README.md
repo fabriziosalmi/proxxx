@@ -10,14 +10,13 @@ python3 assets/build.py
 
 ## Animated demos
 
-Two beat-based animated SVG storyboards, both built with
+Four beat-based animated SVG storyboards, each built with
 [firstframe](https://github.com/fabriziosalmi/firstframe) from a TOML
 manifest (deterministic, single self-contained file, loops cleanly,
 respects `prefers-reduced-motion`):
 
 | SVG | Manifest | Story |
 | :-- | :-- | :-- |
-| [`demo.svg`](demo.svg) | (in firstframe `examples/proxxx.toml`) | Risk gate refuses a destructive command → HITL approval via Telegram → executes. README hero. **Security / compliance.** |
 | [`demo-gitops.svg`](demo-gitops.svg) | [`demo-gitops.toml`](demo-gitops.toml) | The GitOps reconcile loop: detect drift → preview → converge (safe by default) → `--prune` → in sync. **DevOps / GitOps.** |
 | [`demo-incident.svg`](demo-incident.svg) | [`demo-incident.toml`](demo-incident.toml) | Incident lockdown: `freeze` the fleet → a mutation is refused before reaching PVE → `thaw`. **Platform / SRE on-call.** |
 | [`demo-mcp.svg`](demo-mcp.svg) | [`demo-mcp.toml`](demo-mcp.toml) | MCP server: 25 typed tools (10 flagged destructive); an agent calls `tools/call list_guests` and gets live cluster data. **LLM / agent integrator.** |
