@@ -123,6 +123,22 @@ probe "search root --limit 5" search root --limit 5
 
 # ── Phase 9: read-only patch / alerts ──
 probe "patch plan" patch plan
+# patch plan reports a node whose apt inventory it could not read under
+# status.failed and still exits 0 (#517), so the exit code alone hides it.
+PATCH_FAILED=$(run_timeout 30 "$BIN" --format json patch plan 2>>"$LOG" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+d = d[0] if isinstance(d, list) else d
+print(' '.join(n['node'] for n in d['nodes'] if isinstance(n.get('status'), dict) and 'failed' in n['status']))
+" 2>>"$LOG") || PATCH_FAILED="(no JSON plan)"
+if [[ -z "$PATCH_FAILED" ]]; then
+    echo "[OK   ] patch plan: every node's apt inventory was read" | tee -a "$LOG"
+    PASS=$((PASS + 1))
+else
+    echo "[FAIL ] patch plan: apt inventory failed on: $PATCH_FAILED" | tee -a "$LOG"
+    FAIL=$((FAIL + 1))
+    echo "─── FAIL: patch plan inventory: $PATCH_FAILED (see $LOG) ───" >> "$ERR"
+fi
 # Publishes to the public https://ntfy.sh/<topic>: opt-in only.
 if [[ -n "${PROXXX_E2E_NTFY_TOPIC:-}" ]]; then
     probe "alerts test --route ntfy:$PROXXX_E2E_NTFY_TOPIC" alerts test --route "ntfy:$PROXXX_E2E_NTFY_TOPIC" --severity warning || true
