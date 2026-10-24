@@ -219,9 +219,14 @@ config file cannot inject tools.
 The registry has a deterministic SHA-256 hash:
 
 ```sh
-$ proxxx mcp tools --checksum
-{ "checksum": "8467de772787baa0" }
+$ proxxx mcp tools --checksum --format json
+{
+  "checksum": "<SHA-256 of the registry, 64 lowercase hex characters>"
+}
 ```
+
+Without `--format json` the command prints a KEY/VALUE table. To pin the hash
+in a script: `proxxx mcp tools --checksum --format json | jq -r .checksum`.
 
 Pin this in your supply-chain tracker. If it changes between builds,
 the tool surface changed.

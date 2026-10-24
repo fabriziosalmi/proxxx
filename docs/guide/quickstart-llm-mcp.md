@@ -47,8 +47,8 @@ destructive flag, and per-tool execution timeout.
 For supply-chain pinning:
 
 ```bash
-proxxx mcp tools --checksum
-# → { "checksum": "8467de772787baa0" }
+proxxx mcp tools --checksum --format json | jq -r .checksum
+# → <SHA-256 of the registry, 64 lowercase hex characters>
 ```
 
 Pin this hash in your CI / agent config. If the deployed binary's

@@ -115,6 +115,13 @@ mod tests {
         // SHA-256 of registry_json().to_string() — stable across builds.
         assert_eq!(hash1, hash2, "Checksum must be deterministic across calls");
         assert_eq!(hash1.len(), 64, "Checksum should be 64 hex chars (SHA-256)");
+        // The docs describe the hash as lowercase hex.
+        assert!(
+            hash1
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "Checksum should be lowercase hex: {hash1}"
+        );
     }
 
     #[test]

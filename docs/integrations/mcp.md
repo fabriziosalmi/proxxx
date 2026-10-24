@@ -156,11 +156,14 @@ Restart Claude Desktop. The agent now sees the 25-tool surface.
 Every MCP-capable build has a deterministic registry hash:
 
 ```sh
-$ proxxx mcp tools --checksum
+$ proxxx mcp tools --checksum --format json
 {
-  "checksum": "8467de772787baa0"
+  "checksum": "<SHA-256 of the registry, 64 lowercase hex characters>"
 }
 ```
+
+Without `--format json` the command prints a KEY/VALUE table. To pin the hash
+in a script: `proxxx mcp tools --checksum --format json | jq -r .checksum`.
 
 Pin this in your CI / supply-chain tracker. If the hash changes
 between builds, the tool surface changed — review the diff.
