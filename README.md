@@ -175,6 +175,12 @@ proxxx version --json                   # build + capability metadata.
 
 The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → inline TOML → 0600 file → macOS Keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
 
+<p align="center">
+  <img src="assets/demo.svg" alt="proxxx terminal recording: `proxxx delete 7777 --yes` on a running container is refused by the pre-flight with a SEVERE risk and exit code 6; `proxxx stop 7777` under a policy that requires one Telegram approval, with no Telegram section configured, is not run and exits 2" width="820">
+  <br>
+  <em>A delete of a running guest is refused by the pre-flight before any request is sent; a stop that a policy puts behind human approval does not run when no approval channel is configured. A terminal recording of the real binary against a lab Proxmox VE 9.1 cluster, unedited.</em>
+</p>
+
 ## Daily-driver TUI
 
 Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command palette (`:`), quick-open palette (`Ctrl+K`). 18 views over the same Elm-pattern reducer:
