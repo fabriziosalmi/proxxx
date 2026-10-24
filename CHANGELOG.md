@@ -30,6 +30,7 @@ SemVer contract:
 
 ### Documentation
 
+- **The MCP registry checksum examples show what the command prints.** Three pages showed `proxxx mcp tools --checksum` returning `{ "checksum": "8467de772787baa0" }`, 16 hex characters. The command prints a KEY/VALUE table unless `--format json` is given, and the value is the full SHA-256 of the registry, 64 lowercase hex characters. The examples now use `--format json` and `jq -r .checksum`, and the registry test checks that the hash is lowercase hex as well as its length.
 - **The README no longer shows the risk-gate demo, which did not match proxxx (#511).** `assets/demo.svg` was captioned "every line verbatim from a live Proxmox VE 9.1 cluster", but its typed command `proxxx stop 101 --allow-risk SEVERE` does not parse, the preflight has no risk score and no database-connection check, and a CLI stop whose policy matches does not wait for Telegram: it records the request and exits 9, and `proxxx hitl serve` executes it after approval. The animation and its row in `assets/README.md` are removed; its manifest was never in this repository. A demo recorded on the lab cluster is tracked in #511. The other four demos are unchanged; their manifests are in `assets/`.
 
 ### Tests and tooling
