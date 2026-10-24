@@ -28,6 +28,10 @@ SemVer contract:
 - **Every subcommand has a description in `--help` (#494).** 64 nested ones had none (for example `firewall-cluster alias list`, `acme plugin show`, `node-system dns get`), so their parent's help listed them blank. A test now checks every level.
 - **Arguments PVE requires are required by the CLI, and a flag PVE does not accept is gone (#494).** Measured on PVE 9.1.1, each call below failed with a 400 "property is missing and it is not optional" unless the argument was given: `node-system dns set` now requires `--search`, `firewall-cluster alias update` and `firewall-guest alias update` require `--cidr`, `cluster-mapping usb update` requires `--map`, and `metric-servers update` requires `--server` and `--port`. `metric-servers create` and `update` no longer offer `--comment`, which PVE's metric-server schema does not have. An invocation that worked before still works.
 
+### Documentation
+
+- **The README no longer shows the risk-gate demo, which did not match proxxx (#511).** `assets/demo.svg` was captioned "every line verbatim from a live Proxmox VE 9.1 cluster", but its typed command `proxxx stop 101 --allow-risk SEVERE` does not parse, the preflight has no risk score and no database-connection check, and a CLI stop whose policy matches does not wait for Telegram: it records the request and exits 9, and `proxxx hitl serve` executes it after approval. The animation and its row in `assets/README.md` are removed; its manifest was never in this repository. A demo recorded on the lab cluster is tracked in #511. The other four demos are unchanged; their manifests are in `assets/`.
+
 ### Tests and tooling
 
 - **CONTRIBUTING states a surface freeze (#295).** No new gateway method group or declarative state family lands until line coverage meets its floor (#298), the family is under its size ceiling (#293) and someone outside the repository asked for it; until those numbers exist the freeze holds. The README non-goals link to it.
