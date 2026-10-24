@@ -10,13 +10,18 @@ python3 assets/build.py
 
 ## Animated demos
 
-Four beat-based animated SVG storyboards, each built with
-[firstframe](https://github.com/fabriziosalmi/firstframe) from a TOML
-manifest (deterministic, single self-contained file, loops cleanly,
-respects `prefers-reduced-motion`):
+Five animated SVGs. `demo.svg` is a terminal recording: [`demo-record.sh`](demo-record.sh) runs the real binary against the lab
+cluster under [asciinema](https://asciinema.org) and writes
+[`demo.cast`](demo.cast), which
+[svg-term-cli](https://github.com/marionebl/svg-term-cli) turns into the
+SVG; nothing is edited between the two. The other four are beat-based
+storyboards built with firstframe (a companion tool that is not
+available from this repository) from a TOML manifest whose output lines
+were copied from real runs.
 
 | SVG | Manifest | Story |
 | :-- | :-- | :-- |
+| [`demo.svg`](demo.svg) | [`demo.cast`](demo.cast) (recorded by [`demo-record.sh`](demo-record.sh)) | Risk gate: a delete of a running guest is refused by the pre-flight (exit 6); a stop behind an approval policy does not run without an approval channel (exit 2). README, quick start. **Security / compliance.** |
 | [`demo-gitops.svg`](demo-gitops.svg) | [`demo-gitops.toml`](demo-gitops.toml) | The GitOps reconcile loop: detect drift → preview → converge (safe by default) → `--prune` → in sync. **DevOps / GitOps.** |
 | [`demo-incident.svg`](demo-incident.svg) | [`demo-incident.toml`](demo-incident.toml) | Incident lockdown: `freeze` the fleet → a mutation is refused before reaching PVE → `thaw`. **Platform / SRE on-call.** |
 | [`demo-mcp.svg`](demo-mcp.svg) | [`demo-mcp.toml`](demo-mcp.toml) | MCP server: 25 typed tools (10 flagged destructive); an agent calls `tools/call list_guests` and gets live cluster data. **LLM / agent integrator.** |
@@ -24,7 +29,16 @@ respects `prefers-reduced-motion`):
 
 Each demo maps to a persona row in the README's *"Who is this for?"* table. Output lines are **verbatim** from real runs against a live PVE 9.1 cluster.
 
-Regenerate any storyboard after editing its manifest (assumes
+Re-record `demo.svg` (needs the lab env of `tests/live`, asciinema and
+node; it starts LXC 7777 and stops it again):
+
+```sh
+PROXXX_BIN=target/release/proxxx assets/demo-record.sh
+npx svg-term-cli@2.1.1 --in assets/demo.cast --out assets/demo.svg --window
+cp assets/demo.svg docs/public/demo.svg
+```
+
+Regenerate a storyboard after editing its manifest (assumes
 `firstframe` checked out alongside this repo):
 
 ```sh
