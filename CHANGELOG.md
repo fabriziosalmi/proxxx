@@ -16,6 +16,19 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-24
+
+Headline: **the verification-discipline milestone, closed, and approved
+MCP operations get the risk preflight.** What the documentation says
+about the CLI, the library surface and the architecture is now held by
+tests, mutation testing and a coverage ratchet guard the approval, audit
+and incident code, two advisories in the SSH signing path are fixed, and
+`patch plan` reads the apt inventory of nodes with pending updates again.
+Two changes reach existing setups: an MCP client that stopped an
+HA-managed guest now gets a refusal (#507, under Security), and
+`metric-servers create` and `update` no longer accept `--comment`, which
+PVE's metric-server schema does not have (#494, under Fixed).
+
 ### Security
 
 - **Approved MCP operations get the risk preflight the CLI runs, at request and again at execution (#507).** `stop_guest`, `restart_guest`, `delete_guest` and `migrate_guest` ran no risk preflight: an approver saw the action and the target only, and an approved stop of an HA-managed guest was executed (the HA manager then started it again). Now the MCP gate runs `assess_deep` before asking: a SEVERE risk (a lock, HA management on stop or delete, a running guest on delete) refuses the call and nobody is asked, and the other risks are added to the Telegram approval message. When `proxxx hitl serve` executes an approved stop, restart, delete or migrate (from MCP or from a CLI batch command), it checks the guest as it is then and refuses a SEVERE risk. **Migration:** an MCP client that relied on stopping an HA-managed guest gets a refusal; change the HA state first, as `proxxx stop` already required. `ARCHITECTURE.md` now also says that CLI start, stop, restart, suspend and resume do go through Telegram approval when a policy matches (its table said "none").
