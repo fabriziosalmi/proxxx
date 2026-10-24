@@ -5,7 +5,10 @@ use super::deserialize_bool_from_int;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AptUpgradable {
-    #[serde(rename = "Title", alias = "Package", default)]
+    /// Package name (`Package`). PVE also sends `Title`, the one-line
+    /// description; it is not read, and must not be mapped here: an entry
+    /// carries both, and two keys for one field fail the whole response (#517).
+    #[serde(rename = "Package", default)]
     pub package: String,
     #[serde(rename = "OldVersion", default)]
     pub old_version: String,
@@ -34,9 +37,8 @@ impl AptUpgradable {
             || p == "systemd"
     }
 
-    /// Heuristic for security category. Proxmox tags security packages
-    /// in `Section` as `pve-no-subscription/security` or upstream
-    /// origin = "Debian-Security".
+    /// Heuristic for security category: the package's `Section` contains
+    /// `security` (for example `pve-no-subscription/security`).
     #[must_use]
     pub fn is_security(&self) -> bool {
         self.section.contains("security")
@@ -373,4 +375,29 @@ pub struct AptInstalledPackage {
     /// `pve-manager` reports its own version string here separately.
     #[serde(rename = "ManagerVersion", default)]
     pub manager_version: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two entries of `GET /nodes/{node}/apt/update`, verbatim from a
+    /// PVE 9.1.1 node. Every entry carries both `Package` and `Title`.
+    const APT_UPDATE: &str = r#"[
+        {"Priority": "required", "Origin": "Debian", "Title": "Debian package management system", "Package": "dpkg", "Version": "1.22.22", "Section": "admin", "Description": "This package provides the low-level infrastructure for handling the installation and removal of Debian software packages. . For Debian package development tools, install dpkg-dev.", "OldVersion": "1.22.21", "Arch": "amd64"},
+        {"Priority": "optional", "Origin": "Proxmox", "Title": "Latest Proxmox Kernel Image", "Version": "6.17.13-21", "Package": "proxmox-kernel-6.17", "Section": "admin", "OldVersion": "6.17.2-1", "Description": "This is a metapackage which will install the latest available proxmox kernel from the 6.17 series.", "Arch": "amd64"}
+    ]"#;
+
+    #[test]
+    fn apt_update_entries_parse_with_package_and_title() {
+        let list: Vec<AptUpgradable> = serde_json::from_str(APT_UPDATE)
+            .unwrap_or_else(|e| panic!("apt/update response must parse (#517): {e}"));
+        let names: Vec<&str> = list.iter().map(|u| u.package.as_str()).collect();
+        assert_eq!(names, ["dpkg", "proxmox-kernel-6.17"]);
+        assert_eq!(list[0].old_version, "1.22.21");
+        assert_eq!(list[0].new_version, "1.22.22");
+        // The reboot heuristic reads the package name, not the description.
+        assert!(!list[0].requires_reboot());
+        assert!(list[1].requires_reboot());
+    }
 }
