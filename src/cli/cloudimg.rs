@@ -129,11 +129,11 @@ pub const REGISTRY: &[CloudImg] = &[
     CloudImg {
         id: "debian-13-trixie-amd64",
         distro: "Debian",
-        version: "13 (trixie) genericcloud, build 20261021-2638",
+        version: "13 (trixie) genericcloud, build 20261026-2643",
         arch: "amd64",
         // Debian publishes SHA512SUMS only (no SHA256). Dated build dir.
-        url: "https://cloud.debian.org/images/cloud/trixie/20261021-2638/debian-13-genericcloud-amd64-20261021-2638.qcow2",
-        checksum: "16e0965312c56feb331049d45d2b1b5778f3f942a33d4300eedbb97527707f2bea87c0006f3e4cc7a25fadbff739c4e235a51fb9bcd1b66fd554f7f8e80ba45c",
+        url: "https://cloud.debian.org/images/cloud/trixie/20261026-2643/debian-13-genericcloud-amd64-20261026-2643.qcow2",
+        checksum: "3ace18e33bdd036edb49d1f79342bd01d2ab980e35194edb0b410435cd543538d286a0bd13bbb0835f7862306e3d385ce2f6a70d8ecf0bd961111166adbc1b8e",
         checksum_algorithm: "sha512",
         size_human: "~400 MiB",
         filename: "debian-13-trixie-amd64.qcow2",
