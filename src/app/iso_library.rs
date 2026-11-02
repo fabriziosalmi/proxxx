@@ -157,12 +157,12 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "debian-12-cloud",
         distro: "Debian",
-        version: "12 (Bookworm) build 20261021-2638",
+        version: "12 (Bookworm) build 20261026-2643",
         arch: "amd64",
-        url: "https://cloud.debian.org/images/cloud/bookworm/20261021-2638/debian-12-genericcloud-amd64-20261021-2638.qcow2",
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
         // Debian publishes ONLY SHA-512, never SHA-256.
         checksum: Some(Checksum::Sha512(
-            "9f181877006e8d9ca4f4554eba8729a829936f0f7d1db5e77f69b1ef0f6bc372b4d46f3dae39b10d84f9131496c2cc1d449264f26577fe934a79de5a5512a3dd",
+            "0464b5d4ae3aa4f658468d88da83af7857b71548b30d46dcb6282770955a747fb95a983476db90d25afd0653af607224c7ebd05122ab71faa106fd712aaad652",
         )),
         content: "import",
         size_mib: 350,
