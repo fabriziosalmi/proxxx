@@ -78,7 +78,7 @@ dirs = "7.0.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 
 # SSH layer
-russh = "0.64"
+russh = "0.65"
 # `russh-keys` was folded back into `russh` proper in 0.60 — the
 # functionality lives at `russh::keys::*` now. That removed rsa 0.9.10,
 # but russh still pulls rsa 0.10.0-rc.18 (directly and through ssh-key)
