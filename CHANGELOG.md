@@ -16,6 +16,19 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-11
+
+Headline: **the terminal is for the reader.** A one-shot command no longer
+prints log lines above its output, colour marks only what needs a look,
+`ls` prints a table a person can read, and `describe` stops printing zero
+metrics for an offline node as if they were measured. Two advisories in
+the bundled SQLite and in rustix are fixed. Four changes reach existing
+setups, all on a terminal only: info log records leave stderr for one-shot
+commands (daemons, journald, cron and CI captures keep them), `ls nodes`,
+`ls guests` and `ls storage` print the reader table instead of the TSV
+(a pipe still gets the TSV), `describe` lists guests by vmid, and usage
+cells at the ok level are no longer green in the TUI.
+
 ### Security
 
 - **`rusqlite` 0.40.2 → 0.41.1, bundling SQLite 3.54.1 (`libsqlite3-sys` 0.39.1, RUSTSEC-2026-0459).** SQLite before 3.54.0 can return uninitialized page-cache memory when it opens a database together with a `-wal` file whose page size differs, so a crafted pair of files can make queries return stale bytes from the process. proxxx builds the bundled SQLite and opens its cache in WAL mode; the exposure needs someone else to write those files. No code change: the API proxxx uses is the same in 0.41. Supersedes Dependabot #531, whose checks ran before either advisory reached the database and which does not update rustix.
@@ -33,6 +46,13 @@ SemVer contract:
 
 - **The log file carries no terminal colour codes.** The file layer wrote ANSI escape sequences around the timestamp, level and target of every line (`ESC[2m...ESC[0m ESC[33m WARN`), which `less` shows as raw codes and a log shipper stores verbatim. The file is now plain text in CLI and TUI mode, and a test reads it back.
 - **`describe` no longer prints zero metrics for a node that is not online as if they were measured (#535).** PVE sends no CPU, memory or uptime for an offline node, and `describe` printed the zero defaults: `cpu=0.0%  mem=0.0 GiB / 0.0 GiB  up=0h` in text, the same in `md`, and `cpu 0.0%, mem 0.0 GiB / 0.0 GiB, up 0h` in `--output llm-context`, which an LLM reads as a real node with no memory. These three renderings now say `no metrics: the node is not online` (`-` in the markdown table). `--format json` keeps its fields, as the JSON contract is additive-only; its `status` says `offline`. Measured on the lab cluster with pve-test-3 offline.
+
+### Dependencies
+
+- **`crypto-bigint` 0.7.6 → 0.7.9 (#526).** 0.7.0 to 0.7.8 were yanked from crates.io and the scheduled `cargo audit --deny warnings` failed on the locked 0.7.6; 0.7.9 is the oldest compatible release that is not yanked.
+- **The RUSTSEC-2026-0381 ignore is removed from `deny.toml` and `.cargo/audit.toml` (#527).** RustSec now lists the `webpki-roots` 0.26.11 shim as unaffected, so the ignore matched nothing.
+- **`fuzz/Cargo.lock` uses the versions of `Cargo.lock`.** Since v0.16.0 it had received only the version line and the `pageant` bump, and still locked `crypto-bigint` 0.7.5 and `ctutils` 0.4.2 (RUSTSEC-2026-0387 and RUSTSEC-2026-0385, fixed in the main lockfile in v0.17.0), `rusqlite` 0.40.2, `rustix` 1.1.4 and `russh` 0.64.1. The fuzz harness is not shipped; `cargo audit --deny warnings -f fuzz/Cargo.lock` now passes.
+- `russh` 0.64.1 → 0.65.0 (#523), `pageant` 0.2.4 → 0.2.5 (#528, also in `fuzz/`, #529), `tokio` 1.53.3 → 1.54.1 (#521), `flate2` 1.1.9 → 1.1.10 and `libc` 0.2.190 → 0.2.191 (#520), GitHub Actions patch and minor updates (#522), `medium-zoom` for the docs site (#525).
 
 ## [0.17.0] - 2026-10-24
 
