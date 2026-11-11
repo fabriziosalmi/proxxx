@@ -16,6 +16,11 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **`rusqlite` 0.40.2 → 0.41.1, bundling SQLite 3.54.1 (`libsqlite3-sys` 0.39.1, RUSTSEC-2026-0459).** SQLite before 3.54.0 can return uninitialized page-cache memory when it opens a database together with a `-wal` file whose page size differs, so a crafted pair of files can make queries return stale bytes from the process. proxxx builds the bundled SQLite and opens its cache in WAL mode; the exposure needs someone else to write those files. No code change: the API proxxx uses is the same in 0.41. Supersedes Dependabot #531, whose checks ran before either advisory reached the database and which does not update rustix.
+- **`rustix` 1.1.4 → 1.1.6 (RUSTSEC-2026-0486).** Its xattr functions marked unwritten bytes as initialized when given a zero-length buffer. proxxx and the two crates that pull rustix in (crossterm, tempfile) call no xattr function; lockfile-only. The scheduled CI on main fails `cargo audit` since 2026-11-10 (RUSTSEC-2026-0459, and RUSTSEC-2026-0486 from 2026-11-11); `cargo audit --deny warnings` and `cargo deny check` pass with this change.
+
 ## [0.17.0] - 2026-10-24
 
 Headline: **the verification-discipline milestone, closed, and approved
