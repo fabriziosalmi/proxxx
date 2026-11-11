@@ -21,6 +21,14 @@ SemVer contract:
 - **`rusqlite` 0.40.2 → 0.41.1, bundling SQLite 3.54.1 (`libsqlite3-sys` 0.39.1, RUSTSEC-2026-0459).** SQLite before 3.54.0 can return uninitialized page-cache memory when it opens a database together with a `-wal` file whose page size differs, so a crafted pair of files can make queries return stale bytes from the process. proxxx builds the bundled SQLite and opens its cache in WAL mode; the exposure needs someone else to write those files. No code change: the API proxxx uses is the same in 0.41. Supersedes Dependabot #531, whose checks ran before either advisory reached the database and which does not update rustix.
 - **`rustix` 1.1.4 → 1.1.6 (RUSTSEC-2026-0486).** Its xattr functions marked unwritten bytes as initialized when given a zero-length buffer. proxxx and the two crates that pull rustix in (crossterm, tempfile) call no xattr function; lockfile-only. The scheduled CI on main fails `cargo audit` since 2026-11-10 (RUSTSEC-2026-0459, and RUSTSEC-2026-0486 from 2026-11-11); `cargo audit --deny warnings` and `cargo deny check` pass with this change.
 
+### Changed
+
+- **A one-shot command at a terminal prints only warnings and errors from the log, not two info lines above its output.** Every `proxxx ls`, `describe` or `find` began with `INFO proxxx: proxxx vX starting (log file: ...)` and `INFO proxxx::api::client: Connected to ...` on stderr. With `RUST_LOG` unset, the stderr level is now `warn` when stderr is a terminal and the command is not a daemon. Daemons (`daemon serve`, `hitl serve`, `mcp serve`, `mcp serve-http`, `alerts watch`) and any stderr that is not a terminal (journald, cron mail, a CI capture) keep `info`, as #270 set it, so the systemd units in the production checklist log exactly what they logged before. The rotating log file keeps `info` in every case, and `RUST_LOG` still sets the level for both.
+
+### Fixed
+
+- **The log file carries no terminal colour codes.** The file layer wrote ANSI escape sequences around the timestamp, level and target of every line (`ESC[2m...ESC[0m ESC[33m WARN`), which `less` shows as raw codes and a log shipper stores verbatim. The file is now plain text in CLI and TUI mode, and a test reads it back.
+
 ## [0.17.0] - 2026-10-24
 
 Headline: **the verification-discipline milestone, closed, and approved

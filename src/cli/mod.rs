@@ -59,6 +59,8 @@ mod cli_secret_scope_tests {
 #[cfg(test)]
 mod help_text_tests;
 #[cfg(test)]
+mod log_level_tests;
+#[cfg(test)]
 mod yes_gate_net;
 
 pub use audit_cmd::AuditAction;
@@ -1533,6 +1535,47 @@ pub fn enforce_cli_secure_mode(cmd: &Command, secure: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `tracing` directive for the stderr layer when `RUST_LOG` is unset.
+///
+/// #270 put log records on stderr so a daemon under systemd shows its
+/// diagnostics in journald, and that stays: a long-running command, and
+/// any command whose stderr is not a terminal (journald, cron mail, a CI
+/// capture), keeps `info`. A one-shot command run by a person at a
+/// terminal gets `warn`: its output is the answer, and two `info` lines
+/// (the startup banner and "Connected to") printed above every `ls` or
+/// `describe` were noise. Warnings and errors, including the freeze lock
+/// becoming unreadable, still reach that person. The rotating log file
+/// keeps `info` in every case.
+#[must_use]
+pub const fn stderr_log_directive(cmd: &Command, stderr_is_terminal: bool) -> &'static str {
+    if stderr_is_terminal && !is_long_running(cmd) {
+        "proxxx=warn"
+    } else {
+        "proxxx=info"
+    }
+}
+
+/// Commands that run until stopped and are meant to sit under a service
+/// manager. Their `info` records (start, ticks, approvals) are the trail
+/// an operator reads in journald, so they keep `info` on stderr even in a
+/// terminal.
+#[must_use]
+pub const fn is_long_running(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::Daemon { .. }
+            | Command::Hitl {
+                action: HitlCommand::Serve
+            }
+            | Command::Mcp {
+                action: McpCommand::Serve | McpCommand::ServeHttp { .. }
+            }
+            | Command::Alerts {
+                action: monitoring::AlertsCommand::Watch { .. }
+            }
+    )
 }
 
 /// Argument ids of the per-command output flags that the global

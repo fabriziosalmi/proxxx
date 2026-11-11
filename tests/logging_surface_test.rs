@@ -86,3 +86,38 @@ fn startup_names_the_log_file_location() {
         "startup must name the log file path, got: {err:?}"
     );
 }
+
+/// The rotating file is read with `grep`, `less` and log shippers: it must
+/// carry no terminal colour codes, whatever stderr is attached to.
+#[test]
+fn the_log_file_carries_no_colour_codes() {
+    let dir = std::env::temp_dir().join(format!(
+        "proxxx-logging-ansi-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("temp log dir");
+    let _out = Command::new(env!("CARGO_BIN_EXE_proxxx"))
+        .args(["ls", "nodes"])
+        .env_remove("RUST_LOG")
+        .env("PROXXX_CONFIG", "/nonexistent/proxxx-logging-test.toml")
+        .env("PROXXX_LOG_DIR", &dir)
+        .output()
+        .expect("binary runs");
+    let mut text = String::new();
+    for entry in std::fs::read_dir(&dir).expect("log dir readable") {
+        let path = entry.expect("dir entry").path();
+        text.push_str(&std::fs::read_to_string(&path).expect("log file readable"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        text.contains("starting"),
+        "the startup record must reach the file, got: {text:?}"
+    );
+    assert!(
+        !text.contains('\u{1b}'),
+        "the log file must not contain escape codes, got: {text:?}"
+    );
+}
