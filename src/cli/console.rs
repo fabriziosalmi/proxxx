@@ -305,10 +305,16 @@ pub async fn execute_ssh(
             target.host,
         );
     }
-    eprintln!(
-        "\x1b[2m[ssh] resolved {}@{}:{} (source: {source})\x1b[0m",
-        target.user, target.host, target.port
-    );
+    // Dim on a terminal only: a pipe, a file or a CI log gets plain text.
+    crate::util::color::Line::new()
+        .paint(
+            format!(
+                "[ssh] resolved {}@{}:{} (source: {source})",
+                target.user, target.host, target.port
+            ),
+            Some(crate::util::color::Paint::Dim),
+        )
+        .eprint();
 
     // Spawn the system `ssh`. Sharing stdin/stdout/stderr with the
     // parent gives a true terminal handoff — no extra PTY layer, no

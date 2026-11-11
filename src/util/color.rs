@@ -7,9 +7,10 @@
 //! which also gets a `!` marker for monochrome terminals and colour-blind
 //! readers).
 //!
-//! Colour is written only when stdout is a terminal, `NO_COLOR` is unset
-//! or empty (<https://no-color.org>) and `TERM` is not `dumb`. A pipe, a
-//! file or `--format json` never sees an escape sequence.
+//! Colour is written only when the stream it goes to (stdout, or stderr
+//! for a [`Line::eprint`]) is a terminal, `NO_COLOR` is unset or empty
+//! (<https://no-color.org>) and `TERM` is not `dumb`. A pipe, a file or
+//! `--format json` never sees an escape sequence.
 //!
 //! #437: human-readable output goes through `outln!`, which removes every
 //! control sequence, colour included. A [`Line`] therefore sanitizes each
@@ -26,7 +27,7 @@ use crate::tui::theme::{usage_level, UsageLevel, UsageMetric};
 pub enum Paint {
     /// Running, online.
     Ok,
-    /// Stopped: present but not active.
+    /// Stopped: present but not active. Also a side note on stderr.
     Dim,
     /// Paused or suspended: an intentional state.
     Info,
@@ -64,14 +65,29 @@ pub fn enabled() -> bool {
     })
 }
 
-/// Pure form of [`enabled`].
+/// Whether CLI output on stderr is coloured, decided once per process.
+/// stderr is checked on its own: one of the two streams is often redirected
+/// (`2>log`, `| less`) while the other stays on the terminal.
+#[must_use]
+pub fn stderr_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        decide(
+            std::io::IsTerminal::is_terminal(&std::io::stderr()),
+            std::env::var_os("NO_COLOR").as_deref(),
+            std::env::var_os("TERM").as_deref(),
+        )
+    })
+}
+
+/// Pure form of [`enabled`] and [`stderr_enabled`].
 #[must_use]
 pub fn decide(
-    stdout_is_terminal: bool,
+    stream_is_terminal: bool,
     no_color: Option<&std::ffi::OsStr>,
     term: Option<&std::ffi::OsStr>,
 ) -> bool {
-    stdout_is_terminal
+    stream_is_terminal
         && no_color.is_none_or(std::ffi::OsStr::is_empty)
         && term.is_none_or(|t| t != "dumb")
 }
@@ -178,6 +194,11 @@ impl Line {
         // raw-output: every segment is sanitized in `render`; the only
         // control sequences left are the SGR codes added there.
         println!("{}", self.render(enabled()));
+    }
+
+    /// Print the line to stderr, coloured when [`stderr_enabled`].
+    pub fn eprint(&self) {
+        eprintln!("{}", self.render(stderr_enabled()));
     }
 }
 
