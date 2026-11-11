@@ -100,6 +100,36 @@ macro_rules! out {
     };
 }
 
+/// A size for a reader: `512M`, `1.5G`, `2.0T` (binary units, as PVE's web
+/// UI shows them).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn human_bytes(bytes: u64) -> String {
+    const MIB: u64 = 1_048_576;
+    const GIB: u64 = 1_073_741_824;
+    const TIB: u64 = 1_099_511_627_776;
+    if bytes >= TIB {
+        format!("{:.1}T", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1}G", bytes as f64 / GIB as f64)
+    } else {
+        format!("{}M", bytes / MIB)
+    }
+}
+
+/// An uptime for a reader: `12d4h`, `3h20m`, `45m`.
+#[must_use]
+pub fn human_uptime(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+    if d > 0 {
+        format!("{d}d{h}h")
+    } else if h > 0 {
+        format!("{h}h{m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
 /// Whole-text output (pretty JSON, plain lines). JSON escapes C0 controls
 /// inside strings but not DEL or C1, which are removed here (#365); the
 /// line breaks of the layout are kept.
@@ -296,6 +326,22 @@ pub fn render_fatal_error(
     }
     let err_json = Value::Array(vec![err_obj]);
     render_json_output(&err_json, format)
+}
+
+#[cfg(test)]
+mod human_units_tests {
+    use super::{human_bytes, human_uptime};
+
+    #[test]
+    fn sizes_and_uptimes_read_like_the_web_ui() {
+        assert_eq!(human_bytes(0), "0M");
+        assert_eq!(human_bytes(512 * 1_048_576), "512M");
+        assert_eq!(human_bytes(1_610_612_736), "1.5G");
+        assert_eq!(human_bytes(2 * 1_099_511_627_776), "2.0T");
+        assert_eq!(human_uptime(45 * 60), "45m");
+        assert_eq!(human_uptime(3 * 3_600 + 20 * 60), "3h20m");
+        assert_eq!(human_uptime(12 * 86_400 + 4 * 3_600 + 59), "12d4h");
+    }
 }
 
 #[cfg(test)]

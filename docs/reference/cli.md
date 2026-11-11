@@ -3,6 +3,14 @@
 Every command supports `--format json|json-envelope|table|plain`. Default
 is `table`.
 
+`table` is tab-separated, one column per field, for scripts. When stdout is
+a terminal, `ls nodes`, `ls guests` and `ls storage` print a table for a
+reader instead: chosen columns, aligned, sizes like `1.8G/3.8G`, guests by
+vmid, and no metrics for a node that is not online. Piped or redirected,
+they print the tab-separated table. Status and usage are coloured on a
+terminal unless `NO_COLOR` is set or `TERM` is `dumb`; `describe` follows
+the same rule.
+
 Commands with their own output flag (`--output`, `--print`, `--json`: `explain`, `describe`, `cloud-img`, `schedule list`, `backup-verify`, `heatmap`, `anomaly`, `upgrade-check`, `accounting`, `import`, `gpu-inspect`, `state`, `reconcile`, `mcp tools`) print JSON under `--format json` or `json-envelope` unless that flag is given; given explicitly, it wins. Their JSON is printed as is, without the envelope.
 
 `json-envelope` wraps the same payload as `json` in
