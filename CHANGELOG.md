@@ -16,6 +16,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The TUI finds a guest's SSH address the way `proxxx ssh` does, and its errors say what to do (#545).** The TUI read only `[ssh.guests."<vmid>"]` and refused a running guest that the CLI reached through the QEMU guest agent or the container's interfaces; it now uses the same resolution (`cli::resolve_guest_target`). When there is no target, the message names the profile's own table (`[profiles.lab.ssh.guests."200"]` instead of `[profiles.X...]`, or `[ssh.guests...]` in the CLI for a profile-based config) and the reason, for example that the guest is stopped. A key the server refuses is reported with the user, the host, the key path and its SHA256 fingerprint and the fix (`authorized_keys`), instead of `Failure { remaining_methods: MethodSet([PublicKey, Password]), partial_success: false }`; this also covers node SSH (`logs tail`, `patch`). Measured on the lab: LXC 7777 stopped is reported as stopped, and once started it is found at its address with no config entry.
+
 ## [0.18.0] - 2026-11-11
 
 Headline: **the terminal is for the reader.** A one-shot command no longer

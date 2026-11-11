@@ -124,7 +124,13 @@ impl SshSessionHandler {
     /// Open a new PTY session. Closes any existing one first.
     /// `cols`/`rows` reflect the available pane size at open time.
     /// Async — caller should `tokio::spawn` this so the TUI doesn't freeze.
-    pub async fn open(&self, vmid: u32, cols: u16, rows: u16) -> Result<()> {
+    pub async fn open(
+        &self,
+        client: &Arc<crate::api::PxClient>,
+        vmid: u32,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
         // Pop the prior session before connecting (the new one will replace it).
         // Done in a tight scope so the std::sync::Mutex isn't held over .await.
         let prior = {
@@ -138,14 +144,12 @@ impl SshSessionHandler {
             p.close();
         }
 
-        let ssh_cfg = self
-            .profile
-            .ssh
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("profile has no [ssh] block; SSH disabled"))?;
-        let target = ssh_cfg.resolve_guest(vmid).ok_or_else(|| {
-            anyhow::anyhow!("guest {vmid} not configured under [profiles.X.ssh.guests.\"{vmid}\"]")
-        })?;
+        // Same resolution as `proxxx ssh` (#545): the profile's
+        // [ssh.guests."<vmid>"], else QGA / LXC-interface discovery.
+        let (target, _source) =
+            crate::cli::resolve_guest_target(client, &self.profile, vmid).await?;
+        crate::config::validate_ssh_destination(&target.user, &target.host)
+            .map_err(|why| anyhow::anyhow!("refusing to open SSH to guest {vmid}: {why}"))?;
 
         let pass = self.passphrase();
         let session = PtySession::open(
@@ -277,5 +281,85 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(f, "this is not a private key").expect("write");
         assert!(!key_file_is_encrypted(f.path()));
+    }
+}
+
+#[cfg(test)]
+mod target_resolution_tests {
+    //! #545: the TUI resolves a guest through the same code as `proxxx ssh`.
+    //! Before, it read only [ssh.guests] and answered
+    //! `guest 200 not configured under [profiles.X.ssh.guests."200"]`.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::SshSessionHandler;
+    use crate::api::PxClient;
+    use crate::config::ProfileConfig;
+
+    #[tokio::test]
+    async fn the_tui_reports_a_stopped_guest_with_the_profile_header() {
+        let server = MockServer::start().await;
+        for (p, data) in [
+            (
+                "/cluster/resources",
+                json!([{"vmid": 200, "type": "lxc", "node": "pve1", "status": "stopped", "name": "ct"}]),
+            ),
+            (
+                "/nodes/pve1/lxc",
+                json!([{"vmid": 200, "status": "stopped", "name": "ct"}]),
+            ),
+            ("/nodes/pve1/qemu", json!([])),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api2/json{p}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ssh = toml::from_str(&format!(
+            "user = \"root\"\nkey_path = \"/nonexistent/id_ed25519\"\nknown_hosts = \"{}\"\n",
+            dir.path().join("known_hosts").display()
+        ))
+        .expect("ssh table parses");
+        let cfg = ProfileConfig {
+            url: server.uri(),
+            user: "root@pam".into(),
+            auth: "token".into(),
+            token_id: Some("t".into()),
+            token_secret: Some(crate::util::secret::SecretString::from("dummy")),
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            tls_pin_mode: None,
+            read_only: false,
+            rate_limit: None,
+            policies: None,
+            telegram: None,
+            ssh: Some(ssh),
+            pbs: None,
+            alerts: None,
+            mcp_token: None,
+            reconcile: None,
+            profile_name: Some("lab".into()),
+        };
+        let client = Arc::new(
+            PxClient::new(cfg.clone(), Some("dummy"))
+                .await
+                .expect("client builds"),
+        );
+        let handler = SshSessionHandler::new(cfg);
+        let err = format!(
+            "{:#}",
+            handler.open(&client, 200, 80, 24).await.unwrap_err()
+        );
+        assert!(err.contains("guest 200 is stopped on node pve1"), "{err}");
+        assert!(err.contains("[profiles.lab.ssh.guests.\"200\"]"), "{err}");
+        assert!(!err.contains("profiles.X"), "{err}");
     }
 }

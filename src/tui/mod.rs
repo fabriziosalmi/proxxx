@@ -754,6 +754,7 @@ pub async fn run(
                                         } else {
                                             spawn_ssh_open(
                                                 &ssh_handler,
+                                                &client,
                                                 &data_tx,
                                                 terminal,
                                                 vmid,
@@ -765,7 +766,7 @@ pub async fn run(
                                         passphrase,
                                     }) => {
                                         ssh_handler.set_passphrase(passphrase);
-                                        spawn_ssh_open(&ssh_handler, &data_tx, terminal, vmid);
+                                        spawn_ssh_open(&ssh_handler, &client, &data_tx, terminal, vmid);
                                     }
                                     Some(SideEffect::CloseSshSession) => {
                                         ssh_handler.close();
@@ -1257,17 +1258,19 @@ where
 /// two stay in lockstep.
 fn spawn_ssh_open<B: ratatui::backend::Backend>(
     ssh_handler: &Arc<ssh_handler::SshSessionHandler>,
+    client: &Arc<PxClient>,
     data_tx: &mpsc::Sender<DataMsg>,
     terminal: &ratatui::Terminal<B>,
     vmid: u32,
 ) {
     let h = Arc::clone(ssh_handler);
+    let client = Arc::clone(client);
     let tx_c = data_tx.clone();
     let area = terminal.size().unwrap_or_default();
     let cols = area.width.max(20);
     let rows = area.height.saturating_sub(2).max(5);
     crate::util::spawn_traced::spawn_traced("ssh_session_open", async move {
-        let res = h.open(vmid, cols, rows).await;
+        let res = h.open(&client, vmid, cols, rows).await;
         let error = res.err().map(|e| format!("{e:#}"));
         let _ = tx_c
             .send(DataMsg::SshSessionOpenResult { vmid, error })

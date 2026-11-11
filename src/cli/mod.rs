@@ -65,6 +65,8 @@ mod log_level_tests;
 mod yes_gate_net;
 
 pub use audit_cmd::AuditAction;
+/// Guest SSH target resolution shared with the TUI (#545).
+pub(crate) use console::resolve_guest_target;
 
 use crate::util;
 use common::{
