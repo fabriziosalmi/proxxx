@@ -131,11 +131,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "ubuntu-22.04-cloud",
         distro: "Ubuntu",
-        version: "22.04 LTS (Jammy) build 20261020",
+        version: "22.04 LTS (Jammy) build 20261106",
         arch: "amd64",
-        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261020/ubuntu-22.04-server-cloudimg-amd64.img",
+        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261106/ubuntu-22.04-server-cloudimg-amd64.img",
         checksum: Some(Checksum::Sha256(
-            "2099e63da0b822ef8e05e3d596c1b402eaaae658fc08ab919cb8495bfcdc488b",
+            "f77bc6d59cb8deaa9657095736b5f5003f7705b47055f01823459715c967de6a",
         )),
         content: "import",
         size_mib: 700,
@@ -157,12 +157,12 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "debian-12-cloud",
         distro: "Debian",
-        version: "12 (Bookworm) build 20261021-2638",
+        version: "12 (Bookworm) build 20261026-2643",
         arch: "amd64",
-        url: "https://cloud.debian.org/images/cloud/bookworm/20261021-2638/debian-12-genericcloud-amd64-20261021-2638.qcow2",
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
         // Debian publishes ONLY SHA-512, never SHA-256.
         checksum: Some(Checksum::Sha512(
-            "9f181877006e8d9ca4f4554eba8729a829936f0f7d1db5e77f69b1ef0f6bc372b4d46f3dae39b10d84f9131496c2cc1d449264f26577fe934a79de5a5512a3dd",
+            "0464b5d4ae3aa4f658468d88da83af7857b71548b30d46dcb6282770955a747fb95a983476db90d25afd0653af607224c7ebd05122ab71faa106fd712aaad652",
         )),
         content: "import",
         size_mib: 350,
@@ -184,11 +184,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "alpine-3.21-iso",
         distro: "Alpine",
-        version: "3.21.9",
+        version: "3.21.10",
         arch: "amd64",
-        url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.9-x86_64.iso",
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.10-x86_64.iso",
         checksum: Some(Checksum::Sha256(
-            "1ceafa2ca068faf2925de977815681c182708f3c6cbfbad137f3ffc9324a03b4",
+            "9b9b28535526b1972eb1e961a36203db3c011855801b93538ad721ee28a3123f",
         )),
         content: "iso",
         size_mib: 60,
