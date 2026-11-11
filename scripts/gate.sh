@@ -120,7 +120,8 @@ stage 2 "cargo clippy --release"
 run clippy cargo clippy --release --all-targets
 
 # ── Stage 3: supply-chain audit ──
-# Mirrors CI exactly: `cargo audit --deny warnings` against Cargo.lock,
+# Mirrors CI exactly: `cargo audit --deny warnings` against Cargo.lock
+# and fuzz/Cargo.lock,
 # with documented ignores in `.cargo/audit.toml`. Catching a vulnerable
 # transitive dep at commit-time beats catching it post-push. If
 # `cargo-audit` isn't installed, fail with a clear hint — don't silently
@@ -132,6 +133,8 @@ if ! command -v cargo-audit >/dev/null 2>&1; then
     fail audit 127
 fi
 run audit cargo audit --deny warnings
+# #542: the fuzz harness lockfile, audited like the root one in CI.
+run audit-fuzz cargo audit --deny warnings -f fuzz/Cargo.lock
 
 # ── Stage 4: supply-chain policy (cargo-deny) ──
 # Companion to stage 3 (cargo-audit). audit checks RustSec advisories

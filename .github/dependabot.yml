@@ -52,6 +52,29 @@ updates:
           - "ratatui"
           - "russh*"
 
+  # #542: the fuzz harness (fuzz/) has its own Cargo.lock. Without this
+  # entry only Dependabot security updates reached it, so a bump in the
+  # root Cargo.lock was left behind there. Same grouping as the root.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "cargo"
+    commit-message:
+      prefix: "deps(fuzz)"
+      include: "scope"
+    groups:
+      fuzz-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+
   # GitHub Actions deps (workflow YAML uses external actions).
   #
   # Every `uses:` in `.github/workflows/*.yml` is pinned to a 40-char

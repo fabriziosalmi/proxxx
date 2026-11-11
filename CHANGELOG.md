@@ -16,6 +16,10 @@ SemVer contract:
 
 ## [Unreleased]
 
+### Security
+
+- **CI audits `fuzz/Cargo.lock` as well as `Cargo.lock` (#542).** The fuzz harness has its own lockfile, which dependency bumps in the root lock do not touch, and it kept four advisories that the root lock had fixed until v0.18.0. The audit job and `scripts/gate.sh` now run `cargo audit --deny warnings -f fuzz/Cargo.lock`, which fails on the pre-v0.18.0 lockfile with RUSTSEC-2026-0385, -0387, -0459 and -0486. Dependabot version updates cover `/fuzz`. `russh` in `fuzz/Cargo.lock` is 0.65.1, as in `Cargo.lock`.
+
 ### Fixed
 
 - **The TUI finds a guest's SSH address the way `proxxx ssh` does, and its errors say what to do (#545).** The TUI read only `[ssh.guests."<vmid>"]` and refused a running guest that the CLI reached through the QEMU guest agent or the container's interfaces; it now uses the same resolution (`cli::resolve_guest_target`). When there is no target, the message names the profile's own table (`[profiles.lab.ssh.guests."200"]` instead of `[profiles.X...]`, or `[ssh.guests...]` in the CLI for a profile-based config) and the reason, for example that the guest is stopped. A key the server refuses is reported with the user, the host, the key path and its SHA256 fingerprint and the fix (`authorized_keys`), instead of `Failure { remaining_methods: MethodSet([PublicKey, Password]), partial_success: false }`; this also covers node SSH (`logs tail`, `patch`). Measured on the lab: LXC 7777 stopped is reported as stopped, and once started it is found at its address with no config entry.
