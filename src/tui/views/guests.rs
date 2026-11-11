@@ -12,6 +12,7 @@ use ratatui::{
 use crate::api::types::{GuestStatus, GuestType};
 use crate::app::AppState;
 use crate::tui::theme::{usage_level, Theme, UsageMetric};
+use crate::util::format::human_bytes;
 use crate::util::sanitize::sanitize_display;
 
 /// Render the guest list or guest detail. The bottom action-hint
@@ -189,7 +190,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
             };
 
             let disk_span = if guest.maxdisk > 0 {
-                let text = format_bytes(guest.maxdisk);
+                let text = human_bytes(guest.maxdisk);
                 if guest.disk > 0 {
                     let disk_pct = (guest.disk as f64 / guest.maxdisk as f64) * 100.0;
                     Theme::usage_span(text, UsageMetric::Disk, disk_pct, true)
@@ -293,18 +294,6 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
 // r restart · d delete · c console · / search) now live in the
 // global `widgets::status_footer`. Pre-fix this view rendered its
 // own copy on top of the global footer — two stacked rows.
-
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const TB: u64 = 1_099_511_627_776;
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else {
-        format!("{:.0}M", bytes as f64 / 1_048_576.0)
-    }
-}
 
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
 fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
@@ -453,8 +442,8 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
             Span::styled("RAM:  ", Theme::dim()),
             Span::raw(format!(
                 "{} / {}",
-                format_bytes(guest.mem),
-                format_bytes(guest.maxmem)
+                human_bytes(guest.mem),
+                human_bytes(guest.maxmem)
             )),
         ]),
         Line::from(vec![Span::styled("      ", Theme::dim()), mem_res_span]),
@@ -463,8 +452,8 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
             Span::styled("Disk: ", Theme::dim()),
             Span::raw(format!(
                 "{} / {}",
-                format_bytes(guest.disk),
-                format_bytes(guest.maxdisk)
+                human_bytes(guest.disk),
+                human_bytes(guest.maxdisk)
             )),
         ]),
         Line::from(vec![Span::styled("      ", Theme::dim()), disk_res_span]),

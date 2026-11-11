@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::AppState;
 use crate::tui::theme::{usage_level, Theme, UsageMetric};
+use crate::util::format::human_bytes;
 
 /// Render the main dashboard. The bottom status bar (mode pill +
 /// keybind hints) is rendered globally by `status_footer`, not here
@@ -134,7 +135,7 @@ fn draw_aggregate_stats(f: &mut Frame, area: Rect, state: &AppState) {
         UsageMetric::Memory,
         mem_pct,
         total_maxmem > 0,
-        &format!("{}/{}", format_bytes(total_mem), format_bytes(total_maxmem)),
+        &format!("{}/{}", human_bytes(total_mem), human_bytes(total_maxmem)),
     );
     f.render_widget(mem_gauge, cols[1]);
 
@@ -143,11 +144,7 @@ fn draw_aggregate_stats(f: &mut Frame, area: Rect, state: &AppState) {
         UsageMetric::Disk,
         disk_pct,
         total_maxdisk > 0,
-        &format!(
-            "{}/{}",
-            format_bytes(total_disk),
-            format_bytes(total_maxdisk)
-        ),
+        &format!("{}/{}", human_bytes(total_disk), human_bytes(total_maxdisk)),
     );
     f.render_widget(disk_gauge, cols[2]);
 }
@@ -232,7 +229,7 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
                     node.maxcpu > 0,
                 ),
                 Theme::usage_span(
-                    format!("{mem_pct:.0}% ({})", format_bytes(node.maxmem)),
+                    format!("{mem_pct:.0}% ({})", human_bytes(node.maxmem)),
                     UsageMetric::Memory,
                     mem_pct,
                     node.maxmem > 0,
@@ -279,22 +276,6 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
 // resulting in two stacked rows on screen.
 
 // ── Helpers ─────────────────────────────────────────────
-
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const MB: u64 = 1_048_576;
-    const TB: u64 = 1_099_511_627_776;
-
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.0}M", bytes as f64 / MB as f64)
-    } else {
-        format!("{bytes}B")
-    }
-}
 
 fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86400;

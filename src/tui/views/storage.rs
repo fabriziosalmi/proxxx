@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::AppState;
 use crate::tui::theme::Theme;
+use crate::util::format::human_bytes;
 
 /// Render the storage list
 pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
@@ -79,8 +80,8 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
                 0.0
             };
 
-            let used_str = format_bytes(pool.used);
-            let total_str = format_bytes(pool.total);
+            let used_str = human_bytes(pool.used);
+            let total_str = human_bytes(pool.total);
             let usage_bar = make_bar(usage_pct, 10);
 
             let style = if actual_index == state.selected_index {
@@ -108,7 +109,7 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
                             let diff = pool.used - past_used;
                             let bytes_per_sec = diff as f64 / elapsed_secs as f64;
                             let bytes_per_day = bytes_per_sec * 86400.0;
-                            trend_str = format!("+{}", format_bytes(bytes_per_day as u64));
+                            trend_str = format!("+{}", human_bytes(bytes_per_day as u64));
 
                             let remaining = pool.total.saturating_sub(pool.used);
                             let days_left = remaining as f64 / bytes_per_day;
@@ -122,7 +123,7 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
                             let diff = past_used - pool.used;
                             let bytes_per_sec = diff as f64 / elapsed_secs as f64;
                             let bytes_per_day = bytes_per_sec * 86400.0;
-                            trend_str = format!("-{}", format_bytes(bytes_per_day as u64));
+                            trend_str = format!("-{}", human_bytes(bytes_per_day as u64));
                             eta_str = "∞".to_string();
                         }
                         Ordering::Equal => {
@@ -188,16 +189,4 @@ fn make_bar(percent: f64, width: usize) -> String {
     let filled = ((percent / 100.0) * width as f64).round() as usize;
     let filled = filled.min(width);
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const TB: u64 = 1_099_511_627_776;
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else {
-        format!("{:.0}M", bytes as f64 / 1_048_576.0)
-    }
 }
