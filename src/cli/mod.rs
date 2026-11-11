@@ -34,6 +34,7 @@ mod patch;
 // `pub(crate)` so the converge core in `state::converge` can reuse the shared
 // drift helpers (`compute_drift_with_live`, `drift_summary`) without a second
 // copy. The items themselves stay `pub(crate)`.
+mod ls_view;
 pub(crate) mod reconcile;
 mod schedule;
 mod state;
@@ -1797,11 +1798,24 @@ pub async fn execute(
             resource,
             all_profiles: _, // already handled in the short-circuit above when true
         } => match resource.as_str() {
+            // On a terminal with `--format table`, `ls_view` prints a
+            // table for a reader and returns `Null` (already printed).
             "nodes" => {
                 let nodes = client.get_nodes().await?;
+                if ls_view::wanted(format) {
+                    ls_view::print_nodes(&nodes);
+                    return Ok((Value::Null, 0));
+                }
                 Ok((serde_json::to_value(nodes)?, 0))
             }
-            "guests" => Ok((serde_json::to_value(client.get_all_guests().await?)?, 0)),
+            "guests" => {
+                let guests = client.get_all_guests().await?;
+                if ls_view::wanted(format) {
+                    ls_view::print_guests(&guests);
+                    return Ok((Value::Null, 0));
+                }
+                Ok((serde_json::to_value(guests)?, 0))
+            }
             "storage" => {
                 let (pools, skipped) = client.get_all_storage_pools_and_skipped().await?;
                 // #352: an offline node's pools are not in the list; say so.
@@ -1814,6 +1828,10 @@ pub async fn execute(
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                }
+                if ls_view::wanted(format) {
+                    ls_view::print_storage(&pools);
+                    return Ok((Value::Null, 0));
                 }
                 Ok((serde_json::to_value(pools)?, 0))
             }
