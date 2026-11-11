@@ -281,7 +281,7 @@ jobs:
 
       - name: Install cosign (sigstore)
         # Pinned action; sigstore-managed. ~5 MiB download, runs in <2s.
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Sign tarball with cosign (keyless via OIDC)
         # `--bundle` packs the signature, signing certificate, and
@@ -396,7 +396,7 @@ jobs:
           ( cd dist && shasum -a 256 "proxxx-${VERSION}.cdx.json" > "proxxx-${VERSION}.cdx.json.sha256" )
 
       - name: Install cosign (sigstore)
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Sign the SBOM with cosign (keyless via OIDC)
         # Same keyless, transparency-logged signature as the tarballs
@@ -526,7 +526,7 @@ jobs:
           echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release + upload assets
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           # Trigger fired on `v*` tag, so `github.ref_name` is `vX.Y.Z`.
           tag_name: ${{ github.ref_name }}
