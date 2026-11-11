@@ -191,28 +191,52 @@ fn main() -> Result<()> {
     //    logging a line per HTTP request, which is a lot of disk for a
     //    long-running daemon and is one `RUST_LOG=proxxx=debug` away
     //    when someone actually needs it.
+    //
+    // 3. THE TERMINAL GETS LESS THAN THE FILE. With `RUST_LOG` unset, a
+    //    one-shot command at a terminal prints only warnings and errors
+    //    on stderr; daemons and non-terminal stderr keep `info` (see
+    //    `cli::stderr_log_directive`). The file always keeps `info`, and
+    //    without colour codes: escape sequences in a log file break
+    //    `grep` and every log shipper that reads it.
     let filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("proxxx=info"))
     };
-    let is_tui = cli.command.is_none();
-    if is_tui {
-        tracing_subscriber::fmt()
-            .with_writer(non_blocking)
-            .with_env_filter(filter())
-            .init();
-    } else {
-        use tracing_subscriber::layer::SubscriberExt as _;
-        use tracing_subscriber::util::SubscriberInitExt as _;
-        tracing_subscriber::registry()
-            .with(filter())
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(util::term_gate::GatedStderrMakeWriter::stderr())
-                    .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
-            )
-            .init();
+    match &cli.command {
+        None => {
+            tracing_subscriber::fmt()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_env_filter(filter())
+                .init();
+        }
+        Some(cmd) => {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            use tracing_subscriber::util::SubscriberInitExt as _;
+            use tracing_subscriber::Layer as _;
+            let stderr_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            let stderr_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(cli::stderr_log_directive(
+                        cmd,
+                        stderr_is_terminal,
+                    ))
+                });
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false)
+                        .with_filter(filter()),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(util::term_gate::GatedStderrMakeWriter::stderr())
+                        .with_ansi(stderr_is_terminal)
+                        .with_filter(stderr_filter),
+                )
+                .init();
+        }
     }
 
     info!(
