@@ -32,6 +32,7 @@ SemVer contract:
 ### Documentation
 
 - **The quick starts offer `proxxx token bootstrap` as the first-run path when SSH to a node works (#541).** The README, `quick-start.md`, `quickstart-homelab.md` and `installation.md` show it before the web UI and the wizard, with the minimal `config.toml` it needs, its default role (`PVEAuditor`, read-only) and `--role PVEAdmin` to operate guests; `docs/reference/cli.md` lists it. The hint printed by `proxxx init` names it. The homelab page also printed the token id of `pveum user token add root@pam proxxx` as `proxxx@pve!proxxx`; it is `root@pam!proxxx`. Checked on the lab from a config with no secret: the token was created, its secret stored in a `0600` file, verified against PVE 9.1.1, and `ls nodes` ran with it.
+- **The README starts with install and three commands (#540).** `## Install` moved from line 86 to line 31: a Homebrew one-liner, then `init --interactive`, `ls nodes` and the TUI, with the full first-run block below. The persona table, the feature list and the EU and compliance table follow the TUI section, and the tarball verification and the source build moved to "Other install methods". The TUI section said 18 views and listed 12; the count is right (the `View` enum has 18 variants), and it now names the six that open from context. The TUI recording the issue asks for is not part of this change.
 
 ### Tests and tooling
 
