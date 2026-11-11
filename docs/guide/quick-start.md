@@ -4,10 +4,50 @@ Five minutes from `cargo build` to driving a real cluster.
 
 ## 1. Authenticate
 
+### Fastest path: proxxx mints the token over SSH
+
+If you can SSH as root to a node, `proxxx token bootstrap` creates the
+API token there with `pveum`, grants it a role, and stores the secret
+without printing it. Start from the commented template, set `url`,
+`user` and `verify_tls`, and uncomment `[ssh]`:
+
+```sh
+proxxx init          # writes ~/.config/proxxx/config.toml (Linux); --force to overwrite
+```
+
+```toml
+url = "https://pve1.lan:8006"
+user = "root@pam"
+token_id = "proxxx"
+verify_tls = false   # self-signed certificate
+
+[ssh]
+user = "root"
+key_path = "~/.ssh/id_ed25519"
+```
+
+```sh
+proxxx token bootstrap --yes                   # read-only: PVEAuditor on /
+proxxx token bootstrap --role PVEAdmin --yes   # to start, stop and migrate guests
+```
+
+It connects to the host in `url` on port 22 (`--ssh-host <host[:port]>`
+for another node) under the `[ssh]` host-key policy (`tofu` by default:
+the first connection records the key; `"off"` is refused). The secret
+goes to `--secret-file <path>`, else the profile's `token_secret_file`,
+else the macOS keychain, else `<config dir>/secrets/<profile>.token`,
+always mode `0600`. proxxx then checks the new token against `/version`
+and `/nodes` and prints the lines to add to `config.toml` (`token_id`,
+and `token_secret_file` for a file); it does not edit the file. A token
+that already exists is refused unless you pass `--rotate`, which
+invalidates the old secret.
+
+### Without SSH: create the token in the web UI
+
 Create an API token in the Proxmox web UI under
 **Datacenter → Permissions → API Tokens**. Untick "Privilege Separation"
 unless you know which roles you need. Copy the secret — Proxmox shows
-it only once.
+it only once. Then use the wizard or edit the file.
 
 ### Easy path: the wizard
 

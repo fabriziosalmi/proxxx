@@ -104,6 +104,21 @@ proxxx reads its configuration from an OS-conventional path:
 | macOS   | `~/Library/Application Support/dev.proxxx.proxxx/config.toml` |
 | Windows | `%APPDATA%\dev\proxxx\proxxx\config.toml` |
 
+### Fastest: mint the token over SSH
+
+If you can SSH as root to a node, run `proxxx init`, set `url`, `user`
+and `verify_tls` in the template, uncomment `[ssh]`, then:
+
+```sh
+proxxx token bootstrap --yes                   # PVEAuditor on / (read-only)
+proxxx token bootstrap --role PVEAdmin --yes   # to operate guests
+```
+
+proxxx creates the token on the node with `pveum`, stores the secret in
+the macOS keychain or a `0600` file without printing it, checks it
+against the API and prints the `config.toml` lines to add. See
+[Quick start → Authenticate](/guide/quick-start#_1-authenticate).
+
 ### Easy: interactive wizard
 
 ```sh
