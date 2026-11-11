@@ -3,6 +3,8 @@ use ratatui::{
     text::Span,
 };
 
+use crate::api::types::GuestStatus;
+
 /// Resource metric class for per-metric usage colouring (`#334`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UsageMetric {
@@ -190,7 +192,10 @@ impl Theme {
     /// When `has_max` is `false` (`max == 0` or missing data), returns `text`
     /// with [`Style::default()`] and no marker. When `has_max` is `true`,
     /// appends [`UsageLevel::marker`] (`"!"` at [`UsageLevel::Critical`]) and
-    /// styles the cell with [`UsageLevel::style`].
+    /// styles the cell with [`UsageLevel::style`] from
+    /// [`UsageLevel::Elevated`] up. An [`UsageLevel::Ok`] cell keeps the
+    /// default text colour: colour marks what needs a look, and a table where
+    /// every `0%` is green makes the yellow and red cells harder to find.
     #[must_use]
     pub fn usage_span(
         text: String,
@@ -202,6 +207,9 @@ impl Theme {
             return Span::raw(text);
         }
         let level = usage_level(metric, percent);
+        if level == UsageLevel::Ok {
+            return Span::raw(text);
+        }
         let marker = level.marker();
         let labeled = if marker.is_empty() {
             text
@@ -209,6 +217,32 @@ impl Theme {
             format!("{text}{marker}")
         };
         Span::styled(labeled, level.style())
+    }
+
+    /// Style of a guest's status cell. Stopped is a normal state, not an
+    /// alarm, so it is dim rather than red; red stays for what is wrong.
+    #[must_use]
+    pub fn guest_status(status: GuestStatus) -> Style {
+        match status {
+            GuestStatus::Running => Style::default().fg(Self::SUCCESS),
+            GuestStatus::Stopped => Self::dim(),
+            GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Self::INFO),
+            GuestStatus::Unknown => Style::default().fg(Self::WARNING),
+        }
+    }
+
+    /// Style of a whole guest row: stopped rows are dim, every other row
+    /// keeps the default text colour and lets its status cell carry the
+    /// state ([`Theme::guest_status`]).
+    #[must_use]
+    pub fn guest_row(status: GuestStatus) -> Style {
+        match status {
+            GuestStatus::Stopped => Self::dim(),
+            GuestStatus::Running
+            | GuestStatus::Paused
+            | GuestStatus::Suspended
+            | GuestStatus::Unknown => Style::default(),
+        }
     }
 
     #[must_use]

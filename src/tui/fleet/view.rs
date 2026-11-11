@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::{FleetCluster, FleetFocus, FleetState};
-use crate::api::types::{GuestStatus, GuestType};
+use crate::api::types::GuestType;
 use crate::tui::theme::{Theme, UsageMetric};
 use crate::util::sanitize::{sanitize_display, truncate_ellipsis};
 
@@ -232,12 +232,6 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
                 GuestType::Lxc => "LXC",
             };
             let status = format!("{:?}", g.status).to_lowercase();
-            let style = match g.status {
-                GuestStatus::Running => Style::default().fg(Theme::SUCCESS),
-                GuestStatus::Stopped => Style::default().fg(Theme::DANGER),
-                GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::INFO),
-                GuestStatus::Unknown => Style::default().fg(Theme::WARNING),
-            };
             let cpu_pct = g.cpu * 100.0;
             let cpu_span = Theme::usage_span(
                 format!("{cpu_pct:.0}%"),
@@ -261,12 +255,12 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
                 Span::raw(g.vmid.to_string()),
                 Span::raw(truncate_ellipsis(&sanitize_display(&g.name), 22)),
                 Span::raw(type_str.to_string()),
-                Span::raw(status),
+                Span::styled(status, Theme::guest_status(g.status)),
                 Span::raw(truncate_ellipsis(&sanitize_display(&g.node), 12)),
                 cpu_span,
                 mem_span,
             ])
-            .style(style)
+            .style(Theme::guest_row(g.status))
         })
         .collect();
 
@@ -419,8 +413,9 @@ mod tests {
 
         assert_eq!(stor_0.trim(), "10.0G/100.0G");
         assert!(!stor_0.contains('!'));
-        assert_eq!(buf[(storage_col, r0)].fg, Theme::SUCCESS);
-        assert_eq!(buf[(mem_col, r0)].fg, Theme::SUCCESS);
+        // An ok level keeps the row's text colour (row 0 is the selected row).
+        assert_eq!(buf[(storage_col, r0)].fg, Theme::TEXT);
+        assert_eq!(buf[(mem_col, r0)].fg, Theme::TEXT);
 
         assert_eq!(stor_1.trim(), "85.0G/100.0G");
         assert!(!stor_1.contains('!'));
@@ -460,5 +455,60 @@ mod tests {
         );
         assert_eq!(buf[(mem_col, row_y)].fg, Color::Reset);
         assert_eq!(buf[(storage_col, row_y)].fg, Color::Reset);
+    }
+
+    /// Colour means "look here": a stopped guest is a normal state, so its
+    /// row is dim and nothing in it is red; a running guest's row keeps the
+    /// default text and only its status cell is green.
+    #[test]
+    fn fleet_guest_rows_colour_only_the_status_cell_and_never_red_for_stopped() {
+        use crate::api::types::{Guest, GuestStatus};
+        let mut cluster = make_cluster("c1", 10, 100);
+        cluster.guests = vec![
+            Guest {
+                vmid: 100,
+                name: "web".into(),
+                status: GuestStatus::Running,
+                node: "n1".into(),
+                ..Guest::default()
+            },
+            Guest {
+                vmid: 101,
+                name: "db".into(),
+                status: GuestStatus::Stopped,
+                node: "n1".into(),
+                ..Guest::default()
+            },
+        ];
+        let state = FleetState {
+            clusters: vec![cluster],
+            ..FleetState::default()
+        };
+        let buf = render_buffer(&state);
+        let header_y = (0..buf.area.height)
+            .find(|&y| row_string(&buf, y).contains("vmid"))
+            .expect("guest header row present");
+        let name_col = find_col_of(&buf, header_y, "name");
+        let status_col = find_col_of(&buf, header_y, "status");
+        let row_of = |vmid: &str| {
+            (header_y + 1..buf.area.height)
+                .find(|&y| row_string(&buf, y).contains(vmid))
+                .unwrap_or_else(|| panic!("row for {vmid}"))
+        };
+        let running = row_of("100");
+        let stopped = row_of("101");
+
+        assert_eq!(buf[(status_col, running)].fg, Theme::SUCCESS);
+        assert_eq!(buf[(name_col, running)].fg, Color::Reset);
+
+        assert_eq!(buf[(status_col, stopped)].fg, Theme::TEXT_DIM);
+        assert_eq!(buf[(name_col, stopped)].fg, Theme::TEXT_DIM);
+        for x in 0..buf.area.width {
+            assert_ne!(
+                buf[(x, stopped)].fg,
+                Theme::DANGER,
+                "no red cell in a stopped row (column {x})"
+            );
+        }
     }
 }

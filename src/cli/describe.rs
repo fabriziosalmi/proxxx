@@ -28,6 +28,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::api::{ProxmoxGateway, PxClient};
+use crate::tui::theme::UsageMetric;
+use crate::util::color::{self, Line};
 
 /// Output format. `LlmContext` is the heading-marker variant
 /// designed for paste-into-LLM use; the others are
@@ -348,6 +350,86 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
+/// Status and usage are coloured on a terminal (`util::color`); each
+/// field is padded before it is coloured, so the columns line up.
+fn print_nodes(nodes: &[NodeSummary]) {
+    crate::outln!("## Nodes");
+    for n in nodes {
+        let mem_used = format_bytes_gib(n.mem_used_bytes);
+        let mem_total = format_bytes_gib(n.mem_total_bytes);
+        let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
+        let (cpu_paint, cpu_mark) = color::usage(UsageMetric::Cpu, cpu_pct);
+        let (mem_paint, mem_mark) = if n.mem_total_bytes > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let p = (n.mem_used_bytes as f64 / n.mem_total_bytes as f64) * 100.0;
+            color::usage(UsageMetric::Memory, p)
+        } else {
+            (None, "")
+        };
+        Line::new()
+            .plain(format!("  {:<14} ", n.node))
+            .paint(
+                format!("{:<8}", n.status),
+                Some(color::node_status(&n.status)),
+            )
+            .plain("  cpu=")
+            .paint(format!("{cpu_pct:>5.1}%{cpu_mark}"), cpu_paint)
+            .plain("  mem=")
+            .paint(format!("{mem_used} / {mem_total}{mem_mark}"), mem_paint)
+            .plain(format!("  up={}", fmt_uptime(n.uptime_secs)))
+            .print();
+    }
+}
+
+fn print_guests(guests: &[GuestSummary]) {
+    crate::outln!("\n## Guests");
+    // By vmid, so a reader scanning for a guest finds it. They arrive per
+    // node, VMs first and then containers, each in the API's order. The
+    // JSON digest keeps that order.
+    let mut sorted: Vec<&GuestSummary> = guests.iter().collect();
+    sorted.sort_by_key(|g| g.vmid);
+    for g in sorted {
+        let res = match (g.cores, g.mem_mb) {
+            (Some(c), Some(m)) => format!("{c}c/{m}MB"),
+            _ => "—".into(),
+        };
+        Line::new()
+            .plain(format!(
+                "  {vmid:<6} {kind:<5} {name:<20} on {node:<10} ",
+                vmid = g.vmid,
+                kind = g.kind,
+                name = g.name,
+                node = g.node,
+            ))
+            .paint(
+                format!("{:<8}", g.status),
+                Some(color::guest_status(&g.status)),
+            )
+            .plain(format!(" {res}"))
+            .print();
+    }
+}
+
+fn print_storages(storages: &[StorageSummary]) {
+    crate::outln!("\n## Storages");
+    for s in storages {
+        let shared = if s.shared { "shared" } else { "local" };
+        let (used_pct, used_paint, used_mark) = if s.total_bytes > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let p = (s.used_bytes as f64 / s.total_bytes as f64) * 100.0;
+            let (paint, mark) = color::usage(UsageMetric::Disk, p);
+            (format!("{p:>5.1}%"), paint, mark)
+        } else {
+            ("  n/a".into(), None, "")
+        };
+        Line::new()
+            .plain(format!("  {:<14} {:<10} ", s.storage, s.kind))
+            .paint(format!("{used_pct:<5}{used_mark}"), used_paint)
+            .plain(format!("  on {} nodes  ({shared})", s.on_nodes.len()))
+            .print();
+    }
+}
+
 fn print_text(d: &ClusterDigest) {
     crate::outln!("# Cluster ({})", d.cluster.pve_version);
     crate::outln!(
@@ -367,52 +449,9 @@ fn print_text(d: &ClusterDigest) {
         crate::outln!("  (empty sections below may be empty, or unreadable — do not");
         crate::outln!("   infer absence from them)\n");
     }
-    crate::outln!("## Nodes");
-    for n in &d.nodes {
-        let mem_used = format_bytes_gib(n.mem_used_bytes);
-        let mem_total = format_bytes_gib(n.mem_total_bytes);
-        let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
-        crate::outln!(
-            "  {name:<14} {status:<8}  cpu={cpu_pct:>5.1}%  mem={mem_used} / {mem_total}  up={up}",
-            name = n.node,
-            status = n.status,
-            up = fmt_uptime(n.uptime_secs),
-        );
-    }
-    crate::outln!("\n## Guests");
-    for g in &d.guests {
-        let res = match (g.cores, g.mem_mb) {
-            (Some(c), Some(m)) => format!("{c}c/{m}MB"),
-            _ => "—".into(),
-        };
-        crate::outln!(
-            "  {vmid:<6} {kind:<5} {name:<20} on {node:<10} {status:<8} {res}",
-            vmid = g.vmid,
-            kind = g.kind,
-            name = g.name,
-            node = g.node,
-            status = g.status,
-            res = res,
-        );
-    }
-    crate::outln!("\n## Storages");
-    for s in &d.storages {
-        let shared = if s.shared { "shared" } else { "local" };
-        let used_pct = if s.total_bytes > 0 {
-            #[allow(clippy::cast_precision_loss)]
-            let p = (s.used_bytes as f64 / s.total_bytes as f64) * 100.0;
-            format!("{p:>5.1}%")
-        } else {
-            "  n/a".into()
-        };
-        crate::outln!(
-            "  {name:<14} {kind:<10} {used:<5}  on {n} nodes  ({shared})",
-            name = s.storage,
-            kind = s.kind,
-            used = used_pct,
-            n = s.on_nodes.len(),
-        );
-    }
+    print_nodes(&d.nodes);
+    print_guests(&d.guests);
+    print_storages(&d.storages);
     if let Some(failures) = &d.recent_failures {
         crate::outln!("\n## Recent failures ({})", failures.len());
         for t in failures {

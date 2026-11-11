@@ -67,10 +67,7 @@ fn draw_title(f: &mut Frame, area: Rect, state: &AppState) {
             format!(" {running} running "),
             Style::default().fg(Theme::SUCCESS),
         ),
-        Span::styled(
-            format!(" {stopped} stopped "),
-            Style::default().fg(Theme::DANGER),
-        ),
+        Span::styled(format!(" {stopped} stopped "), Theme::dim()),
         Span::styled(format!(" {vms} VM  {lxc} LXC "), Theme::dim()),
     ]);
     // #378: guests of a node whose last fetch failed are last-known data.
@@ -219,27 +216,30 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
             } else if actual_index == state.selected_index {
                 Theme::selected()
             } else {
-                match guest.status {
-                    GuestStatus::Running => Style::default(),
-                    GuestStatus::Stopped => Theme::dim(),
-                    _ => Style::default().fg(Theme::WARNING),
-                }
+                Theme::guest_row(guest.status)
             };
 
-            if let Some(task) = state.active_tasks.get(&guest.vmid) {
+            let status_cell = if let Some(task) = state.active_tasks.get(&guest.vmid) {
                 status_icon = ">";
                 status_text = task.clone();
                 if !state.selected_guests.contains(&guest.vmid) {
                     style = style.fg(Theme::WARNING);
                 }
-            }
+                Span::raw(status_text)
+            } else if state.selected_guests.contains(&guest.vmid) {
+                // A multi-selected row has a coloured background; the
+                // status colour on top of it would be unreadable.
+                Span::raw(status_text)
+            } else {
+                Span::styled(status_text, Theme::guest_status(guest.status))
+            };
 
             Row::new(vec![
                 Span::raw(status_icon.to_string()),
                 Span::raw(guest.vmid.to_string()),
                 Span::raw(sanitize_display(&guest.name).into_owned()),
                 Span::raw(type_str.to_string()),
-                Span::raw(status_text),
+                status_cell,
                 cpu_span,
                 mem_span,
                 disk_span,
@@ -327,12 +327,7 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
         .split(area);
 
     // Header — status color carries semantic; row text shows the word.
-    let status_style = match guest.status {
-        GuestStatus::Running => Style::default().fg(Theme::SUCCESS),
-        GuestStatus::Stopped => Style::default().fg(Theme::DANGER),
-        GuestStatus::Paused | GuestStatus::Suspended => Style::default().fg(Theme::INFO),
-        GuestStatus::Unknown => Style::default().fg(Theme::WARNING),
-    };
+    let status_style = Theme::guest_status(guest.status);
     let status_word = format!("{:?}", guest.status).to_lowercase();
 
     let title = Line::from(vec![
@@ -689,7 +684,8 @@ mod tests {
 
         assert_eq!(cell_0.trim(), "10%");
         assert!(!cell_0.contains('!'));
-        assert_eq!(buf[(ram_col, r0)].fg, Theme::SUCCESS);
+        // An ok level keeps the row's text colour (row 0 is the selected row).
+        assert_eq!(buf[(ram_col, r0)].fg, Theme::TEXT);
 
         assert_eq!(cell_1.trim(), "85%");
         assert!(!cell_1.contains('!'));
