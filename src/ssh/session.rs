@@ -209,6 +209,41 @@ pub struct SshSession {
     last_used: Arc<RwLock<Instant>>,
 }
 
+/// What to tell the operator when the server refuses the client key
+/// (#545). The russh `AuthResult` used to be printed with `{:?}`
+/// (`Failure { remaining_methods: MethodSet([PublicKey, Password]), ... }`),
+/// which named neither the key nor the fix.
+#[must_use]
+pub fn auth_refused_message(
+    user: &str,
+    host: &str,
+    port: u16,
+    key_path: &std::path::Path,
+    fingerprint: &str,
+    remaining: &[&str],
+    partial_success: bool,
+) -> String {
+    let offers = if remaining.is_empty() {
+        "no other method".to_string()
+    } else {
+        remaining.join(", ")
+    };
+    if partial_success {
+        format!(
+            "{host}:{port} accepted the key {} ({fingerprint}) for {user} but requires a \
+             further method ({offers}); proxxx authenticates with a key only",
+            key_path.display()
+        )
+    } else {
+        format!(
+            "{host}:{port} refused the key {} ({fingerprint}) for {user}: add its public \
+             half to {user}'s ~/.ssh/authorized_keys on that host (the server still \
+             offers: {offers})",
+            key_path.display()
+        )
+    }
+}
+
 impl SshSession {
     /// Establish a new SSH session: TCP → handshake → publickey auth.
     pub async fn connect(
@@ -223,6 +258,12 @@ impl SshSession {
         let key_pair = russh::keys::load_secret_key(key_path, passphrase)
             .with_context(|| format!("loading SSH key {}", key_path.display()))?;
         check_client_key_strength(&key_pair, key_path)?;
+        // Named in an auth refusal (#545), so the operator can compare it
+        // with the server's authorized_keys and the OpenSSH client's `-v`.
+        let fingerprint = key_pair
+            .public_key()
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
 
         let config = Arc::new(Config {
             inactivity_timeout: Some(Duration::from_mins(5)),
@@ -280,13 +321,24 @@ impl SshSession {
         // PartialFailure includes which methods the server still
         // expects (useful for debugging "I gave it a key but it
         // wants password too").
-        match auth_result {
-            AuthResult::Success => {}
-            other => {
-                anyhow::bail!(
-                    "ssh publickey auth rejected by {host}:{port} for user {user}: {other:?}"
-                );
-            }
+        if let AuthResult::Failure {
+            remaining_methods,
+            partial_success,
+        } = auth_result
+        {
+            let remaining: Vec<&'static str> = remaining_methods.iter().map(Into::into).collect();
+            anyhow::bail!(
+                "{}",
+                auth_refused_message(
+                    &user,
+                    &host,
+                    port,
+                    key_path,
+                    &fingerprint,
+                    &remaining,
+                    partial_success
+                )
+            );
         }
 
         info!("ssh authenticated {user}@{host}:{port}");
@@ -724,6 +776,92 @@ mod hardening_tests {
         ) -> Result<russh::server::Auth, Self::Error> {
             Ok(russh::server::Auth::Accept)
         }
+    }
+
+    /// Refuses every key and offers publickey and password, as an OpenSSH
+    /// server does when the key is not in `authorized_keys` (#545).
+    struct RefusingSshServer;
+
+    impl russh::server::Handler for RefusingSshServer {
+        type Error = russh::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _public_key: russh::server::VerifiedPublicKey<'_>,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            let methods: &[russh::MethodKind] =
+                &[russh::MethodKind::PublicKey, russh::MethodKind::Password];
+            Ok(russh::server::Auth::Reject {
+                proceed_with_methods: Some(russh::MethodSet::from(methods)),
+                partial_success: false,
+            })
+        }
+    }
+
+    async fn spawn_refusing_server(host_key: PrivateKey) -> u16 {
+        let mut server_config = russh::server::Config::default();
+        server_config.keys.push(host_key);
+        let server_config = Arc::new(server_config);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0");
+        let port = listener.local_addr().expect("local_addr").port();
+        tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                let _ = russh::server::run_stream(server_config, socket, RefusingSshServer).await;
+            }
+        });
+        port
+    }
+
+    /// #545: a refused key is reported with the key path, its SHA256
+    /// fingerprint and the fix, not as a russh Debug struct.
+    #[tokio::test]
+    async fn a_refused_key_names_the_key_its_fingerprint_and_the_fix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client_key = sample_private_key(0x66);
+        let fingerprint = client_key
+            .public_key()
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+        let client_key_path = dir.path().join("id_ed25519");
+        std::fs::write(
+            &client_key_path,
+            client_key
+                .to_openssh(LineEnding::LF)
+                .expect("encode client key")
+                .as_bytes(),
+        )
+        .expect("write client key");
+        let port = spawn_refusing_server(sample_private_key(0x77)).await;
+        let known = Arc::new(RwLock::new(
+            KnownHosts::load(dir.path().join("known_hosts")).expect("load known_hosts"),
+        ));
+        let tofu: Arc<dyn HostKeyVerifier> = Arc::new(PolicyVerifier {
+            policy: HostKeyPolicy::Tofu,
+        });
+        let err = SshSession::connect(
+            "127.0.0.1".to_string(),
+            port,
+            "root".to_string(),
+            &client_key_path,
+            None,
+            known,
+            tofu,
+        )
+        .await
+        .err()
+        .expect("a refused key must fail");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains(&format!("refused the key {}", client_key_path.display())),
+            "{chain}"
+        );
+        assert!(chain.contains(&fingerprint), "{chain}");
+        assert!(chain.contains("root's ~/.ssh/authorized_keys"), "{chain}");
+        assert!(chain.contains("publickey, password"), "{chain}");
+        assert!(!chain.contains("MethodSet"), "{chain}");
     }
 
     async fn spawn_in_process_server(host_key: PrivateKey) -> u16 {

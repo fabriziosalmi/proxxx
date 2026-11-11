@@ -1296,10 +1296,40 @@ mod ssh_validation_tests {
     }
 }
 
+/// The TOML path of the `ssh` table in the config the operator actually
+/// has (#545): `profiles.<name>.ssh` for a named profile, `ssh` for a flat
+/// config. A profile name that is not a bare TOML key is quoted.
+#[must_use]
+pub fn ssh_table_path(profile_name: Option<&str>) -> String {
+    match profile_name {
+        Some(name) => {
+            let bare = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if bare {
+                format!("profiles.{name}.ssh")
+            } else {
+                let quoted = name.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("profiles.\"{quoted}\".ssh")
+            }
+        }
+        None => "ssh".to_string(),
+    }
+}
+
+/// The TOML table header for a guest's SSH target, for example
+/// `[profiles.lab.ssh.guests."200"]` (#545).
+#[must_use]
+pub fn ssh_guest_table_header(profile_name: Option<&str>, vmid: u32) -> String {
+    format!("[{}.guests.\"{vmid}\"]", ssh_table_path(profile_name))
+}
+
 impl SshConfig {
-    /// Look up a guest's connection target by VMID, applying parent fallbacks.
-    /// Returns `None` if the guest isn't configured AND there's no auto-discovery
-    /// configured (auto-discovery via qemu-guest-agent is a future enhancement).
+    /// Look up a guest's explicit connection target by VMID, applying parent
+    /// fallbacks. Returns `None` when `[ssh.guests."<vmid>"]` is not set; the
+    /// CLI and the TUI then try auto-discovery
+    /// (`cli::resolve_guest_target`).
     #[must_use]
     pub fn resolve_guest(&self, vmid: u32) -> Option<ResolvedGuestSsh> {
         let key = vmid.to_string();

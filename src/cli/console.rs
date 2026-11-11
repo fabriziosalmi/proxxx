@@ -279,54 +279,16 @@ pub async fn execute_ssh(
     vmid: u32,
     cmd: Option<&str>,
 ) -> Result<(Value, i32)> {
-    let ssh_cfg = config.ssh.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no [ssh] block in config.toml — run `proxxx init --interactive`\n\
-             and answer 'y' at the SSH layer step, OR add a minimal block:\n\
+    let (target, source) = match resolve_guest_target(client, config, vmid).await {
+        Ok(found) => found,
+        Err(e) => anyhow::bail!(
+            "{e:#}\n\
              \n\
-             [ssh]\n\
-             user = \"root\"\n\
-             key_path = \"~/.ssh/id_ed25519\"\n\
-             \n\
-             then add a per-guest target as below."
-        )
-    })?;
-    // 1. Explicit config wins. The operator may have set host:
-    // "internal-name.lab" via DNS or pinned a non-default user/port —
-    // auto-discovery must not override that.
-    let (target, source) = if let Some(t) = ssh_cfg.resolve_guest(vmid) {
-        (t, "config.toml")
-    } else {
-        // 2. Try auto-discovery. The error path collects WHY discovery
-        // failed (no agent, link-local only, etc.) so the fallback
-        // message is actionable rather than just "not found".
-        match qga_resolve_guest(client, ssh_cfg, vmid).await {
-            Ok(t) => (t, "QGA / lxc-interfaces auto-discovery"),
-            Err(discovery_err) => {
-                // 3. Both paths failed — surface paste-able TOML +
-                // the discovery diagnostic so the operator knows
-                // whether the agent is missing, the IP is link-local
-                // only, or PVE rejected the lookup.
-                anyhow::bail!(
-                    "no [ssh.guests.\"{vmid}\"] entry in config.toml AND auto-\n\
-                     discovery failed: {discovery_err}\n\
-                     \n\
-                     Add an explicit target:\n\
-                     \n\
-                     [ssh.guests.\"{vmid}\"]\n\
-                     host = \"<guest-ip-or-hostname>\"   # e.g. 192.168.1.42\n\
-                     # user = \"root\"                    # optional, falls back to [ssh].user\n\
-                     # port = 22                          # optional, default 22\n\
-                     # key_path = \"~/.ssh/...\"           # optional, falls back to [ssh].key_path\n\
-                     \n\
-                     You can confirm the guest's IP from PVE with:\n\
-                     proxxx --format json ls guests | jq '.[] | select(.vmid == {vmid})'\n\
-                     \n\
-                     For QEMU guests with the agent installed but not running:\n\
-                     proxxx qga {vmid} net   # exercises the same path"
-                )
-            }
-        }
+             Find the guest's address with:\n\
+             proxxx --format json ls guests | jq '.[] | select(.vmid == {vmid})'\n\
+             For a QEMU guest whose agent is installed but not running:\n\
+             proxxx qga {vmid} net   # exercises the same path"
+        ),
     };
     // Last-line-of-defense validation BEFORE we spawn ssh. The config
     // and QGA paths above can each yield a target, but a tampered TOML
@@ -396,6 +358,46 @@ pub async fn execute_ssh(
     ))
 }
 
+/// The SSH target of a guest, resolved the same way by `proxxx ssh` and
+/// by the TUI (#545):
+///   1. `[ssh.guests."<vmid>"]` of the profile, which always wins;
+///   2. auto-discovery: the QEMU guest agent for a VM,
+///      `/lxc/{vmid}/interfaces` for a container, with the profile's
+///      `[ssh]` user and key.
+///
+/// The error names the profile's own TOML header and why discovery
+/// failed (stopped guest, agent off, no routable address). The second
+/// element of the result says which path found the target.
+pub async fn resolve_guest_target(
+    client: &Arc<crate::api::PxClient>,
+    config: &crate::config::ProfileConfig,
+    vmid: u32,
+) -> Result<(crate::config::ResolvedGuestSsh, &'static str)> {
+    let profile = config.profile_name.as_deref();
+    let header = crate::config::ssh_guest_table_header(profile, vmid);
+    let ssh_cfg = config.ssh.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no SSH target for guest {vmid}: the profile has no [{ssh}] table. Add one \
+             (`proxxx init --interactive` asks for it), for example:\n\
+             [{ssh}]\n\
+             user = \"root\"\n\
+             key_path = \"~/.ssh/id_ed25519\"",
+            ssh = crate::config::ssh_table_path(profile)
+        )
+    })?;
+    if let Some(target) = ssh_cfg.resolve_guest(vmid) {
+        return Ok((target, "config.toml"));
+    }
+    match qga_resolve_guest(client, ssh_cfg, vmid).await {
+        Ok(target) => Ok((target, "QGA / lxc-interfaces auto-discovery")),
+        Err(e) => anyhow::bail!(
+            "no SSH target for guest {vmid}: {e:#}. To set one by hand, add to config.toml:\n\
+             {header}\n\
+             host = \"<guest-ip-or-hostname>\""
+        ),
+    }
+}
+
 /// Resolve a guest's SSH target via auto-discovery — QGA for QEMU,
 /// `/lxc/{vmid}/interfaces` for LXC. Used as a fallback by
 /// `execute_ssh` when no explicit `[ssh.guests."<vmid>"]` block is
@@ -417,7 +419,15 @@ async fn qga_resolve_guest(
     use crate::api::types::GuestType;
     use crate::api::ProxmoxGateway;
 
-    let (node, gtype) = find_guest(client, vmid).await?;
+    let guest = crate::cli::common::find_guest_full(client, vmid).await?;
+    if guest.status != crate::api::types::GuestStatus::Running {
+        anyhow::bail!(
+            "guest {vmid} is {} on node {}, and discovery reads the address of a running guest",
+            format!("{:?}", guest.status).to_lowercase(),
+            guest.node
+        );
+    }
+    let (node, gtype) = (guest.node, guest.guest_type);
 
     let host = match gtype {
         GuestType::Qemu => {
@@ -760,5 +770,216 @@ mod ssh_discovery_tests {
         assert!(is_routable_ipv4("10.0.0.1"));
         assert!(is_routable_ipv4("192.168.1.42"));
         assert!(is_routable_ipv4("8.8.8.8"));
+    }
+}
+
+#[cfg(test)]
+mod ssh_target_tests {
+    //! #545: the TUI and `proxxx ssh` resolve a guest the same way, and every
+    //! failure names the profile's own TOML header and the reason.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::resolve_guest_target;
+    use crate::api::PxClient;
+    use crate::config::{ssh_guest_table_header, ProfileConfig, SshConfig};
+
+    fn ssh(guests_toml: &str) -> SshConfig {
+        toml::from_str(&format!(
+            "user = \"root\"\nkey_path = \"/nonexistent/id_ed25519\"\n{guests_toml}"
+        ))
+        .expect("ssh table parses")
+    }
+
+    async fn client(
+        server: &MockServer,
+        ssh: Option<SshConfig>,
+        profile: Option<&str>,
+    ) -> (Arc<PxClient>, ProfileConfig) {
+        let cfg = ProfileConfig {
+            url: server.uri(),
+            user: "root@pam".into(),
+            auth: "token".into(),
+            token_id: Some("t".into()),
+            token_secret: Some(crate::util::secret::SecretString::from("dummy")),
+            token_secret_file: None,
+            password: None,
+            verify_tls: false,
+            tls_pin_mode: None,
+            read_only: false,
+            rate_limit: None,
+            policies: None,
+            telegram: None,
+            ssh,
+            pbs: None,
+            alerts: None,
+            mcp_token: None,
+            reconcile: None,
+            profile_name: profile.map(str::to_string),
+        };
+        let c = PxClient::new(cfg.clone(), Some("dummy"))
+            .await
+            .expect("client builds");
+        (Arc::new(c), cfg)
+    }
+
+    async fn mock(server: &MockServer, p: &str, data: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/api2/json{p}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+            .mount(server)
+            .await;
+    }
+
+    async fn lab_with_ct200(server: &MockServer, status: &str) {
+        mock(
+            server,
+            "/cluster/resources",
+            json!([{"vmid": 200, "type": "lxc", "node": "pve1", "status": status, "name": "ct"}]),
+        )
+        .await;
+        mock(
+            server,
+            "/nodes/pve1/lxc",
+            json!([{"vmid": 200, "status": status, "name": "ct"}]),
+        )
+        .await;
+        mock(server, "/nodes/pve1/qemu", json!([])).await;
+        mock(
+            server,
+            "/nodes/pve1/lxc/200/interfaces",
+            json!([
+                {"name": "lo", "inet": "127.0.0.1/8", "hwaddr": "00:00:00:00:00:00"},
+                {"name": "eth0", "inet": "192.168.0.156/24", "hwaddr": "bc:24:11:4d:f4:ff"}
+            ]),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_entry_wins_without_asking_the_cluster() {
+        let server = MockServer::start().await;
+        let (c, cfg) = client(
+            &server,
+            Some(ssh("[guests.\"200\"]\nhost = \"10.0.0.9\"\nuser = \"fab\"")),
+            Some("lab"),
+        )
+        .await;
+        let (t, source) = resolve_guest_target(&c, &cfg, 200).await.unwrap();
+        assert_eq!(
+            (t.host.as_str(), t.user.as_str(), t.port),
+            ("10.0.0.9", "fab", 22)
+        );
+        assert_eq!(source, "config.toml");
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    /// The TUI used to refuse this guest: it read only [ssh.guests].
+    #[tokio::test]
+    async fn a_running_container_without_an_entry_is_discovered() {
+        let server = MockServer::start().await;
+        lab_with_ct200(&server, "running").await;
+        let (c, cfg) = client(&server, Some(ssh("")), Some("lab")).await;
+        let (t, source) = resolve_guest_target(&c, &cfg, 200).await.unwrap();
+        assert_eq!(
+            (t.host.as_str(), t.user.as_str()),
+            ("192.168.0.156", "root")
+        );
+        assert_eq!(source, "QGA / lxc-interfaces auto-discovery");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_guest_is_named_as_stopped_with_the_profile_header() {
+        let server = MockServer::start().await;
+        lab_with_ct200(&server, "stopped").await;
+        let (c, cfg) = client(&server, Some(ssh("")), Some("lab")).await;
+        let err = format!(
+            "{:#}",
+            resolve_guest_target(&c, &cfg, 200).await.unwrap_err()
+        );
+        assert!(err.contains("guest 200 is stopped on node pve1"), "{err}");
+        assert!(err.contains("[profiles.lab.ssh.guests.\"200\"]"), "{err}");
+        assert!(!err.contains("profiles.X"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_an_ssh_table_is_told_which_table_to_add() {
+        let server = MockServer::start().await;
+        let (c, cfg) = client(&server, None, Some("lab")).await;
+        let err = format!(
+            "{:#}",
+            resolve_guest_target(&c, &cfg, 200).await.unwrap_err()
+        );
+        assert!(err.contains("[profiles.lab.ssh]"), "{err}");
+    }
+
+    #[test]
+    fn the_header_matches_the_config_shape() {
+        assert_eq!(
+            ssh_guest_table_header(Some("lab"), 210),
+            "[profiles.lab.ssh.guests.\"210\"]"
+        );
+        assert_eq!(ssh_guest_table_header(None, 210), "[ssh.guests.\"210\"]");
+        assert_eq!(
+            ssh_guest_table_header(Some("my lab"), 7),
+            "[profiles.\"my lab\".ssh.guests.\"7\"]"
+        );
+        // The header with a quoted name is valid TOML that lands where
+        // the profile reads it.
+        let doc = format!(
+            "{}\nhost = \"10.0.0.7\"\n",
+            ssh_guest_table_header(Some("my \"lab\""), 7)
+        );
+        let v: toml::Value = toml::from_str(&doc).unwrap();
+        assert_eq!(
+            v["profiles"]["my \"lab\""]["ssh"]["guests"]["7"]["host"].as_str(),
+            Some("10.0.0.7")
+        );
+    }
+
+    #[test]
+    fn an_auth_refusal_names_the_key_and_the_fix() {
+        let msg = crate::ssh::session::auth_refused_message(
+            "root",
+            "192.168.0.156",
+            22,
+            std::path::Path::new("/home/u/.ssh/id_rsa"),
+            "SHA256:9eQco89Q2VZfOF",
+            &["publickey", "password"],
+            false,
+        );
+        for want in [
+            "192.168.0.156:22 refused the key /home/u/.ssh/id_rsa (SHA256:9eQco89Q2VZfOF) for root",
+            "root's ~/.ssh/authorized_keys",
+            "publickey, password",
+        ] {
+            assert!(msg.contains(want), "missing {want:?} in {msg}");
+        }
+        assert!(
+            !msg.contains("MethodSet") && !msg.contains("Failure {"),
+            "{msg}"
+        );
+        let partial = crate::ssh::session::auth_refused_message(
+            "root",
+            "h",
+            22,
+            std::path::Path::new("/k"),
+            "SHA256:x",
+            &["password"],
+            true,
+        );
+        assert!(
+            partial.contains("accepted the key") && partial.contains("password"),
+            "{partial}"
+        );
     }
 }
