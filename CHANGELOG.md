@@ -30,6 +30,7 @@ SemVer contract:
 ### Fixed
 
 - **The log file carries no terminal colour codes.** The file layer wrote ANSI escape sequences around the timestamp, level and target of every line (`ESC[2m...ESC[0m ESC[33m WARN`), which `less` shows as raw codes and a log shipper stores verbatim. The file is now plain text in CLI and TUI mode, and a test reads it back.
+- **`describe` no longer prints zero metrics for a node that is not online as if they were measured (#535).** PVE sends no CPU, memory or uptime for an offline node, and `describe` printed the zero defaults: `cpu=0.0%  mem=0.0 GiB / 0.0 GiB  up=0h` in text, the same in `md`, and `cpu 0.0%, mem 0.0 GiB / 0.0 GiB, up 0h` in `--output llm-context`, which an LLM reads as a real node with no memory. These three renderings now say `no metrics: the node is not online` (`-` in the markdown table). `--format json` keeps its fields, as the JSON contract is additive-only; its `status` says `offline`. Measured on the lab cluster with pve-test-3 offline.
 
 ## [0.17.0] - 2026-10-24
 
