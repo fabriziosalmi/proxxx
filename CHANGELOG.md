@@ -33,6 +33,10 @@ SemVer contract:
 
 - **The quick starts offer `proxxx token bootstrap` as the first-run path when SSH to a node works (#541).** The README, `quick-start.md`, `quickstart-homelab.md` and `installation.md` show it before the web UI and the wizard, with the minimal `config.toml` it needs, its default role (`PVEAuditor`, read-only) and `--role PVEAdmin` to operate guests; `docs/reference/cli.md` lists it. The hint printed by `proxxx init` names it. The homelab page also printed the token id of `pveum user token add root@pam proxxx` as `proxxx@pve!proxxx`; it is `root@pam!proxxx`. Checked on the lab from a config with no secret: the token was created, its secret stored in a `0600` file, verified against PVE 9.1.1, and `ls nodes` ran with it.
 
+### Tests and tooling
+
+- **The pre-tag battery and the lab inventory are in the repository (#543).** `tests/live/battery.sh` runs the ten live suites of the v0.17.0 and v0.18.0 release checks in order and prints one line per suite (exit code, duration, pass and fail counts, and for the cargo suites the env-gated early returns that cargo reports as passed). `tests/live/inventory.sh` takes a GET-only snapshot of 17 configuration endpoints through `lib.sh`, with the token on curl's stdin, and drops metrics and `digest` fields, so an unchanged cluster compares equal. On the lab: the suites gave the same counts as the v0.18.0 battery, the inventory was identical before and after, and a pool created between two snapshots showed up in the diff.
+
 ## [0.18.0] - 2026-11-11
 
 Headline: **the terminal is for the reader.** A one-shot command no longer

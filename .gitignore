@@ -10,6 +10,7 @@ tests/live/env.local
 tests/live/env.rbac.local
 tests/live/*.log
 tests/live/*_summary.md
+tests/live/battery-out/
 # Mission 2 — local E2E env (do NOT commit secrets); only the
 # .example template is tracked.
 tests/e2e.env
