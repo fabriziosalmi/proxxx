@@ -13,9 +13,16 @@ async fn cluster() -> MockServer {
             .and(path(format!("/api2/json{p}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": body })))
     };
-    get("/nodes", json!([{"node": "pve1", "status": "online"}]))
-        .mount(&s)
-        .await;
+    get(
+        "/nodes",
+        json!([
+            {"node": "pve1", "status": "online", "cpu": 0.25, "mem": 1_073_741_824_u64,
+             "maxmem": 4_294_967_296_u64, "uptime": 90000},
+            {"node": "pve2", "status": "offline"}
+        ]),
+    )
+    .mount(&s)
+    .await;
     // PVE answers per node, VMs then containers, in its own order.
     get(
         "/nodes/pve1/qemu",
@@ -103,4 +110,22 @@ async fn ls_table_on_a_pipe_has_no_colour_codes() {
         "{text:?}"
     );
     assert!(!text.contains('\u{1b}'), "{text:?}");
+}
+
+/// #535: PVE sends no metrics for an offline node; the zeros proxxx holds
+/// for it are not printed as if they were measured, in any human or LLM
+/// rendering. The online node keeps its numbers.
+#[tokio::test]
+async fn describe_prints_no_metrics_for_a_node_that_is_not_online() {
+    let s = cluster().await;
+    for output in ["text", "md", "llm-context"] {
+        let out = run(&s, &["describe", "--output", output], &[]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let pve2: Vec<&str> = text.lines().filter(|l| l.contains("pve2")).collect();
+        assert_eq!(pve2.len(), 1, "{output}: {text}");
+        assert!(!pve2[0].contains("0.0"), "{output}: {}", pve2[0]);
+        assert!(!pve2[0].contains('%'), "{output}: {}", pve2[0]);
+        let pve1 = text.lines().find(|l| l.contains("pve1") && l.contains('%'));
+        assert!(pve1.is_some_and(|l| l.contains("25.0")), "{output}: {text}");
+    }
 }

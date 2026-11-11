@@ -109,6 +109,21 @@ pub struct NodeSummary {
     pub uptime_secs: u64,
 }
 
+impl NodeSummary {
+    /// Whether the CPU, memory and uptime fields are measurements. PVE
+    /// sends none for an offline node (measured on PVE 9.1.1), so they are
+    /// zero defaults (#535); a status proxxx does not model is treated the
+    /// same, since nothing says its numbers are real.
+    #[must_use]
+    pub fn has_metrics(&self) -> bool {
+        self.status == "online"
+    }
+}
+
+/// What the human and LLM renderings print instead of zero metrics for a
+/// node that is not online (#535).
+const NO_NODE_METRICS: &str = "no metrics: the node is not online";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GuestSummary {
     pub vmid: u32,
@@ -355,6 +370,14 @@ fn fmt_uptime(secs: u64) -> String {
 fn print_nodes(nodes: &[NodeSummary]) {
     crate::outln!("## Nodes");
     for n in nodes {
+        let status = Line::new().plain(format!("  {:<14} ", n.node)).paint(
+            format!("{:<8}", n.status),
+            Some(color::node_status(&n.status)),
+        );
+        if !n.has_metrics() {
+            status.plain(format!("  {NO_NODE_METRICS}")).print();
+            continue;
+        }
         let mem_used = format_bytes_gib(n.mem_used_bytes);
         let mem_total = format_bytes_gib(n.mem_total_bytes);
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
@@ -366,12 +389,7 @@ fn print_nodes(nodes: &[NodeSummary]) {
         } else {
             (None, "")
         };
-        Line::new()
-            .plain(format!("  {:<14} ", n.node))
-            .paint(
-                format!("{:<8}", n.status),
-                Some(color::node_status(&n.status)),
-            )
+        status
             .plain("  cpu=")
             .paint(format!("{cpu_pct:>5.1}%{cpu_mark}"), cpu_paint)
             .plain("  mem=")
@@ -487,6 +505,10 @@ fn print_markdown(d: &ClusterDigest) {
     crate::outln!("| Node | Status | CPU | Memory | Uptime |");
     crate::outln!("| :--- | :----- | --: | :----- | :----- |");
     for n in &d.nodes {
+        if !n.has_metrics() {
+            crate::outln!("| `{}` | {} | - | - | - |", n.node, n.status);
+            continue;
+        }
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
         crate::outln!(
             "| `{}` | {} | {:.1}% | {} / {} | {} |",
@@ -566,6 +588,10 @@ fn print_llm_context(d: &ClusterDigest) {
     crate::outln!();
     crate::outln!("Nodes:");
     for n in &d.nodes {
+        if !n.has_metrics() {
+            crate::outln!("- {} ({}): {NO_NODE_METRICS}", n.node, n.status);
+            continue;
+        }
         let cpu_pct = (n.cpu_pct * 100.0).clamp(0.0, 100.0);
         crate::outln!(
             "- {} ({}): cpu {:.1}%, mem {} / {}, up {}",
