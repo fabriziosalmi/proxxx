@@ -304,7 +304,8 @@ mod tests {
 
         assert_eq!(cell_0.trim(), "10%");
         assert!(!cell_0.contains('!'));
-        assert_eq!(buf[(disk_col, r0)].fg, Theme::SUCCESS);
+        // An ok level keeps the row's text colour (row 0 is the selected row).
+        assert_eq!(buf[(disk_col, r0)].fg, Theme::TEXT);
 
         assert_eq!(cell_1.trim(), "85%");
         assert!(!cell_1.contains('!'));

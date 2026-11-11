@@ -52,7 +52,7 @@ pub fn print(data: &Value, format: OutputFormat) -> Result<()> {
             println!("{}", render_json_output(data, format)?);
         }
         OutputFormat::Table => {
-            print!("{}", render_table(data));
+            print!("{}", render_table_with(data, crate::util::color::enabled()));
         }
         OutputFormat::Plain => {
             print!("{}", render_plain(data));
@@ -120,10 +120,17 @@ pub fn safe_text(s: &str) -> String {
 /// - an object is `KEY<TAB>VALUE` rows, followed by one table per field
 ///   that holds an array of objects;
 /// - anything else is printed bare.
+#[cfg(test)]
 fn render_table(data: &Value) -> String {
+    render_table_with(data, false)
+}
+
+/// [`render_table`] with the `STATUS` column coloured when `color` is set
+/// (stdout is a terminal, see `util::color`). A pipe gets the plain TSV.
+fn render_table_with(data: &Value, color: bool) -> String {
     match data {
-        Value::Array(items) => rows_table(items),
-        Value::Object(map) => object_table(map),
+        Value::Array(items) => rows_table(items, color),
+        Value::Object(map) => object_table(map, color),
         other => format!("{}\n", table_cell(&cell_text(other))),
     }
 }
@@ -149,7 +156,7 @@ fn cell_text(v: &Value) -> String {
 /// payload under `data`).
 const ENVELOPE_KEYS: &[&str] = &["data"];
 
-fn rows_table(items: &[Value]) -> String {
+fn rows_table(items: &[Value], color: bool) -> String {
     if items.is_empty() {
         return "(no results)\n".to_string();
     }
@@ -194,13 +201,19 @@ fn rows_table(items: &[Value]) -> String {
     out.push('\n');
     for item in items.iter().filter_map(Value::as_object) {
         let row: Vec<String> = columns
-            .values()
-            .map(|path| {
+            .iter()
+            .map(|(header, path)| {
                 let mut v = item.get(&path[0]);
                 if let Some(sub) = path.get(1) {
                     v = v.and_then(|o| o.get(sub));
                 }
-                v.map_or_else(|| "-".to_string(), |v| table_cell(&cell_text(v)))
+                let cell = v.map_or_else(|| "-".to_string(), |v| table_cell(&cell_text(v)));
+                match crate::util::color::status_word(&cell) {
+                    Some(paint) if color && header == "status" => crate::util::color::Line::new()
+                        .paint(cell, Some(paint))
+                        .render(true),
+                    _ => cell,
+                }
             })
             .collect();
         out.push_str(&row.join("\t"));
@@ -209,7 +222,7 @@ fn rows_table(items: &[Value]) -> String {
     out
 }
 
-fn object_table(map: &serde_json::Map<String, Value>) -> String {
+fn object_table(map: &serde_json::Map<String, Value>, color: bool) -> String {
     let mut out = String::from("KEY\tVALUE\n");
     let mut sections = String::new();
     for (key, value) in map {
@@ -218,7 +231,7 @@ fn object_table(map: &serde_json::Map<String, Value>) -> String {
                 sections.push('\n');
                 sections.push_str(&table_cell(&key.to_uppercase()));
                 sections.push('\n');
-                sections.push_str(&rows_table(items));
+                sections.push_str(&rows_table(items, color));
             }
             Value::Object(inner) if !inner.is_empty() => {
                 for (sub, v) in inner {
@@ -289,7 +302,7 @@ pub fn render_fatal_error(
 mod terminal_safety_tests {
     //! #365: table and plain output never pass control sequences from API
     //! strings to the terminal, and a cell never splits its row.
-    use super::{render_plain, render_table};
+    use super::{render_plain, render_table, render_table_with};
     use serde_json::json;
 
     const OSC52: &str = "\u{1b}]52;c;ZXZpbA==\u{7}";
@@ -303,6 +316,34 @@ mod terminal_safety_tests {
                 "control U+{u:04X} reached the output: {out:?}"
             );
         }
+    }
+
+    /// With colour on (stdout is a terminal), the only escape sequences in
+    /// the table are the SGR codes around a guest or node `STATUS` word; a
+    /// hostile cell, in any column, still loses its own.
+    #[test]
+    fn coloured_table_adds_only_sgr_around_status_words() {
+        let data = json!([
+            {"vmid": 100, "name": format!("vm{OSC52}"), "status": "running"},
+            {"vmid": 101, "name": "db", "status": "stopped"},
+            {"vmid": 102, "name": "x", "status": "weird"},
+            {"vmid": 103, "name": "y", "status": format!("stopped{OSC52}")}
+        ]);
+        let out = render_table_with(&data, true);
+        assert!(out.contains("\u{1b}[32mrunning\u{1b}[0m"), "{out:?}");
+        assert!(out.contains("\u{1b}[2mstopped\u{1b}[0m"), "{out:?}");
+        // A word that is not a guest or node status, and a status that
+        // carried an escape sequence (sanitized, it is no longer the word
+        // `stopped`), stay uncoloured.
+        assert!(out.contains("\tweird\t"), "{out:?}");
+        assert!(out.contains("\tstopped]52;"), "{out:?}");
+        let without_sgr = out
+            .replace("\u{1b}[32m", "")
+            .replace("\u{1b}[2m", "")
+            .replace("\u{1b}[0m", "");
+        assert_no_controls(&without_sgr);
+        assert_eq!(render_table_with(&data, false), render_table(&data));
+        assert!(!render_table(&data).contains('\u{1b}'));
     }
 
     #[test]
