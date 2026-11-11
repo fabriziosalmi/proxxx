@@ -158,6 +158,12 @@ Verify its signature exactly like the tarball — `cosign verify-blob --bundle p
 ## Quick start
 
 ```bash
+proxxx token bootstrap --yes            # with root SSH to a node: creates the API token with
+                                        # pveum, stores the secret in the keychain or a 0600
+                                        # file without printing it, prints the config lines.
+                                        # Needs url, user, token_id and [ssh] in config.toml
+                                        # (`proxxx init` writes them commented). PVEAuditor by
+                                        # default; --role PVEAdmin to operate guests.
 proxxx init --interactive               # 5-step wizard: prompts for URL, auth, TLS, optional
                                         # SSH + Telegram, validates each input against the
                                         # live cluster before write. Recommended for first
