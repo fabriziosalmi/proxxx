@@ -2621,59 +2621,107 @@ fn draw(f: &mut Frame, state: &AppState, ssh: &ssh_handler::SshSessionHandler) {
     }
 
     // ── Global Status Overlays ───────────────────────────
-    let mut status_spans = Vec::new();
+    draw_status_overlays(f, area, state);
+}
 
+/// The error banner and the QUORUM LOST / STALE DATA badges, over the
+/// top rows of the view.
+///
+/// The error is drawn across the full width and wraps onto up to
+/// [`MAX_ERROR_ROWS`] rows, keeping its own line breaks: a one-row
+/// banner cut every message longer than the terminal (the SSH hint
+/// that names the `[ssh]` table never showed its example), and a short
+/// one landed on top of whatever title sat on row 0. The badges stay
+/// right-aligned on the row below the error, or on row 0 without one.
+fn draw_status_overlays(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &app::AppState,
+) {
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span, Text};
+    use ratatui::widgets::{Clear, Paragraph, Wrap};
+
+    let mut top = 0u16;
     if let Some(err) = &state.error {
-        status_spans.push(ratatui::text::Span::styled(
-            format!(" {err} "),
-            ratatui::style::Style::default()
-                .bg(theme::Theme::DANGER)
-                .fg(ratatui::style::Color::White)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ));
+        let style = Style::default()
+            .bg(theme::Theme::DANGER)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let rows = error_banner_rows(err, area.width);
+        let banner = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: rows.min(area.height),
+        };
+        let text = Text::from(
+            err.lines()
+                .map(|l| Line::from(format!(" {l}")))
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Clear, banner);
+        f.render_widget(
+            Paragraph::new(text).style(style).wrap(Wrap { trim: false }),
+            banner,
+        );
+        top = banner.height;
     }
 
-    // — render the QUORUM LOST banner whenever the most
-    // recent /cluster/status fetch reported quorate=false. Highest
-    // visual priority (red, bold) because every other rendered field
-    // could be silently stale at this point.
+    let mut badges = Vec::new();
+    // Render the QUORUM LOST banner whenever the most recent
+    // /cluster/status fetch reported quorate=false. Highest visual
+    // priority (red, bold) because every other rendered field could be
+    // silently stale at this point.
     if state.cluster_quorate == Some(false) {
-        status_spans.push(ratatui::text::Span::styled(
+        badges.push(Span::styled(
             " QUORUM LOST — STALE DATA ".to_string(),
-            ratatui::style::Style::default()
+            Style::default()
                 .bg(theme::Theme::DANGER)
-                .fg(ratatui::style::Color::White)
-                .add_modifier(ratatui::style::Modifier::BOLD),
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ));
     }
-
     if let Some(last) = state.last_sync {
         let age = std::time::Instant::now().duration_since(last).as_secs();
         if age > 10 {
-            status_spans.push(ratatui::text::Span::styled(
-                format!(" 📡 STALE DATA ({age}s) "),
-                ratatui::style::Style::default()
+            badges.push(Span::styled(
+                format!(" STALE DATA ({age}s) "),
+                Style::default()
                     .bg(theme::Theme::WARNING)
-                    .fg(ratatui::style::Color::Black)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     }
-
-    if !status_spans.is_empty() {
-        use ratatui::widgets::Paragraph;
-        let p = Paragraph::new(ratatui::text::Line::from(status_spans))
-            .alignment(ratatui::layout::Alignment::Right);
-
-        let overlay_area = ratatui::layout::Rect {
-            x: 0,
-            y: 0,
+    if !badges.is_empty() && top < area.height {
+        let row = Rect {
+            x: area.x,
+            y: area.y + top,
             width: area.width,
             height: 1,
         };
-        f.render_widget(p, overlay_area);
+        f.render_widget(
+            Paragraph::new(Line::from(badges)).alignment(ratatui::layout::Alignment::Right),
+            row,
+        );
     }
 }
+
+/// Rows the error banner takes at `width`: each of the message's own
+/// lines, plus its leading space, wrapped; at most [`MAX_ERROR_ROWS`].
+fn error_banner_rows(err: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let rows: usize = err
+        .lines()
+        .map(|l| (l.chars().count() + 1).div_ceil(width).max(1))
+        .sum();
+    u16::try_from(rows.clamp(1, usize::from(MAX_ERROR_ROWS))).unwrap_or(MAX_ERROR_ROWS)
+}
+
+/// The error banner's height cap, so a long message cannot hide the view.
+const MAX_ERROR_ROWS: u16 = 4;
 
 /// Demo data fallback for offline development
 fn load_demo_data(state: &mut AppState) {
@@ -2942,5 +2990,58 @@ mod refresh_cost_tests {
         assert_eq!(failed, vec!["pve3".to_string()]);
         assert_eq!(pools, 2);
         server.verify().await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod status_overlay_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn screen(state: &app::AppState, w: u16, h: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        terminal
+            .draw(|f| draw_status_overlays(f, f.area(), state))
+            .expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    /// A message longer than the terminal wraps onto the next rows and
+    /// keeps its own line breaks, instead of being cut at the edge.
+    #[test]
+    fn a_long_error_wraps_and_keeps_its_line_breaks() {
+        let mut state = app::AppState::new();
+        state.error = Some(
+            "SSH to 7777 failed: no SSH target for guest 7777: the profile has no [ssh] table.\n\
+             [ssh]\nuser = \"root\""
+                .to_string(),
+        );
+        let rows = screen(&state, 60, 10);
+        let text = rows[..4].join("");
+        for word in ["7777:", "profile", "table.", "[ssh]", "user", "\"root\""] {
+            assert!(
+                text.contains(word),
+                "{word:?} missing from the banner: {rows:#?}"
+            );
+        }
+        assert!(
+            rows[3].trim_start().starts_with("user = \"root\""),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[4].trim().is_empty(),
+            "the banner stops after its rows: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_banner_is_capped_at_four_rows() {
+        assert_eq!(error_banner_rows("short", 80), 1);
+        assert_eq!(error_banner_rows(&"x".repeat(1000), 80), MAX_ERROR_ROWS);
+        assert_eq!(error_banner_rows("a\nb\nc", 80), 3);
     }
 }

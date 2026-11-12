@@ -218,6 +218,22 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
                 Style::default().bg(Theme::BG)
             };
 
+            // An offline node reports zeros, not measurements: show `-`
+            // as `ls nodes` does instead of a 0% that reads as idle.
+            if node.status != crate::api::types::NodeStatus::Online {
+                let dash = || Span::raw("-".to_string());
+                return Row::new(vec![
+                    Span::raw(status_icon.to_string()),
+                    Span::raw(node.node.clone()),
+                    Span::raw(status_str),
+                    dash(),
+                    dash(),
+                    dash(),
+                    dash(),
+                ])
+                .style(style);
+            }
+
             Row::new(vec![
                 Span::raw(status_icon.to_string()),
                 Span::raw(node.node.clone()),
@@ -288,5 +304,45 @@ fn format_uptime(seconds: u64) -> String {
         format!("{hours}h {mins}m")
     } else {
         format!("{mins}m")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::api::types::{Node, NodeStatus};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// The dashboard's node table shows `-` for an offline node's CPU,
+    /// RAM, disk and uptime, not `0%`, `0% (0M)` and `0m`.
+    #[test]
+    fn an_offline_node_shows_dashes_not_zeros() {
+        let mut state = AppState::new();
+        state.nodes = vec![Node {
+            node: "n-off".into(),
+            status: NodeStatus::Offline,
+            ..Node::default()
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal.draw(|f| draw(f, f.area(), &state)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let row = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|l| l.contains("n-off"))
+            .expect("offline row");
+        let cells: Vec<&str> = row
+            .trim_matches(|c| c == '│' || c == ' ')
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            cells,
+            ["○", "n-off", "offline", "-", "-", "-", "-"],
+            "{row}"
+        );
     }
 }

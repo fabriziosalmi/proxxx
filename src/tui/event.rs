@@ -72,6 +72,25 @@ pub fn spawn_event_loop(tick_rate: Duration) -> mpsc::Receiver<AppEvent> {
     rx
 }
 
+/// The guests `s`, `S` and `r` act on: in the guest list the selected
+/// guests, or the highlighted one when none is selected; in the guest
+/// detail the guest shown. Elsewhere none.
+fn lifecycle_targets(state: &crate::app::AppState) -> Vec<u32> {
+    use crate::app::View;
+    match state.current_view() {
+        View::GuestList if !state.selected_guests.is_empty() => {
+            state.selected_guests.iter().copied().collect()
+        }
+        View::GuestList => state
+            .visible_guests()
+            .get(state.selected_index)
+            .map(|g| vec![g.vmid])
+            .unwrap_or_default(),
+        View::GuestDetail { vmid } => vec![*vmid],
+        _ => Vec::new(),
+    }
+}
+
 /// Map a key event to an app Action
 #[must_use]
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
@@ -141,20 +160,15 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
             }
 
             KeyCode::Char('s') => {
-                if *state.current_view() == View::GuestList {
-                    let mut actions = Vec::new();
-                    if !state.selected_guests.is_empty() {
-                        for vmid in &state.selected_guests {
-                            actions.push(Box::new(Action::StartGuest { vmid: *vmid }));
-                        }
-                    } else if let Some(guest) = state.visible_guests().get(state.selected_index) {
-                        actions.push(Box::new(Action::StartGuest { vmid: guest.vmid }));
-                    }
-                    if !actions.is_empty() {
-                        return Some(Action::EnqueueBatchOperation(actions));
-                    }
+                let actions: Vec<Box<Action>> = lifecycle_targets(state)
+                    .into_iter()
+                    .map(|vmid| Box::new(Action::StartGuest { vmid }))
+                    .collect();
+                if actions.is_empty() {
+                    None
+                } else {
+                    Some(Action::EnqueueBatchOperation(actions))
                 }
-                None
             }
             KeyCode::Char('X') => {
                 if *state.current_view() == View::GuestList && !state.selected_guests.is_empty() {
@@ -163,42 +177,26 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
                 None
             }
             KeyCode::Char('S') => {
-                if *state.current_view() == View::GuestList {
-                    let mut actions = Vec::new();
-                    if !state.selected_guests.is_empty() {
-                        for vmid in &state.selected_guests {
-                            actions.push(Box::new(Action::StopGuest {
-                                vmid: *vmid,
-                                force: false,
-                            }));
-                        }
-                    } else if let Some(guest) = state.visible_guests().get(state.selected_index) {
-                        actions.push(Box::new(Action::StopGuest {
-                            vmid: guest.vmid,
-                            force: false,
-                        }));
-                    }
-                    if !actions.is_empty() {
-                        return Some(Action::EnqueueBatchOperation(actions));
-                    }
+                let actions: Vec<Box<Action>> = lifecycle_targets(state)
+                    .into_iter()
+                    .map(|vmid| Box::new(Action::StopGuest { vmid, force: false }))
+                    .collect();
+                if actions.is_empty() {
+                    None
+                } else {
+                    Some(Action::EnqueueBatchOperation(actions))
                 }
-                None
             }
             KeyCode::Char('r') => {
-                if *state.current_view() == View::GuestList {
-                    let mut actions = Vec::new();
-                    if !state.selected_guests.is_empty() {
-                        for vmid in &state.selected_guests {
-                            actions.push(Box::new(Action::RestartGuest { vmid: *vmid }));
-                        }
-                    } else if let Some(guest) = state.visible_guests().get(state.selected_index) {
-                        actions.push(Box::new(Action::RestartGuest { vmid: guest.vmid }));
-                    }
-                    if !actions.is_empty() {
-                        return Some(Action::EnqueueBatchOperation(actions));
-                    }
+                let actions: Vec<Box<Action>> = lifecycle_targets(state)
+                    .into_iter()
+                    .map(|vmid| Box::new(Action::RestartGuest { vmid }))
+                    .collect();
+                if actions.is_empty() {
+                    None
+                } else {
+                    Some(Action::EnqueueBatchOperation(actions))
                 }
-                None
             }
             KeyCode::Char('d') => {
                 // GuestList: enqueue delete for selected/highlighted.
@@ -271,12 +269,14 @@ pub fn map_key(key: KeyEvent, state: &crate::app::AppState) -> Option<crate::app
                 // typing `:ssh <vmid>`. If `[ssh.guests."<vmid>"]`
                 // isn't configured the OpenGuestSsh dispatch surfaces
                 // a clear error via SshSessionFailed.
-                if *state.current_view() == View::GuestList {
-                    if let Some(guest) = state.visible_guests().get(state.selected_index) {
-                        return Some(Action::OpenGuestSsh { vmid: guest.vmid });
-                    }
+                match state.current_view() {
+                    View::GuestDetail { vmid } => Some(Action::OpenGuestSsh { vmid: *vmid }),
+                    View::GuestList => state
+                        .visible_guests()
+                        .get(state.selected_index)
+                        .map(|guest| Action::OpenGuestSsh { vmid: guest.vmid }),
+                    _ => None,
                 }
-                None
             }
             KeyCode::Char('T') => Some(Action::EnterTimeline),
             KeyCode::Char('Z') => {

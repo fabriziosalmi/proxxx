@@ -108,11 +108,15 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
         "Nodes:      ",
         Style::default().fg(Theme::TEXT_DIM),
     )];
-    for entry in state
+    // `/cluster/status` lists the nodes in no fixed order; sort by name
+    // so the line does not reshuffle between refreshes.
+    let mut nodes: Vec<_> = state
         .cluster_entries
         .iter()
         .filter(|e| e.entry_type == "node")
-    {
+        .collect();
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    for entry in nodes {
         let style = if entry.online {
             Style::default().fg(Theme::SUCCESS)
         } else {
@@ -322,12 +326,17 @@ fn draw_replication(f: &mut Frame, area: Rect, state: &AppState) {
         Block::default()
             .borders(Borders::TOP)
             .border_style(Theme::border())
-            .title(Line::from(vec![
-                Span::raw(" replication jobs ("),
-                Span::raw(format!("{} ", state.repl_status.len())),
-                summary_label,
-                Span::raw(") "),
-            ])),
+            .title(if state.repl_status.is_empty() {
+                // No jobs: nothing is healthy or failing, so no verdict.
+                Line::from(" replication jobs (0) ")
+            } else {
+                Line::from(vec![
+                    Span::raw(" replication jobs ("),
+                    Span::raw(format!("{} ", state.repl_status.len())),
+                    summary_label,
+                    Span::raw(") "),
+                ])
+            }),
     );
     f.render_widget(table, area);
 }
@@ -374,5 +383,58 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let cutoff: String = s.chars().take(n).collect();
         format!("{cutoff}…")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::api::types::ClusterStatusEntry;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn screen(state: &AppState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|f| draw(f, f.area(), state)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The node line is sorted by name, whatever order `/cluster/status`
+    /// returned, and a cluster with no replication jobs gets no
+    /// `healthy` verdict.
+    #[test]
+    fn nodes_are_sorted_and_zero_jobs_have_no_verdict() {
+        let mut state = AppState::new();
+        state.cluster_entries = ["pve-c", "pve-a", "pve-b"]
+            .iter()
+            .map(|n| ClusterStatusEntry {
+                entry_type: "node".into(),
+                name: (*n).into(),
+                online: true,
+                local: *n == "pve-a",
+                ..ClusterStatusEntry::default()
+            })
+            .collect();
+        let text = screen(&state);
+        let line = text
+            .lines()
+            .find(|l| l.contains("Nodes:"))
+            .expect("nodes line");
+        let (a, b, c) = (
+            line.find("pve-a").unwrap(),
+            line.find("pve-b").unwrap(),
+            line.find("pve-c").unwrap(),
+        );
+        assert!(a < b && b < c, "nodes not sorted: {line}");
+        assert!(text.contains("replication jobs (0)"), "{text}");
+        assert!(!text.contains("healthy"), "no verdict without jobs: {text}");
     }
 }

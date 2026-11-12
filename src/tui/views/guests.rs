@@ -175,14 +175,17 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 GuestType::Lxc => "LXC",
             };
 
-            let cpu_span = if guest.cpus > 0 {
+            // A guest that is not running has no CPU or memory use to
+            // show: `-`, as in `ls guests`, not a 0% that reads as idle.
+            let running = guest.status == GuestStatus::Running;
+            let cpu_span = if running && guest.cpus > 0 {
                 let cpu_pct = guest.cpu * 100.0;
                 Theme::usage_span(format!("{cpu_pct:.0}%"), UsageMetric::Cpu, cpu_pct, true)
             } else {
                 Span::raw("-".to_string())
             };
 
-            let mem_span = if guest.maxmem > 0 {
+            let mem_span = if running && guest.maxmem > 0 {
                 let mem_pct = (guest.mem as f64 / guest.maxmem as f64) * 100.0;
                 Theme::usage_span(format!("{mem_pct:.0}%"), UsageMetric::Memory, mem_pct, true)
             } else {
@@ -201,7 +204,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 Span::raw("-".to_string())
             };
 
-            let tags = if guest.tags.is_empty() {
+            let tags = if guest.tags.trim().is_empty() {
                 "-".to_string()
             } else {
                 sanitize_display(&guest.tags).replace(';', ", ")
@@ -390,11 +393,11 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     let cpu_level = usage_level(UsageMetric::Cpu, cpu_pct);
     let cpu_res_span = if has_cpu {
         Span::styled(
-            format!("{cpu_pct:<6.1}%{} {cpu_bar}", cpu_level.marker()),
+            format!("{cpu_pct:>5.1}%{} {cpu_bar}", cpu_level.marker()),
             cpu_level.style(),
         )
     } else {
-        Span::raw(format!("{cpu_pct:<6.1}% {cpu_bar}"))
+        Span::raw(format!("{cpu_pct:>5.1}% {cpu_bar}"))
     };
 
     let has_mem = guest.maxmem > 0;
@@ -407,11 +410,11 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     let mem_level = usage_level(UsageMetric::Memory, mem_pct);
     let mem_res_span = if has_mem {
         Span::styled(
-            format!("{mem_pct:<6.1}%{} {mem_bar}", mem_level.marker()),
+            format!("{mem_pct:>5.1}%{} {mem_bar}", mem_level.marker()),
             mem_level.style(),
         )
     } else {
-        Span::raw(format!("{mem_pct:<6.1}% {mem_bar}"))
+        Span::raw(format!("{mem_pct:>5.1}% {mem_bar}"))
     };
 
     let has_disk = guest.maxdisk > 0;
@@ -424,11 +427,11 @@ fn draw_guest_detail(f: &mut Frame, area: Rect, state: &AppState, vmid: u32) {
     let disk_level = usage_level(UsageMetric::Disk, disk_pct);
     let disk_res_span = if has_disk {
         Span::styled(
-            format!("{disk_pct:<6.1}%{} {disk_bar}", disk_level.marker()),
+            format!("{disk_pct:>5.1}%{} {disk_bar}", disk_level.marker()),
             disk_level.style(),
         )
     } else {
-        Span::raw(format!("{disk_pct:<6.1}% {disk_bar}"))
+        Span::raw(format!("{disk_pct:>5.1}% {disk_bar}"))
     };
 
     let res_text = vec![
@@ -718,5 +721,71 @@ mod tests {
             "max==0 row must not contain '!': {line}"
         );
         assert_eq!(buf[(ram_col, row_y)].fg, Color::Reset);
+    }
+
+    /// A stopped guest has no CPU or memory use: `-`, as in `ls guests`.
+    /// Empty tags, or tags that are only blanks, read `-` alike.
+    #[test]
+    fn a_stopped_guest_shows_dashes_for_cpu_and_ram() {
+        let mut state = AppState::new();
+        state.push_view(crate::app::View::GuestList);
+        state.guests = vec![
+            Guest {
+                vmid: 101,
+                name: "off".into(),
+                node: "pve1".into(),
+                status: GuestStatus::Stopped,
+                cpus: 2,
+                maxmem: 512 << 20,
+                maxdisk: 8 << 30,
+                tags: " ".into(),
+                ..Guest::default()
+            },
+            Guest {
+                vmid: 102,
+                name: "on".into(),
+                node: "pve1".into(),
+                status: GuestStatus::Running,
+                cpus: 2,
+                cpu: 0.25,
+                mem: 256 << 20,
+                maxmem: 512 << 20,
+                maxdisk: 8 << 30,
+                ..Guest::default()
+            },
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(110, 12)).expect("terminal");
+        terminal.draw(|f| draw(f, f.area(), &state)).expect("draw");
+        let buf: Buffer = terminal.backend().buffer().clone();
+        let row = |name: &str| {
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .find(|l| l.contains(name))
+                .unwrap_or_else(|| panic!("row {name}"))
+        };
+        let off: Vec<String> = row(" off ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let on: Vec<String> = row(" on ").split_whitespace().map(str::to_string).collect();
+        let cols = |r: &[String]| {
+            r.iter()
+                .skip_while(|c| !c.ends_with("stopped") && !c.ends_with("running"))
+                .skip(1)
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cols(&off), ["-", "-"], "{off:?}");
+        assert_eq!(cols(&on), ["25%", "50%"], "{on:?}");
+        assert_eq!(
+            off.iter().rev().nth(1).map(String::as_str),
+            Some("-"),
+            "blank tags read `-`: {off:?}"
+        );
     }
 }

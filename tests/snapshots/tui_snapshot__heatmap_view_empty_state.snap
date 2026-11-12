@@ -1,9 +1,9 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 295
+assertion_line: 394
 expression: dump
 ---
- 🔥  Live Hotspot Heatmap (Sorted by CPU+RAM Saturation)
+ Live Hotspot Heatmap (Sorted by CPU+RAM Saturation)
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  No guests to monitor.
