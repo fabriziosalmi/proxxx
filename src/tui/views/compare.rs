@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::AppState;
 use crate::tui::theme::Theme;
+use crate::util::format::human_bytes;
 use crate::util::sanitize::sanitize_display;
 
 pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests: &[u32]) {
@@ -55,8 +56,8 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests
                 "status" => format!("{:?}", guest.status),
                 "node" => sanitize_display(&guest.node).into_owned(),
                 "cpu cores" => guest.cpus.to_string(),
-                "ram" => format_bytes(guest.maxmem),
-                "disk" => format_bytes(guest.maxdisk),
+                "ram" => human_bytes(guest.maxmem),
+                "disk" => human_bytes(guest.maxdisk),
                 "tags" => sanitize_display(&guest.tags).into_owned(),
                 _ => String::new(),
             };
@@ -124,16 +125,4 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests
 
 enum CellContent {
     Str(String),
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const TB: u64 = 1_099_511_627_776;
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else {
-        format!("{:.0}M", bytes as f64 / 1_048_576.0)
-    }
 }

@@ -101,20 +101,30 @@ macro_rules! out {
 }
 
 /// A size for a reader: `512M`, `1.5G`, `2.0T` (binary units, as PVE's web
-/// UI shows them).
+/// UI shows them). The one byte formatter of the CLI tables and the TUI
+/// views (#544).
+///
+/// Rounding: to the nearest unit shown (whole MiB, tenths of GiB or TiB),
+/// a half rounds up, in integer arithmetic so the result does not depend
+/// on float formatting. A value that rounds up to the next unit is shown
+/// in it: 1023.6 MiB is `1.0G`, not `1024M`.
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn human_bytes(bytes: u64) -> String {
-    const MIB: u64 = 1_048_576;
-    const GIB: u64 = 1_073_741_824;
-    const TIB: u64 = 1_099_511_627_776;
-    if bytes >= TIB {
-        format!("{:.1}T", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.1}G", bytes as f64 / GIB as f64)
-    } else {
-        format!("{}M", bytes / MIB)
+    const MIB: u128 = 1 << 20;
+    const GIB: u128 = 1 << 30;
+    const TIB: u128 = 1 << 40;
+    let b = u128::from(bytes);
+    let rounded = |unit: u128, scale: u128| (b * scale + unit / 2) / unit;
+    let mib = rounded(MIB, 1);
+    if mib < 1024 {
+        return format!("{mib}M");
     }
+    let gib_tenths = rounded(GIB, 10);
+    if gib_tenths < 10_240 {
+        return format!("{}.{}G", gib_tenths / 10, gib_tenths % 10);
+    }
+    let tib_tenths = rounded(TIB, 10);
+    format!("{}.{}T", tib_tenths / 10, tib_tenths % 10)
 }
 
 /// An uptime for a reader: `12d4h`, `3h20m`, `45m`.
@@ -338,6 +348,66 @@ mod human_units_tests {
         assert_eq!(human_bytes(512 * 1_048_576), "512M");
         assert_eq!(human_bytes(1_610_612_736), "1.5G");
         assert_eq!(human_bytes(2 * 1_099_511_627_776), "2.0T");
+    }
+
+    /// #544: the TUI had five private byte formatters with two rounding
+    /// rules. The views use `human_bytes`; a new private copy fails here.
+    #[test]
+    fn no_tui_view_defines_its_own_byte_formatter() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (i, line) in text.lines().enumerate() {
+                        let l = line.trim_start();
+                        if l.starts_with("fn format_bytes") || l.starts_with("pub fn format_bytes")
+                        {
+                            hits.push(format!("{}:{}", path.display(), i + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui"),
+            &mut hits,
+        );
+        assert!(hits.is_empty(), "use util::format::human_bytes: {hits:?}");
+    }
+
+    /// #544: the breakpoints and the rounding rule, pinned.
+    #[test]
+    fn sizes_round_to_the_nearest_unit_shown_and_carry_into_the_next() {
+        const MIB: u64 = 1 << 20;
+        const GIB: u64 = 1 << 30;
+        const TIB: u64 = 1 << 40;
+        let cases = [
+            (MIB / 2 - 1, "0M"),
+            (MIB / 2, "1M"),
+            (MIB + MIB / 2 - 1, "1M"),
+            (MIB + MIB / 2, "2M"),
+            (1023 * MIB, "1023M"),
+            (1023 * MIB + MIB / 2 - 1, "1023M"),
+            (1023 * MIB + MIB / 2, "1.0G"),
+            (GIB, "1.0G"),
+            // 1.05 GiB is not a whole number of bytes: the first byte at
+            // or past it rounds up, the one before rounds down.
+            ((21 * GIB).div_ceil(20) - 1, "1.0G"),
+            ((21 * GIB).div_ceil(20), "1.1G"),
+            ((20_479 * GIB).div_ceil(20) - 1, "1023.9G"),
+            ((20_479 * GIB).div_ceil(20), "1.0T"),
+            (TIB, "1.0T"),
+            ((21 * TIB).div_ceil(20), "1.1T"),
+            (2048 * TIB, "2048.0T"),
+            (u64::MAX, "16777216.0T"),
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(human_bytes(bytes), want, "{bytes} bytes");
+        }
         assert_eq!(human_uptime(45 * 60), "45m");
         assert_eq!(human_uptime(3 * 3_600 + 20 * 60), "3h20m");
         assert_eq!(human_uptime(12 * 86_400 + 4 * 3_600 + 59), "12d4h");

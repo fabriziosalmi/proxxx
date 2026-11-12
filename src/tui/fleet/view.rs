@@ -12,6 +12,7 @@ use ratatui::{
 use super::{FleetCluster, FleetFocus, FleetState};
 use crate::api::types::GuestType;
 use crate::tui::theme::{Theme, UsageMetric};
+use crate::util::format::human_bytes;
 use crate::util::sanitize::{sanitize_display, truncate_ellipsis};
 
 pub fn draw(f: &mut Frame, area: Rect, state: &FleetState) {
@@ -151,7 +152,7 @@ fn summary_row(_idx: usize, c: &FleetCluster, selected: bool) -> Row<'static> {
         0.0
     };
     let mem = Theme::usage_span(
-        format!("{}/{}", format_bytes(mem_used), format_bytes(mem_total)),
+        format!("{}/{}", human_bytes(mem_used), human_bytes(mem_total)),
         UsageMetric::Memory,
         mem_pct,
         mem_total > 0,
@@ -167,8 +168,8 @@ fn summary_row(_idx: usize, c: &FleetCluster, selected: bool) -> Row<'static> {
     let storage = Theme::usage_span(
         format!(
             "{}/{}",
-            format_bytes(storage_used),
-            format_bytes(storage_total)
+            human_bytes(storage_used),
+            human_bytes(storage_total)
         ),
         UsageMetric::Disk,
         storage_pct,
@@ -245,7 +246,7 @@ fn draw_guests(f: &mut Frame, area: Rect, state: &FleetState) {
                 0.0
             };
             let mem_span = Theme::usage_span(
-                format_bytes(g.mem),
+                human_bytes(g.mem),
                 UsageMetric::Memory,
                 mem_pct,
                 g.maxmem > 0,
@@ -307,20 +308,6 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &FleetState) {
         Paragraph::new(Line::from(Span::styled(text, Theme::dim()))),
         area,
     );
-}
-
-/// IEC byte formatting, matching the per-view helper used across
-/// `tui::views::*` (G/T thresholds, M for the remainder).
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const TB: u64 = 1_099_511_627_776;
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else {
-        format!("{:.0}M", bytes as f64 / 1_048_576.0)
-    }
 }
 
 #[cfg(test)]
