@@ -232,6 +232,13 @@ jobs:
         # `cargo audit`).
         run: cargo audit --deny warnings
 
+      - name: Audit fuzz/Cargo.lock for CVEs
+        # #542: the fuzz harness has its own lockfile, which dependency
+        # bumps in Cargo.lock do not touch. It kept advisories that
+        # Cargo.lock had already fixed (RUSTSEC-2026-0385, -0387, -0459,
+        # -0486) until v0.18.0. Same policy and ignores as the root lock.
+        run: cargo audit --deny warnings -f fuzz/Cargo.lock
+
   deny:
     name: Supply-chain policy (cargo-deny)
     runs-on: ubuntu-latest
