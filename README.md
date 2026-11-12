@@ -25,7 +25,75 @@
   <img src="assets/demo-homelab.svg" alt="proxxx describe — one command prints the whole cluster: nodes (online, CPU, memory, uptime), guests (vmid, kind, node, status), and storages (type, usage, shared) — for a live 3-node Proxmox VE 9.1 cluster" width="900">
 </p>
 
+
 ---
+
+## Install
+
+```bash
+brew install fabriziosalmi/proxxx/proxxx
+```
+
+Homebrew covers macOS and Linux. For a Proxmox VE node use the [`.deb`](#debian--ubuntu--proxmox-ve--deb); for a tarball with its checksum, sigstore signature and SBOM, or a build from source, see [Other install methods](#other-install-methods).
+
+## Quick start
+
+```bash
+proxxx init --interactive   # wizard: URL, TLS, token, optional SSH and Telegram, each checked live
+proxxx ls nodes             # the connection works
+proxxx                      # the TUI; ? shows the keymap
+```
+
+With root SSH to a node, `proxxx token bootstrap --yes` creates the API token for you instead of the web UI: see [First run in detail](#first-run-in-detail).
+
+### First run in detail
+
+```bash
+proxxx token bootstrap --yes            # with root SSH to a node: creates the API token with
+                                        # pveum, stores the secret in the keychain or a 0600
+                                        # file without printing it, prints the config lines.
+                                        # Needs url, user, token_id and [ssh] in config.toml
+                                        # (`proxxx init` writes them commented). PVEAuditor by
+                                        # default; --role PVEAdmin to operate guests.
+proxxx init --interactive               # 5-step wizard: prompts for URL, auth, TLS, optional
+                                        # SSH + Telegram, validates each input against the
+                                        # live cluster before write. Recommended for first
+                                        # run — wrong field caught here, never lands in TOML.
+proxxx init                             # non-interactive variant: writes a commented
+                                        # starter config.toml; refuses to overwrite — pass
+                                        # --force if you mean it. Edit url / user /
+                                        # token_id / token_secret manually after.
+proxxx ls nodes                         # validates the connection.
+proxxx                                  # TUI (no args). Press ? for the keymap; the
+                                        # bottom-row footer shows contextual binds always.
+proxxx --help                           # full subcommand list.
+proxxx version --json                   # build + capability metadata.
+```
+
+The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → inline TOML → 0600 file → macOS Keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
+
+<p align="center">
+  <img src="assets/demo.svg" alt="proxxx terminal recording: `proxxx delete 7777 --yes` on a running container is refused by the pre-flight with a SEVERE risk and exit code 6; `proxxx stop 7777` under a policy that requires one Telegram approval, with no Telegram section configured, is not run and exits 2" width="820">
+  <br>
+  <em>A delete of a running guest is refused by the pre-flight before any request is sent; a stop that a policy puts behind human approval does not run when no approval channel is configured. A terminal recording of the real binary against a lab Proxmox VE 9.1 cluster, unedited.</em>
+</p>
+
+## Daily-driver TUI
+
+Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command palette (`:`), quick-open palette (`Ctrl+K`). 18 views over the same Elm-pattern reducer:
+
+| `1` Dashboard | `2` Nodes | `3` Guests | `4` Storage |
+| :---: | :---: | :---: | :---: |
+| `H` Heatmap | `B` Backup board | `G` Config grep | `Q` Operation queue |
+| `T` Audit timeline | `Z` Snapshot tree | `D` Drift compare | `W` Hardware passthrough |
+
+The table has the twelve with their own key (`Z` on a selected guest, `W` on a selected node, `D` with two or more guests selected). The other six open from where you are: guest detail (`Enter` on a guest), SSH session (`c` on a guest, or `:ssh <vmid>`), ISO library (`:iso`), HA console (`:ha`), the task log when a task starts, and the approval queue when an operation waits for HITL approval.
+
+Plus a read-only **fleet view** (`proxxx fleet`) that aggregates every configured profile into one screen — `↑↓` select cluster, `Tab` toggle guest pane, `Enter` drill into a cluster, `q` quit.
+
+Multi-select + bulk ops with pre-flight risk preview. Operation queue with dry-run, diff preview, replay-as-script export (proxxx CLI / pvesh / curl / Ansible), and HITL approval gate (Telegram, policy-driven).
+
+The terminal is restored on every exit path — happy, `?` early-return, panic. RAII `TerminalGuard` plus a flight-recorder panic hook installed in `main()` before the runtime starts.
 
 ## Who is this for?
 
@@ -40,8 +108,6 @@ Pick the row that matches you and jump straight to the right page.
 | **Security / compliance** evaluating before deploy | typed errors, HITL replay protection, sigstore-signed releases, CycloneDX SBOM, gate on every commit | [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`SECURITY.md`](SECURITY.md) · [Production checklist](https://fabriziosalmi.github.io/proxxx/guide/production-checklist) |
 | **EU-regulated ops** (NIS2 / ISO 27001 / GDPR) | append-only SQLite audit log with HMAC-SHA256 chain, `proxxx audit verify`, zero telemetry, fully self-hosted | [EU & compliance](#eu--compliance) |
 | **Contributor** sending a PR | 8-stage commit gate (fmt + clippy + audit + cargo-deny + test+proptest + live cluster + mutation lifecycle), no-skip-flags policy | [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [Pre-commit gate](https://fabriziosalmi.github.io/proxxx/guide/pre-commit-gate) |
-
----
 
 ## What you get
 
@@ -81,17 +147,11 @@ proxxx is designed for operators who need auditability, data sovereignty, and su
 
 > **Note:** proxxx is a management tool, not a compliance product. `proxxx audit verify` provides integrity assurance for the local mutation log; it does not replace a SIEM or a formal audit trail required by a certification body. Use it as one control layer in a broader NIS2 / ISO 27001 implementation.
 
----
-
-## Install
+## Other install methods
 
 Pre-built binaries for **macOS Apple Silicon**, **Linux x86_64-musl**, and **Linux aarch64-musl** (Pi 4/5, Ampere, Graviton, Oracle Free Tier) are attached to each [tagged release](https://github.com/fabriziosalmi/proxxx/releases). All Linux artefacts are statically linked — no glibc, drops onto Alpine through RHEL.
 
-### Homebrew (macOS & Linux)
-
-```bash
-brew install fabriziosalmi/proxxx/proxxx
-```
+### Verified tarball
 
 The fastest path on a workstation. For a Proxmox VE node (Debian) use the [`.deb`](#debian--ubuntu--proxmox-ve--deb) below; for air-gapped installs or full supply-chain verification, download + verify the trio manually:
 
@@ -154,53 +214,6 @@ proxxx --version
 ```
 
 Verify its signature exactly like the tarball — `cosign verify-blob --bundle proxxx_${VERSION}-1_amd64.deb.cosign.bundle …` with the same `--certificate-identity-regexp` / `--certificate-oidc-issuer` as above.
-
-## Quick start
-
-```bash
-proxxx token bootstrap --yes            # with root SSH to a node: creates the API token with
-                                        # pveum, stores the secret in the keychain or a 0600
-                                        # file without printing it, prints the config lines.
-                                        # Needs url, user, token_id and [ssh] in config.toml
-                                        # (`proxxx init` writes them commented). PVEAuditor by
-                                        # default; --role PVEAdmin to operate guests.
-proxxx init --interactive               # 5-step wizard: prompts for URL, auth, TLS, optional
-                                        # SSH + Telegram, validates each input against the
-                                        # live cluster before write. Recommended for first
-                                        # run — wrong field caught here, never lands in TOML.
-proxxx init                             # non-interactive variant: writes a commented
-                                        # starter config.toml; refuses to overwrite — pass
-                                        # --force if you mean it. Edit url / user /
-                                        # token_id / token_secret manually after.
-proxxx ls nodes                         # validates the connection.
-proxxx                                  # TUI (no args). Press ? for the keymap; the
-                                        # bottom-row footer shows contextual binds always.
-proxxx --help                           # full subcommand list.
-proxxx version --json                   # build + capability metadata.
-```
-
-The starter `config.toml` carries inline comments for every secret-resolution path (CLI flag → env var → inline TOML → 0600 file → macOS Keychain). Optional sections — HITL via Telegram, SSH layer, PBS, alerts, policies — are commented out so the API-only operator doesn't have to delete anything.
-
-<p align="center">
-  <img src="assets/demo.svg" alt="proxxx terminal recording: `proxxx delete 7777 --yes` on a running container is refused by the pre-flight with a SEVERE risk and exit code 6; `proxxx stop 7777` under a policy that requires one Telegram approval, with no Telegram section configured, is not run and exits 2" width="820">
-  <br>
-  <em>A delete of a running guest is refused by the pre-flight before any request is sent; a stop that a policy puts behind human approval does not run when no approval channel is configured. A terminal recording of the real binary against a lab Proxmox VE 9.1 cluster, unedited.</em>
-</p>
-
-## Daily-driver TUI
-
-Run with no arguments. Vim keys, fuzzy search across the cluster (`/`), command palette (`:`), quick-open palette (`Ctrl+K`). 18 views over the same Elm-pattern reducer:
-
-| `1` Dashboard | `2` Nodes | `3` Guests | `4` Storage |
-| :---: | :---: | :---: | :---: |
-| `H` Heatmap | `B` Backup board | `G` Config grep | `Q` Operation queue |
-| `T` Audit timeline | `Z` Snapshot tree | `D` Drift compare | `W` Hardware passthrough |
-
-Plus a read-only **fleet view** (`proxxx fleet`) that aggregates every configured profile into one screen — `↑↓` select cluster, `Tab` toggle guest pane, `Enter` drill into a cluster, `q` quit.
-
-Multi-select + bulk ops with pre-flight risk preview. Operation queue with dry-run, diff preview, replay-as-script export (proxxx CLI / pvesh / curl / Ansible), and HITL approval gate (Telegram, policy-driven).
-
-The terminal is restored on every exit path — happy, `?` early-return, panic. RAII `TerminalGuard` plus a flight-recorder panic hook installed in `main()` before the runtime starts.
 
 ## Pipeline-friendly CLI
 
