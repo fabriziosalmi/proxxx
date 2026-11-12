@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 370
+assertion_line: 372
 expression: dump
 ---
  cluster status ────────────────────────────────────────────────────────────────────────────────────
@@ -18,5 +18,5 @@ group              priority             sid       group     node      state     
 
 
 
- replication jobs (0 healthy) ──────────────────────────────────────────────────────────────────────
+ replication jobs (0) ──────────────────────────────────────────────────────────────────────────────
 job        src      dst      RPO            fails      last-error

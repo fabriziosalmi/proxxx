@@ -151,6 +151,24 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
                 has_disk,
             );
 
+            if node.status != NodeStatus::Online {
+                // An offline node reports zeros, not measurements.
+                let dash = || Span::raw("-".to_string());
+                return Row::new(vec![
+                    Span::raw(status_icon.to_string()),
+                    Span::raw(node.node.clone()),
+                    Span::raw(format!("{:?}", node.status).to_lowercase()),
+                    dash(),
+                    Span::raw(String::new()),
+                    dash(),
+                    Span::raw(String::new()),
+                    dash(),
+                    dash(),
+                    Span::raw(format!("{running_count}/{guest_count}")),
+                ])
+                .style(style);
+            }
+
             Row::new(vec![
                 Span::raw(status_icon.to_string()),
                 Span::raw(node.node.clone()),
@@ -345,5 +363,31 @@ mod tests {
             "max==0 row must not contain '!': {line}"
         );
         assert_eq!(buf[(disk_col, row_y)].fg, Color::Reset);
+    }
+
+    /// An offline node reports zeros. The row shows `-` for CPU, RAM,
+    /// disk and uptime, as `ls nodes` does, not `0%` and `0m`.
+    #[test]
+    fn an_offline_node_shows_dashes_not_zeros() {
+        let mut state = AppState::new();
+        state.nodes = vec![Node {
+            node: "n-off".into(),
+            status: NodeStatus::Offline,
+            ..Node::default()
+        }];
+        let buf = render_buffer(&state);
+        let row = (0..buf.area.height)
+            .map(|y| row_string(&buf, y))
+            .find(|l| l.contains("n-off"))
+            .expect("offline row");
+        let cells: Vec<&str> = row
+            .trim_matches(|c| c == '│' || c == ' ')
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            cells,
+            ["○", "n-off", "offline", "-", "-", "-", "-", "0/0"],
+            "{row}"
+        );
     }
 }

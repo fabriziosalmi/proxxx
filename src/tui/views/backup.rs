@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
 
@@ -136,22 +136,21 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
             "-".to_string()
         };
 
-        rows.push(
-            Row::new(vec![
-                guest.vmid.to_string(),
-                sanitize_display(&guest.name).into_owned(),
-                sanitize_display(&guest.node).into_owned(),
-                last_ok_str,
-                duration_str,
-                if failures > 0 {
-                    failures.to_string()
-                } else {
-                    "-".to_string()
-                },
-                health_str,
-            ])
-            .style(health_style),
-        );
+        rows.push(Row::new(vec![
+            Cell::from(guest.vmid.to_string()),
+            Cell::from(sanitize_display(&guest.name).into_owned()),
+            Cell::from(sanitize_display(&guest.node).into_owned()),
+            Cell::from(last_ok_str),
+            Cell::from(duration_str),
+            Cell::from(if failures > 0 {
+                failures.to_string()
+            } else {
+                "-".to_string()
+            }),
+            // Colour means "look here": only the health cell carries
+            // it, not the vmid, name and node of the row.
+            Cell::from(Span::styled(health_str, health_style)),
+        ]));
     }
 
     let widths = [
@@ -171,4 +170,56 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     );
 
     f.render_widget(table, chunks[1]);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::api::types::{Guest, GuestStatus};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// A guest with no backup is flagged in the health cell only: its
+    /// vmid, name and node keep the default colour.
+    #[test]
+    fn only_the_health_cell_is_coloured() {
+        let mut state = AppState::new();
+        state.guests = vec![Guest {
+            vmid: 4242,
+            name: "nobackup".into(),
+            node: "pve1".into(),
+            status: GuestStatus::Running,
+            ..Guest::default()
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(110, 12)).expect("terminal");
+        terminal.draw(|f| draw(f, f.area(), &state)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let y = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("4242")
+            })
+            .expect("guest row");
+        let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let col = |needle: &str| {
+            u16::try_from(line[..line.find(needle).expect(needle)].chars().count()).expect("u16")
+        };
+        assert_ne!(
+            buf[(col("4242"), y)].fg,
+            Theme::DANGER,
+            "vmid must not be red: {line}"
+        );
+        assert_ne!(
+            buf[(col("nobackup"), y)].fg,
+            Theme::DANGER,
+            "name must not be red: {line}"
+        );
+        assert_eq!(
+            buf[(col("unprotected"), y)].fg,
+            Theme::DANGER,
+            "health is red: {line}"
+        );
+    }
 }

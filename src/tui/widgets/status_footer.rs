@@ -124,9 +124,9 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
         View::Dashboard => vec![
             ("Enter", "open"),
             ("/", "search"),
-            ("g", "guests"),
-            ("n", "nodes"),
-            ("s", "storage"),
+            ("3", "guests"),
+            ("2", "nodes"),
+            ("4", "storage"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -172,9 +172,9 @@ fn bindings_for(view: &View, mode: &AppMode) -> Vec<(&'static str, &'static str)
             ("?", "help"),
             ("q", "quit"),
         ],
+        // Approvals are answered in Telegram; the view only lists them.
         View::ApprovalQueue => vec![
-            ("a", "approve"),
-            ("d", "deny"),
+            ("j/k", "nav"),
             ("Esc", "back"),
             ("?", "help"),
             ("q", "quit"),
@@ -367,6 +367,85 @@ mod tests {
                 Some("back"),
                 "{v:?}: Esc must say 'back' (it triggers Action::Back which pops the stack)"
             );
+        }
+    }
+
+    /// Every key the footer names does something in that view. The
+    /// dashboard used to offer `g guests`, `n nodes` and `s storage`
+    /// (no such keys; the views are on `3`, `2`, `4`), the approval
+    /// queue `a approve` and `d deny` (approvals are answered in
+    /// Telegram), and the guest detail `s`/`S`/`r`/`c`, which only the
+    /// guest list handled.
+    #[test]
+    fn every_footer_key_maps_to_an_action_in_its_view() {
+        use crate::api::types::{Guest, GuestStatus, GuestType, Node, NodeStatus};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let fresh = || {
+            let mut state = crate::app::AppState::new();
+            state.guests = vec![Guest {
+                vmid: 100,
+                name: "web".into(),
+                node: "pve1".into(),
+                status: GuestStatus::Running,
+                guest_type: GuestType::Qemu,
+                ..Guest::default()
+            }];
+            state.nodes = vec![Node {
+                node: "pve1".into(),
+                status: NodeStatus::Online,
+                ..Node::default()
+            }];
+            state
+        };
+        let views = [
+            View::Dashboard,
+            View::NodeList,
+            View::GuestList,
+            View::GuestDetail { vmid: 100 },
+            View::StorageList,
+            View::TaskLog {
+                upid: String::new(),
+            },
+            View::ApprovalQueue,
+            View::OperationQueue,
+            View::Heatmap,
+            View::BackupBoard,
+            View::AuditTimeline,
+            View::ConfigGrep,
+            View::SnapshotTree { vmid: 100 },
+            View::IsoLibrary,
+            View::HaConsole,
+            View::Hardware {
+                node: "pve1".into(),
+            },
+            View::GuestCompare { guests: vec![] },
+        ];
+        for view in views {
+            let mut state = fresh();
+            state.push_view(view.clone());
+            if view == View::OperationQueue {
+                let op = crate::app::queue::QueuedOp::new(
+                    Box::new(crate::app::Action::StartGuest { vmid: 100 }),
+                    &state,
+                );
+                state.op_queue.push(op);
+            }
+            for (key, label) in bindings_for(&view, &AppMode::Normal) {
+                let code = match key {
+                    "Enter" => KeyCode::Enter,
+                    "Esc" => KeyCode::Esc,
+                    "j/k" => KeyCode::Char('j'),
+                    k if k.chars().count() == 1 => KeyCode::Char(k.chars().next().unwrap_or(' ')),
+                    other => panic!("{view:?}: footer key {other:?} has no test mapping"),
+                };
+                let action =
+                    crate::tui::event::map_key(KeyEvent::new(code, KeyModifiers::NONE), &state);
+                assert!(
+                    action.is_some(),
+                    "{view:?}: footer says `{key} {label}` but the key does nothing"
+                );
+            }
         }
     }
 

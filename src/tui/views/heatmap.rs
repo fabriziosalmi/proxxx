@@ -17,7 +17,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" 🔥 ", Style::default().fg(Theme::DANGER)),
+        Span::raw(" "),
         Span::styled("Live Hotspot Heatmap", Theme::title()),
         Span::styled(" (Sorted by CPU+RAM Saturation)", Theme::dim()),
     ]))
