@@ -171,7 +171,7 @@ fn write_flat_template(force: bool) -> Result<(serde_json::Value, i32)> {
         serde_json::json!({
             "wrote": config_path.display().to_string(),
             "force": force,
-            "next_step": "edit `url`, `user`, `token_id`, `token_secret`, then run `proxxx ls nodes`",
+            "next_step": "edit `url`, `user`, `token_id`, then either set `token_secret` or uncomment `[ssh]` and run `proxxx token bootstrap --yes`; then run `proxxx ls nodes`",
         }),
         0,
     ))

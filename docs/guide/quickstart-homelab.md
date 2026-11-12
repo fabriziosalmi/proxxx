@@ -37,7 +37,23 @@ a clone.
 
 ## 2. Mint a token on the node (1 min)
 
-In the PVE web UI: **Datacenter → Permissions → API Tokens →
+If your laptop can SSH as root to the node, let proxxx do it. Write the
+template, set `url` and `verify_tls = false`, and uncomment `[ssh]`
+with your key:
+
+```bash
+proxxx init
+$EDITOR ~/.config/proxxx/config.toml     # macOS: ~/Library/Application Support/dev.proxxx.proxxx/config.toml
+proxxx token bootstrap --role PVEAdmin --yes
+```
+
+`token bootstrap` runs `pveum` on the node over SSH, grants the role on
+`/` (`PVEAuditor` without `--role`, which is read-only), stores the
+secret in the macOS keychain or a `0600` file without printing it,
+checks the token against the API, and prints the `config.toml` lines to
+add. Then skip the wizard and go to step 4.
+
+Without SSH, in the PVE web UI: **Datacenter → Permissions → API Tokens →
 Add**. Untick "Privilege Separation" (homelabs rarely need it),
 copy the secret immediately — PVE shows it once.
 
@@ -46,8 +62,8 @@ Or from the node's shell:
 ```bash
 ssh root@<node>
 pveum user token add root@pam proxxx --privsep=0
-# → token id: proxxx@pve!proxxx
-# → secret  : <uuid>     # save this
+# → full-tokenid: root@pam!proxxx
+# → value       : <uuid>     # save this
 ```
 
 ## 3. Run the wizard (2 min)

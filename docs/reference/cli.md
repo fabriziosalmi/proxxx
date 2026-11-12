@@ -104,6 +104,7 @@ within a major version.
 | `proxxx task-stop --node N --upid U --yes` | Cancel a running task (vzdump / migration / etc.) |
 | `proxxx token create <user> <id>`        | Create API token (secret shown once) |
 | `proxxx token revoke <user> <id> --yes`  | Revoke token |
+| `proxxx token bootstrap [--userid U] [--tokenid ID] [--role R] [--acl-path P] [--ssh-host H[:PORT]] [--secret-file PATH] [--rotate] --yes` | Create the profile's API token over SSH (`pveum`), grant `--role` (default `PVEAuditor`) on `--acl-path` (default `/`), store the secret in `--secret-file`, the profile's `token_secret_file`, the macOS keychain or `<config dir>/secrets/<profile>.token` (mode `0600`) without printing it, verify it against `/version` and `/nodes`, and print the `config.toml` lines to add. Needs `[ssh]`; refuses an existing token without `--rotate` and a `read_only` profile. Rolls the token back if the role grant or the secret store fails |
 | `proxxx access password <userid> --password X` | Change a user's password |
 | `proxxx pool {create,add-members,remove-members,set-comment,delete}` | Multi-tenancy pool CRUD |
 
