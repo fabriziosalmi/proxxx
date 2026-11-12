@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo-homelab.svg" alt="proxxx describe — one command prints the whole cluster: nodes (online, CPU, memory, uptime), guests (vmid, kind, node, status), and storages (type, usage, shared) — for a live 3-node Proxmox VE 9.1 cluster" width="900">
+  <img src="assets/tour.svg" alt="proxxx terminal recording against a live 3-node Proxmox VE 9.1 lab cluster: `proxxx ls nodes` (two online, one offline), `proxxx ls guests` (one running container, one stopped VM), `proxxx ls storage`, `proxxx describe` (nodes, guests and storages in one digest), and `proxxx ls guests --format json` piped to jq to print the running guest" width="900">
 </p>
 
 
