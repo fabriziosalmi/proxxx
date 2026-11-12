@@ -4,14 +4,14 @@ layout: home
 hero:
   text: Terminal cockpit for Proxmox VE & PBS.
   tagline: A Rust TUI and CLI that talks to real Proxmox clusters. REST against PVE and PBS, SSH for the rest. No agent on the cluster.
-  # Animated SVG mirroring the README hero (assets/demo-homelab.svg — proxxx describe).
+  # The README hero recording (assets/tour.svg, recorded by assets/tour-record.sh).
   # vitepress's home layout slots `image.src` to the right of the
   # headline + tagline + actions; `base: /proxxx/` from .vitepress/
   # config.ts auto-prefixes the URL at build time, so we write the
   # path as if served from the site root.
   image:
-    src: /demo-homelab.svg
-    alt: proxxx describe — one command prints the whole cluster (nodes, guests, storages) for a live 3-node Proxmox VE 9.1 cluster
+    src: /tour.svg
+    alt: proxxx terminal recording against a live Proxmox VE 9.1 lab cluster - ls nodes, ls guests, ls storage, describe, and ls guests --format json piped to jq
   actions:
     - theme: brand
       text: Install in 60 s
