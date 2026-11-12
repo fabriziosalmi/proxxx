@@ -410,7 +410,7 @@ fn queue_view_empty_state() {
         views::queue::draw(f, f.area(), &state);
     });
     assert!(
-        dump.contains("Queue is empty"),
+        dump.contains("The queue is empty"),
         "empty-state hint missing:\n{dump}"
     );
     insta::assert_snapshot!(dump);
@@ -813,4 +813,128 @@ fn the_guest_table_names_the_stale_node() {
         "the stale guest's node is marked:\n{dump}"
     );
     assert!(!dump.contains("pve1?"), "{dump}");
+}
+
+/// Data shaped like the lab cluster: two online nodes and one offline,
+/// a storage named on both nodes, guests with the lab's names.
+fn lab_like_state() -> AppState {
+    let mut state = AppState::new();
+    state.nodes = ["pve-test-1", "pve-test-2", "pve-test-3"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| Node {
+            node: (*n).into(),
+            status: if i < 2 {
+                NodeStatus::Online
+            } else {
+                NodeStatus::Offline
+            },
+            cpu: if i < 2 { 0.03 } else { 0.0 },
+            maxcpu: u32::from(i < 2),
+            mem: if i < 2 { 1_800_000_000 } else { 0 },
+            maxmem: if i < 2 { 4_100_000_000 } else { 0 },
+            disk: if i < 2 { 4_900_000_000 } else { 0 },
+            maxdisk: if i < 2 { 44_800_000_000 } else { 0 },
+            uptime: if i < 2 { 2_800_000 } else { 0 },
+        })
+        .collect();
+    state.guests = vec![
+        Guest {
+            vmid: 7777,
+            name: "alpine-existing-lxc".into(),
+            node: "pve-test-1".into(),
+            status: GuestStatus::Stopped,
+            guest_type: GuestType::Lxc,
+            cpus: 1,
+            maxmem: 512 << 20,
+            maxdisk: 8 << 30,
+            ..Guest::default()
+        },
+        Guest {
+            vmid: 8888,
+            name: "alpine-existing-vm".into(),
+            node: "pve-test-1".into(),
+            status: GuestStatus::Running,
+            guest_type: GuestType::Qemu,
+            cpus: 1,
+            cpu: 0.02,
+            mem: 200 << 20,
+            maxmem: 512 << 20,
+            maxdisk: 16 << 30,
+            ..Guest::default()
+        },
+    ];
+    state.storage = ["pve-test-1", "pve-test-2"]
+        .iter()
+        .flat_map(|n| {
+            ["local", "local-lvm"].iter().map(move |s| StoragePool {
+                storage: (*s).into(),
+                node: (*n).into(),
+                storage_type: if *s == "local" { "dir" } else { "lvmthin" }.into(),
+                active: true,
+                used: 4 << 30,
+                total: 40 << 30,
+                content: "images,rootdir".into(),
+                ..StoragePool::default()
+            })
+        })
+        .collect();
+    state
+}
+
+/// At 80 columns no column of the guest, node and storage lists is cut:
+/// the least useful columns are left out whole instead. Before, `stopped`
+/// printed as `stopp`, `local-lvm` as `local-`, and the node headers as
+/// `cpu usag` and `ram us`; the storage list had no node column.
+#[test]
+fn lists_at_80_columns_drop_columns_instead_of_cutting_values() {
+    let mut state = lab_like_state();
+    state.push_view(View::GuestList);
+    let guests = render_to_string(80, 12, |f| views::guests::draw(f, f.area(), &state));
+    for want in ["alpine-existing-lxc", "stopped", "running", "pve-test-1"] {
+        assert!(
+            guests.contains(want),
+            "guests at 80: {want:?} cut:\n{guests}"
+        );
+    }
+
+    let nodes = render_to_string(80, 10, |f| views::nodes::draw(f, f.area(), &state));
+    for want in ["pve-test-1", "uptime", "guests", "offline"] {
+        assert!(nodes.contains(want), "nodes at 80: {want:?} cut:\n{nodes}");
+    }
+    assert!(!nodes.contains("cpu usag "), "a header was cut:\n{nodes}");
+
+    let storage = render_to_string(80, 10, |f| views::storage::draw(f, f.area(), &state));
+    for want in ["node", "pve-test-2", "local-lvm", "lvmthin"] {
+        assert!(
+            storage.contains(want),
+            "storage at 80: {want:?} cut:\n{storage}"
+        );
+    }
+}
+
+/// On a wide screen the name column is as wide as the longest name, not
+/// half of the screen: the numbers sit next to the names.
+#[test]
+fn a_wide_screen_does_not_give_the_name_column_the_spare_space() {
+    let state = lab_like_state();
+    let nodes = render_to_string(160, 10, |f| views::nodes::draw(f, f.area(), &state));
+    let row = nodes
+        .lines()
+        .find(|l| l.contains("pve-test-1"))
+        .expect("row");
+    let gap = row.find("online").unwrap() - row.find("pve-test-1").unwrap();
+    assert!(gap < 16, "node name column {gap} wide:\n{nodes}");
+}
+
+/// A name with a multi-byte character where the old code cut at byte 7
+/// draws instead of panicking, and a long name is not cut to 8.
+#[test]
+fn the_heatmap_cuts_names_by_characters_and_fits_them_when_it_can() {
+    let mut state = lab_like_state();
+    // 30 characters, `é` across bytes 6 and 7: cut to 23 characters + `…`.
+    state.guests[0].name = "abcdeféxyz0123456789abcdefghij".into();
+    let dump = render_to_string(100, 12, |f| views::heatmap::draw(f, f.area(), &state));
+    assert!(dump.contains("abcdeféxyz0123456789abc…"), "{dump}");
+    assert!(dump.contains("alpine-existing-vm"), "{dump}");
 }

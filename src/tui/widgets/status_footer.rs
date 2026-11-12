@@ -44,6 +44,8 @@ pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
     ));
     spans.push(Span::styled(" · ", Style::default().fg(Theme::TEXT_MUTED)));
 
+    let budget = usize::from(area.width).saturating_sub(mode_label.chars().count() + 5);
+    let bindings = fit_bindings(&bindings, budget);
     for (i, (key, label)) in bindings.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(Theme::TEXT_MUTED)));
@@ -63,6 +65,38 @@ pub fn draw_status_footer(f: &mut Frame, area: Rect, state: &AppState) {
         .alignment(Alignment::Left)
         .style(Style::default().bg(Theme::BG_ELEVATED));
     f.render_widget(p, area);
+}
+
+/// Columns one binding takes: ` · ` before all but the first,
+/// ` key ` and the label.
+fn binding_width(i: usize, key: &str, label: &str) -> usize {
+    let sep = if i == 0 { 0 } else { 3 };
+    sep + key.chars().count() + 2 + label.chars().count()
+}
+
+/// The bindings that fit in `width` columns. When they do not all fit,
+/// the ones that leave the view or the app (`Esc`, `?`, `q`, `Ctrl+]`)
+/// stay and the others are dropped from the end, so a narrow terminal
+/// loses `/ search` before it loses `q quit`. The order is kept.
+fn fit_bindings(
+    bindings: &[(&'static str, &'static str)],
+    width: usize,
+) -> Vec<(&'static str, &'static str)> {
+    let total = |b: &[(&str, &str)]| -> usize {
+        b.iter()
+            .enumerate()
+            .map(|(i, (k, l))| binding_width(i, k, l))
+            .sum()
+    };
+    let essential = |k: &str| matches!(k, "Esc" | "?" | "q" | "Ctrl+]" | "any key");
+    let mut kept: Vec<(&'static str, &'static str)> = bindings.to_vec();
+    while total(&kept) > width {
+        let Some(pos) = kept.iter().rposition(|(k, _)| !essential(k)) else {
+            break;
+        };
+        kept.remove(pos);
+    }
+    kept
 }
 
 /// Pure mapping of `AppMode` → label rendered in the footer's mode
@@ -447,6 +481,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// On an 80-column terminal every view's footer still shows how to
+    /// get help, go back and quit; the extra bindings go first.
+    #[test]
+    fn a_narrow_footer_keeps_help_back_and_quit() {
+        let b = bindings_for(&View::GuestList, &AppMode::Normal);
+        let fit = fit_bindings(&b, 80 - 12);
+        let keys: Vec<&str> = fit.iter().map(|(k, _)| *k).collect();
+        for k in ["Esc", "?", "q"] {
+            assert!(keys.contains(&k), "{k} dropped: {keys:?}");
+        }
+        assert!(
+            keys.len() < b.len(),
+            "nothing dropped at 80 columns: {keys:?}"
+        );
+        let width: usize = fit
+            .iter()
+            .enumerate()
+            .map(|(i, (k, l))| binding_width(i, k, l))
+            .sum();
+        assert!(width <= 80 - 12, "footer still {width} columns wide");
+        assert_eq!(fit_bindings(&b, 500), b, "a wide footer keeps everything");
     }
 
     #[test]

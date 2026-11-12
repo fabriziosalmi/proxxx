@@ -180,7 +180,15 @@ fn summary_row(_idx: usize, c: &FleetCluster, selected: bool) -> Row<'static> {
         Span::raw(marker.to_string()),
         Span::raw(truncate_ellipsis(&sanitize_display(&c.profile), 18)),
         Span::styled(status_text, status_style),
-        Span::raw(c.nodes.len().to_string()),
+        // Online of total: a cluster with a node down read `● OK  3`.
+        Span::raw(format!(
+            "{}/{}",
+            c.nodes
+                .iter()
+                .filter(|n| n.status == crate::api::types::NodeStatus::Online)
+                .count(),
+            c.nodes.len()
+        )),
         Span::raw(guests),
         Span::raw(cpu),
         mem,
@@ -299,10 +307,31 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &FleetState) {
         } else {
             "Esc clear · "
         };
-        format!(
-            " q quit · ↑↓ select · Enter open · Tab: {focus} · / search · s sort:{} · {esc}read-only ",
-            state.sort.label()
-        )
+        // Fitted to the width: the items after the first that do not
+        // fit are left out, `q quit` first so it always shows (the
+        // line was cut at `read-o` on 100 columns).
+        let sort = format!("s sort:{}", state.sort.label());
+        let tab = format!("Tab: {focus}");
+        let mut items: Vec<&str> =
+            vec!["q quit", "↑↓ select", "Enter open", &tab, "/ search", &sort];
+        if !esc.is_empty() {
+            items.push("Esc clear");
+        }
+        items.push("read-only");
+        let width = usize::from(area.width);
+        let mut line = String::new();
+        for item in items {
+            let next = if line.is_empty() {
+                format!(" {item}")
+            } else {
+                format!("{line} · {item}")
+            };
+            if next.chars().count() > width && !line.is_empty() {
+                continue;
+            }
+            line = next;
+        }
+        line
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(text, Theme::dim()))),

@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::AppState;
 use crate::tui::theme::Theme;
+use crate::tui::widgets::columns::{self, Column};
 use crate::util::sanitize::sanitize_display;
 
 #[allow(clippy::too_many_lines)] // audit #272: wide, flat dispatch — see Cargo.toml
@@ -36,15 +37,30 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let header = Row::new(vec![
-        "vmid",
-        "name",
-        "node",
-        "last ok",
-        "duration",
-        "fails (30d)",
-        "health",
-    ])
+    // Names as wide as the longest one (they were cut at 17 characters
+    // with half the row empty); the duration goes first when narrow.
+    let cols = [
+        Column::new("vmid", 6, 0),
+        Column::new(
+            "name",
+            columns::content_width("name", state.guests.iter().map(|g| g.name.as_str()), 6, 40),
+            0,
+        ),
+        Column::new(
+            "node",
+            columns::content_width("node", state.guests.iter().map(|g| g.node.as_str()), 4, 20),
+            0,
+        ),
+        Column::new("last ok", 13, 0),
+        Column::new("duration", 9, 2),
+        Column::new("fails (30d)", 11, 1),
+        Column::new("health", 11, 0),
+    ];
+    let keep = columns::fit(&cols, chunks[1].width.saturating_sub(2));
+    let header = Row::new(columns::pick(
+        &cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+        &keep,
+    ))
     .style(Theme::header())
     .height(1);
 
@@ -136,32 +152,27 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
             "-".to_string()
         };
 
-        rows.push(Row::new(vec![
-            Cell::from(guest.vmid.to_string()),
-            Cell::from(sanitize_display(&guest.name).into_owned()),
-            Cell::from(sanitize_display(&guest.node).into_owned()),
-            Cell::from(last_ok_str),
-            Cell::from(duration_str),
-            Cell::from(if failures > 0 {
-                failures.to_string()
-            } else {
-                "-".to_string()
-            }),
-            // Colour means "look here": only the health cell carries
-            // it, not the vmid, name and node of the row.
-            Cell::from(Span::styled(health_str, health_style)),
-        ]));
+        rows.push(Row::new(columns::pick(
+            &[
+                Cell::from(guest.vmid.to_string()),
+                Cell::from(sanitize_display(&guest.name).into_owned()),
+                Cell::from(sanitize_display(&guest.node).into_owned()),
+                Cell::from(last_ok_str),
+                Cell::from(duration_str),
+                Cell::from(if failures > 0 {
+                    failures.to_string()
+                } else {
+                    "-".to_string()
+                }),
+                // Colour means "look here": only the health cell carries
+                // it, not the vmid, name and node of the row.
+                Cell::from(Span::styled(health_str, health_style)),
+            ],
+            &keep,
+        )));
     }
 
-    let widths = [
-        Constraint::Length(6),  // vmid
-        Constraint::Length(20), // name
-        Constraint::Length(12), // node
-        Constraint::Length(18), // last ok
-        Constraint::Length(10), // duration
-        Constraint::Length(14), // failures
-        Constraint::Length(15), // health
-    ];
+    let widths = columns::constraints(&cols, &keep);
 
     let table = Table::new(rows, widths).header(header).block(
         Block::default()

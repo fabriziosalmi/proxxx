@@ -42,9 +42,19 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
         .count();
     let pending = state.pending_approvals.len();
 
+    // The profile name next to the title, so a cluster opened from the
+    // fleet view says which one it is.
+    let title = if state.profile_label.is_empty() || state.profile_label == "default" {
+        " proxxx ".to_string()
+    } else {
+        format!(
+            " proxxx · {} ",
+            crate::util::sanitize::sanitize_display(&state.profile_label)
+        )
+    };
     let header = Line::from(vec![
         Span::styled(
-            " proxxx ",
+            title,
             Style::default()
                 .fg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -221,17 +231,7 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
             // An offline node reports zeros, not measurements: show `-`
             // as `ls nodes` does instead of a 0% that reads as idle.
             if node.status != crate::api::types::NodeStatus::Online {
-                let dash = || Span::raw("-".to_string());
-                return Row::new(vec![
-                    Span::raw(status_icon.to_string()),
-                    Span::raw(node.node.clone()),
-                    Span::raw(status_str),
-                    dash(),
-                    dash(),
-                    dash(),
-                    dash(),
-                ])
-                .style(style);
+                return offline_row(status_icon, &node.node, status_str).style(style);
             }
 
             Row::new(vec![
@@ -262,14 +262,23 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
         })
         .collect();
 
+    // The node name as wide as the longest name, the uptime last with
+    // the rest of the row: `Min` on the name gave it half of a wide
+    // screen and pushed the numbers to the right edge.
+    let name_w = crate::tui::widgets::columns::content_width(
+        "NODE",
+        state.nodes.iter().map(|n| n.node.as_str()),
+        6,
+        30,
+    );
     let widths = [
         Constraint::Length(2),
-        Constraint::Min(12),
+        Constraint::Length(name_w),
         Constraint::Length(8),
         Constraint::Length(6),
         Constraint::Length(16),
         Constraint::Length(6),
-        Constraint::Length(12),
+        Constraint::Min(12),
     ];
 
     let table = Table::new(rows, widths)
@@ -292,6 +301,21 @@ fn draw_node_cards(f: &mut Frame, area: Rect, state: &AppState) {
 // resulting in two stacked rows on screen.
 
 // ── Helpers ─────────────────────────────────────────────
+
+/// A node-table row for a node that is not online: its numbers are
+/// zeros, not measurements, so they read `-`.
+fn offline_row(icon: &'static str, name: &str, status: String) -> Row<'static> {
+    let dash = || Span::raw("-".to_string());
+    Row::new(vec![
+        Span::raw(icon.to_string()),
+        Span::raw(name.to_string()),
+        Span::raw(status),
+        dash(),
+        dash(),
+        dash(),
+        dash(),
+    ])
+}
 
 fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86400;

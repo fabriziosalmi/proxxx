@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 233
+assertion_line: 235
 expression: dump
 ---
  proxxx  2 nodes  1/2 guests
@@ -12,9 +12,9 @@ expression: dump
 │███████                        ││████████████                    ││█                              │
 └───────────────────────────────┘└────────────────────────────────┘└───────────────────────────────┘
 ┌ Nodes ───────────────────────────────────────────────────────────────────────────────────────────┐
-│   NODE                                       STATUS   CPU    RAM              DISK   UPTIME      │
-│●  pve1                                       online   12%    50% (8.0G)       3%     1d 0h 0m    │
-│●  pve2                                       online   30%    25% (8.0G)       3%     1d 0h 0m    │
+│   NODE   STATUS   CPU    RAM              DISK   UPTIME                                          │
+│●  pve1   online   12%    50% (8.0G)       3%     1d 0h 0m                                        │
+│●  pve2   online   30%    25% (8.0G)       3%     1d 0h 0m                                        │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

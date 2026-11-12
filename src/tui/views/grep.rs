@@ -67,11 +67,23 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
         let table = Table::new(
             rows,
+            // vmid, then name and key as wide as their longest value, the
+            // value with the rest (names were cut at 12 on 80 columns).
             [
-                Constraint::Length(8),
-                Constraint::Length(20),
-                Constraint::Length(20),
-                Constraint::Min(40),
+                Constraint::Length(6),
+                Constraint::Length(crate::tui::widgets::columns::content_width(
+                    "name",
+                    state.grep_results.iter().map(|m| m.name.as_str()),
+                    4,
+                    32,
+                )),
+                Constraint::Length(crate::tui::widgets::columns::content_width(
+                    "key",
+                    state.grep_results.iter().map(|m| m.key.as_str()),
+                    3,
+                    24,
+                )),
+                Constraint::Min(10),
             ],
         )
         .header(

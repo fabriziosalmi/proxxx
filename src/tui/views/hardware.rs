@@ -85,6 +85,7 @@ fn draw_pci_table(f: &mut Frame, area: Rect, state: &AppState) {
     let (assignments, _) = scan_assignments(&state.hw_guest_configs);
     let inventory = pci_inventory(&state.hw_pci, &assignments);
 
+    let labels: Vec<String> = inventory.iter().map(|r| r.device.short_label()).collect();
     let rows: Vec<Row> = inventory
         .into_iter()
         .map(|row| {
@@ -124,13 +125,23 @@ fn draw_pci_table(f: &mut Frame, area: Rect, state: &AppState) {
         })
         .collect();
 
+    // The device label as wide as the longest one, up to what leaves
+    // the other three columns their room; `assigned to` takes the rest.
+    // Two `Min` columns split the space and cut the device names.
+    let room = area.width.saturating_sub(2 + 10 + 4 + 12 + 3);
+    let device_w = crate::tui::widgets::columns::content_width(
+        "pci device",
+        labels.iter().map(String::as_str),
+        16,
+        room.max(16),
+    );
     let table = Table::new(
         rows,
         [
-            Constraint::Min(36),
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Min(20),
+            Constraint::Length(device_w),
+            Constraint::Length(10),
+            Constraint::Length(4),
+            Constraint::Min(12),
         ],
     )
     .header(
