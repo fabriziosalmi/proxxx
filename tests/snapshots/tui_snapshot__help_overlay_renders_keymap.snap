@@ -1,32 +1,33 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 159
+assertion_line: 178
 expression: dump
 ---
 
-
-
-            ┌ Help — keymap reference ─────────────────────────────┐
-            │                                                      │
-            │Navigation                                            │
-            │  j / Down  move selection down                       │
-            │  k / Up    move selection up                         │
-            │  Enter / l select / drill in                         │
-            │  h / Esc   back / parent view                        │
-            │  q         quit                                      │
-            │  R         force refresh                             │
-            │  Ctrl+L    redraw (recover from SIGCONT)             │
-            │                                                      │
-            │Views                                                 │
-            │  1         Dashboard                                 │
-            │  2         Nodes                                     │
-            │  3         Guests                                    │
-            │  4         Storage                                   │
-            │  H         Heatmap                                   │
-            │  B         Backup board                              │
-            │  G         Config grep                               │
-            │  Q         Operation queue                           │
-            │  T         Audit timeline                            │
-            │                                                      │
-            │Selection (Guest list)                                │
-            └──────────────────────────────────────────────────────┘
+    ┌ Help — keymap reference · any key closes ────────────────────────────┐
+    │Navigation                         Guest list                         │
+    │ j / Down  move down                Space     select / unselect       │
+    │ k / Up    move up                  V         select all              │
+    │ Enter / l open / drill in          t         select by tag           │
+    │ h / Esc   back                     s / S / r queue start/stop/restart│
+    │ q         quit                     d         queue delete            │
+    │ R         refresh now              D         compare 2+ selected     │
+    │ Ctrl+L    redraw the screen        X         guest-agent command     │
+    │                                    Z         snapshot tree           │
+    │Views                               c         SSH console             │
+    │ 1         dashboard                C         run the queue (queue)   │
+    │ 2         nodes                                                      │
+    │ 3         guests                  Modes                              │
+    │ 4         storage                  /         search                  │
+    │ H         heatmap                  :         command                 │
+    │ B         backup board             Ctrl+K    quick-open palette      │
+    │ G         config grep              Ctrl+]    leave an SSH session    │
+    │ Q         operation queue                                            │
+    │ T         audit timeline                                             │
+    │ W         hardware (node list)                                       │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    └──────────────────────────────────────────────────────────────────────┘

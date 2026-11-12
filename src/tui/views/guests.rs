@@ -12,6 +12,7 @@ use ratatui::{
 use crate::api::types::{GuestStatus, GuestType};
 use crate::app::AppState;
 use crate::tui::theme::{usage_level, Theme, UsageMetric};
+use crate::tui::widgets::columns::{self, Column};
 use crate::util::format::human_bytes;
 use crate::util::sanitize::sanitize_display;
 
@@ -152,9 +153,32 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
     let scroll_offset = window.start;
     let visible_guests = &visible_list[window];
 
-    let header = Row::new(vec![
-        "", "vmid", "name", "type", "status", "cpu", "ram", "disk", "node", "tags",
-    ])
+    // Name and node columns as wide as the longest value in the list
+    // (not just the visible page, so the layout does not move when
+    // scrolling); the tags take what is left. On a narrow terminal the
+    // tags go first, then the disk size, instead of every column being
+    // cut (`stopped` printed as `stopp` at 80 columns).
+    let name_w =
+        columns::content_width("name", visible_list.iter().map(|g| g.name.as_str()), 8, 32);
+    let node_w =
+        columns::content_width("node", visible_list.iter().map(|g| g.node.as_str()), 6, 20) + 1; // room for the stale-node `?`
+    let cols = [
+        Column::new("", 3, 0),
+        Column::new("vmid", 6, 0),
+        Column::new("name", name_w, 0),
+        Column::new("type", 4, 0),
+        Column::new("status", 9, 0),
+        Column::new("cpu", 5, 0),
+        Column::new("ram", 5, 0),
+        Column::new("disk", 8, 2),
+        Column::new("node", node_w, 0),
+        Column::new("tags", 4, 1),
+    ];
+    let keep = columns::fit(&cols, area.width.saturating_sub(2));
+    let header = Row::new(columns::pick(
+        &cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+        &keep,
+    ))
     .style(Theme::header())
     .height(1);
 
@@ -238,7 +262,7 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                 Span::styled(status_text, Theme::guest_status(guest.status))
             };
 
-            Row::new(vec![
+            let cells = [
                 Span::raw(status_icon.to_string()),
                 Span::raw(guest.vmid.to_string()),
                 Span::raw(sanitize_display(&guest.name).into_owned()),
@@ -256,23 +280,12 @@ fn draw_guest_table(f: &mut Frame, area: Rect, state: &AppState) {
                     Span::raw(sanitize_display(&guest.node).into_owned())
                 },
                 Span::raw(tags),
-            ])
-            .style(style)
+            ];
+            Row::new(columns::pick(&cells, &keep)).style(style)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(3),  // icon
-        Constraint::Length(6),  // vmid
-        Constraint::Min(15),    // name
-        Constraint::Length(4),  // type
-        Constraint::Length(9),  // status
-        Constraint::Length(5),  // cpu
-        Constraint::Length(5),  // ram
-        Constraint::Length(8),  // disk
-        Constraint::Length(10), // node
-        Constraint::Min(10),    // tags
-    ];
+    let widths = columns::constraints(&cols, &keep);
 
     let scroll_info = if total > visible_height {
         format!(" Guests [{}/{total}] ", state.selected_index + 1)

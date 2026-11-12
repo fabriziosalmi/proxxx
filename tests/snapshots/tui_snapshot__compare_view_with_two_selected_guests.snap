@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 352
+assertion_line: 354
 expression: dump
 ---
 ┌ Config Drift Detector (2 guests) ────────────────────────────────────────────────────────────────┐
@@ -8,8 +8,8 @@ expression: dump
 │                                                                                                  │
 │vmid            100                                       101                                     │
 │name            vm-prod                                   vm-staging                              │
-│type            Qemu                                      Qemu                                    │
-│status          Running                                   Running                                 │
+│type            VM                                        VM                                      │
+│status          running                                   running                                 │
 │node            pve1                                      pve1                                    │
 │cpu cores       2                                         2                                       │
 │ram             2.0G                                      2.0G                                    │

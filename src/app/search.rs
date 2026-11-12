@@ -18,6 +18,8 @@ pub enum SearchItem {
     Storage {
         pool: String,
         type_str: String,
+        /// The node it was listed on: a storage appears once per node.
+        node: String,
     },
     Command {
         action: crate::app::Action,
@@ -64,6 +66,7 @@ pub fn build_index(state: &AppState) -> Vec<SearchItem> {
         items.push(SearchItem::Storage {
             pool: storage.storage.clone(),
             type_str: storage.storage_type.clone(),
+            node: storage.node.clone(),
         });
     }
 

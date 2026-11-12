@@ -30,9 +30,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     // h / ← are the actual back chord. "[D] Remove Selected" was
     // advertised but no key was wired — fixed by binding lowercase
     // `d` on this view to Action::DequeueOperation.
-    let instruction_text =
-        " [j/k] Nav · [d] Remove · [C] Commit & Execute · [R] Refresh · [Esc] Back ";
+    // The full key list is in the footer; this line names what the
+    // queue is for, and wraps instead of being cut at the panel edge.
+    let instruction_text = " C runs the queued operations · d removes one · Esc back ";
     let instruction_block = Paragraph::new(instruction_text)
+        .wrap(ratatui::widgets::Wrap { trim: true })
         .style(Style::default().fg(Theme::TEXT_MUTED))
         .block(
             Block::default()
@@ -43,15 +45,22 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
     if state.op_queue.is_empty() {
         let empty_msg = Paragraph::new(
-            "Queue is empty. Press 's', 'S', 'r', 'd' in Guest List to enqueue operations.",
+            "The queue is empty. In the guest list, s, S, r and d queue a start, stop, \
+             restart or delete.",
         )
+        .wrap(ratatui::widgets::Wrap { trim: true })
         .style(Style::default().fg(Theme::TEXT_MUTED))
         .alignment(ratatui::layout::Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
         f.render_widget(empty_msg, chunks[1]);
-        let empty_block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Replay-as-Script ");
+        let empty_block = Paragraph::new("The queued operations appear here as a shell script.")
+            .wrap(ratatui::widgets::Wrap { trim: true })
+            .style(Style::default().fg(Theme::TEXT_MUTED))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Replay-as-Script "),
+            );
         f.render_widget(empty_block, main_chunks[1]);
         return;
     }

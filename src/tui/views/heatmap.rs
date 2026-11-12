@@ -61,26 +61,45 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
 
     // We want boxes of fixed width, say 18 chars: "[100] webserver  "
     // To do this reliably with Paragraph wrap, we format each string to exact width.
-    let cell_width = 20;
+    // Tiles as wide as the longest name (up to 24), so `alpine-existing-lxc`
+    // is not `alpine-…` on a screen with room to spare. Names are cut by
+    // characters, not bytes: `String::truncate(7)` panicked on a name
+    // with a multi-byte character across byte 7.
+    let name_w = heat_list
+        .iter()
+        .map(|(g, ..)| sanitize_display(&g.name).chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 24);
+    let vmid_w = heat_list
+        .iter()
+        .map(|(g, ..)| g.vmid.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let cell_width = vmid_w + name_w + 9;
 
     for (guest, total_heat, _cpu_heat, _mem_heat) in heat_list {
         let bg = get_heat_color(total_heat);
-        // Both branches previously returned `Color::White` — a dead
-        // conditional clippy caught. Foreground stays white across the
-        // gradient because backgrounds darken with temperature; black
-        // text would vanish on the cold end. If we ever introduce a
-        // mid-temperature pastel band, branch on `total_heat` again.
+        // Foreground stays white across the gradient because
+        // backgrounds darken with temperature; black text would vanish
+        // on the cold end.
         let fg = Color::White;
 
-        // Truncate name (sanitized first — heatmap cells are tiny and
-        // an injected ESC sequence would garble the whole grid)
-        let mut name = sanitize_display(&guest.name).into_owned();
-        if name.len() > 8 {
-            name.truncate(7);
-            name.push('…');
-        }
+        // Sanitized first: an injected ESC sequence would garble the grid.
+        let full = sanitize_display(&guest.name).into_owned();
+        let name = if full.chars().count() > name_w {
+            let mut cut: String = full.chars().take(name_w - 1).collect();
+            cut.push('…');
+            cut
+        } else {
+            full
+        };
 
-        let cell_text = format!(" {:<4} {:<8} {:>3.0}% ", guest.vmid, name, total_heat);
+        let cell_text = format!(
+            " {:<vmid_w$} {:<name_w$} {:>3.0}% ",
+            guest.vmid, name, total_heat
+        );
 
         let style = Style::default().bg(bg).fg(fg);
 

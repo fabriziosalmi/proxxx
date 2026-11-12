@@ -1,21 +1,21 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 423
+assertion_line: 425
 expression: dump
 ---
 
 
 
 
-                    ┌ Instant Search (/ to filter, Enter to select) ───────────┐
-                    │>                                                         │
-                    └──────────────────────────────────────────────────────────┘
-                    ┌──────────────────────────────────────────────────────────┐
-                    │cmd   View: Dashboard                 action              │
-                    │cmd   View: Nodes                     action              │
-                    │cmd   View: Guests                    action              │
-                    │cmd   View: Storage                   action              │
-                    │cmd   View: Hotspot Heatmap           action              │
-                    │cmd   View: Backup Health Board       action              │
-                    │cmd   View: Audit Timeline            action              │
-                    └──────────────────────────────────────────────────────────┘
+    ┌ Instant Search (/ to filter, Enter to select) ───────────────────────────────────────────┐
+    │>                                                                                         │
+    └──────────────────────────────────────────────────────────────────────────────────────────┘
+    ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+    │cmd   View: Dashboard                                             action                  │
+    │cmd   View: Nodes                                                 action                  │
+    │cmd   View: Guests                                                action                  │
+    │cmd   View: Storage                                               action                  │
+    │cmd   View: Hotspot Heatmap                                       action                  │
+    │cmd   View: Backup Health Board                                   action                  │
+    │cmd   View: Audit Timeline                                        action                  │
+    └──────────────────────────────────────────────────────────────────────────────────────────┘

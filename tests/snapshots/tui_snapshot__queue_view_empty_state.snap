@@ -1,13 +1,14 @@
 ---
 source: tests/tui_snapshot.rs
+assertion_line: 416
 expression: dump
 ---
 ┌ Operation Queue ─────────────────────────────────────────┐┌ Replay-as-Script ────────────────────┐
-│ [j/k] Nav · [d] Remove · [C] Commit & Execute · [R] Refre││                                      │
-└──────────────────────────────────────────────────────────┘│                                      │
+│C runs the queued operations · d removes one · Esc back   ││The queued operations appear here as a│
+└──────────────────────────────────────────────────────────┘│shell script.                         │
 ┌──────────────────────────────────────────────────────────┐│                                      │
-│Queue is empty. Press 's', 'S', 'r', 'd' in Guest List to ││                                      │
-│                                                          ││                                      │
+│The queue is empty. In the guest list, s, S, r and d queue││                                      │
+│             a start, stop, restart or delete.            ││                                      │
 │                                                          ││                                      │
 │                                                          ││                                      │
 │                                                          ││                                      │

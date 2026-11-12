@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::AppState;
 use crate::tui::theme::Theme;
+use crate::tui::widgets::columns::{self, Column};
 use crate::util::format::human_bytes;
 
 /// Render the storage list
@@ -59,9 +60,44 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
     let scroll_offset = window.start;
     let visible_storage = &state.storage[window];
 
-    let header = Row::new(vec![
-        "", "storage", "type", "active", "used", "usage", "total", "trend", "eta", "content",
-    ])
+    // A storage is listed once per node, so the node is a column: the
+    // view printed `local` twice with nothing to tell the two apart.
+    // Names take the width of the longest one (`local-lvm` printed as
+    // `local-lv`); on a narrow terminal the trend, the bar and the
+    // active flag go before anything is cut.
+    let node_w =
+        columns::content_width("node", state.storage.iter().map(|p| p.node.as_str()), 4, 20);
+    let name_w = columns::content_width(
+        "storage",
+        state.storage.iter().map(|p| p.storage.as_str()),
+        7,
+        24,
+    );
+    let type_w = columns::content_width(
+        "type",
+        state.storage.iter().map(|p| p.storage_type.as_str()),
+        4,
+        12,
+    );
+    let cols = [
+        Column::new("", 1, 0),
+        Column::new("node", node_w, 0),
+        Column::new("storage", name_w, 0),
+        Column::new("type", type_w, 0),
+        Column::new("active", 6, 3),
+        Column::new("used", 6, 0),
+        Column::new("usage", 6, 0),
+        Column::new("", 10, 4),
+        Column::new("total", 6, 0),
+        Column::new("trend", 8, 5),
+        Column::new("eta", 5, 5),
+        Column::new("content", 10, 1),
+    ];
+    let keep = columns::fit(&cols, area.width.saturating_sub(2));
+    let header = Row::new(columns::pick(
+        &cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+        &keep,
+    ))
     .style(Theme::header())
     .height(1);
 
@@ -134,34 +170,25 @@ fn draw_storage_table(f: &mut Frame, area: Rect, state: &AppState) {
                 }
             }
 
-            Row::new(vec![
+            let cells = [
                 status_icon.to_string(),
+                pool.node.clone(),
                 pool.storage.clone(),
                 pool.storage_type.clone(),
                 active_str.to_string(),
                 used_str,
-                format!("{:.1}% {}", usage_pct, usage_bar),
+                format!("{usage_pct:.1}%"),
+                usage_bar,
                 total_str,
                 trend_str,
                 eta_str,
-                pool.content.clone(),
-            ])
-            .style(style)
+                pool.content.replace(',', ", "),
+            ];
+            Row::new(columns::pick(&cells, &keep)).style(style)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(3),  // icon
-        Constraint::Length(15), // name
-        Constraint::Length(10), // type
-        Constraint::Length(8),  // active
-        Constraint::Length(10), // used
-        Constraint::Length(20), // usage bar
-        Constraint::Length(10), // total
-        Constraint::Length(12), // trend
-        Constraint::Length(6),  // eta
-        Constraint::Min(20),    // content
-    ];
+    let widths = columns::constraints(&cols, &keep);
 
     let scroll_info = if total > visible_height {
         format!(" Storage Pools [{}/{total}] ", state.selected_index + 1)

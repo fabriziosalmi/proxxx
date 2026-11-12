@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshot.rs
-assertion_line: 286
+assertion_line: 381
 expression: dump
 ---
  hardware inventory
@@ -8,7 +8,7 @@ node:    pve1
 0 PCI devices  ·  0 USB devices  ·  0 GPUs  ·  0 mdev-capable
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ┌ PCI (0 devices, 0 GPUs) ─────────────────────────────────────────────────────────────────────────┐
-│pci device                              iommu        mdev   assigned to                           │
+│pci device       iommu      mdev assigned to                                                      │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

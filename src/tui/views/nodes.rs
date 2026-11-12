@@ -12,6 +12,7 @@ use ratatui::{
 use crate::api::types::{GuestStatus, NodeStatus};
 use crate::app::AppState;
 use crate::tui::theme::{usage_level, Theme, UsageMetric};
+use crate::tui::widgets::columns::{self, Column};
 
 /// Render the node list view. The bottom status row (mode pill +
 /// keybind hints) is rendered by the global `widgets::status_footer`
@@ -58,18 +59,27 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let header = Row::new(vec![
-        "",
-        "node",
-        "status",
-        "cpu",
-        "cpu usage",
-        "ram",
-        "ram usage",
-        "disk",
-        "uptime",
-        "guests",
-    ])
+    // The node name as wide as the longest name; the usage bars are the
+    // first to go on a narrow terminal (at 80 columns every column was
+    // cut instead: `cpu usag`, `(0.0/`).
+    let name_w = columns::content_width("node", state.nodes.iter().map(|n| n.node.as_str()), 6, 30);
+    let cols = [
+        Column::new("", 2, 0),
+        Column::new("node", name_w, 0),
+        Column::new("status", 8, 0),
+        Column::new("cpu", 14, 0),
+        Column::new("cpu usage", 10, 2),
+        Column::new("ram", 6, 0),
+        Column::new("ram usage", 10, 2),
+        Column::new("disk", 6, 0),
+        Column::new("uptime", 12, 0),
+        Column::new("guests", 8, 0),
+    ];
+    let keep = columns::fit(&cols, area.width.saturating_sub(2));
+    let header = Row::new(columns::pick(
+        &cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+        &keep,
+    ))
     .style(Theme::header())
     .height(1);
 
@@ -154,7 +164,7 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
             if node.status != NodeStatus::Online {
                 // An offline node reports zeros, not measurements.
                 let dash = || Span::raw("-".to_string());
-                return Row::new(vec![
+                let cells = [
                     Span::raw(status_icon.to_string()),
                     Span::raw(node.node.clone()),
                     Span::raw(format!("{:?}", node.status).to_lowercase()),
@@ -165,11 +175,11 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
                     dash(),
                     dash(),
                     Span::raw(format!("{running_count}/{guest_count}")),
-                ])
-                .style(style);
+                ];
+                return Row::new(columns::pick(&cells, &keep)).style(style);
             }
 
-            Row::new(vec![
+            let cells = [
                 Span::raw(status_icon.to_string()),
                 Span::raw(node.node.clone()),
                 Span::raw(format!("{:?}", node.status).to_lowercase()),
@@ -180,23 +190,12 @@ fn draw_node_table(f: &mut Frame, area: Rect, state: &AppState) {
                 disk_span,
                 Span::raw(format_uptime(node.uptime)),
                 Span::raw(format!("{running_count}/{guest_count}")),
-            ])
-            .style(style)
+            ];
+            Row::new(columns::pick(&cells, &keep)).style(style)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(2),
-        Constraint::Min(10),
-        Constraint::Length(8),
-        Constraint::Length(14),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(12),
-        Constraint::Length(8),
-    ];
+    let widths = columns::constraints(&cols, &keep);
 
     let table = Table::new(rows, widths)
         .header(header)

@@ -22,6 +22,11 @@ SemVer contract:
 
 ### Changed
 
+- **TUI tables size their columns from the data and the terminal width.** A name column is as wide as the longest name, the last column takes the space left, and on a narrow terminal the least useful columns (usage bars, trend, disk size, tags) are left out whole instead of every column being cut: at 80 columns `stopped` printed as `stopp`, `local-lvm` as `local-`, the node headers as `cpu usag`; at 160 the node name filled half the screen. Applies to the dashboard, nodes, guests, storage, backup board, config grep, hardware, heatmap and ISO library.
+  - The storage view has a node column; it listed `local` once per node with nothing to tell them apart. Search results name the node of a storage.
+  - The footer drops bindings that do not fit, keeping `Esc`, `?` and `q`; the help overlay flows its sections into columns so the whole keymap shows on 80x24 (it stopped at "Selection"), and lists `r`, `d`, `D` and `W`, with a test that every key it lists does something.
+  - The search popup uses most of a narrow screen; the operation queue's hints and empty state wrap; the heatmap cuts names by characters (cutting by bytes panicked on a multi-byte character at byte 7).
+  - The fleet view shows nodes as online/total, fits its footer to the width, and the cluster opened from it names its profile in the dashboard title. The guest compare uses `VM`/`LXC` and lower-case status like the guest list.
 - **`ls` and the TUI print the same size for the same number of bytes (#544).** Five TUI views (fleet, guests, compare, storage, dashboard) each had a private byte formatter that rounded MiB, and `ls` truncated them, so 1.5 MiB was `2M` in the TUI and `1M` in `ls`. All of them now use `util::format::human_bytes`: whole MiB, tenths of GiB and TiB, a half rounds up, and a value that rounds into the next unit is shown in it (1023.6 MiB is `1.0G`, not `1024M`). The dashboard no longer prints sizes below 1 MiB in bytes (`512B` is now `1M`). A test pins the breakpoints, and another fails if a TUI file defines its own `format_bytes` again.
 
 ### Fixed

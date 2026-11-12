@@ -13,7 +13,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let query = &state.search_query;
 
     // Create centered modal rect
-    let popup_area = centered_rect(60, 60, area);
+    // 60% of a wide screen, most of a narrow one: at 80 columns 60% left
+    // 46 cells and cut every entry (`guest 7777 (alpine-existin`).
+    let percent_x = if area.width < 140 { 92 } else { 60 };
+    let popup_area = centered_rect(percent_x, 60, area);
 
     f.render_widget(Clear, popup_area);
 
@@ -55,9 +58,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
                 SearchItem::Guest {
                     vmid, name, node, ..
                 } => ("guest", format!("{vmid} ({name})"), format!("on {node}")),
-                SearchItem::Storage { pool, type_str, .. } => {
-                    ("stor", pool.clone(), format!("type: {type_str}"))
-                }
+                SearchItem::Storage {
+                    pool,
+                    type_str,
+                    node,
+                } => ("stor", pool.clone(), format!("{type_str} on {node}")),
                 SearchItem::Command { desc, .. } => ("cmd", desc.clone(), "action".to_string()),
             };
 
@@ -68,7 +73,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &AppState) {
     let widths = [
         Constraint::Length(5),
         Constraint::Min(20),
-        Constraint::Length(20),
+        Constraint::Length(24),
     ];
 
     let results_table = Table::new(result_rows, widths)

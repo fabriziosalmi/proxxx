@@ -1,17 +1,18 @@
 ---
 source: tests/tui_snapshot.rs
+assertion_line: 403
 expression: dump
 ---
  ISO / cloud-image library
 
  6 entries  default storage: <no storage> ──────────────────────────────────────────────────────────
 ┌ library ───────────────────────────────────────┐┌ details ───────────────────────────────────────┐
-│ubuntu-22.04-cloud      Ubuntu        22.04 LTS ││id:        ubuntu-22.04-cloud                   │
-│ubuntu-24.04-cloud      Ubuntu        24.04 LTS ││distro:    Ubuntu 22.04 LTS (Jammy) build       │
-│debian-12-cloud         Debian        12 (Bookwo││20261106                                        │
-│fedora-41-cloud         Fedora        41 (Generi││arch:      amd64                                │
-│alpine-3.21-iso         Alpine        3.21.10   ││content:   import                               │
-│rocky-9-cloud           Rocky Linux   9.8 build ││size:      ~700 MiB                             │
+│ubuntu-22.04-cloud Ubuntu       700 MiB         ││id:        ubuntu-22.04-cloud                   │
+│ubuntu-24.04-cloud Ubuntu       750 MiB         ││distro:    Ubuntu 22.04 LTS (Jammy) build       │
+│debian-12-cloud    Debian       350 MiB         ││20261106                                        │
+│fedora-41-cloud    Fedora       470 MiB         ││arch:      amd64                                │
+│alpine-3.21-iso    Alpine        60 MiB         ││content:   import                               │
+│rocky-9-cloud      Rocky Linux  900 MiB         ││size:      ~700 MiB                             │
 │                                                ││                                                │
 │                                                ││url:                                            │
 │                                                ││https://cloud-images.ubuntu.com/releases/jammy/r│

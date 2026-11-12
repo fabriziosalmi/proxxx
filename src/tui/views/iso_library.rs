@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Frame;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::app::iso_library::{IsoEntry, LIBRARY};
 use crate::app::AppState;
@@ -57,37 +57,60 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(block, area);
 }
 
+/// The library as a table whose columns fit the pane: each line was 70
+/// fixed characters in a pane half the screen wide, so the size ran
+/// past the border on 160 columns and the version was cut on 80. When
+/// the pane is narrow the version, then the distro, are left out (the
+/// detail pane shows both).
 fn draw_list(f: &mut Frame, area: Rect, state: &AppState) {
-    let items: Vec<ListItem> = LIBRARY
+    use crate::tui::widgets::columns::{self, Column};
+    use ratatui::widgets::{Row, Table, TableState};
+
+    let cols = [
+        Column::new(
+            "id",
+            columns::content_width("id", LIBRARY.iter().map(|e| e.id), 8, 30),
+            0,
+        ),
+        Column::new(
+            "distro",
+            columns::content_width("distro", LIBRARY.iter().map(|e| e.distro), 6, 16),
+            1,
+        ),
+        Column::new("size", 8, 0),
+        Column::new(
+            "version",
+            columns::content_width("version", LIBRARY.iter().map(|e| e.version), 7, 30),
+            2,
+        ),
+    ];
+    let keep = columns::fit(&cols, area.width.saturating_sub(2));
+    let rows: Vec<Row> = LIBRARY
         .iter()
         .map(|e| {
-            let line = Line::from(vec![
-                Span::styled(format!("{:<24}", e.id), Style::default().fg(Theme::ACCENT)),
-                Span::styled(
-                    format!("{:<14}", e.distro),
-                    Style::default().fg(Theme::TEXT),
-                ),
-                Span::styled(
-                    format!("{:<22}", e.version),
-                    Style::default().fg(Theme::TEXT),
-                ),
-                Span::styled(
-                    format!("{:>6} MiB", e.size_mib),
-                    Style::default().fg(Theme::TEXT_DIM),
-                ),
-            ]);
-            ListItem::new(line)
+            Row::new(columns::pick(
+                &[
+                    Span::styled(e.id.to_string(), Style::default().fg(Theme::ACCENT)),
+                    Span::styled(e.distro.to_string(), Style::default().fg(Theme::TEXT)),
+                    Span::styled(
+                        format!("{:>4} MiB", e.size_mib),
+                        Style::default().fg(Theme::TEXT_DIM),
+                    ),
+                    Span::styled(e.version.to_string(), Style::default().fg(Theme::TEXT)),
+                ],
+                &keep,
+            ))
         })
         .collect();
 
-    let mut list_state = ListState::default();
+    let mut list_state = TableState::default();
     if state.selected_index < LIBRARY.len() {
         list_state.select(Some(state.selected_index));
     }
 
-    let list = List::new(items)
+    let list = Table::new(rows, columns::constraints(&cols, &keep))
         .block(Block::default().borders(Borders::ALL).title(" library "))
-        .highlight_style(
+        .row_highlight_style(
             Style::default()
                 .bg(Theme::ACCENT)
                 .fg(ratatui::style::Color::Black)

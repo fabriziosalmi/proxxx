@@ -52,8 +52,12 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, guests
             let val = match prop {
                 "vmid" => guest.vmid.to_string(),
                 "name" => sanitize_display(&guest.name).into_owned(),
-                "type" => format!("{:?}", guest.guest_type),
-                "status" => format!("{:?}", guest.status),
+                // The words the guest list uses: `VM`/`LXC`, lower-case status.
+                "type" => match guest.guest_type {
+                    crate::api::types::GuestType::Qemu => "VM".to_string(),
+                    crate::api::types::GuestType::Lxc => "LXC".to_string(),
+                },
+                "status" => format!("{:?}", guest.status).to_lowercase(),
                 "node" => sanitize_display(&guest.node).into_owned(),
                 "cpu cores" => guest.cpus.to_string(),
                 "ram" => human_bytes(guest.maxmem),
