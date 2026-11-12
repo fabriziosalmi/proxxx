@@ -11,10 +11,12 @@ integration tests in `tests/*.rs` — these talk to actual hardware.
 | `test_run.sh` | yes | Read-only probes — `ls nodes/guests/storage`, `replication`, `access`, `iso`, `search`, `patch plan`, format contracts. |
 | `test_mutation.sh` | yes | Full LXC lifecycle on VMID 9999: create → start → snapshot → stop → delete, with RAII `trap EXIT` teardown. |
 | `test_env.md` | **gitignored** | Free-form notes (cluster topology, manual-only steps). |
+| `battery.sh` | yes | Pre-tag battery: every suite below in order, one summary line each, with an inventory before and after. **Mutating.** See [Pre-tag battery](#pre-tag-battery). |
+| `inventory.sh` | yes | Read-only snapshot of 17 configuration endpoints (GET only), normalized so an unchanged cluster compares equal. |
 | `lib.sh` | yes | Sourced by the scripts: loads the env file, accepts the token with or without `root@pam!`, gives the binary a private config built from the same URL and token as the curl calls (plus its own audit, log and cache directories), and provides `run_timeout` for macOS. |
 | `env.local` | **gitignored** | Cluster URL + PVE token for `test_mutation.sh`. **Sourced by the script; copy from `env.local.example` and fill.** |
 | `env.local.example` | yes | Template showing required env-var names. |
-| `*.log`, `*_errors.log`, `*_summary.md` | gitignored | Run artifacts; regenerated each invocation. |
+| `*.log`, `*_errors.log`, `*_summary.md`, `battery-out/` | gitignored | Run artifacts; regenerated each invocation. |
 
 ## Running
 
@@ -76,6 +78,50 @@ Example:
 ```sh
 LOG_DIR=/tmp/proxxx-ci BIN=./target/debug/proxxx ./tests/live/test_run.sh
 ```
+
+## Pre-tag battery
+
+Before a release tag, run every live suite against the lab and check that
+the suites left the cluster as they found it:
+
+```sh
+tests/live/battery.sh                 # suites + inventory before and after
+tests/live/battery.sh --no-inventory  # suites only
+```
+
+**It mutates the cluster**: `test_mutation.sh`, the state and reconcile
+suites and the cargo e2e suites create, change and delete guests and
+settings. Point it at a lab, never at production.
+
+In order it runs `test_run.sh`, `test_mutation.sh`,
+`test_state_mappings.sh`, `test_state_ha_rules.sh`,
+`test_reconcile_converge.sh`, `setup_demo.sh --check`, and the cargo live
+suites `feature_coverage_live`, `ssh_live`, `e2e_beta` and `e2e_alpha`
+(with `PROXXX_E2E_ENABLE`, `PROXXX_E2E_FEATURE_COVERAGE_ENABLE` and
+`PROXXX_E2E_ALLOW_DELETE` set to 1). Without `BIN` it builds the release
+binary first. Each suite writes `LOG_DIR/<suite>.log` (default
+`tests/live/battery-out/`), and `summary.txt` gets one line per suite:
+
+```
+test_run                     rc=11    16s  pass=76 fail=11
+cargo_e2e_alpha              rc=0     41s  pass=1 fail=0 skipped=0
+```
+
+`skipped` counts the cargo suites' env-gated early returns
+(`[e2e] PROXXX_E2E_ENABLE != 1 — skipping`), which cargo reports as
+passed: a suite with `skipped` above 0 did not exercise the cluster. `test_run.sh` exits with its failure count,
+so a node that is offline shows up there. The battery exits with the
+number of suites that exited non-zero, plus one when the inventory
+differs.
+
+`inventory.sh <outdir>` is the snapshot on its own: one JSON file per
+endpoint (`cluster/resources`, pools, storage, HA, mappings, firewall,
+users, groups, ACLs, backup and replication jobs, notification matchers).
+It drops what moves while nothing changes (resource metrics, every
+`digest`) and sorts lists and storage `content`, so
+`diff -r before after` is empty for an unchanged cluster. It sends GET
+requests only, through `lib.sh`, and passes the token to curl on stdin,
+out of the process listing.
 
 ## Cluster prerequisites
 
