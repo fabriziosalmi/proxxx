@@ -269,12 +269,11 @@ pub async fn execute_verify(client: &Arc<PxClient>, args: VerifyArgs) -> Result<
                     let age = r
                         .age_days
                         .map_or_else(|| "-".to_string(), |a| format!("{a:.1}"));
-                    crate::outln!(
-                        "{vmid:<8}  {node:<14}  {status:<9}  {age:<8}  {reason}",
-                        node = r.node,
-                        status = st,
-                        reason = r.reason,
-                    );
+                    // The reason wraps under itself on a terminal; it
+                    // carries PVE's error text and broke mid-word.
+                    let prefix =
+                        format!("{vmid:<8}  {node:<14}  {st:<9}  {age:<8}  ", node = r.node);
+                    crate::outln!("{}", crate::util::wrap::hanging(&prefix, &r.reason));
                 }
             }
         }

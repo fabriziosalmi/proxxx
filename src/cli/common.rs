@@ -378,8 +378,13 @@ pub async fn enforce_preflight_with_notes(
         guest.name,
         guest.node
     );
+    // Wrapped between words on a terminal: a risk is one long sentence
+    // and the terminal broke it mid-word (`irre` / `versible`).
     for (risk, level) in &risks {
-        eprintln!("  [{}] {}", level.as_str(), risk.describe());
+        crate::util::wrap::eprint_wrapped(
+            &format!("  [{}] {}", level.as_str(), risk.describe()),
+            2,
+        );
     }
     let max = max_level(&risks);
     if max == RiskLevel::Severe && !force {

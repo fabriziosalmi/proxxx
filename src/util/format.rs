@@ -52,7 +52,17 @@ pub fn print(data: &Value, format: OutputFormat) -> Result<()> {
             println!("{}", render_json_output(data, format)?);
         }
         OutputFormat::Table => {
-            print!("{}", render_table_with(data, crate::util::color::enabled()));
+            use std::io::IsTerminal as _;
+            // A person at a terminal gets aligned columns (`util::reader`);
+            // a pipe or a file gets the TSV, byte for byte as before.
+            match crate::util::wrap::width_if_terminal(std::io::stdout().is_terminal()) {
+                // raw-output: every cell went through `safe_text` in reader.
+                Some(width) => print!(
+                    "{}",
+                    crate::util::reader::render(data, width, crate::util::color::enabled())
+                ),
+                None => print!("{}", render_table_with(data, crate::util::color::enabled())),
+            }
         }
         OutputFormat::Plain => {
             print!("{}", render_plain(data));
@@ -208,8 +218,23 @@ fn rows_table(items: &[Value], color: bool) -> String {
         }
         return out;
     }
-    // Columns as (header, path), sorted by header; the union over rows,
-    // so an error row first does not hide the data columns.
+    let columns = table_columns(items);
+    let mut out = String::new();
+    let header: Vec<String> = columns
+        .keys()
+        .map(|h| table_cell(&h.to_uppercase()))
+        .collect();
+    out.push_str(&header.join("\t"));
+    out.push('\n');
+    rows_body(items, &columns, color, &mut out);
+    out
+}
+
+/// Columns as (header, path), sorted by header; the union over rows, so
+/// an error row first does not hide the data columns. A nested object
+/// expands into `key.sub` columns, and the `data` envelope of fanout
+/// rows into its own keys.
+pub(crate) fn table_columns(items: &[Value]) -> std::collections::BTreeMap<String, Vec<String>> {
     let mut columns: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for item in items.iter().filter_map(Value::as_object) {
@@ -232,13 +257,15 @@ fn rows_table(items: &[Value], color: bool) -> String {
             }
         }
     }
-    let mut out = String::new();
-    let header: Vec<String> = columns
-        .keys()
-        .map(|h| table_cell(&h.to_uppercase()))
-        .collect();
-    out.push_str(&header.join("\t"));
-    out.push('\n');
+    columns
+}
+
+fn rows_body(
+    items: &[Value],
+    columns: &std::collections::BTreeMap<String, Vec<String>>,
+    color: bool,
+    out: &mut String,
+) {
     for item in items.iter().filter_map(Value::as_object) {
         let row: Vec<String> = columns
             .iter()
@@ -259,7 +286,6 @@ fn rows_table(items: &[Value], color: bool) -> String {
         out.push_str(&row.join("\t"));
         out.push('\n');
     }
-    out
 }
 
 fn object_table(map: &serde_json::Map<String, Value>, color: bool) -> String {

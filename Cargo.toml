@@ -33,6 +33,9 @@ flate2 = "1.1"
 # Already in the build graph transitively via tokio + rustls, so this
 # declaration costs nothing.
 libc = "0.2"
+# Local time for the terminal tables (`util::reader`). Already in the tree
+# through russh-util with the same features: no new crate.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

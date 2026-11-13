@@ -121,14 +121,22 @@ pub async fn fanout_ls(kind: FanoutKind, cli_secret: Option<&str>) -> Result<Vec
 /// owner) and would clutter the output otherwise.
 pub async fn fanout_find_vmid(vmid: u32, cli_secret: Option<&str>) -> Result<Vec<ProfileRow>> {
     let profiles = crate::config::list_profiles()?;
-    if profiles.is_empty() {
-        anyhow::bail!("no named profiles in config.toml — `--all-profiles` requires at least one");
-    }
+    // A config without `[profiles.NAME]` blocks is one cluster: search
+    // it. `find 7777` failed there with "`--all-profiles` requires at
+    // least one", a flag the user had not passed.
+    let (profiles, single) = if profiles.is_empty() {
+        (vec!["default".to_string()], true)
+    } else {
+        (profiles, false)
+    };
 
     let cli_secret_owned = cli_secret.map(str::to_owned);
     let joined = join_per_profile(profiles, move |profile| {
         let cli_secret = cli_secret_owned.clone();
-        async move { find_one_profile(&profile, vmid, cli_secret.as_deref()).await }
+        async move {
+            let load = (!single).then_some(profile.as_str());
+            find_one_profile(&profile, load, vmid, cli_secret.as_deref()).await
+        }
     })
     .await;
 
@@ -215,12 +223,15 @@ async fn query_one_profile(
     Ok(rows)
 }
 
+/// `profile` labels the row; `load` is the profile to load (`None`: the
+/// config's top level, when it has no named profiles).
 async fn find_one_profile(
     profile: &str,
+    load: Option<&str>,
     vmid: u32,
     cli_secret: Option<&str>,
 ) -> Result<Option<ProfileRow>> {
-    let cfg = crate::config::load_config(Some(profile))?;
+    let cfg = crate::config::load_config(load)?;
     let client = Arc::new(PxClient::new(cfg, cli_secret).await?);
     // Walk nodes; first hit wins. Could parallelise per-node but
     // each profile is itself fanned out at the outer level — a
