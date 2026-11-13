@@ -829,3 +829,54 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// A config with no `[profiles.NAME]` blocks is one cluster: `find`
+/// searches it. It failed with "`--all-profiles` requires at least one",
+/// a flag the user had not passed.
+#[tokio::test]
+async fn test_3_find_searches_a_config_without_named_profiles() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let audit_dir = tmp.path().join("audit");
+    std::fs::create_dir_all(&audit_dir).expect("create audit dir");
+    let srv = MockServer::start().await;
+    mount_pve_node_with_guest(&srv, "pve-solo", Some(100)).await;
+    let cfg = tmp.path().join("single.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"
+url = "{}"
+user = "root@pam"
+token_id = "test"
+token_secret = "00000000-0000-0000-0000-000000000003"
+verify_tls = false
+"#,
+            srv.uri()
+        ),
+    )
+    .expect("write single.toml");
+
+    let out = Command::new(proxxx_bin())
+        .env("PROXXX_CONFIG", &cfg)
+        .env("PROXXX_AUDIT_DIR", &audit_dir)
+        .args(["--format", "json", "find", "100"])
+        .output()
+        .expect("run proxxx find 100");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "find on a single config: {stderr}"
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(rows[0]["profile"], "default", "{rows}");
+    assert_eq!(rows[0]["data"]["node"], "pve-solo", "{rows}");
+
+    let missing = Command::new(proxxx_bin())
+        .env("PROXXX_CONFIG", &cfg)
+        .env("PROXXX_AUDIT_DIR", &audit_dir)
+        .args(["--format", "json", "find", "999"])
+        .output()
+        .expect("run proxxx find 999");
+    assert_eq!(missing.status.code(), Some(5), "an absent VMID exits 5");
+}

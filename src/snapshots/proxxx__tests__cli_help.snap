@@ -1,5 +1,6 @@
 ---
 source: src/main.rs
+assertion_line: 638
 expression: out
 ---
 ===== proxxx --help =====
@@ -9,7 +10,7 @@ Usage: proxxx [OPTIONS] [COMMAND]
 
 Commands:
   ls                 List resources (aliases: get)
-  find               Find a guest by VMID across every cluster. Like `ls guests --all-profiles` but filtered to one VMID. Returns one row per profile that owns the VMID (typically 0 or 1). Useful for "which cluster owns VMID 100?" without manual profile-switching
+  find               Find a guest by VMID across every cluster. Like `ls guests --all-profiles` but filtered to one VMID. Returns one row per profile that owns the VMID (typically 0 or 1). Useful for "which cluster owns VMID 100?" without manual profile-switching. A config with no named profiles is searched as one cluster
   start              Start a guest
   stop               Stop a guest
   restart            Restart a guest
@@ -31,7 +32,7 @@ Commands:
   upgrade-check      Pre-flight scanner for PVE major-version upgrades (e.g. `--target 9.x`). Cluster + config scan; structured findings with severity (info/warn/block) for CI gating. Exit 0 on info+warn only, 1 on any block
   accounting         Per-pool / per-node / per-tag resource accounting. Current state only — time-window aggregation deferred to a follow-up
   heatmap            Per-node API latency probe. Colored table by RTT bucket (green/yellow/red), JSON for tooling
-  anomaly            Rolling-baseline z-score anomaly detection across nodes for CPU + memory. Exit 0 = clean, 1 = anomalies found
+  anomaly            Rolling-baseline z-score anomaly detection across nodes for CPU + memory. Exit 0 = clean, 1 = anomalies found or a node could not be checked
   backup-verify      Cross-cluster backup verification — metadata-level probe of each guest's most-recent backup. Exit 1 on any missing or corrupt manifest
   import             Unified VM image import — `qemu-img convert` wrapper for raw/qcow2/vmdk/vdi/vhdx/vhd → qcow2. Use `--dry-run` for inspect-only
   gpu-inspect        GPU / PCI passthrough inspection — IOMMU state, vfio readiness, lspci device map. Requires SSH configured
@@ -175,7 +176,7 @@ Options:
           Print help (see a summary with '-h')
 
 ===== proxxx find --help =====
-Find a guest by VMID across every cluster. Like `ls guests --all-profiles` but filtered to one VMID. Returns one row per profile that owns the VMID (typically 0 or 1). Useful for "which cluster owns VMID 100?" without manual profile-switching
+Find a guest by VMID across every cluster. Like `ls guests --all-profiles` but filtered to one VMID. Returns one row per profile that owns the VMID (typically 0 or 1). Useful for "which cluster owns VMID 100?" without manual profile-switching. A config with no named profiles is searched as one cluster
 
 Usage: proxxx find [OPTIONS] <VMID>
 
@@ -1877,7 +1878,7 @@ Options:
           Print help (see a summary with '-h')
 
 ===== proxxx anomaly --help =====
-Rolling-baseline z-score anomaly detection across nodes for CPU + memory. Exit 0 = clean, 1 = anomalies found
+Rolling-baseline z-score anomaly detection across nodes for CPU + memory. Exit 0 = clean, 1 = anomalies found or a node could not be checked
 
 Usage: proxxx anomaly [OPTIONS]
 

@@ -396,6 +396,18 @@ pub async fn execute_accounting(
                 );
             }
         }
+        AccountingOutput::Text if rows.is_empty() => {
+            // An empty table with only its header told the user nothing.
+            let why = match args.group_by {
+                GroupBy::Pool => "no guest is in a pool",
+                GroupBy::Tag => "no guest has a tag",
+                GroupBy::Node => "no guests",
+            };
+            crate::outln!(
+                "{why}; group differently with `--group-by node|tag|pool`, or count the \
+                 others with `--include-unassigned`"
+            );
+        }
         AccountingOutput::Text => {
             crate::outln!(
                 "{group:<24}  {guests:<8}  {cores:<8}  {mem:<12}  disk",

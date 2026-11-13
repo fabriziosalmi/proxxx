@@ -432,9 +432,10 @@ fn main() -> Result<()> {
                         // response from /X" message hid the actual serde
                         // / TLS / IO error one level down, leaving the
                         // operator with nothing to act on.
-                        eprintln!("Fatal Error: {e:#}");
+                        // Wrapped between words on a terminal.
+                        util::wrap::eprint_wrapped(&format!("Fatal Error: {e:#}"), 2);
                         if let Some(h) = hint {
-                            eprintln!("  hint: {h}");
+                            util::wrap::eprint_wrapped(&format!("  hint: {h}"), 2);
                         }
                     }
                     std::process::exit(exit_code);

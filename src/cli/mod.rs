@@ -114,6 +114,7 @@ pub enum Command {
     /// --all-profiles` but filtered to one VMID. Returns one row per
     /// profile that owns the VMID (typically 0 or 1). Useful for
     /// "which cluster owns VMID 100?" without manual profile-switching.
+    /// A config with no named profiles is searched as one cluster.
     #[command(alias = "where")]
     Find {
         /// VMID to find.
@@ -364,7 +365,8 @@ pub enum Command {
     Heatmap(heatmap::HeatmapArgs),
 
     /// Rolling-baseline z-score anomaly detection across nodes for
-    /// CPU + memory. Exit 0 = clean, 1 = anomalies found.
+    /// CPU + memory. Exit 0 = clean, 1 = anomalies found or a node could
+    /// not be checked.
     Anomaly(anomaly::AnomalyArgs),
 
     /// Cross-cluster backup verification — metadata-level probe of

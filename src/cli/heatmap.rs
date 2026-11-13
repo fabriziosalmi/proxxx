@@ -96,14 +96,16 @@ pub async fn execute_heatmap(client: &Arc<PxClient>, args: HeatmapArgs) -> Resul
             let sep = "─".repeat(70);
             crate::outln!("{sep}");
             for s in &samples {
-                crate::outln!(
-                    "{node:<16}  {endpoint:<18}  {rtt:>9.1}  {bucket:<7}  {status}",
+                // The status wraps under itself on a terminal (an error
+                // for a down node is one long line).
+                let prefix = format!(
+                    "{node:<16}  {endpoint:<18}  {rtt:>9.1}  {bucket:<7}  ",
                     node = s.node,
                     endpoint = s.endpoint,
                     rtt = s.rtt_ms,
                     bucket = s.bucket,
-                    status = s.status,
                 );
+                crate::outln!("{}", crate::util::wrap::hanging(&prefix, &s.status));
             }
         }
     }

@@ -6,8 +6,15 @@ is `table`.
 `table` is tab-separated, one column per field, for scripts. When stdout is
 a terminal, `ls nodes`, `ls guests` and `ls storage` print a table for a
 reader instead: chosen columns, aligned, sizes like `1.8G/3.8G`, guests by
-vmid, and no metrics for a node that is not online. Piped or redirected,
-they print the tab-separated table. Status and usage are coloured on a
+vmid, and no metrics for a node that is not online. Every other command's
+`table` output is also laid out for a reader on a terminal: columns
+aligned to the screen width with names and status first and free text
+last (it wraps; other columns are shortened with `…`), objects as
+`key  value` lines, epoch times in local time, byte counts like `16.2G`,
+uptimes like `33d8h`, and `metrics` as its sparkline and summary with a
+count of samples. Piped or redirected, every command prints the
+tab-separated table, unchanged. On a terminal, pre-flight risks and fatal
+errors wrap between words. Status and usage are coloured on a
 terminal unless `NO_COLOR` is set or `TERM` is `dumb`; `describe` follows
 the same rule.
 
@@ -247,7 +254,7 @@ at `<data_dir>/freeze.lock` (global) and `<data_dir>/freeze.<profile>.lock`.
 | :--- | :--- |
 | `proxxx fleet` | Read-only full-screen TUI aggregating **every** configured profile (clusters + standalone, mixed) into one screen: per-cluster health summary + aggregated guest table. Keys: `↑↓` select cluster, `Tab` toggle guest pane (selected cluster vs whole fleet), `Enter` drill into the selected cluster's full TUI, `q`/`Esc` quit. Ignores `--profile` (aggregates all); strictly read-only (no mutation path is reachable). |
 | `proxxx ls <kind> --all-profiles` / `-A` | Fan a read-only `ls` (nodes/guests/storage) across every named profile in `config.toml`. Per-cluster failures surface as `error` rows. |
-| `proxxx find <vmid>` (alias `where`) | Find a VMID across every cluster. Exit 5 if no profile owns it. |
+| `proxxx find <vmid>` (alias `where`) | Find a VMID across every cluster; a config without named profiles is searched as one cluster. Exit 5 if no profile owns it. |
 | `proxxx describe [--output text\|md\|json\|llm-context] [--include events\|rbac\|all]` | Structured cluster digest. `llm-context` format is token-compact for paste-into-LLM. |
 
 ## Observability + chargeback
