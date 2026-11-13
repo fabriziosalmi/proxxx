@@ -13,7 +13,9 @@
 # dir), HOME and the freeze lock are moved into the same dir, LXC 7777 is
 # started, and the config gets one [[policies]] entry (stop, any guest, one
 # approval, Telegram) with no [telegram] section. RUST_LOG=proxxx=error
-# hides the tracing lines (connection, the offline lab node) on stderr.
+# hides the tracing lines (connection, the offline lab node) on stderr,
+# and TERM is fixed so the recording does not depend on the caller's
+# terminal.
 # During the delete, an incident freeze is held as a safety net, so the
 # guest cannot be deleted even if the pre-flight did not refuse; the
 # pre-flight refuses first, so the freeze is never reached and prints
@@ -70,7 +72,7 @@ trap live_cleanup EXIT
 export HOME="$LIVE_TMP/home" XDG_CONFIG_HOME="$LIVE_TMP/home/.config" XDG_DATA_HOME="$LIVE_TMP/home/.local/share"
 export PROXXX_FREEZE_PATH="$LIVE_TMP/freeze/freeze.lock"
 mkdir -p "$HOME" "$LIVE_TMP/freeze"
-export RUST_LOG=proxxx=error BIN
+export RUST_LOG=proxxx=error TERM=xterm-256color BIN
 
 cat >> "$PROXXX_CONFIG" <<'EOF'
 
