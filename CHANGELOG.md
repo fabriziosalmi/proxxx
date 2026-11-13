@@ -16,6 +16,20 @@ SemVer contract:
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-13
+
+Headline: **every screen fits the terminal it is on.** Driving each TUI
+view at 80x24, 100x30 and 160x45 and 50 read commands in 80- and
+100-column terminals on the lab found cut values, columns stretched
+across wide screens, footers naming keys that do nothing and raw TSV on
+a terminal; this release fixes what that audit found. Changes that reach
+existing setups: on a terminal, every command's `--format table` output
+is aligned to the screen with local times and readable sizes (a pipe or a
+file still gets the same TSV); in the TUI, tables leave out whole columns
+on a narrow terminal and `s`, `S`, `r` and `c` in the guest detail now
+queue an operation for the guest shown; and `find` searches a config
+without named profiles instead of failing.
+
 ### Security
 
 - **CI audits `fuzz/Cargo.lock` as well as `Cargo.lock` (#542).** The fuzz harness has its own lockfile, which dependency bumps in the root lock do not touch, and it kept four advisories that the root lock had fixed until v0.18.0. The audit job and `scripts/gate.sh` now run `cargo audit --deny warnings -f fuzz/Cargo.lock`, which fails on the pre-v0.18.0 lockfile with RUSTSEC-2026-0385, -0387, -0459 and -0486. Dependabot version updates cover `/fuzz`. `russh` in `fuzz/Cargo.lock` is 0.65.1, as in `Cargo.lock`.
@@ -51,6 +65,11 @@ SemVer contract:
 ### Tests and tooling
 
 - **The pre-tag battery and the lab inventory are in the repository (#543).** `tests/live/battery.sh` runs the ten live suites of the v0.17.0 and v0.18.0 release checks in order and prints one line per suite (exit code, duration, pass and fail counts, and for the cargo suites the env-gated early returns that cargo reports as passed). `tests/live/inventory.sh` takes a GET-only snapshot of 17 configuration endpoints through `lib.sh`, with the token on curl's stdin, and drops metrics and `digest` fields, so an unchanged cluster compares equal. On the lab: the suites gave the same counts as the v0.18.0 battery, the inventory was identical before and after, and a pool created between two snapshots showed up in the diff.
+
+### Dependencies
+
+- `russh` 0.65.0 → 0.65.1 (#532, also in `fuzz/` with #542). GitHub Actions: `github/codeql-action` 4.39.1 → 4.39.3, `sigstore/cosign-installer` 4.1.2 → 4.1.3, `softprops/action-gh-release` 3.0.3 → 3.0.4 (#530), pinned by commit SHA. `chrono` (clock feature) becomes a direct dependency; it was already built through `russh-util` with the same features. `fuzz/Cargo.lock` gains the `chrono` edge of the `proxxx` entry, which #557 left out (`cargo metadata --locked` failed in `fuzz/`).
+- The cloud-image registry is re-pinned to the latest upstream builds (#524): Ubuntu 22.04 build 20261106, Debian 12 build 20261026-2643, Debian 13 build 20261103-2651, Alpine 3.21.10, with their checksums.
 
 ## [0.18.0] - 2026-11-11
 
