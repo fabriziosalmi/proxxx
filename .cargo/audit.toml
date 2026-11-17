@@ -29,6 +29,21 @@ ignore = [
     # a constant-time decryption path. Track:
     # https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+    # chrono 0.4.45 — "chrono is unmaintained" (informational, not a
+    # vulnerability; published to advisory-db on 2026-11-17).
+    # Path (Cargo.lock, `cargo tree -i chrono --target all`, 2026-11-17):
+    # proxxx → chrono directly (one call, `util::reader::local_time`, which
+    # formats a timestamp in the local zone), and russh 0.65.1 →
+    # russh-util 0.52.0 → chrono (wasm targets only; russh-util 0.52.0 is
+    # the latest release).
+    # Why accepted: the advisory lists no patched version and names no
+    # defect; the only finding is that upstream stopped maintenance. No
+    # bump can close it, and dropping our direct use would not remove
+    # chrono from Cargo.lock while russh-util depends on it.
+    # Remediation path: move `local_time` to `jiff` or `time`, and remove
+    # this entry once russh-util no longer depends on chrono. Track:
+    # https://github.com/chronotope/chrono/issues/1768
+    "RUSTSEC-2026-0543",
 ]
 # Phase 5.13: paste (RUSTSEC-2024-0436) and lru (RUSTSEC-2026-0002)
 # entries removed. Bumped ratatui 0.29 → 0.30 + dropped vt100-ctt's
