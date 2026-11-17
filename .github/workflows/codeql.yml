@@ -29,8 +29,22 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    # Only commits that can change what CodeQL sees. The weekly schedule
+    # below re-analyses main regardless.
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/workflows/codeql.yml"
   pull_request:
     branches: [main]
+    # No `paths:` filter here: "Analyse (rust) (rust)" is a required status
+    # check, and a workflow that does not start never reports it, which
+    # leaves a docs-only pull request blocked. The job always starts and
+    # skips the analysis steps instead (see the `scope` step); a job whose
+    # steps were skipped still reports success.
   schedule:
     # Wednesdays 04:23 UTC — offset from ci.yml (04:17 daily) and
     # scorecard.yml (04:31 Mondays) so the three security scans don't
@@ -73,8 +87,41 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # On pull_request the checkout is GitHub's test merge commit;
+          # depth 2 brings its first parent (the base tip), so the `scope`
+          # step can list what the pull request changes.
+          fetch-depth: 2
+
+      - name: Does this change touch Rust code?
+        # 27 of 211 CodeQL pull_request runs in the 30 days to 2026-11-17
+        # were on pull requests that changed no Rust-relevant path (docs,
+        # live shell harnesses, npm docs bumps), at ~9 min each. Push and
+        # schedule always analyse. If the diff cannot be computed, the
+        # analysis runs.
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only HEAD^1 HEAD); then
+            echo "::warning::could not list the changed files; analysing"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -Eq '\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^\.github/workflows/codeql\.yml$'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no Rust-relevant file changed; CodeQL analysis skipped"
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Rust toolchain (stable)
+        if: steps.scope.outputs.rust == 'true'
         # CodeQL's autobuild for Rust invokes `cargo build`. Providing
         # the toolchain explicitly (same version as ci.yml) means the
         # build inside CodeQL exactly matches the one CI verifies, so
@@ -83,6 +130,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (HEAD as of 2026-03-27)
 
       - name: Cache cargo registry + target
+        if: steps.scope.outputs.rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           # Distinct cache key — CodeQL's build produces extra artefacts
@@ -90,6 +138,7 @@ jobs:
           shared-key: codeql
 
       - name: Initialize CodeQL
+        if: steps.scope.outputs.rust == 'true'
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
         with:
           languages: ${{ matrix.language }}
@@ -100,6 +149,7 @@ jobs:
           queries: security-and-quality
 
       - name: Autobuild
+        if: steps.scope.outputs.rust == 'true'
         # CodeQL's Rust autobuild runs `cargo build` to observe the
         # full compilation graph. If it ever stops working for our
         # build shape, replace with an explicit `cargo build
@@ -107,6 +157,7 @@ jobs:
         uses: github/codeql-action/autobuild@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
 
       - name: Perform CodeQL analysis
+        if: steps.scope.outputs.rust == 'true'
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
         with:
           category: "/language:${{ matrix.language }}"
