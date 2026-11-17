@@ -51,6 +51,7 @@ jobs:
   build-test:
     name: Build · test · clippy · fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -102,12 +103,18 @@ jobs:
           done
           exit "$leaked"
 
-      - name: Build (release, stripped)
-        run: cargo build --locked --release
+      # No glibc release build here. It was the longest step of the job
+      # (p50 186 s of 540 s, 10 runs to 2026-11-13) on the slowest path of
+      # the workflow, and the binary it produced was neither uploaded nor
+      # shipped: release.yml ships darwin and musl targets only. The release
+      # profile (fat LTO, codegen-units = 1, opt-level = "z") is still
+      # compiled on every run by `musl-static` below, for the Linux target
+      # that is actually released.
 
   lint-scripts:
     name: Lint shell + Python
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Audit #274: 10 shell files and 2 Python files shipped unchecked.
     # One of them (scripts/repin-cloudimg.py) rewrites Rust source in
     # place and opens supply-chain-sensitive re-pin PRs on a schedule;
@@ -134,6 +141,7 @@ jobs:
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Audit #274. GitHub's native secret scanning covers provider
     # patterns on push; this covers the rest, and covers history — which
     # matters here specifically: tests/live/test_mutation.sh records that
@@ -152,6 +160,7 @@ jobs:
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Audit #275: nothing measured which code the tests execute, so the
     # distribution of that effort was chosen by judgement and could not be
     # checked. The per-file summary is the input for deciding where the
@@ -202,6 +211,7 @@ jobs:
   audit:
     name: Supply-chain audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -242,6 +252,7 @@ jobs:
   deny:
     name: Supply-chain policy (cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Companion to `audit:` above. `cargo audit` covers CVE advisories
     # against the RustSec DB; `cargo deny` additionally enforces:
     #   - License whitelist (MIT/Apache-2.0/BSD/ISC/MPL-2.0 + curated
@@ -273,6 +284,7 @@ jobs:
   musl-static:
     name: Static binary (musl)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Macro audit: `x86_64-unknown-linux-musl` produces
     # a TRULY portable Linux binary that links libc statically. The
     # default `x86_64-unknown-linux-gnu` glibc binary built on Ubuntu
