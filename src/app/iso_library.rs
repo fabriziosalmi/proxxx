@@ -131,11 +131,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "ubuntu-22.04-cloud",
         distro: "Ubuntu",
-        version: "22.04 LTS (Jammy) build 20261106",
+        version: "22.04 LTS (Jammy) build 20261109",
         arch: "amd64",
-        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261106/ubuntu-22.04-server-cloudimg-amd64.img",
+        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261109/ubuntu-22.04-server-cloudimg-amd64.img",
         checksum: Some(Checksum::Sha256(
-            "f77bc6d59cb8deaa9657095736b5f5003f7705b47055f01823459715c967de6a",
+            "77d19e53656f87c95f1f6c6be59c789083b3f77fa08f9d88011ee04085c61f87",
         )),
         content: "import",
         size_mib: 700,
@@ -157,12 +157,12 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "debian-12-cloud",
         distro: "Debian",
-        version: "12 (Bookworm) build 20261026-2643",
+        version: "12 (Bookworm) build 20261112-2660",
         arch: "amd64",
-        url: "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261112-2660/debian-12-genericcloud-amd64-20261112-2660.qcow2",
         // Debian publishes ONLY SHA-512, never SHA-256.
         checksum: Some(Checksum::Sha512(
-            "0464b5d4ae3aa4f658468d88da83af7857b71548b30d46dcb6282770955a747fb95a983476db90d25afd0653af607224c7ebd05122ab71faa106fd712aaad652",
+            "485a390d1c5e3a9f57ebb903654c21044c5d5b5b94de126d28b9d0cd960112dc0536afd1217c45036c331659543c8c8acb5f56dff706c9530f9fe39e2908e512",
         )),
         content: "import",
         size_mib: 350,
