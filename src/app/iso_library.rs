@@ -131,11 +131,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "ubuntu-22.04-cloud",
         distro: "Ubuntu",
-        version: "22.04 LTS (Jammy) build 20261106",
+        version: "22.04 LTS (Jammy) build 20261109",
         arch: "amd64",
-        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261106/ubuntu-22.04-server-cloudimg-amd64.img",
+        url: "https://cloud-images.ubuntu.com/releases/jammy/release-20261109/ubuntu-22.04-server-cloudimg-amd64.img",
         checksum: Some(Checksum::Sha256(
-            "f77bc6d59cb8deaa9657095736b5f5003f7705b47055f01823459715c967de6a",
+            "77d19e53656f87c95f1f6c6be59c789083b3f77fa08f9d88011ee04085c61f87",
         )),
         content: "import",
         size_mib: 700,
@@ -157,12 +157,12 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "debian-12-cloud",
         distro: "Debian",
-        version: "12 (Bookworm) build 20261026-2643",
+        version: "12 (Bookworm) build 20261117-2665",
         arch: "amd64",
-        url: "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261117-2665/debian-12-genericcloud-amd64-20261117-2665.qcow2",
         // Debian publishes ONLY SHA-512, never SHA-256.
         checksum: Some(Checksum::Sha512(
-            "0464b5d4ae3aa4f658468d88da83af7857b71548b30d46dcb6282770955a747fb95a983476db90d25afd0653af607224c7ebd05122ab71faa106fd712aaad652",
+            "946b917a37882f16e5b3b0b2cbe5744637d0cd36190b5b53cbb21d14a54557d5b45e9e523021b8f52c1707dbe470489f3515458e0680ded76ee2574b4a8daf1b",
         )),
         content: "import",
         size_mib: 350,
@@ -197,11 +197,11 @@ pub const LIBRARY: &[IsoEntry] = &[
     IsoEntry {
         id: "rocky-9-cloud",
         distro: "Rocky Linux",
-        version: "9.8 build 20260525.0",
+        version: "9.9 build 20261112.0",
         arch: "amd64",
-        url: "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2",
+        url: "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.9-20261112.0.x86_64.qcow2",
         checksum: Some(Checksum::Sha256(
-            "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8",
+            "4f88f4209de50813d8054ab97309e7169a580206a0c4ea04f375d36c4846d50e",
         )),
         content: "import",
         size_mib: 900,
