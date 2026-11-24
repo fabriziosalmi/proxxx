@@ -13,6 +13,8 @@ version: 2
 updates:
   # Rust crate deps
   - package-ecosystem: "cargo"
+    cooldown:
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"
@@ -56,6 +58,8 @@ updates:
   # entry only Dependabot security updates reached it, so a bump in the
   # root Cargo.lock was left behind there. Same grouping as the root.
   - package-ecosystem: "cargo"
+    cooldown:
+      default-days: 7
     directory: "/fuzz"
     schedule:
       interval: "weekly"
@@ -90,6 +94,8 @@ updates:
   # output to the public documentation site, which is where operators
   # are told how to install a security-sensitive tool.
   - package-ecosystem: "npm"
+    cooldown:
+      default-days: 7
     directory: "/docs"
     schedule:
       interval: "weekly"
@@ -110,6 +116,8 @@ updates:
           - "minor"
 
   - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 7
     directory: "/"
     schedule:
       interval: "weekly"
